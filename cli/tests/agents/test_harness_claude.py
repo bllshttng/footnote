@@ -262,12 +262,49 @@ def test_bg_create_argv_shape_small_message(tmp_path: Path, monkeypatch) -> None
     claude_mod.bg_create(name="demo", message="hi", cwd=cwd, timeout=5)
 
     argv = captured["argv"]
-    assert argv[0] == "claude"
-    assert "--bg" in argv
-    assert "--name" in argv
-    assert argv[argv.index("--name") + 1] == "demo"
-    assert argv[-1] == "hi"
+    claude_argv = argv[argv.index("--") + 1 :]
+    assert argv[1:3] == ["claude-birth-exec", "--"]
+    assert claude_argv[0] == "claude"
+    assert "--bg" in claude_argv
+    assert "--name" in claude_argv
+    assert claude_argv[claude_argv.index("--name") + 1] == "demo"
+    assert claude_argv[-1] == "hi"
     assert captured["input"] is None  # argv path, not stdin
+
+
+def test_bg_create_uses_rust_birth_exec_fence(tmp_path: Path, monkeypatch) -> None:
+    from fno import rust_binary
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backgrounded · 7c5dcf5d · demo\n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(name="demo", message="hi", cwd=tmp_path, timeout=5)
+
+    assert captured["argv"][:3] == ["fno-agents", "claude-birth-exec", "--"]
+    assert captured["argv"][3] == "claude"
+
+
+def test_bg_create_stale_rust_binary_suggests_update(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.harnesses import claude as claude_mod
+
+    result = MagicMock(returncode=2, stdout="", stderr="unknown verb: claude-birth-exec")
+    monkeypatch.setattr(claude_mod, "_subprocess_run", lambda *args, **kwargs: result)
+
+    with pytest.raises(claude_mod.ProviderSubprocessError) as exc:
+        claude_mod.bg_create(name="demo", message="hi", cwd=tmp_path, timeout=5)
+
+    assert exc.value.exit_code == 2
+    assert "fno doctor update" in exc.value.stderr
 
 
 def test_bg_create_floors_incoherent_model_env_via_settings_file(
@@ -436,11 +473,13 @@ def test_bg_create_argv_shape_overflow_message(
     claude_mod.bg_create(name="demo", message=big, cwd=cwd, timeout=5)
 
     argv = captured["argv"]
-    assert argv[0] == "claude"
-    assert "--bg" in argv
-    assert "--name" in argv
+    claude_argv = argv[argv.index("--") + 1 :]
+    assert argv[1:3] == ["claude-birth-exec", "--"]
+    assert claude_argv[0] == "claude"
+    assert "--bg" in claude_argv
+    assert "--name" in claude_argv
     # The literal 250KB message must NOT appear in argv
-    for token in argv:
+    for token in claude_argv:
         assert len(token) < 200 * 1024
     # ... but it IS piped via stdin
     assert captured["input"] == big

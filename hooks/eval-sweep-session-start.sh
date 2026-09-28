@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - eval sweep session start
 # SessionStart hook: kick off a daily-throttled eval-loop ignition in the
 # background (observer sweep -> skill-diff tick), then exit instantly.
 #
@@ -12,6 +13,10 @@
 # nothing); exit 0 = no error. NEVER blocks session start - the sweep+tick are
 # detached (see scripts/lib/eval-sweep-throttle.sh).
 set -euo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

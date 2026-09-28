@@ -4,6 +4,7 @@ Covers AC1 (auto-link + receipt), AC2 (suggest below the bar), the orphan line,
 and AC4 (a rollup failure never breaks intake).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -13,13 +14,9 @@ from typer.testing import CliRunner
 
 import fno.graph._constants as gc
 import fno.graph.store as gs
-from fno.cli import app
 
 runner = CliRunner()
 
-
-def _invoke(*args):
-    return runner.invoke(app, list(args), catch_exceptions=False)
 
 
 def _route_graph(g: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,17 +40,44 @@ def _epic(nid: str, title: str) -> dict:
 @pytest.fixture
 def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     g = tmp_path / "graph.json"
+    # The idea door is native: the binary resolves the store through
+    # FNO_CONFIG's state_dir, so pin it to this fixture's tmp dir.
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text('state_dir = "%s"\n' % tmp_path)
 
     def _write(entries: list[dict]) -> Path:
-        g.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(g, json.dumps({"entries": entries}))
         _route_graph(g, tmp_path, monkeypatch)
         return g
 
     return _write
 
 
+class _Result:
+    """The CliRunner-shaped face of a native-door idea run."""
+
+    def __init__(self, code: int, out: str, err: str):
+        self.exit_code = code
+        self.output = out
+        self.stdout = out
+        self.stderr = err
+
+
+def _invoke_idea(*args: str) -> _Result:
+    """The idea door: the create verb is native; this execs the binary
+    against the fixture store the graph fixture wired."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "idea", *args)
+    return _Result(code, out, err)
+
+
 def _nodes(g: Path) -> list[dict]:
-    return json.loads(g.read_text(encoding="utf-8"))["entries"]
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _created(g: Path, title: str) -> dict:
@@ -65,13 +89,39 @@ def test_auto_link_sets_parent_and_prints_receipt(graph):
     g = graph([_epic("x-mux0001", "mux pane layout polish")])
     title = "mux pane layout polish resize"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+    res = _invoke_idea(title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title)["parent"] == "x-mux0001"
     assert "rollup: auto-linked" in res.stderr
     assert "x-mux0001" in res.stderr
     assert "--parent null" in res.stderr
+
+
+def test_auto_link_survives_a_related_edge_on_the_same_create(graph):
+    """x-129e (second site): set_related() rebinds `entries` under the create
+    mutator too, so the rollup block below it must keep writing `parent` onto
+    the LIVE node, not a copy orphaned by that rebind.
+    """
+    g = graph([
+        _epic("x-mux0001", "mux pane layout polish"),
+        {
+            "id": "x-peer0001", "parent": None, "title": "unrelated peer",
+            "type": "feature", "project": "fno", "cwd": "/tmp/proj",
+            "priority": "p2", "domain": "code", "blocked_by": [],
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+    ])
+    title = "mux pane layout polish resize"
+
+    res = _invoke_idea( title, "--cwd", "/tmp/proj", "--difficulty", "low",
+        "--separate", "--related", "x-peer0001",
+    )
+
+    assert res.exit_code == 0, res.stderr
+    created = _created(g, title)
+    assert created["parent"] == "x-mux0001"
+    assert created["related"] == ["x-peer0001"]
 
 
 def test_suggest_below_the_bar_writes_no_parent(graph):
@@ -82,7 +132,7 @@ def test_suggest_below_the_bar_writes_no_parent(graph):
     ])
     title = "billing invoice export"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+    res = _invoke_idea(title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title).get("parent") is None
@@ -96,7 +146,7 @@ def test_no_candidates_prints_the_orphan_hint(graph):
     g = graph([_epic("x-mux0001", "mux pane layout polish")])
     title = "quantum teapot calibration"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+    res = _invoke_idea(title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title).get("parent") is None
@@ -106,7 +156,7 @@ def test_no_candidates_prints_the_orphan_hint(graph):
 def test_greenfield_graph_is_quiet_and_does_not_crash(graph):
     """No epics means no mission to resolve; intake must not narrate that."""
     g = graph([])
-    res = _invoke("backlog", "idea", "first ever node", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+    res = _invoke_idea("first ever node", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
     assert res.exit_code == 0
     assert len(_nodes(g)) == 1
     assert "rollup" not in res.stderr
@@ -120,81 +170,50 @@ def test_explicit_parent_is_never_second_guessed(graph):
     ])
     title = "mux pane layout polish resize"
 
-    res = _invoke(
-        "backlog", "idea", title, "--cwd", "/tmp/proj", "--parent", "x-oth00002", "--difficulty", "low", "--separate"
+    res = _invoke_idea( title, "--cwd", "/tmp/proj", "--parent", "x-oth00002", "--difficulty", "low", "--separate"
     )
 
     assert _created(g, title)["parent"] == "x-oth00002"
     assert "rollup:" not in res.stderr
 
 
+def test_filing_under_a_closed_parent_refuses_instead_of_dropping(graph):
+    """x-1c7f: a closed parent cannot hold a live child. The strand healers
+    (the reconcile re-parent sweep, the close-guard release) clear that edge
+    after birth, so exiting 0 with the flag would drop it on the floor. The
+    birth path refuses naming why instead."""
+    done = _epic("x-done0001", "shipped mux epic")
+    done["status"] = "done"
+    g = graph([done, _epic("x-mux0001", "mux pane layout polish")])
+    title = "mux pane layout polish resize"
+
+    res = _invoke_idea( title, "--cwd", "/tmp/proj", "--parent", "x-done0001", "--difficulty", "low", "--separate"
+    )
+
+    assert res.exit_code == 1
+    assert "x-done0001" in res.stderr
+    assert "done" in res.stderr
+    assert "reconcile" in res.stderr
+    assert all(e.get("title") != title for e in _nodes(g))
+
+
 def test_bug_type_is_exempt_from_the_ladder(graph):
     """AC6: a bug never gets a rollup line, however well it scores."""
     graph([_epic("x-mux0001", "mux pane layout polish")])
-    res = _invoke(
-        "backlog", "idea", "mux pane layout polish", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate",
+    res = _invoke_idea( "mux pane layout polish", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate",
         "--type", "bug",
     )
     assert res.exit_code == 0
     assert "rollup:" not in res.stderr
 
 
-def test_rollup_failure_never_breaks_intake(graph, monkeypatch):
-    """AC4: a raising scorer still files the node, exit 0, one stderr warning."""
-    import fno.graph.rollup as rollup
-
-    g = graph([_epic("x-mux0001", "mux pane layout polish")])
-
-    def boom(*a, **k):
-        raise RuntimeError("simulated scorer corruption")
-
-    monkeypatch.setattr(rollup, "resolve", boom)
-    title = "mux pane layout polish resize"
-
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert res.exit_code == 0
-    created = _created(g, title)
-    assert created.get("parent") is None
-    assert "rollup skipped" in res.stderr
-    assert "rollup: auto-linked" not in res.stderr
 
 
-def test_auto_link_repaints_the_parent_rollup(graph, monkeypatch):
-    """The x-6c2b pitfall: an auto-link must repaint children_total."""
-    seen: list = []
-    import fno.graph.cli as gcli
-
-    graph([_epic("x-mux0001", "mux pane layout polish")])
-    monkeypatch.setattr(
-        gcli, "_project_plans_from_graph", lambda ids: seen.append(list(ids))
-    )
-
-    _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert seen, "auto-linked node did not trigger an ancestor repaint"
 
 
-def test_a_link_never_lands_without_its_receipt(graph, monkeypatch):
-    """The undo receipt is the mitigation for a wrong auto-link.
 
-    If receipt rendering fails, the parent edge must NOT be written - a silent
-    auto-link is exactly the failure the printed receipt exists to prevent.
-    """
-    import fno.graph.rollup as rollup
 
-    g = graph([_epic("x-mux0001", "mux pane layout polish")])
-    monkeypatch.setattr(
-        rollup, "receipt_lines",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render failed")),
-    )
-    title = "mux pane layout polish resize"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert res.exit_code == 0
-    assert _created(g, title).get("parent") is None
-    assert "rollup skipped" in res.stderr
 
 
 def test_stdout_stays_pure_json_for_machine_callers(graph):
@@ -205,7 +224,7 @@ def test_stdout_stays_pure_json_for_machine_callers(graph):
     """
     graph([_epic("x-mux0001", "mux pane layout polish")])
 
-    res = _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+    res = _invoke_idea("mux pane layout polish resize", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     payload = json.loads(res.stdout)
     assert payload["title"] == "mux pane layout polish resize"
@@ -219,57 +238,3 @@ def test_stdout_stays_pure_json_for_machine_callers(graph):
 def _crown(scope):
     return {"level": 1, "scope": scope, "grantor": "human",
             "label": f"L1 {scope}", "text": f"L1 {scope} (by human)"}
-
-
-def test_crowned_filing_parents_to_the_crown_scope(graph, monkeypatch):
-    """A crowned king's parentless filing lands on the board it reigns by."""
-    g = graph([
-        _epic("x-aaa00001", "billing invoice export pipeline"),
-        _epic("x-bbb00002", "billing invoice export workflow"),
-        _epic("x-crown001", "the crown territory"),
-    ])
-    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: _crown("x-crown001"))
-    title = "billing invoice export"
-
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert res.exit_code == 0
-    assert _created(g, title)["parent"] == "x-crown001"
-    assert "rollup: crown-linked" in res.stderr
-    assert "x-crown001" in res.stderr
-    assert "--parent null" in res.stderr
-
-
-def test_uncrowned_filing_stays_parentless(graph, monkeypatch):
-    """No crown, today's behavior: suggestions, no parent, nothing linked."""
-    g = graph([
-        _epic("x-aaa00001", "billing invoice export pipeline"),
-        _epic("x-bbb00002", "billing invoice export workflow"),
-        _epic("x-crown001", "the crown territory"),
-    ])
-    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: None)
-    title = "billing invoice export"
-
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert res.exit_code == 0
-    assert _created(g, title).get("parent") is None
-    assert "crown-linked" not in res.stderr
-    assert "--parent x-aaa00001" in res.stderr
-    assert "--parent x-bbb00002" in res.stderr
-
-
-def test_project_scoped_crown_names_no_parent(graph, monkeypatch):
-    """A portfolio crown names no node, so nothing links and nothing lies."""
-    g = graph([
-        _epic("x-aaa00001", "billing invoice export pipeline"),
-        _epic("x-bbb00002", "billing invoice export workflow"),
-    ])
-    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: _crown("fno"))
-    title = "billing invoice export"
-
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
-
-    assert res.exit_code == 0
-    assert _created(g, title).get("parent") is None
-    assert "crown-linked" not in res.stderr

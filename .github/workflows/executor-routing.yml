@@ -14,8 +14,8 @@ on:
       - '.github/workflows/executor-routing.yml'
 
 concurrency:
-  group: executor-routing-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  group: executor-routing-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

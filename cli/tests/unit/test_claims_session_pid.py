@@ -1,278 +1,158 @@
-"""Unit tests for fno.claims.session_pid: durable session pid resolution."""
+"""Unit tests for fno.claims.session_pid: the shim over the native verb.
+
+The ancestor walk itself lives in Rust (`spawn_context.rs`, served by
+`fno agents claim session-pid`); its semantics - nearest harness wins, the
+claude exe-only substring rule, segment-vs-substring matching, the node-shim
+stem rule, pool-machinery refusal, and the FNO_SESSION_PID stamp pair - are
+pinned by spawn_context's own tests (session_identity_*, ambient_stamp_pair,
+harness_walk_still_proves_claude_behind_a_spare). What stays testable here is
+the Python contract: exec the verb once per from_pid, cache the answer,
+answer both halves from that one read, and degrade to (None, None) on any
+failure mode instead of raising into a caller that holds a claim lock.
+"""
 from __future__ import annotations
 
-import os
+import json
+import subprocess
 from unittest.mock import patch
 
-import psutil
 import pytest
 
-from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
+from fno.claims import session_pid
+from fno.claims.session_pid import (
+    pid_dies_with_session,
+    resolve_session_harness,
+    resolve_session_pid,
+)
 
 
-class _FakeProc:
-    """Minimal psutil.Process stand-in for a chosen ancestor chain.
-
-    ``name``/``exe``/``cmdline`` may each be an exception INSTANCE, in which case
-    the corresponding getter raises it (models a per-getter psutil failure).
-    ``cmdline`` defaults to ``[exe]`` so plain (pid, name, exe) specs behave like
-    a real process without a bespoke argv.
-    """
-
-    def __init__(self, pid, name, exe, parent=None, cmdline=None):
-        self.pid = pid
-        self._name = name
-        self._exe = exe
-        self._parent = parent
-        self._cmdline = [exe] if cmdline is None else cmdline
-
-    def _get(self, value):
-        if isinstance(value, BaseException):
-            raise value
-        return value
-
-    def name(self):
-        return self._get(self._name)
-
-    def exe(self):
-        return self._get(self._exe)
-
-    def cmdline(self):
-        return self._get(self._cmdline)
-
-    def parent(self):
-        return self._get(self._parent)
+@pytest.fixture(autouse=True)
+def _fresh_identity_cache():
+    """Each test starts from a cold memo and leaves one behind it."""
+    session_pid._clear_session_identity_cache()
+    yield
+    session_pid._clear_session_identity_cache()
 
 
-def _chain(*specs):
-    """Build a child->...->root chain (child first). Each spec is
-    (pid, name, exe) or (pid, name, exe, cmdline)."""
-    parent = None
-    for spec in reversed(specs):
-        pid, name, exe = spec[0], spec[1], spec[2]
-        cmdline = spec[3] if len(spec) > 3 else None
-        parent = _FakeProc(pid, name, exe, parent=parent, cmdline=cmdline)
-    # walk back to the first (child) node
-    node = parent
-    nodes = []
-    while node is not None:
-        nodes.append(node)
-        node = node._parent
-    return nodes[0]
+def _reply(payload=None, rc=0, stdout=None):
+    """A CompletedProcess shaped like the verb's answer."""
+    if stdout is None:
+        stdout = "" if payload is None else json.dumps(payload)
+    return subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
 
 
-def test_env_override_wins_when_alive():
-    """FNO_SESSION_PID set to a live pid is returned verbatim (launcher hook)."""
-    with patch.dict(os.environ, {"FNO_SESSION_PID": str(os.getpid())}):
-        assert resolve_session_pid() == os.getpid()
+def test_verb_answer_fills_both_halves():
+    """One JSON read answers pid and harness together (AC6)."""
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        return_value=_reply({"session_pid": 20, "harness": "claude"}),
+    ) as run:
+        assert resolve_session_pid(from_pid=10) == 20
+        assert resolve_session_harness(from_pid=10) == "claude"
+    (call,) = run.call_args_list
+    assert call.args[0] == [
+        "fno",
+        "agents",
+        "claim",
+        "session-pid",
+        "--json",
+        "--from-pid",
+        "10",
+    ]
 
 
-def test_env_override_ignored_when_dead():
-    """A dead/malformed FNO_SESSION_PID falls through to the walk."""
-    dead = 999_999
-    while psutil.pid_exists(dead):
-        dead += 1
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
-    )
-    with patch.dict(os.environ, {"FNO_SESSION_PID": str(dead)}):
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) == 20
+def test_one_exec_per_from_pid_cached():
+    """Repeat reads for one from_pid pay one exec; a new from_pid execs again."""
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        return_value=_reply({"session_pid": 20, "harness": "claude"}),
+    ) as run:
+        assert resolve_session_pid(from_pid=10) == 20
+        assert resolve_session_pid(from_pid=10) == 20
+        assert resolve_session_harness(from_pid=10) == "claude"
+        assert run.call_count == 1
+        assert resolve_session_pid(from_pid=11) == 20
+        assert run.call_count == 2
 
 
-def test_env_override_malformed_falls_through():
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "claude", "/Users/x/.local/bin/claude"),
-    )
-    with patch.dict(os.environ, {"FNO_SESSION_PID": "not-a-pid"}):
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) == 20
+def test_cache_clear_seam_reexecs():
+    """The documented test seam drops the memo so a re-exec is observable."""
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        return_value=_reply({"session_pid": 20, "harness": None}),
+    ) as run:
+        assert resolve_session_pid(from_pid=10) == 20
+        session_pid._clear_session_identity_cache()
+        assert resolve_session_pid(from_pid=10) == 20
+        assert run.call_count == 2
 
 
-def test_walk_finds_versioned_binary_by_exe_path():
-    """The versioned binary's name() is a version string; match on exe path."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (15, "node", "/usr/bin/node"),
-        (20, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
-    )
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) == 20
+def test_degrades_when_the_binary_is_missing():
+    with patch.object(
+        session_pid.subprocess, "run", side_effect=FileNotFoundError("fno")
+    ):
+        assert resolve_session_pid(from_pid=10) is None
+        assert resolve_session_harness(from_pid=10) is None
 
 
-def test_walk_returns_nearest_claude_ancestor():
-    """When several claude ancestors exist, the NEAREST is returned."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "claude", "/Users/x/.local/bin/claude"),            # nearest
-        (30, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
-    )
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) == 20
+def test_degrades_on_a_nonzero_exit():
+    with patch.object(
+        session_pid.subprocess, "run", return_value=_reply(rc=1, stdout="boom")
+    ):
+        assert resolve_session_pid(from_pid=10) is None
 
 
-def test_walk_returns_none_when_no_claude_ancestor():
-    """No claude ancestor -> None -> caller degrades to TTL-only."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "node", "/usr/bin/node"),
-        (30, "zsh", "/bin/zsh"),
-    )
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) is None
+def test_degrades_on_malformed_json():
+    with patch.object(
+        session_pid.subprocess, "run", return_value=_reply(stdout="not json")
+    ):
+        assert resolve_session_pid(from_pid=10) is None
+        assert resolve_session_harness(from_pid=10) is None
 
 
-def test_walk_returns_none_when_start_pid_gone():
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", side_effect=psutil.NoSuchProcess(123)):
-            assert resolve_session_pid(from_pid=123) is None
+def test_degrades_on_a_non_dict_payload():
+    with patch.object(
+        session_pid.subprocess, "run", return_value=_reply(stdout="[20]")
+    ):
+        assert resolve_session_pid(from_pid=10) is None
 
 
-def test_walk_returns_none_on_negative_start_pid():
-    """A negative/zero start pid raises ValueError in psutil.Process; degrade to None."""
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", side_effect=ValueError("invalid pid")):
-            assert resolve_session_pid(from_pid=-1) is None
+def test_degrades_on_a_timeout():
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(cmd="fno", timeout=30),
+    ):
+        assert resolve_session_pid(from_pid=10) is None
 
 
-def test_process_list_permission_error_degrades_to_unproven_identity():
-    """Managed macOS sandboxes can deny psutil's parent-process census."""
-    child = _FakeProc(10, "bash", "/bin/bash", parent=PermissionError("sysctl denied"))
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", return_value=child):
-            assert resolve_session_pid(from_pid=10) is None
-            assert resolve_session_harness(from_pid=10) is None
+@pytest.mark.parametrize("bad", ["20", 0, -3, 2.5])
+def test_rejects_pid_halves_that_are_not_positive_ints(bad):
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        return_value=_reply({"session_pid": bad, "harness": "claude"}),
+    ):
+        assert resolve_session_pid(from_pid=10) is None
 
 
-def test_env_override_non_positive_ignored():
-    """FNO_SESSION_PID of 0 or -1 must not be honored even if pid_exists is True."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "claude", "/Users/x/.local/bin/claude"),
-    )
-    with patch.dict(os.environ, {"FNO_SESSION_PID": "0"}):
-        with patch("psutil.pid_exists", return_value=True):
-            with patch("psutil.Process", return_value=child):
-                # 0 is rejected -> walk runs -> finds the claude ancestor.
-                assert resolve_session_pid(from_pid=10) == 20
+def test_rejects_a_non_string_harness_but_keeps_the_pid():
+    with patch.object(
+        session_pid.subprocess,
+        "run",
+        return_value=_reply({"session_pid": 20, "harness": 42}),
+    ):
+        assert resolve_session_pid(from_pid=10) == 20
+        assert resolve_session_harness(from_pid=10) is None
 
 
-# --- non-claude harness resolution (x-5e58) -----------------------------------
-
-
-def _resolve_from(child, from_pid):
-    """Run resolve_session_pid over a fake chain with FNO_SESSION_PID unset."""
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FNO_SESSION_PID", None)
-        with patch("psutil.Process", return_value=child):
-            return resolve_session_pid(from_pid=from_pid)
-
-
-@pytest.mark.parametrize("token", ["codex", "opencode", "agy", "cursor-agent"])
-def test_native_binary_harness_resolves_by_basename(token):
-    """Native-binary harnesses have their name as the exe basename."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, token, f"/opt/homebrew/bin/{token}"),
-    )
-    assert _resolve_from(child, 10) == 20
-
-
-def test_node_shim_gemini_resolves_via_cmdline_symlink():
-    """gemini is a node shim: name()==node, exe()==node, cmdline()[1]==bin/gemini."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "node", "/usr/bin/node", ["node", "/Users/x/.gemini/bin/gemini"]),
-    )
-    assert _resolve_from(child, 10) == 20
-
-
-def test_node_shim_gemini_resolves_via_cmdline_resolved_script():
-    """The resolved-script argv shape (gemini.js) matches via the stem rule."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "node", "/usr/bin/node", ["node", "/Users/x/lib/gemini-cli/gemini.js"]),
-    )
-    assert _resolve_from(child, 10) == 20
-
-
-def test_substring_trap_legacy_does_not_match_agy():
-    """`agy` is a substring of `legacy`; segment-exact matching must not match it."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "tool", "/opt/legacy/bin/tool", ["/opt/legacy/bin/tool", "--run"]),
-    )
-    assert _resolve_from(child, 10) is None
-
-
-def test_substring_trap_codex_framework_does_not_match_codex():
-    """The ChatGPT app's `Codex Framework.framework` segments are not `codex`."""
-    exe = (
-        "/Applications/ChatGPT.app/Contents/Frameworks/"
-        "Codex Framework.framework/Versions/A/helper"
-    )
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "helper", exe, [exe]),
-    )
-    assert _resolve_from(child, 10) is None
-
-
-def test_nearest_harness_wins_across_mixed_chain():
-    """A claude worker nested under codex anchors the NEAREST harness (claude)."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "claude", "/Users/x/.local/bin/claude"),   # nearest
-        (30, "codex", "/opt/homebrew/bin/codex"),        # outer
-    )
-    assert _resolve_from(child, 10) == 20
-
-
-def test_cmdline_access_denied_degrades_to_other_getters():
-    """cmdline() raising AccessDenied still lets name()/exe() resolve the harness."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        (20, "codex", "/opt/homebrew/bin/codex", psutil.AccessDenied(20)),
-    )
-    assert _resolve_from(child, 10) == 20
-
-
-def test_cmdline_zombie_on_only_source_continues_walk():
-    """A node-shim ancestor whose cmdline() zombies yields no match; walk continues."""
-    child = _chain(
-        (10, "bash", "/bin/bash"),
-        # name/exe say only "node"; its one identifying source (cmdline) zombies.
-        (20, "node", "/usr/bin/node", psutil.ZombieProcess(20)),
-        (30, "codex", "/opt/homebrew/bin/codex"),
-    )
-    assert _resolve_from(child, 10) == 30
-
-
-def test_claude_substring_never_matches_a_cmdline_wrapper_path():
-    """codex P1 (#419): a hook/wrapper `bash` whose argv carries a `.claude/`
-    install path must NOT match as claude (a substring test there would return the
-    transient shell pid); the walk continues to the real claude process. The
-    claude substring rule applies to name()/exe() only, never to argv."""
-    child = _chain(
-        (
-            10,
-            "bash",
-            "/bin/bash",
-            ["bash", "/Users/x/.claude/plugins/fno/hooks/helpers/init-target-state.sh"],
-        ),
-        (20, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
-    )
-    # Without the guard this returns 10 (the wrapper shell); with it, the real
-    # claude ancestor (20).
-    assert _resolve_from(child, 10) == 20
+def test_pid_dies_with_session_is_a_measured_deny_list():
+    """codex is the one measured shared host; everything else dies with the
+    session, including an unknown or absent harness."""
+    assert pid_dies_with_session("codex") is False
+    assert pid_dies_with_session("Codex") is False
+    for harness in ("claude", "gemini", "opencode", "agy", "cursor-agent", "", None):
+        assert pid_dies_with_session(harness) is True, harness

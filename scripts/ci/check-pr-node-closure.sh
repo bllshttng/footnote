@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # check-pr-node-closure.sh - CI gate: a node-bearing branch must exact-claim
-# its own node in the PR's Backlog-Closure trailer.
+# its own node in the PR's closure line.
 #
-# x-aaaa: a PR naming several backlog nodes only ever closed the ONE node
+# A PR naming several backlog nodes only ever closed the ONE node
 # individually stamped at creation; every other named node stayed open
-# forever. The fix is an exact `Backlog-Closure: <id> [<id>...]` trailer,
-# bound atomically at merge - this gate is its CI backstop for the direct
-# `gh pr create` path, which never runs the `fno do pr closure-trailer`
-# generator. It never infers extra nodes from prose or diffs: it only checks
-# that a node id already present in the HEAD ref is also named in the exact
-# trailer line.
+# forever. The fix is an exact `Fixes <id> [<id>...]` line (the retired
+# `Backlog-Closure:` spelling still reads), bound atomically at merge - this
+# gate is its CI backstop for the direct `gh pr create` path, which never
+# runs the `fno do pr closure-trailer` generator. It never infers extra
+# nodes from prose or diffs: it only checks that a node id already present
+# in the HEAD ref is also named in the exact closure line.
 #
 # Run: PR_BODY="<body>" PR_HEAD_REF="<branch>" bash scripts/ci/check-pr-node-closure.sh
 # Env: PR_BODY (the PR body), PR_HEAD_REF (the PR's head branch name).
@@ -26,20 +26,15 @@ if [[ -z "$PR_HEAD_REF" ]]; then
   exit 0
 fi
 
-# Liberal FORMAT match, sourced from the one shell copy of the node-id shape
-# (kept aligned with the Python source of truth by its own pinning test,
-# test_node_id_sh.py) rather than a second hardcoded copy here that could
-# silently drift. This is a format check, not an identity check: no graph is
-# available in CI to confirm the id is real, so a branch segment that merely
-# LOOKS like a node id (e.g. a coincidental "db-2026") is treated the same as
-# a real one - the documented liberal-extraction tradeoff, not a bug.
+# Graphless candidate shape, sourced from the shared shell library: dashed ids
+# plus the historical compact x family. Other compact tokens often look like
+# ordinary branch words, and CI has no graph to confirm them.
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/node-id.sh
 source "${_script_dir}/../lib/node-id.sh"
-# _NODE_ID_FNO_RE is anchored (^...$); strip both anchors so this script's own
-# `^${node_id_re}$` wrapping at the match site below stays the single place
-# anchoring happens.
-node_id_re="${_NODE_ID_FNO_RE#^}"
+# _NODE_ID_CLOSURE_RE is anchored (^...$); strip both anchors so this script's
+# `^${node_id_re}$` wrapping at the match site stays the single anchor.
+node_id_re="${_NODE_ID_CLOSURE_RE#^}"
 node_id_re="${node_id_re%\$}"
 
 # Extract every delimiter-bounded candidate segment from the head ref. Split on
@@ -52,14 +47,21 @@ node_id_re="${node_id_re%\$}"
 # re-glued two segments that a '/' separated and demanded an id the branch
 # never names: "feat/cafe" asked for "feat-cafe", "target/deadbeef" for
 # "target-deadbeef". Those refs name no node, and the producer
-# (fno.pr.closure.branch_node_ids, which requires a literal '-') writes no
-# trailer for them - so the gate red a PR over a line nothing could generate.
+# (fno.pr.closure.branch_node_ids) recognizes only complete, delimiter-bounded
+# ids and writes no trailer for them - so the gate red a PR over a line nothing
+# could generate.
 candidates=()
 IFS='/' read -ra _paths <<< "$PR_HEAD_REF"
 for _path in "${_paths[@]}"; do
   IFS='-' read -ra _segments <<< "$_path"
   i=0
   while [[ $i -lt ${#_segments[@]} ]]; do
+    segment="${_segments[$i]}"
+    if [[ "$segment" =~ ^${node_id_re}$ ]]; then
+      candidates+=("$segment")
+      i=$((i + 1))
+      continue
+    fi
     # Re-glue two adjacent segments (the id's own prefix/suffix straddle the
     # '-' IFS split point: "x" and "59a6" from "feature/x-aaaa").
     if [[ $((i + 1)) -lt ${#_segments[@]} ]]; then
@@ -85,23 +87,23 @@ if [[ ${#candidates[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# The LAST exact Backlog-Closure line only (mirrors fno.pr.closure.parse_closure_trailer:
-# a stale earlier line, e.g. carried forward by a rebase, must not satisfy this).
-trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^Backlog-Closure:[[:space:]]*' | tail -1 || true)
+# The LAST closure line only, either spelling, colon optional (mirrors the
+# Rust parser behind fno.pr.closure.parse_closure_trailer: a stale earlier
+# line, e.g. carried forward by a rebase, must not satisfy this).
+trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^(fixes|backlog-closure):?[[:space:]]*' | tail -1 || true)
 
-# Strip the label itself (everything through its own colon + any immediate
-# spaces/tabs), mirroring `_TRAILER_LINE_RE`'s `^Backlog-Closure:[ \t]*(.*)$`
-# capture group - the runtime parser (parse_closure_trailer) only ever
-# tokenizes THAT captured remainder, on whitespace and "," alone, never a
-# bare ":". Matching against the raw trailer_line (label prefix still
-# attached) let ANY colon in the line - including a stray one BETWEEN two
-# ids, e.g. "Backlog-Closure:x-aaaa:x-1111" - read as a valid separator via
-# the leading-boundary group below, so the gate passed a trailer the real
-# parser tokenizes as one malformed run and binds zero ids from (round-10
-# review fix: reproduced live, gate passed / parser returned []).
+# Strip the keyword itself (plus its optional colon and any immediate
+# spaces/tabs), mirroring the Rust grammar. The line is lowercased before the
+# strip so a plain sed works on both GNU and BSD; node ids are lowercase by
+# grammar, so the comparison below loses nothing. Matching against the raw
+# line (keyword still attached) let ANY colon in the line - including a
+# stray one BETWEEN two ids, e.g. "Fixes: x-aaaa:x-1111" - read as a valid
+# separator via the leading-boundary group below, so the gate passed a line
+# the real parser tokenizes as one malformed run and binds zero ids from
+# (round-10 review fix, reproduced live: gate passed / parser returned []).
 trailer_body=""
-if [[ "$trailer_line" =~ ^[^:]*:[[:space:]]*(.*)$ ]]; then
-  trailer_body="${BASH_REMATCH[1]}"
+if [[ -n "$trailer_line" ]]; then
+  trailer_body="$(printf '%s' "$trailer_line" | tr '[:upper:]' '[:lower:]' | sed -E 's/^(fixes|backlog-closure):?[[:space:]]*//')"
 fi
 
 missing=()
@@ -135,13 +137,27 @@ done
 # that wrote no trailer at all names zero ids and fails here.
 claimed=$(( ${#candidates[@]} - ${#missing[@]} ))
 if [[ $claimed -eq 0 ]]; then
+  # How many exact trailer lines the body holds, and what the LAST one (the
+  # only line this gate and parse_closure_trailer read) names - the shape a
+  # two-line body needs to understand before it can be fixed.
+  trailer_count=$(printf '%s\n' "$PR_BODY" | grep -icE '^(fixes|backlog-closure):?[[:space:]]*' || true)
   {
-    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact trailer claims none of them."
-    echo "  Add a line reading:"
-    echo "    Backlog-Closure: <the node id this PR closes>"
-    echo "  Generate it with: fno do pr closure-trailer <node-id>, which checks the"
-    echo "  id against the graph and PRINTS the line. The verb does not edit the"
-    echo "  PR: append the printed line to the PR body yourself. Do NOT paste a"
+    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact closure line claims none of them."
+    if [[ "$trailer_count" -eq 1 ]]; then
+      echo "  The body holds 1 closure line; this gate reads only the LAST one."
+    else
+      echo "  The body holds $trailer_count closure lines; this gate reads only the LAST one."
+    fi
+    if [[ -n "$trailer_body" ]]; then
+      echo "  That last line names: $trailer_body"
+    else
+      echo "  That last line names: nothing"
+    fi
+    echo "  The gate wanted: ${candidates[*]}"
+    echo "  Remedy: fno do pr closure-trailer <node-id> --extra <id> [--extra <id> ...]"
+    echo "  prints ONE Fixes line naming every id. Replace EVERY closure line in"
+    echo "  the PR body with that one line. The verb checks the ids against the"
+    echo "  graph and PRINTS the line; it does not edit the PR. Do NOT paste a"
     echo "  candidate from this message:"
     echo "  a branch segment can match the id grammar without being a real node,"
     echo "  and one unknown id voids the whole binding at merge."

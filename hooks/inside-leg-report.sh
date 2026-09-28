@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - report inside-leg state
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 # hooks/inside-leg-report.sh -- the inside leg (inside-out E3.2).
 #
 # A per-turn hook that pushes structured agent state OUTWARD so a grid pane badge
@@ -10,7 +14,11 @@
 #   PreToolUse        -> state=working  (a tool call is proof the worker is
 #                        unblocked and running -- the first thing that happens
 #                        after a permission approval, which fires no
-#                        UserPromptSubmit of its own)
+#                        UserPromptSubmit of its own). EXCEPT: tool_name
+#                        AskUserQuestion or ExitPlanMode is the session
+#                        asking the operator -> state=blocked, reason
+#                        "asking the user" (C14 feed); the next PreToolUse
+#                        or Stop reports working/done and clears it.
 #   UserPromptSubmit  -> state=working  (the turn started)
 #   Stop              -> state=done     (the turn finished)
 # This is Claude-only: no other harness (codex, agy, opencode) emits a
@@ -94,6 +102,7 @@ try:
     msg = (d.get("message") or "") if isinstance(d, dict) else ""
     event = (d.get("hook_event_name") or "") if isinstance(d, dict) else ""
     model = (d.get("to_model") or "") if isinstance(d, dict) else ""
+    tool = (d.get("tool_name") or "") if isinstance(d, dict) else ""
     ev = d.get("effort") if isinstance(d, dict) else None
     if isinstance(ev, str):
         eff = ev
@@ -108,23 +117,26 @@ if not sid:
 msg = msg.replace("\t", " ").replace("\n", " ")
 event = event.replace("\t", " ").replace("\n", " ")
 model = model.replace("\t", " ").replace("\n", " ")
+tool = tool.replace("\t", " ").replace("\n", " ")
 eff = eff.replace("\t", " ").replace("\n", " ")
-print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}")
+print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}\t{tool}")
 ' <<<"$INPUT" 2>/dev/null) || PARSED=""
 
 # Keep marker emission INDEPENDENT of the parse: on a malformed/empty payload (or
 # no python3) SESSION_ID stays empty and the pane host still emits via the
 # presence-gate degrade. Only the state report (which needs both fields) is
 # skipped, below. A clean parse yields
-# "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>";
+# "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>\t<tool_name>";
 # message is empty for every event that doesn't carry one (all but Notification),
-# model/effort only arrive on PostModelSwitch / effort-carrying inputs.
+# model/effort only arrive on PostModelSwitch / effort-carrying inputs,
+# tool_name only on PreToolUse.
 SESSION_ID=""
 SEQ=""
 MESSAGE=""
 HOOK_EVENT=""
 MODEL=""
 EFFORT=""
+TOOL_NAME=""
 if [[ "$PARSED" == *$'\t'* ]]; then
   SESSION_ID="${PARSED%%$'\t'*}"
   REST="${PARSED#*$'\t'}"
@@ -135,7 +147,25 @@ if [[ "$PARSED" == *$'\t'* ]]; then
   HOOK_EVENT="${REST%%$'\t'*}"
   REST="${REST#*$'\t'}"
   MODEL="${REST%%$'\t'*}"
-  EFFORT="${REST#*$'\t'}"
+  REST="${REST#*$'\t'}"
+  EFFORT="${REST%%$'\t'*}"
+  TOOL_NAME="${REST#*$'\t'}"
+fi
+
+# C14 feed: a claude question picker (AskUserQuestion) or a plan approval
+# (ExitPlanMode) is the session ASKING the operator - the "session-asking"
+# half of the mail quiet wait. PreToolUse would report `working` (unblocked),
+# so the tool call is reclassified before the report: the daemon stores
+# `blocked` with reason `asking the user`, and the next PreToolUse (any other
+# tool) or Stop reports working/done as today, which clears it. Fail-open:
+# any other event or tool keeps today's state untouched.
+if [[ "$HOOK_EVENT" == "PreToolUse" ]]; then
+  case "$TOOL_NAME" in
+    AskUserQuestion | ExitPlanMode)
+      STATE="blocked"
+      MESSAGE="asking the user"
+      ;;
+  esac
 fi
 
 # Turn boundary -> OSC 133 marker, mux panes only, and only from THE pane host.

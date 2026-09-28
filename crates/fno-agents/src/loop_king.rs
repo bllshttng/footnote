@@ -54,6 +54,7 @@
 //! plan to stamp and no node to graduate, so there is nothing left for a
 //! close to do.
 
+use crate::loop_dispatch::retry_etxtbsy;
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -296,9 +297,10 @@ impl std::fmt::Display for ScopeDrainError {
         match self {
             ScopeDrainError::TimedOut { scope, bound } => write!(
                 f,
-                "king drain for {scope} timed out after {}ms and was killed (a spent fire budget leaves a late read only its {}ms floor); wait for a quieter fire or rerun the drain",
+                "king drain for {scope} timed out after {}ms and was killed (drain floor {}ms; {}ms of harness margin left); wait for a quieter fire or rerun the drain",
                 bound.as_millis(),
-                crate::loopcheck::STOPGATE_BOUND_FLOOR.as_millis()
+                crate::loopcheck::STOPGATE_DRAIN_FLOOR.as_millis(),
+                crate::loopcheck::stopgate_harness_margin_remaining_ms()
             ),
             ScopeDrainError::Failed(detail) => write!(f, "{detail}"),
         }
@@ -448,24 +450,24 @@ pub(crate) fn mint_walk_key(fno_bin: &str, cwd: &Path, scope: &str) -> Result<St
     let discriminator = mint_walk_discriminator();
     // `agents name` is a Python-only verb: an ambient FNO_AGENTS_RUNTIME=rust
     // routes the whole group to this binary, which has no name port.
-    let out = std::process::Command::new(fno_bin)
-        .args([
-            "agents",
-            "name",
-            "--source",
-            "kl",
-            "--verb",
-            "th",
-            scope,
-            "--discriminator",
-            &discriminator,
-        ])
-        .current_dir(cwd)
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .output()
-        .map_err(|error| {
-            LoopError::Queue(format!("walk-name mint failed to spawn fno: {error}"))
-        })?;
+    let out = retry_etxtbsy(|| {
+        std::process::Command::new(fno_bin)
+            .args([
+                "agents",
+                "name",
+                "--source",
+                "kl",
+                "--verb",
+                "th",
+                scope,
+                "--discriminator",
+                &discriminator,
+            ])
+            .current_dir(cwd)
+            .env("FNO_AGENTS_RUNTIME", "python")
+            .output()
+    })
+    .map_err(|error| LoopError::Queue(format!("walk-name mint failed to spawn fno: {error}")))?;
     if !out.status.success() {
         return Err(LoopError::Queue(format!(
             "walk-name mint refused ({}): {}",
@@ -593,6 +595,22 @@ pub(crate) fn same_territory(a: &str, b: &str, projects: &HashMap<String, String
     !left.is_empty() && left == canonical_members(b, projects)
 }
 
+/// `crown_answers_to`'s Rust twin: territory equality, or a rung-2 epic set
+/// answering for a subset of its members. Never a portfolio for its projects.
+pub(crate) fn crown_answers_to(
+    held: &str,
+    requested: &str,
+    projects: &HashMap<String, String>,
+) -> bool {
+    if same_territory(held, requested, projects) {
+        return true;
+    }
+    let asked = canonical_members(requested, projects);
+    !asked.is_empty()
+        && derived_scope_level(held, projects) == Some(2)
+        && asked.is_subset(&canonical_members(held, projects))
+}
+
 /// `crown_rivals` for sibling modules (`reign`'s multiple-holders warning).
 pub(crate) fn crown_rivals_pub(
     held: &str,
@@ -681,24 +699,29 @@ pub(crate) fn escalate_stalled(
     reason: &str,
     scope: &str,
 ) -> String {
-    let output = Command::new(fno_bin)
-        .args([
-            "agents",
-            "king",
-            "escalate",
-            "--stalled",
-            &ids.join(","),
-            "--reason",
-            reason,
-        ])
-        .args(if scope.is_empty() {
-            Vec::<&str>::new()
-        } else {
-            vec![scope]
-        })
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output();
+    // Like every shellout here: retry_etxtbsy, because a binary rewritten
+    // under us (a test stub on a parallel runner, or an fno upgrade racing a
+    // spawn) briefly refuses exec with ETXTBSY.
+    let output = retry_etxtbsy(|| {
+        Command::new(fno_bin)
+            .args([
+                "agents",
+                "king",
+                "escalate",
+                "--stalled",
+                &ids.join(","),
+                "--reason",
+                reason,
+            ])
+            .args(if scope.is_empty() {
+                Vec::<&str>::new()
+            } else {
+                vec![scope]
+            })
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+    });
     match output {
         Ok(out) if out.status.success() => {
             let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -867,20 +890,7 @@ mod tests {
     /// A shell script standing in for `fno`, executable, printing its
     /// argument on stdout.
     fn write_fno_stub(dir: &Path, stdout: &str) -> std::path::PathBuf {
-        // Published atomically (temp sibling + rename, same fix as
-        // tests/common/mod.rs): a direct write onto the exec'd path leaves a
-        // write-open fd that a sibling thread's fork window turns into a
-        // CI-only ETXTBSY.
-        let tmp = dir.join(format!(".fno.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let p = dir.join("fno");
-        std::fs::rename(&tmp, &p).unwrap();
-        p
+        crate::write_exec_stub(dir, "fno", &format!("#!/bin/sh\nprintf '%s' '{stdout}'\n"))
     }
 
     #[test]
@@ -932,13 +942,11 @@ mod tests {
         // The verdict read keys on the scope; without it the question carries
         // no verdict sentence and no handoff offer.
         let dir = tempfile::tempdir().unwrap();
-        let stub_path = dir.path().join("fno-stub");
-        std::fs::write(&stub_path, "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.txt\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let stub_path = crate::write_exec_stub(
+            dir.path(),
+            "fno-stub",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.txt\n",
+        );
         let out = escalate_stalled(
             stub_path.to_str().unwrap(),
             dir.path(),
@@ -982,13 +990,7 @@ mod tests {
         // A stub that exits 1 stands in for a stale fno / naming refusal: the
         // walk refuses (Err) instead of dispatching under an uncoded key.
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("fno");
-        std::fs::write(&p, "#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let p = crate::write_exec_stub(dir.path(), "fno", "#!/bin/sh\nexit 1\n");
         let out = mint_walk_key(p.to_str().unwrap(), dir.path(), "epic-x");
         assert!(out.is_err(), "a failed mint must refuse the walk");
     }
@@ -1085,8 +1087,6 @@ mod tests {
 
     #[test]
     fn termination_reads_the_scope_drain_not_the_actionable_board() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
@@ -1101,10 +1101,9 @@ mod tests {
         .unwrap();
         let registry = dir.join("no-registry.json");
         let stub = |body: &str, name: &str| -> String {
-            let path = dir.join(name);
-            fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-            path.to_string_lossy().to_string()
+            crate::write_exec_stub(&dir, name, &format!("#!/bin/sh\necho '{body}'\n"))
+                .to_string_lossy()
+                .to_string()
         };
 
         // The 2026-09-06 incident state: every row driven, nothing shipped. An
@@ -1139,18 +1138,14 @@ mod tests {
 
     #[test]
     fn drain_rejects_json_from_a_failed_command() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain-failed");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fno-drain-failed");
-        fs::write(
-            &path,
+        let path = crate::write_exec_stub(
+            &dir,
+            "fno-drain-failed",
             "#!/bin/sh\necho '{\"scope\":\"epic-x\",\"undelivered\":0}'\nexit 1\n",
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = scope_undelivered_count(path.to_str().unwrap(), &dir, "epic-x");
 
@@ -1163,12 +1158,8 @@ mod tests {
 
     #[test]
     fn drain_kills_a_hung_command_inside_its_read_bound() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fno-drain-hung");
-        fs::write(&path, "#!/bin/sh\nsleep 1\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = crate::write_exec_stub(dir.path(), "fno-drain-hung", "#!/bin/sh\nsleep 1\n");
 
         let started = std::time::Instant::now();
         let result = scope_undelivered_count_with_timeout(
@@ -1391,6 +1382,20 @@ mod tests {
     }
 
     #[test]
+    fn crown_answers_to_admits_a_set_member_and_refuses_a_portfolio_member() {
+        let none = HashMap::new();
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc", &none));
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-bbbb", &none));
+        assert!(!crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-aaaa", &none));
+        let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert!(!crown_answers_to("alpha,beta", "alpha", &projects));
+        assert!(crown_answers_to("alpha,beta", "beta,alpha", &projects));
+    }
+
+    #[test]
     fn a_mislabeled_row_still_blocks_the_walk() {
         // A row stamped level 0 over epic members: derivation reads rung 2 on
         // BOTH sides, so overlap decides and the stored number cannot switch
@@ -1440,7 +1445,14 @@ mod tests {
         // comparing; a raw trim let a row stored as 'alpha' and a walk for
         // the short name 'a' miss each other - the double-rule the guard
         // exists to stop.
-        let _root = crate::paths::DeclaredRoot::declare("kingalias");
+        // The declared root pins process env for the whole test body, so hold
+        // the env lock across it (declare_held: declare itself would take it
+        // twice and deadlock); otherwise a locked test mid-flight sees this
+        // pin and resolves its state into the wrong root.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _root = crate::paths::DeclaredRoot::declare_held("kingalias");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let config = dir.join(".fno").join("config.toml");
@@ -1545,6 +1557,37 @@ mod tests {
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn fire_history_carries_the_newest_king_terminal() {
+        // The newest king `termination` row for the session is
+        // the durable verdict a repeat fire reuses without a board read.
+        // Other sessions' terminals and target-driver rows never count.
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            concat!(
+                r#"{"ts":"2026-09-15T10:00:00Z","type":"termination","data":{"session_id":"k1","driver":"king","reason":"NoProgress"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:05:00Z","type":"termination","data":{"session_id":"k2","driver":"king","reason":"Budget"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:07:00Z","type":"termination","data":{"session_id":"k1","driver":"target","reason":"DonePRGreen"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:09:00Z","type":"termination","data":{"session_id":"k1","driver":"king","reason":"Budget"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let history = king_fire_history(&events, "k1");
+        assert_eq!(
+            history.last_terminal,
+            Some(("2026-09-15T10:09:00Z".to_string(), "Budget".to_string()))
+        );
+        // A session with no rows reads as never-terminal.
+        let history = king_fire_history(&events, "nobody");
+        assert_eq!(history.last_terminal, None);
+    }
 }
 
 /// What the dry-fire scan found: how many fires have landed with no new work
@@ -1562,6 +1605,10 @@ pub(crate) struct KingFireHistory {
     /// readable. A shrinking count is the quiet board's only progress signal:
     /// `actionable_ids` is empty there, so `king_cleared_a_row` never fires.
     pub(crate) last_undelivered: Option<i64>,
+    /// The newest `termination` row this session's king driver emitted, as
+    /// `(ts, reason)`: the durable answer to "did this reign already end"
+    /// Forward scan, so the last write wins.
+    pub(crate) last_terminal: Option<(String, String)>,
 }
 
 /// Count how many king loop-check fires have landed with no NEW work done.
@@ -1579,19 +1626,13 @@ pub(crate) struct KingFireHistory {
 ///    outlive the only action a king has for them, and a reset-on-repeat
 ///    counter would never converge.
 pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: Vec::new(),
-            last_undelivered: None,
-        };
-    };
+    let content = crate::event_store::journal_text(events_path, &[]);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total: u64 = 0;
     let mut dry: u64 = 0;
     let mut last_ids: Vec<String> = Vec::new();
     let mut last_undelivered: Option<i64> = None;
+    let mut last_terminal: Option<(String, String)> = None;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1612,6 +1653,25 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
                     .unwrap_or("");
                 if !target.is_empty() && seen.insert(target.to_string()) {
                     dry = 0;
+                }
+            }
+            Some("termination") => {
+                // The newest king terminal for this session:
+                // the verdict a later fire can reuse without reading a board.
+                let driver = data
+                    .and_then(|d| d.get("driver"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if driver != "king" {
+                    continue;
+                }
+                let ts = value.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+                let reason = data
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !ts.is_empty() && !reason.is_empty() {
+                    last_terminal = Some((ts.to_string(), reason.to_string()));
                 }
             }
             Some("king_loop_check") => {
@@ -1657,6 +1717,7 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
         dry,
         last_ids,
         last_undelivered,
+        last_terminal,
     }
 }
 

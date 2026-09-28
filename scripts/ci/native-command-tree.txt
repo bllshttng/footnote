@@ -1,0 +1,56 @@
+# Native fno command inventory, generated from the typed clap tree.
+# Regenerate with:
+#   cargo run --quiet --manifest-path crates/fno/Cargo.toml --example native_command_tree > scripts/ci/native-command-tree.txt
+# Columns: path, kind (root|group|leaf), visibility, aliases, flags
+# (hidden flags prefixed !; a hidden FLAG ALIAS is not listed).
+(root)	root	visible	-	!--session,--server
+mux	group	visible	-	-
+mux attach	leaf	visible	-	-
+mux block	group	visible	-	-
+mux block annotate	leaf	visible	-	-
+mux block pipe	leaf	visible	-	-
+mux command	leaf	visible	-	--empty-composer,--expect,--proof,--request-id,--text,--timeout-seconds
+mux doctor	leaf	visible	-	--json,-J
+mux kill-server	leaf	visible	-	--all,--end-unkept,--json,-J,--stale-idle
+mux layout	group	visible	-	!--session,--json,--server
+mux layout apply	leaf	visible	-	-
+mux layout get	leaf	visible	-	-
+mux layout graft	leaf	visible	-	-
+mux ls	leaf	visible	-	--json,-J
+mux pane	group	visible	-	-
+mux pane break	leaf	visible	-	-
+mux pane claim	leaf	visible	-	-
+mux pane focus	leaf	visible	-	-
+mux pane keeper	group	hidden	-	-
+mux pane keeper list	leaf	visible	-	-
+mux pane kill	leaf	visible	-	-
+mux pane ls	leaf	visible	-	-
+mux pane read	leaf	visible	-	-
+mux pane release	leaf	visible	-	-
+mux pane run	leaf	visible	-	-
+mux pane send	leaf	visible	-	-
+mux pane split	leaf	visible	-	-
+mux pane wait	leaf	visible	-	-
+mux retire-session	leaf	hidden	-	-
+mux rows	leaf	hidden	-	-
+mux serve	leaf	visible	-	-
+mux server	leaf	visible	-	!--session,--server
+mux shell-init	leaf	visible	-	--json,-J
+mux stats	leaf	hidden	-	--json,-J
+mux tab	group	visible	-	-
+mux tab close	leaf	visible	-	-
+mux tab create	leaf	visible	-	-
+mux tab join	leaf	visible	-	-
+mux tab ls	leaf	visible	-	-
+mux tab move	leaf	visible	-	-
+mux tab rename	leaf	visible	-	-
+mux thread	group	hidden	-	-
+mux thread reseat	leaf	hidden	-	-
+mux view	leaf	visible	-	-
+mux web	group	visible	-	-
+mux web reap	leaf	visible	-	-
+mux where	leaf	visible	-	-
+mux workspace	group	visible	-	-
+mux workspace prune	leaf	visible	-	-
+mux workspace restore	leaf	visible	-	-
+version	leaf	visible	-	--json

@@ -3,8 +3,6 @@ rename, carrying the ProviderBudget record, with the legacy spelling parsing
 forever and ONE deprecation line."""
 from __future__ import annotations
 
-import pytest
-
 
 def test_legacy_spelling_parses_with_deprecation_line(capsys):
     from fno.config import AgentsBlock
@@ -69,15 +67,15 @@ def test_retired_trigger_parses_warns_once_and_is_ignored(caplog):
     assert "delete the key" in warnings[0]
 
 
-def test_pair_coercion_is_gone():
-    """x-7783 LD2: the trigger/backstop pair validator is deleted. An
-    incoherent-looking pair keeps BOTH values as written, because the trigger
-    is ignored and the backstop is the only load knob left."""
+def test_retired_backstop_key_is_no_longer_modeled():
+    """x-7783 LD2 removed the trigger/backstop pair; x-c588 retired the
+    backstop key itself. It no longer parses onto the model: a config that
+    still sets it is named as unmodeled on every load and ignored."""
     from fno.config import AgentsBlock
 
     block = AgentsBlock(max_load_per_cpu=2.0, hard_max_load_per_cpu=1.0)
     assert block.max_load_per_cpu == 2.0
-    assert block.hard_max_load_per_cpu == 1.0
+    assert getattr(block, "hard_max_load_per_cpu", None) is None
 
 
 def test_provider_limits_table_reads_both_spellings():
@@ -104,4 +102,4 @@ def test_no_second_agents_leaf_named_max_lanes():
     assert agents_fields == set(), f"agents.* grew a second max_lanes leaf: {agents_fields}"
 
 # The gate's own provider_limits read moved into the ONE Rust gate
-# (spawn_gate_lanes::provider_lanes_cap); its cases live there.
+# (spawn_gate_lanes::provider_lane_caps); its cases live there.

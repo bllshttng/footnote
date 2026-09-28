@@ -20,7 +20,7 @@
 //! tick index, so a slow head never starves the tail.
 
 use crate::agents_config;
-use crate::backlog::api::{self as backlog_api, Store as GraphStore};
+use crate::backlog::api as backlog_api;
 use crate::claims::{status as claim_status, ClaimState, ClaimState::*};
 use crate::finalize::slug_from_git_remote;
 use crate::graph_keeper::node_carries_pr;
@@ -40,6 +40,17 @@ pub const REFUSED: &str = "refused";
 pub const HELD: &str = "held";
 pub const ABSENT: &str = "absent";
 pub const UNKNOWN: &str = "unknown";
+
+/// The law-lane subject prefix of the head-scoped operator merge grant.
+/// The full subject is `{MERGE_GRANT_SUBJECT}:<owner/repo>#<pr>@<40-hex head>`,
+/// so a push invalidates the grant by construction: the new head's subject
+/// has no rows.
+pub const MERGE_GRANT_SUBJECT: &str = "merge-grant";
+
+/// The one decision value that counts as an affirmative grant, mirroring the
+/// waiver's exact-match polarity (`coverage_status::WAIVER_DECISION`): row
+/// existence carries none, so a note or a denial at the subject reads no.
+pub const MERGE_GRANT_DECISION: &str = "merge authorized for this head";
 
 /// The live-config arms of the verdict, read once per node after a receipt
 /// clears. `cfg` is a closure so config files are read only after a receipt
@@ -143,7 +154,7 @@ fn do_row_receipts(node: &Value) -> Result<Vec<&Value>, String> {
         if !row.is_object() {
             continue;
         }
-        if row.get("phase").and_then(Value::as_str) != Some("do") {
+        if row.get("phase").and_then(Value::as_str) != Some("execute") {
             continue;
         }
         let grant = match row.get("merge_grant") {
@@ -370,6 +381,64 @@ pub fn repo_slug_from_pr_url(pr_url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
+/// The head-scoped subject one merge grant lives at. Same trust shape as the
+/// review-coverage waiver's `scoped_waiver_subject`, over a different action.
+pub fn head_grant_subject(repo_slug: &str, pr: i64, head: &str) -> String {
+    format!("{MERGE_GRANT_SUBJECT}:{repo_slug}#{pr}@{head}")
+}
+
+/// The attended command an operator runs in their own terminal to record the
+/// grant. Only that door can carry it: `decide/__init__.py` refuses
+/// `--authority operator` from any agent session, so a worker can never mint
+/// one, and this string is what a per-run refusal names as its one remedy.
+pub fn attended_grant_command(repo_slug: &str, pr: i64, head: &str) -> String {
+    format!(
+        "fno backlog decide '{}' '{}' --authority operator",
+        head_grant_subject(repo_slug, pr, head),
+        MERGE_GRANT_DECISION
+    )
+}
+
+/// The head-grant reading over one `decisions` payload. Same polarity as the
+/// durable verdict: only a positively affirmative operator row set grants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadGrant {
+    /// Every operator row at the subject carries `MERGE_GRANT_DECISION`, so
+    /// identical duplicates read granted once (idempotent re-records).
+    Granted,
+    /// No operator row at the subject. `chat_attested` and unattributed rows
+    /// are already filtered out by `operator_law_rows`.
+    Absent,
+    /// Operator rows disagree, or one carries no readable decision.
+    Conflict,
+    /// No payload (nonzero exit, dead probe) or a payload without the
+    /// `decisions` array. Never reads as either grant or absence.
+    Unreadable(String),
+}
+
+/// The pure grant reader over an already-read `decisions` stdout.
+/// `None` stdout (the read failed) is `Unreadable`, never `Absent`.
+pub fn head_grant_status(stdout: Option<&[u8]>) -> HeadGrant {
+    let Some(bytes) = stdout else {
+        return HeadGrant::Unreadable("the decisions read did not answer".to_string());
+    };
+    let Some(rows) = crate::loopcheck::coverage_status::operator_law_rows(bytes) else {
+        return HeadGrant::Unreadable("malformed decisions payload".to_string());
+    };
+    if rows.is_empty() {
+        return HeadGrant::Absent;
+    }
+    let missing = rows
+        .iter()
+        .filter(|r| r.get("decision").and_then(|d| d.as_str()) != Some(MERGE_GRANT_DECISION))
+        .count();
+    if missing > 0 {
+        HeadGrant::Conflict
+    } else {
+        HeadGrant::Granted
+    }
+}
+
 /// Which PRs a dispatch lane may execute this tick, counted over
 /// already-read entries. Pure: `root_of` and `cfg_of` are closures so tests
 /// need no filesystem. `root_of` must depend only on the entry's `cwd`,
@@ -413,7 +482,7 @@ pub fn queue_from_entries(
             .iter()
             .any(|row| {
                 row.is_object()
-                    && row.get("phase").and_then(Value::as_str) == Some("do")
+                    && row.get("phase").and_then(Value::as_str) == Some("execute")
                     && !matches!(row.get("merge_grant"), None | Some(Value::Null))
             });
         if !has_grant {
@@ -557,22 +626,26 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
 pub fn run_op(op: &str, payload: &Value) -> String {
     match op {
         "grant-verdict" => {
-            let rows = read_rows(payload);
-            verdict_op(rows, payload)
+            // A missing pr narrows to number 0, which no node carries, so the
+            // verdict reads the same `absent` the full read answers.
+            let pr = payload.get("pr").and_then(Value::as_i64).or(Some(0));
+            verdict_op(read_rows(payload, pr), payload)
         }
         "grant-queue" => {
             let started = Instant::now();
             let rotate = payload.get("rotate").and_then(Value::as_u64).unwrap_or(0);
-            queue_op(read_rows(payload), rotate, started).to_string()
+            queue_op(read_rows(payload, None), rotate, started).to_string()
         }
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
 }
 
-fn read_rows(payload: &Value) -> Result<Vec<Value>, String> {
+fn read_rows(payload: &Value, pr: Option<i64>) -> Result<Vec<Value>, String> {
     let cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let graph_path = graph_json_path(Path::new(cwd));
-    backlog_api::rows(&GraphStore::new(&graph_path)).map_err(|e| e.0)
+    crate::graph_store::read_pr_rows(&graph_path, pr)
+        .map(|rows| backlog_api::rows_in(&rows))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

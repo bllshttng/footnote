@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from fno.graph.store import read_graph_strict
 
 
 # ---------------------------------------------------------------------------
@@ -99,11 +100,14 @@ def _seed(g: Path, entries: list[dict]) -> None:
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
-    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n", encoding="utf-8")
+    # A re-seed must replace rows through the store: the db outlives the file.
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _entries: complete)
 
 
 def _node(g: Path, node_id: str) -> dict:
-    return next(e for e in json.loads(g.read_text())["entries"] if e["id"] == node_id)
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id)
 
 
 def _merged(monkeypatch, *, target="both"):
@@ -773,7 +777,7 @@ def test_dependent_stays_blocked_until_the_read_recovers(routed, tmp_path, monke
     import fno.graph._reconcile as rec
 
     plan = _outage_world(routed, tmp_path, monkeypatch, "ab-out02")
-    entries = json.loads(routed.read_text())["entries"]
+    entries = read_graph_strict(routed)
     entries.append({
         "id": "ab-dep01",
         "title": "dependent",

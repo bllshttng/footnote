@@ -8,9 +8,11 @@ Measured 2026-08-13 against one real install: 527 top-level entries, 395 of them
 
 ## The rule
 
-Anything that writes to the top level of the state root moves into a subfolder unless it genuinely belongs at the root. Anything unused gets removed.
+The root holds folders, plus the rows this page already has. Nothing new lands at the top level: state goes in a named subfolder wherever one can hold it.
 
-"Belongs at the root" means one durable file per install, named for what it is: `graph.json`, `ledger.json`, `config.toml`. A family of files keyed by session, band, or timestamp does not belong there, however small each one is. The cost is legibility, not bytes. All 395 latches together were 14,625 bytes and made the directory unreadable.
+Two gates hold that line. At runtime, `hooks/claude-config-write-guard.sh` refuses an agent write creating a new top-level entry, in the state root or the Claude config dir, whatever its name. The refusal names the session's job tmp dir. In CI, `scripts/ci/check-state-root-rows.sh` fails any PR that adds a root pattern to this page against the checked-in baseline, so the root rows below are SHRINK-ONLY. A writer that moves into a subfolder or dies takes its row with it. A row never enters.
+
+"Belongs at the root" used to mean one durable file per install, named for what it is: `graph.db`, `ledger.json`, `config.toml`. That set closed on 2026-09-27. A family of files keyed by session, band, or timestamp never belonged there, however small each one is. The cost is legibility, not bytes: all 395 context-nudge latches together were 14,625 bytes and made the directory unreadable.
 
 Every location resolves through `fno.paths`. Adding a hardcoded `$HOME/.fno/<newdir>` repeats the bug one directory down, so route new paths through the resolver: `from fno import paths` in Python, `source "$(fno config paths shell-stub)"` in bash. `scripts/ci/check-no-hardcoded-paths.sh` gates this.
 
@@ -20,53 +22,105 @@ One file per install. These belong at the root.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `graph.json`, `.lock`, `.sha256` | `graph/store.py` via `paths.graph_json()` | permanent |
-| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
+| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog find`, or the tracker snapshot door (`fno-agents backlog get` stdin door) | written only when exported |
+| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate); reached from the `paths.graph_json()` anchor via its `.db` sibling | durable row store; WAL sidecars are SQLite-managed |
+| `graph.json.lock` | `crates/fno-agents/src/graph_store.rs::BoundedLock` | the publish cycle's bounded lock beside the store; the keeper holds it for the duration of one mutation |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
 | `graph.html` | `graph/render_html.py` | regenerated |
-| `graph-archive.json` | `graph/archive.py` via `paths.graph_archive_json()` | permanent |
 | `relatedness.json` | `paths.relatedness_json()` | regenerated |
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs`; the rename happens only after `events_store::sync` ingested the file, so one generation on disk loses no durable row | rotated |
-| `events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
+| `events.jsonl`, `.1` | `paths.global_events_json()`; LEGACY bytes only. Since the event-store cutover every writer commits to `events.db` and no reader treats the file as authoritative; retained generations are imported on first store open | legacy import source |
+| `events.db`, `events.db-wal`, `events.db-shm` | the `fno-event-store` crate: the AUTHORITATIVE event store (schema v2: seq/event_id/retention_class/identity columns). Every writer commits here; every reader queries here | durable and gate rows forever, ephemeral rows 672 h |
 | `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
 | `questions.jsonl` | `paths.questions_jsonl()`, written by `fno inbox outstanding` | permanent; a question does not expire |
 | `decisions.jsonl.corrupt` | `decide/__init__.py::_compact_index` | permanent; the only copy of a row whose source journal is gone |
 | `decisions.jsonl.compact` | `decide/__init__.py::_compact_index` | transient; replaced onto `decisions.jsonl` in the same call |
 | `evals-history.jsonl` | `paths.evals_history()` | append-only |
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
-| `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
 | `.canary` | `scripts/ci/check-state-canary.sh` `plant` | permanent, and written ONLY into a root with no live graph, which in practice means a CI runner. A live operator root is watched read-only and never receives it. One byte of content; its job is to give the walk a file it can prove it saw. |
 | `notify-signals.json` | `crates/fno-agents/src/operator_notice.rs` (the notify_watch arm) | permanent; one entry per subscribed signal, the last token + ts; safe to delete (the next state change re-sends) |
+| `opencode-install-<hash>.json` | `crates/fno-agents/src/opencode_install.rs` (the `plugin-install opencode` arm) | permanent; one per `OPENCODE_CONFIG_DIR` (the hash is of the config dir's canonical path), rewritten per install with one entry per written path and its content hash; removed last by `plugin-install opencode --uninstall`, so an interrupted uninstall is resumable |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `recovery/provider-outages.json`, `.lock`, `.provider-outages-*.tmp` | `agents/provider_outage.py` | permanent breaker/evidence journal; lock and atomic temp sidecars live only for one write and stale temps are safe to remove when no writer holds the lock; stores fingerprints, bounded raw refusal text, and explicit route IDs, never credentials or full transcripts |
 | `recovery/provider-canaries/*.json` | `agents/watchdog.py` | bounded health proofs for audit; exact marker, provider/account IDs, pane ID, and timestamp only, never pane dumps or credentials |
 | `recovery/canary-work/` | `agents/watchdog.py` | permanent empty neutral cwd reused by canaries; owns no node claim or project data |
 | `claims/dispatch%3A*.lock`, `.recovery.d/` | `claims/core.py` for provider handoff | transaction lease for one attempt; released at terminal return, recovery mutex removed by the claim primitive; contains holder/process metadata only |
+| `claims/<key>.lock.queue.d/`, `.priority.d/`, `.full.d/` | `crates/fno-agents/src/claim_queue.rs` owns the ticket format; waiters live in `crates/fno-agents/src/test_run.rs` and `scripts/ci/preflight.sh` | one ticket dir per live waiter on one admission door, named `NNNNNN/holder`; removed by its own waiter on every exit path and reaped by the next scan when its recorded pid is gone. The three dirs are the lanes: `priority` (a live `test:priority` claim names the checkout), `queue` (arrival order), `full` (whole-suite runs, suite door only) |
+| `claims/build-waiters/` | `crates/fno-agents/src/test_run.rs` `CargoWait` | one marker per waiting checkout, removed when the wait ends and by the reader when its pid is gone; read by the stop hook to allow a stop during a held build |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock`, `squads.json.tmp.*` | `crates/fno/src/squad_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent; the pid-suffixed tmp is replaced on every locked write and a stale one is safe to remove |
 | `agents/squads.json` | no writer in this build: a historical store location beside the live agent files (`registry.json` there IS authoritative, which is what makes the dead file read as real). `fno mux doctor` names it and its live replacement. | dead: nothing reads it, so it can only mislead; delete on sight (`fno mux doctor` prints the `rm`) |
 | `session-names.json`, `.lock` | `agents/discover.py` | legacy alias overlay: registry rows' `aliases` are the primary name store and `reconcile` migrates file entries into rows; external roster rows (no fno row) keep the file as their alias home until the mail-address surface retires it |
-| `agents/reap-receipts/<harness>-<session id>.json` | `crates/fno-agents/src/receipt.rs` (`write_reap_receipt`, called by the GC sweep in `gc_sweep.rs`; `FNO_AGENTS_HOME` overrides) | retained `config.agents.reap_receipts.retain_days` days (default 7); past the window the sweep strips the EXPENDABLE detail (ledger copy, per-effect rows, log path) and keeps the identity core (who, native locator, resume argv) forever, because deleting it would strand the only recovery record for a resumable session. Receipts carry a schema version, the writer build, and per-effect outcomes; `fno agents reap --verify --since 24h --json` audits them against the current build. A receipt whose `reaped_at` cannot be read is kept and named in the sweep summary, never deleted on a failed read |
-| `agents/fleet-stop.json` | `crates/fno-agents/src/fleet_incident.rs` via `AgentsHome::fleet_stop_json()` (written by `fno agents incident stop|clear`; `FNO_AGENTS_HOME` overrides) | permanent machine-wide circuit breaker: `{version, state: stopped|clear, generation, changed_at, changed_by, reason}`, temp-plus-rename atomic. `clear` is a positive record, never a deletion; every stop and clear increments `generation`. Read by the spawn gates, the active-backlog daemon, and the test-run owner BEFORE their bypass branches; a present-but-unreadable file refuses admission (`fleet-stop-unavailable`), and a writer refuses to replace an unreadable record - remove it by hand to start a fresh generation. Mail is deliberately never gated |
+| `agents/reap-receipts/<harness>-<session id>.json` | `crates/fno-agents/src/receipt.rs` (`write_reap_receipt`; the four writer doors are `gc_sweep.rs`, `roster_reap.rs`, the `update_registry` choke point in `receipt.rs`, and the Python choke point in `cli/src/fno/agents/registry.py`; `FNO_AGENTS_HOME` overrides) | retained `config.agents.reap_receipts.retain_days` days (default 7); past the window the sweep strips the EXPENDABLE detail (ledger copy, per-effect rows, log path) and keeps the identity core (who, native locator, resume argv) forever, because deleting it would strand the only recovery record for a resumable session. Receipts carry a schema version, the writer build, and per-effect outcomes; `fno agents reap --verify --since 24h --json` audits them against the current build. A receipt whose `reaped_at` cannot be read is kept and named in the sweep summary, never deleted on a failed read |
+| `agents/fleet-stop.json` | `crates/fno-agents/src/fleet_incident.rs` via `AgentsHome::fleet_stop_json()` (written by `fno agents incident stop|clear`; `FNO_AGENTS_HOME` overrides) | permanent machine-wide circuit breaker: `{version, state: stopped|clear, generation, changed_at, changed_by, reason, holds, target, expires_at, origin, mail, mail_session_id}`, temp-plus-rename atomic. `incident stop|clear` and `loops pause-all|resume-all` use the same writer. `clear` is a positive record, never a deletion; every stop and clear increments `generation`. Read by the spawn gates, the active-backlog daemon, and the test-run owner BEFORE their bypass branches; a present-but-unreadable file refuses admission (`fleet-stop-unavailable`), and a writer refuses to replace an unreadable record - remove it by hand to start a fresh generation. Mail is not gated by the fleet breaker; pause-all records whether it armed a clock and the full owning session id, while the registry delivery_policy flag enforces a mail hold. A failed owner release stays `armed` for a later `resume-all` retry; success marks it `lifted` |
+| `agents/fleet-stop.d/<target>.json` | `crates/fno-agents/src/fleet_incident.rs` (same writer as `agents/fleet-stop.json`; `FNO_AGENTS_HOME` overrides) | one 0600 session or territory record per target under a 0700 directory; expiry releases enforcement but records remain visible in status until clear or re-arm; session identity uses the full session id |
+| `~/.fno/loops-paused.json` | read by `crates/fno-agents/src/loops_pause.rs`; no active writer | legacy pause-all sentinel, read-only during migration and deleted by `loops resume-all`; `pause-all` refuses to stack a bounded breaker pause over an active or corrupt sentinel |
 | `agents/compacting/<session>.json` | `crates/fno-agents/src/compaction.rs` via `compaction::mark` (the `PreCompact` hook's best-effort call to `fno-agents compaction mark --session`; `FNO_AGENTS_HOME` overrides) | session-keyed, overwritten per compaction, never cleaned: a stamp is tiny and self-expiring (the reader returns `stamp-past-ceiling` after 45 minutes), so no sweep is owed. Read by `compaction::compaction_state` and the provider-cap actor, which holds any member whose state is `Compacting` or a live-stamp `Unknown` |
 | `agents/provider-cap/<lane>-<epoch>.jsonl` | `crates/fno-agents/src/provider_cap.rs` (`FNO_AGENTS_HOME` overrides) | per-move journal: one line per migration step (`decided`, `destination`, `spawn-confirmed`, `stopped`, `unknown`, the wave-4 return steps `canary-resumed`, `canary-verdict`, `trickle-resumed`, `announced`, `return`), written append-only at actor time. A step the code could not prove records `unknown`, never `moved` (the unmeasured-state rule). The per-epoch canary state `return-<lane>.json` (keyed by the reset it belongs to) and the `decide` answers live beside it under the same folder |
 | `mux/` (`<session>.sock`, `.ver`, `.pid`, `.detach`, `.log`) | `crates/fno/src/proto.rs::mux_dir()`, following `config.state_dir` (`FNO_MUX_DIR` overrides) | server-managed; `kill-server` owns socket removal |
+| `mux/command-receipts/<request-id>.json` | `crates/fno/src/mux_cli/harness_command.rs` via the mux directory | one idempotent native-action receipt per request; retained for seven days, then removed by the next command invocation |
 | `mux/panes/<session>-<pane>.sock` | `crates/fno/src/pty.rs::keeper_dir()`, written by each `fno-agents-worker --pane` keeper | unlinked by the keeper when its child exits; a server-start sweep unlinks leftovers whose keeper is gone, and `fno mux pane keeper list` names them |
 | `mux/threads/<agent>.sock` | `cli/src/fno/agents/dispatch.py::_lane_b_keeper_socket()`, written by each `fno-agents-worker --keeper` it launches (the pane-less lane-B thread keeper; a session-keyed subfolder, never a top-level write) | unlinked by the keeper when its child exits; no server-start sweep yet - the restart journey that owns re-adoption is a later group of the same epic, so until then a crashed keeper's leftover is named by the registry row's `messaging_socket_path` |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
-| `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
-| `source-pin.json` | `crates/fno-agents/src/source_pin.rs::record_from_str` via the hidden `fno-agents source-pin record` verb, called from `update._cache_source_path` | permanent; the versioned companion to `source-path` (schema, timestamp, selection origin, worktree kind, branch, both heads, eligibility). Provenance only: eligibility is re-proven live at every resolve, and a companion that disagrees with `source-path` reads as unknown, never evidence |
-| `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
-| `plugin-root` | `hooks/session-start.sh` | permanent |
-| `pr-watcher-state.json`, `pr-watcher-state.lock` | `pr_watch/_state.py` | permanent |
-| `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
+| `my-priorities.md`, `.lock` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
+| `pr-watcher-state.json`, `pr-watcher-state.lock`, `.lock` | `pr_watch/_state.py` | permanent |
+| `pr-watcher-state-delivery.json`, `.lock` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
 | `fleet-sweep-state.json`, `.lock` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
 
+`graph.json` is retired. A former file moves to `backups/graph.json.retired.*`; an unimported nonempty file makes the store refuse to open so its rows remain recoverable.
+
 `paths.locks_dir()` hardcodes `Path.home() / ".fno" / "locks"` on purpose, and a `config.state_dir` override deliberately does not move it. The config-free plan-stamp path and the config-loading append path have to agree on one directory, and moving it desyncs them. Its docstring says so. Do not "fix" it to match the rest of this page.
+
+## Frozen root rows (2026-09-27 backfill)
+
+The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. The crown verified and deleted the backups whose data a `.db` provably holds. The ephemeral writers below learned to clean up after themselves. Every remaining real entry got its row here. The section is FROZEN: shrink-only, like every root row. When one of these writers moves into a subfolder, delete its row in the same PR.
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `decisions.db`, `decisions.db-wal`, `decisions.db-shm` | `crates/fno-agents/src/decision_index.rs`: the decision store the inbox `decide` path commits to; the journals index into it | durable |
+| `questions.db`, `questions.db-wal`, `questions.db-shm` | `crates/fno-agents/src/question_intake.rs`: the question store beside the questions journal | durable; a question does not expire |
+| `graph-archive.db`, `graph-archive.db-wal`, `graph-archive.db-shm` | the archive store (the same backlog schema as `graph.db`), populated by the operator's archive import; `read_archive` in `crates/fno-agents/src/graph_store.rs` reads the archive projection | durable; imported nodes live here under fresh ids |
+| `graph-archive.json.lock` | the store's bounded lock beside the archive anchor, the `graph.json.lock` shape | lives only for one mutation |
+| `graph.json.store.sock.lock`, `graph-archive.json.store.sock.lock` | the store keeper's bounded lock beside each `*.store.sock` IPC socket | server-managed, unlinked with the socket |
+| `config.toml.bak*` (5 files, 2026-09-08 through 2026-09-22) | the operator, by hand, during config and model-routing edits | permanent: no `.db` holds their data, so deletion waits on the operator's yes |
+| `ruleset-21074865-before-smoke-hold.json` | the operator, by hand, before a smoke-hold change | permanent, same rule as the `config.toml.bak*` row |
+| `.plan-sync-watermark-v2` | `cli/src/fno/plan/cli.py` | single file, overwritten |
+| `pr-watch-bounce.json` | `cli/src/fno/pr_watch/_install.py` | transient bounce record, overwritten per deferred bounce |
+| `merge-gate-overrides.log` | `hooks/git-protection.py` (`OVERRIDE_LOG`) | append-only audit trail of merge-gate overrides |
+| `corrections.log` | the corrections git hook family (`hooks/corrections-git-postcommit.sh`, `scripts/corrections-*.sh`) | append-only autocorrect evidence |
+| `ntfy/` | an operator-run ntfy server (its `cache.db`) plus `ntfy.out.log` / `ntfy.err.log` | server-managed; not written by this repo |
+| `intel/` | the intel fold behind `fno intel` | regenerated per run; safe to delete |
+| `fleet.html` | `crates/fno-agents/src/fleet_page.rs` writes `<state_dir>/fleet.html` | regenerated per render |
+| `reign.html` | the reign board render (`crates/fno-agents/src/king_ledger.rs`, `fno agents king` `--out` default) | regenerated per render |
+| `sidecar/` | `cli/src/fno/paths.py::sidecar_dir()` | per-item sidecar files owned by their writers |
+| `blueprinters/` | the blueprinter sessions (one hash dir per session) | session-keyed; a dead session's dir is inert |
+| `reign-watch/` | the reign-watch tool deploy (its `bin/`, `src/`, and `fno-mux` copy) | operator-managed |
+| `jobs/` | event-snapshot dirs from isolation and repro runs (`events-global-<date>/`) | repro residue; safe to delete once a run ends |
+| `backup/` | the operator, by hand: pre-store graph exports (`fno.json`, `etl.json`, node-list jsons) | permanent until the operator rules on them |
+| `stable-bin/` | the operator, by hand: a stable-channel binary copy (`bin/`, `src/`) | operator-managed |
+| `internal/` | the operator, by hand: vault-adjacent exports (`etl.json`, `fno.json`) | operator-managed |
+| `handoff-evidence/` | the rank goldens capture (`crates/fno-agents/src/backlog/rank_cli.rs` names the goldens) | permanent evidence for the rank CLI |
+| `repro-isolated/` | `cli/src/fno/observer/isolation.py`: the observer's isolated repro root | repro residue; safe to delete once a run ends |
+| `.codegraph/` | codegraph (foreign tool): its index beside the state root | tool-managed; never swept |
+| `.gitignore` | the operator, by hand | permanent |
+
+## Named root exceptions
+
+The migration moves every movable file into a named subfolder (`docs/state-root-layout.tsv` is the table, and `fno-agents state migrate` is the mover). These stay at the top level, each because a move is blocked on a port, an operator ruling, or a platform:
+
+| Entries | Why they cannot move yet |
+|---|---|
+| `config.toml`, `config.toml.lock`, `config.toml.bak*`, `settings.yaml`, `settings.yaml.lock` | The config contract every harness, doc and OSS install names at `~/.fno/config.toml`. The `.bak*` files await the operator's ruling on their deletion. |
+| `my-priorities.md`, `my-priorities.md.lock`, `ruleset-21074865-before-smoke-hold.json` | Operator-owned, edited by hand at that path. |
+| `.env`, `.gitignore` | Operator-owned, edited by hand at that path. |
+| `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight; Spotlight reads the opt-out marker only at the folder root. |
+| `.path-migration-done` | The Python startup migration's sentinel (`cli/src/fno/cli.py`). Parking it re-fires that migration, which rewrites root files. It moves when that migration is deleted or ported. |
+| `ledger.json`, `ledger.md`, `events.jsonl`, `events.jsonl.1`, `events.jsonl.ephemeral`, `events.jsonl.shell-writers.d/`, `decisions.jsonl`, `decisions.jsonl.compact`, `decisions.jsonl.corrupt`, `questions.jsonl` | Python locators. `paths.py` derives the journals from the ledger's parent, and about 18 Python sites hardcode `state_dir() / "events.jsonl"`. Over the 30-line budget; they move when those callers port. Their `.db` stores DO move (Rust derives them). |
+| `pr-watcher-state.json`, `pr-watcher-state.json.lock`, `pr-watcher-state.lock`, `pr-watcher-state.lock.lock`, `pr-watcher-state-delivery.json`, `pr-watcher-state-delivery.json.lock`, `pr-watch-bounce.json`, `fleet-sweep-state.json`, `fleet-sweep-state.json.lock`, `provider-runtime-state.json`, `provider-runtime-state.json.update.lock`, `failover-state.json`, `failover-state.json.lock`, `health-throttle.json`, `recovery-nudges.json`, `watchdog-sweep.json` | Each writer is Python in `cli/src/fno`. About 13 more Python lines to move, over budget. They move into `state/` when their writers port. |
+| `.think-spawn-daily.json`, `.a2a-confirmed`, `.active-backlog-nudge` | Python dot-stamps in `cli/src/fno`, same reason: the writers are Python and their move waits on the port. |
 
 ## Owned subfolders and remaining root state
 
@@ -75,29 +129,35 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `approvals.db` | `cli/src/fno/approvals/store.py` via `paths.state_dir()` | permanent SQLite store for approvals and effect attempts |
+| `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache plus `questions_dir`, rewritten every beat; the king check-in reads it and refuses when it is missing or over 600 s old, safe to delete, next beat rebuilds it |
+| `attention/questions.json` | `crates/fno-agents/src/attention_arm.rs` | page settle state (body hashes and since-stamps); deleting it restarts every settle window and cannot double-deliver, because a page's existence proves delivery |
 | `attest/` | `hooks/attest-model.sh`, `hooks/review-hold.sh` | one attestation sidecar per reviewed session |
-| `backups/`, `graph.json.bak` | `crates/fno-agents/src/graph_store.rs::create_backup` (rotation, pruned to `GRAPH_BACKUP_KEEP`), the corrupt-read `.json.bak` copy, and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. `graph.json.bak` is the pre-relocation sibling only builds older than this row write. A backup at most a tenth the size of its predecessor moves that predecessor to `backups/pre-shrink.<name>`, and pins are never pruned. |
+| `backups/` | `crates/fno-agents/src/graph_store.rs` backup rotation (pruned to `GRAPH_BACKUP_KEEP`), and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. A backup at most a tenth the size of its predecessor moves that predecessor to `backups/pre-shrink.<name>`, and pins are never pruned. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |
-| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`) | regenerated PR-status cache; king-drain counts keyed on graph stat identity, rewritten per fresh drain read |
-| `events.jsonl.ephemeral` | `crates/fno-agents/src/claims.rs` (ephemeral retention class) | claim events whose retention class is ephemeral |
-| `events.jsonl.shell-writers.d/` | `cli/src/fno/events/gc.py` | writer-liveness markers, GC'd with the journal |
+| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`), `crates/fno/src/model_catalog.rs` (`cache/models-dev.json`) | regenerated PR-status cache; king-drain counts keyed on graph stat identity, rewritten per fresh drain read; the models.dev catalog cache, refreshed on a composer open when older than 24 h, safe to delete |
+| `events.jsonl.ephemeral` | retired. Ephemeral-class rows commit to the store with `retention_class = 'ephemeral'` and expire at the schema floor | no new writes |
+| `events.jsonl.shell-writers.d/` | retired. The shell writer makes one native store commit; no writer-liveness markers exist | no new writes |
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
-| `graph.json.fts5` | `cli/src/fno/graph/fts.py` | derived full-text index beside the graph; regenerated, safe to delete |
-| `graph.json.history/notes.jsonl` | `crates/fno-agents/src/backlog/note_history.rs::history_path` | PERMANENT node-prose history keyed to the graph file (the bounded-state change): every replaced or cleared `current_state` pre-image and every evacuated note; append-only, hash-verified on write, deduped by (node, reason, prior revision, hash). Never rotates, never prunes; the only copy of evacuated prose. Safe to copy with the graph, fatal to delete. |
-| `graph.json.store.sock`, `graph-archive.json.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
+| `graph.db.history/notes.jsonl` | `crates/fno-agents/src/backlog/note_history.rs::history_path` | PERMANENT node-prose history keyed to the graph store (the bounded-state change): every replaced or cleared `current_state` pre-image and every evacuated note; append-only, hash-verified on write, deduped by (node, reason, prior revision, hash). Never rotates, never prunes; the only copy of evacuated prose. Safe to copy with the graph, fatal to delete. |
+| `graph.db.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
+| `heal/pr-heal.pid` | `crates/fno-agents/src/heal_pid.rs::pid_file` (the pr-heal drive loop, beside the global events journal) | server-managed pid file; unlinked by the loop on a clean exit and by the pid scan when the pid is dead |
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
+| `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`), every reader resolving through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |
+| `backups/state-root-migration/<stamp>/` | `crates/fno-agents/src/state_layout.rs::migrate` | parked legacy copies from the state-root migration, one stamp folder per apply run; the layout table's park rows and every conflict-parked legacy file land here. Never swept; deletion waits on the operator's yes |
 | `inbox/` | `paths.inbox_agents_root()` (`cli/src/fno/paths.py`), the mail bus's fallback root: one mailbox per agent handle under `agents/` | mail drains per handle; a drained envelope is acked away |
 | `.interrupted-writes/` | `crates/fno-agents/src/daemon.rs` (quarantine) | writes caught mid-flight; released after the write settles |
 | `lesson-candidates.jsonl` | `cli/src/fno/think_inspect.py`, `scripts/memory/append-lesson-candidate.sh` | append-only staging for the AGENTS.md pitfalls corpus; consumed by the monthly review |
 | `logs/` | `cli/src/fno/agents/mux_spawn.py` | unrotated spawn logs |
+| `logs/cargo-fallback-writers.log` | `scripts/lib/cargo-rustc-wrapper.sh` | one line per cargo that builds without the build-dir env; self-trims to its last 500 lines at 1,000 |
 | `mail-escalations/` | `cli/src/fno/mail/cli.py` (debounce markers via `O_CREAT|O_EXCL`) | one empty marker per sender/recipient pair inside the debounce window; safe to delete, the next escalation re-creates it |
-| `MOVED-TO` | `cli/src/fno/paths.py`, `crates/fno-agents/src/paths.rs`, `state_path.rs` | migration pointer; permanent until an operator confirms the old path is gone |
 | `notes/` | `cli/src/fno/research/core.py` (`notes/research`) | permanent research notes |
 | `nudge-cursors/` | `cli/src/fno/agents/nudge.py` | one cursor per nudge target, overwritten |
 | `announce-cursors/` | `fno-agents announce` (`crates/fno-agents/src/announce.rs`) | one seen-id set per session; pruned to ids still on retained bus segments |
+| `law-edit-seen/` | `fno inbox law` edit read (`crates/fno-agents/src/law_match.rs` `edit_answer`, via the shared cursor in `announce.rs`) | one seen-id set per session; tiny, never cleaned |
 | `observer-reports/` | the observer fold, via the `paths` accessor | one report per observation run |
 | `operator-capture/` | `cli/src/fno/inbox/operator_turns.py` writes `<session-id>.jsonl`, the ack ledger and receipt; `fno-agents compaction operator-turns` (`crates/fno-agents/src/operator_turns.rs`) writes `<session-id>.scan.json` | per session, the ack ledger is permanent. The scan cursor cache is safe to delete, the next read rescans from byte 0 |
+| `fleet/` | the transcript fold behind `fno-agents intel --fleet` (`crates/fno-agents/src/transcript_activity.rs`), `activity.json` plus its `.lock` | cursor and hour cache, safe to delete, rebuilt from the window on the next run |
 | `postmortems/` | the retro routine and stuck-terminal postmortem writer, via the `paths` accessor | permanent |
 | `provider-runtime-state.json`, `.update.lock` | `cli/src/fno/adapters/providers/runtime_state.py` via the `paths` accessor | permanent; the update lock lives for one write |
 | `providers/` | `cli/src/fno/adapters/providers/managed.py`, `staging.py` | permanent managed provider configs |
@@ -124,7 +184,7 @@ Not written by anything in this repo. Named so the gate can tell known junk from
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight | regenerates on view; safe to delete |
-| `.claude`, `.fno`, `.abilities`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below | <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
+| `.claude`, `.fno`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below |
 
 ## Unclassified (follow-up filed)
 
@@ -155,17 +215,12 @@ One file per session, per day, or per throttle window.
 | `latches/.worktree-create-<session-id>` | `hooks/worktree-setup.sh` (and its /speculate copy) | create-attempt counter, deleted by the same hook on a successful create, stale copies pruned at `-mtime +2` |
 | `.a2a-confirmed` | `agents/dispatch.py` | single file, overwritten |
 | `.active-backlog-nudge` | `active_backlog.py`, `crates/fno-agents/src/active_backlog.rs` | single file |
-| `.worktree-hook-root` | `hooks/session-start.sh` | single file |
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
-| `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
-| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/cancel_sentinel.rs`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | one-shot: carries `author:`/`reason:` lines, deleted by the reader once it has terminated a run; stale copies wiped by init |
 | `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
-| `.reconcile-stamp`, `.reconcile-result.json`, `.shown`, `.reconcile-result.json.tmp`, `.reconcile-result.json.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` (the hook's consume-after-show move creates the `.shown` rename; the throttle's `mv -f` creates the `.tmp` mid-write) | throttle window |
-| `.plan-sync-watermark` | `plan/cli.py` | single file |
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |
-| `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
-| `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
+| `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()`, and `crates/fno-agents/src/mail_hold.rs` via its `state_root()` (byte-identical dialect, inventory in `docs/architecture/dual-implementation-inventory.md`) | one file per held session; a clock the conversation rules wrote adds an optional `"source": "conversation"` key; deleted by the release timer (the conversation grace lapses through the same timer), by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
+| `mail-hold/<handle>.parked/` | `crates/fno-agents/src/mail_hold.rs` (`--park` writes `<ms>-<pid>.txt` payloads, `--run-parked` drains them) | parked raw payloads for one held session, waiting out its hold; each file is deleted by the runner on a sent payload and left in place on a failed send for the next park to pick up; lifetime ends with the hold plus one send |
 | `route-settings/<sha16>.json` | `agents/model_routing.py::_write_settings_env_file` via `paths.state_dir()` (content-addressed, 0600, carries a live auth token) | one file per distinct route overlay, shared by every session on that route; a resume re-resolves provider-default tiers (`refresh_provider_default_tiers`), so a moved default yields a new file rather than a served stale one; files no registry row references and older than 14 days are pruned by `fno config route settings ls --prune` |
 | `flight/<encoded key>.json` | `crates/fno-agents/src/single_flight.rs`, beside the claims dir it locks in (`$FNO_CLAIMS_ROOT`, else `$HOME`) | one file per distinct fno invocation; rewritten by each flight and read only inside the freshness window (`config.agents.single_flight_ttl_seconds`, default 10 s), so a leftover is inert rather than stale. Pruned past `ttl + join budget`, doubled, by `single_flight::prune_records` on the daemon's GC tick. Holds the child's stdout, which is the same text the verb prints on a terminal |
 | `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
@@ -206,10 +261,12 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 ## Adding a new root writer
 
-1. Prefer a subfolder. Reach for the root only for one durable file named after itself.
+You do not. The root rows are shrink-only (see The rule). The runtime guard refuses a new top-level write, and the CI gate fails a PR that adds a row. The remedy for a new surface is a subfolder:
+
+1. Put the state in a named subfolder. Reach for the root only through a row that already exists.
 2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. When a bash caller needs it, export it from `cli/src/fno/setup/emit_shell.py`, then regenerate `scripts/lib/paths.sh`.
 3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun. `scripts/prune-fno-dir.sh` was deleted for exactly that: never once invoked, while every file on its delete list sat in the root.
-4. Add a row above.
+4. If a row above became wrong, fix or delete that row in the same PR. Shrinking is the one direction the gate allows.
 
 ## The project space (`~/.fno/spaces/<slug>/`)
 
@@ -217,8 +274,8 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `<space>/events.jsonl` | `paths.project_events_json()` and `fno-agents` journal writers | append-only per repository; rotated at 8 MB, and only after `events_store::sync` ingested the file |
-| `<space>/events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
+| `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the event-store cutover | import source |
+| `<space>/events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate, the authoritative event store beside each journal | durable and gate rows forever, ephemeral 672 h |
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
@@ -232,7 +289,7 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/worktree-log.jsonl` | `hooks/worktree-setup.sh` | append-only worktree lifecycle log |
 | `<space>/wake-signals/` | `cli/src/fno/wake/signal.py` | one-shot records; drained by the wake readers |
 | `<space>/artifacts/consolidated/` | `scripts/lib/consolidate-artifacts.sh` | per-PR consolidated gate artifacts, shared across worktrees |
-| `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.king-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
+| `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.king-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/footnote-agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
 | `<space>/worktrees/<name>/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
 | `<space>/worktrees/<name>/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per worktree; retained as the lifecycle fold and deleted with a disposable worktree |
 | `<space>/worktrees/<name>/codemap.md` | `fno doctor codemap` | regenerated |

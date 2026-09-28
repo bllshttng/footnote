@@ -16,13 +16,10 @@ runner = CliRunner()
 
 
 def _escapes(ev: Path, reason: str | None = None) -> list[dict]:
-    if not ev.exists():
-        return []
+    from tests._event_rows import event_rows
+
     out = []
-    for line in ev.read_text().splitlines():
-        if not line.strip():
-            continue
-        e = json.loads(line)
+    for e in event_rows(ev):
         if e.get("type") != "gate_escape":
             continue
         if reason is None or e["data"]["reason"] == reason:
@@ -88,26 +85,5 @@ def test_pr_and_dedup_key_together_rejected(tmp_path):
     assert not ev.exists()
 
 
-def test_ac1_ui_rebase_success_prints_nudge_no_event(monkeypatch, capsys, tmp_path):
-    """AC1-UI: a successful rebase prints ONE stderr note suggesting the tag
-    command, and the nudge emits no event by itself."""
-    from fno.pr import _rebase
-
-    monkeypatch.setattr(_rebase, "_phase_a", lambda base, cwd: 0)
-    rc = _rebase.run_rebase([], cwd=str(tmp_path))
-    assert rc == 0
-    err = capsys.readouterr().err
-    assert "gate-escape stale-base" in err
-    assert err.count("note:") == 1
-    # Advisory-only: the nudge writes NO gate_escape event of its own (AC1-UI).
-    assert _escapes(tmp_path / ".fno" / "events.jsonl") == []
-
-
-def test_rebase_failure_no_nudge(monkeypatch, capsys):
-    """The nudge is scoped to success: a failed rebase prints no tag note."""
-    from fno.pr import _rebase
-
-    monkeypatch.setattr(_rebase, "_phase_a", lambda base, cwd: 2)
-    rc = _rebase.run_rebase([], cwd="/tmp")
-    assert rc == 2
-    assert "gate-escape" not in capsys.readouterr().err
+# The rebase nudge tests (AC1-UI) moved to
+# crates/fno-agents/tests/pr_rebase_note.rs with the _rebase.py port to Rust.

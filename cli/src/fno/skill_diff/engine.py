@@ -28,16 +28,29 @@ LOCAL_MAXIMA_WINDOW = 3
 
 
 def read_events_tolerant(path: Path) -> list[dict]:
-    """Read events.jsonl skipping corrupt lines (AC3-ERR).
+    """Read committed events, skipping unreadable rows (AC3-ERR).
 
-    The shared ``read_events`` raises on the first bad line; a standing loop
-    tick must never crash on one malformed append (mirrors fold.py's tolerant
-    readers). A skipped line is logged, not silently swallowed.
+    The store commit is the write boundary: committed rows are the history,
+    and the raw file only serves a pre-store legacy read. The shared
+    ``read_events`` raises on the first bad line; a standing loop tick must
+    never crash on one malformed append (mirrors fold.py's tolerant readers).
+    A skipped line is logged, not silently swallowed.
     """
+    from fno.events.store_client import native_rows
+
     path = Path(path)
+    committed = native_rows(path)
+    if committed is not None:
+        out: list[dict] = []
+        for lineno, raw in enumerate(committed, start=1):
+            try:
+                out.append(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                _LOG.warning("skill-diff: skipping corrupt events.jsonl line %d: %s", lineno, exc)
+        return out
     if not path.exists():
         return []
-    out: list[dict] = []
+    out = []
     # Iterate line-by-line rather than read_text().splitlines() - events.jsonl is
     # append-only and grows without bound, so we never hold the whole file.
     with path.open(encoding="utf-8") as fh:

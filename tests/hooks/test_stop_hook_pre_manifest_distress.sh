@@ -119,15 +119,19 @@ log "T1: pre-manifest stop with a real help-tag transcript"
     # own resolution (both shell the real canonical_repo_root git probe, but as
     # two separate processes); trust the file the hook actually wrote instead of
     # asserting a second, separate re-derivation lands on the identical path.
-    EVENTS_FILE="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.jsonl 2>/dev/null | head -1)"
-    if [[ -z "$EVENTS_FILE" ]]; then
-        fail "T1: no events file under $SPACES_DIR or $HOME_DIR (stderr: $HOOK_STDERR)"
+    # The store commit is the write boundary: the hook's rows land in the
+    # events.db beside the journal, so the db is what this test finds, and
+    # the rows verb reads it back in the envelope shape every reader sees.
+    EVENTS_DB="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.db 2>/dev/null | head -1)"
+    EVENTS_FILE="${EVENTS_DB%.db}.jsonl"
+    if [[ -z "$EVENTS_DB" ]]; then
+        fail "T1: no event store under $SPACES_DIR or $HOME_DIR (stderr: $HOOK_STDERR)"
         t1_ok=false
-    elif ! grep -q '"type":"blocked"' "$EVENTS_FILE" 2>/dev/null; then
+    elif ! "$REPO_ROOT/crates/fno/target/debug/fno" doctor event rows --events "$EVENTS_FILE" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q '"type":"blocked"'; then
         fail "T1: no blocked row in $EVENTS_FILE"
         t1_ok=false
     else
-        ROW=$(grep '"type":"blocked"' "$EVENTS_FILE" | head -1)
+        ROW=$("$REPO_ROOT/crates/fno/target/debug/fno" doctor event rows --events "$EVENTS_FILE" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep '"type":"blocked"' | head -1)
         if ! echo "$ROW" | grep -q 'Operation not permitted'; then
             fail "T1: blocked row missing the evidence string: $ROW"
             t1_ok=false
@@ -166,8 +170,9 @@ log "T2: pre-manifest stop with an empty transcript_path"
         fail "T2: expected exit 0, got $HOOK_RC (stderr: $HOOK_STDERR)"
         t2_ok=false
     fi
-    EVENTS_FILE="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.jsonl 2>/dev/null | head -1)"
-    if [[ -n "$EVENTS_FILE" ]] && grep -q '"type":"blocked"' "$EVENTS_FILE" 2>/dev/null; then
+    EVENTS_DB="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.db 2>/dev/null | head -1)"
+    EVENTS_FILE="${EVENTS_DB%.db}.jsonl"
+    if [[ -n "$EVENTS_DB" ]] && "$REPO_ROOT/crates/fno/target/debug/fno" doctor event rows --events "$EVENTS_FILE" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q '"type":"blocked"'; then
         fail "T2: a blocked row was written despite an empty transcript_path"
         t2_ok=false
     fi

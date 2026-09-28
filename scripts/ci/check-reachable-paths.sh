@@ -116,7 +116,7 @@ REGISTRY = [
         "name": "status-derivation-helper",
         "glob": "cli/src/fno/graph/*.py",
         "site": r"def _(?:effective_)?status",
-        "required": r"_apply_readiness_overlay|read_graph|load_graph",
+        "required": r"_apply_readiness_overlay|read_graph_strict|load_graph",
         "why": "a status helper returning the stored field skips the read-time blocked derivation",
     },
     {
@@ -482,7 +482,7 @@ self_test() {
   # so only the canary entry reports. Same content reused by the clean tree.
   write_compliant_graph() {
     mkdir -p "$1/cli/src/fno/graph"
-    printf 'def _status_of(c):\n    entries = read_graph()\n    return entries\n' > "$1/cli/src/fno/graph/render.py"
+    printf 'def _status_of(c):\n    entries = read_graph_strict()\n    return entries\n' > "$1/cli/src/fno/graph/render.py"
   }
   write_compliant_gate() {
     mkdir -p "$1/cli/src/fno/agents"

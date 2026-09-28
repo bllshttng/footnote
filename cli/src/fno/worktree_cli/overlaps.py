@@ -26,10 +26,12 @@ from fno.events import ValidationError, append_event, validate, worktree_overlap
 # never a lock or an implementation decision.
 RECURRENCE_THRESHOLD = 3
 RECURRENCE_WINDOW_DAYS = 28
-# Hook path bound: far below the 120s liveness window and the event subsystem's
-# default 30s lock wait. Contention degrades to an unrecorded advisory, never a
-# delayed or refused session.
-HOOK_LOCK_BOUND_SECONDS = 0.25
+# Hook path bound: far below the 120s liveness window. The bound is the
+# native commit's whole subprocess budget (spawn, SQLite open, fsync) on a
+# cold runner, so it stays well under the event subsystem's default 30s
+# while leaving a real commit room. Contention degrades to an unrecorded
+# advisory, never a delayed or refused session.
+HOOK_LOCK_BOUND_SECONDS = 10
 
 
 class OverlapReadError(Exception):
@@ -86,6 +88,30 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
         "path": str(journal),
     }
     events: list[dict] = []
+    # The store commit is the write boundary: committed rows are the history.
+    # Raw bytes remain only the legacy fallback, with the same honest coverage.
+    from fno.events.store_client import native_rows
+
+    committed = native_rows(journal)
+    if committed is not None:
+        for line in committed:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                coverage["malformed_lines"] += 1
+                continue
+            if not isinstance(e, dict):
+                coverage["malformed_lines"] += 1
+                continue
+            if e.get("type") == "worktree_overlap_observed":
+                try:
+                    validate(e)
+                except ValidationError:
+                    coverage["malformed_lines"] += 1
+                    continue
+                events.append(e)
+        coverage["state"] = "complete" if events else "no_data"
+        return events, coverage
     try:
         text = journal.read_text(encoding="utf-8")
     except FileNotFoundError:

@@ -61,6 +61,13 @@ _IntakeResult = Union[_IntakeAlready, _IntakeReady, _IntakeClaim]
 
 # -- Graph navigation helpers --
 
+def _dashless_variant(node_id: str) -> str:
+    """The dash-less spelling of a node id (`x-bbbb` -> `xbbbb`): the minter
+    briefly minted dash-less ids, and the graph confirms the id, not the shape.
+    """
+    return node_id.replace("-", "", 1) if "-" in node_id else node_id
+
+
 def _find_node(entries: list[dict], node_id: str) -> dict | None:
     # 'ab-' (3) + 8 hex = 11. Anything shorter that starts with 'ab-' is a
     # partial ab-id; route through the fuzzy resolver so callers like
@@ -88,7 +95,14 @@ def _find_node(entries: list[dict], node_id: str) -> dict | None:
                 f"{candidate_ids}\n"
             )
         return None
-    return next((e for e in entries if e.get("id") == node_id), None)
+    for e in entries:
+        if e.get("id") == node_id:
+            return e
+    # The dash-less twin, exact-match only: the graph confirms the id, not
+    # the spelling. Exact spelling wins first.
+    return next(
+        (e for e in entries if e.get("id") == _dashless_variant(node_id)), None
+    )
 
 
 def _find_dependents(entries: list[dict], node_id: str) -> list[str]:
@@ -891,7 +905,7 @@ def detect_project(entries: list[dict]) -> str | None:
             continue
         # expanduser BEFORE normpath so historical entries stored with
         # tilde-form paths (e.g. "~/code/me/chingu") match the absolute
-        # repo_root. The writer side (cmd_add/cmd_idea) stores absolute
+        # repo_root. The writer side (the native create path) stores absolute
         # paths since PR #167, but pre-#167 entries and any direct edits
         # use ~. Without expanduser, the comparison silently never matches
         # and detect_project falls through to the global-scope fallback.
@@ -1061,12 +1075,13 @@ def _resolve_claim(
             f"invalid claims value: {raw!r} (expected a <prefix>-<4..8 hex> node id)"
         )
 
-    for e in entries:
-        if e.get("id") == raw:
-            source: Literal["cli", "frontmatter"] = (
-                "cli" if cli_claim else "frontmatter"
-            )
-            return (e, source)
+    # Exact spelling first, then its dash-less twin (`x-bbbb` -> `xbbbb`):
+    # the graph confirms the id, not the spelling.
+    source: Literal["cli", "frontmatter"] = "cli" if cli_claim else "frontmatter"
+    for wanted in dict.fromkeys((raw, _dashless_variant(raw))):
+        for e in entries:
+            if e.get("id") == wanted:
+                return (e, source)
 
     raise ValueError(
         f"claims target {raw} not found on graph - "

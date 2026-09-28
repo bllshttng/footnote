@@ -17,6 +17,7 @@ fixtures); the calendar emoji is written as a ``\\U`` escape so this source
 stays ASCII there.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -34,13 +35,11 @@ CAL = "\U0001F4C5"  # 📅
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
-    import fno.paths as paths_mod
     yield
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(path, entries)
 
 
 def _header() -> str:

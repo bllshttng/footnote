@@ -78,3 +78,49 @@ fn claim_session_absent_skips_unresolved_grace_after_expiry() {
         (ClaimState::Stale, basis::SESSION_ABSENT)
     );
 }
+
+fn session_prover_node_record(pid: i32, now: i64) -> ClaimRecord {
+    let mut rec = session_record(pid, now, Some(now + 7_200_000));
+    rec.key = "node:x-live".into();
+    rec.harness = Some("claude".into());
+    rec.pid_provenance = Some("session-prover".into());
+    rec
+}
+
+#[test]
+fn claim_session_absent_keeps_an_unexpired_node_claim_with_a_live_session_prover_pid() {
+    let now = now_ms();
+    let rec = session_prover_node_record(std::process::id() as i32, now);
+    let witness: SessionWitness = &|_| SessionLiveness::Absent;
+    let (state, _) =
+        classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness));
+    assert_eq!(state, ClaimState::Live);
+}
+
+#[test]
+fn claim_session_absent_demotes_a_shared_session_prover_pid_to_suspect() {
+    let now = now_ms();
+    let rec = session_prover_node_record(std::process::id() as i32, now);
+    let witness: SessionWitness = &|_| SessionLiveness::Absent;
+    assert_eq!(
+        classify_with_basis_and_exclusivity(
+            &rec,
+            Some(now),
+            &probe_pid,
+            Some(false),
+            Some(witness)
+        ),
+        (ClaimState::Suspect, basis::PID_SHARED)
+    );
+}
+
+#[test]
+fn claim_session_absent_releases_an_unexpired_node_claim_with_a_dead_session_prover_pid() {
+    let now = now_ms();
+    let rec = session_prover_node_record(dead_pid() as i32, now);
+    let witness: SessionWitness = &|_| SessionLiveness::Absent;
+    assert_eq!(
+        classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
+        (ClaimState::Stale, basis::SESSION_ABSENT)
+    );
+}

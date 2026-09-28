@@ -1,8 +1,8 @@
 """Integration: the v2 A1 birth paths route through on_node_born.
 
-cmd_idea wiring lives in test_idea_think_spawn_wiring.py and the retro path in
-test_retro_land.py. This covers the remaining named A1 paths - intake and add -
-proving each invokes the shared hook for a real birth.
+The add/idea hook wiring is native (the golden replays pin its offer, skip
+ladder and events) and the retro path lives in test_retro_land.py. This covers
+the remaining Python A1 path - intake - proving it invokes the shared hook.
 
 Decompose is NOT one of them. It used to route unflagged children here,
 which spawned a /think on every autonomous decompose rather than offering one;
@@ -10,6 +10,7 @@ which spawned a /think on every autonomous decompose rather than offering one;
 inverse is pinned below.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -78,7 +79,7 @@ def test_decompose_never_fires_birth_hook(tmp_path, monkeypatch, capture_born):
     its own unless the operator flags the group `needs_think`.
     """
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
     _route_graph(g, tmp_path, monkeypatch)
 
     # First pass: 2 children created, still no births.
@@ -95,7 +96,7 @@ def test_decompose_never_fires_birth_hook(tmp_path, monkeypatch, capture_born):
 
 def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     _route_graph(g, tmp_path, monkeypatch)
 
     plan = tmp_path / "plan.md"
@@ -106,17 +107,3 @@ def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
 
     assert len(capture_born) == 1
     assert capture_born[0][0]  # the intaked node's real id reached the hook
-
-
-# -- add (born-with-why v2: cmd_add wiring, x-a552) --
-
-def test_add_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
-    g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
-    _route_graph(g, tmp_path, monkeypatch)
-
-    r = _invoke("backlog", "add", "A new feature", "--project", "fno", "--cwd", "/tmp/proj")
-    assert r.exit_code == 0, r.output
-
-    assert len(capture_born) == 1
-    assert capture_born[0][0]  # the added node's real id reached the hook

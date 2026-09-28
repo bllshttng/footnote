@@ -3,7 +3,7 @@ name = "fno"
 # Keep in lockstep with crates/fno-agents and cli (Python). These ship as
 # separate binaries but share one release number; born-at-0.3.0 was a scaffold
 # typo, not a real version line. Protocol compat is PROTO_VERSION, not this.
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 # The mux pulls in tokio + alacritty_terminal + portable-pty, so this crate no
 # longer targets the old pure-std 1.74 floor. 1.89 matches fno-agents (the
@@ -31,6 +31,14 @@ axum = { version = "0.8", features = ["ws"] }
 # Same major versions as crates/fno-agents, which already builds this stack.
 alacritty_terminal = "0.26"
 crossterm = { version = "0.29", features = ["event-stream"] }
+# The sideline's widget layer: `draw_sideline` renders a `Table` into a
+# standalone `Buffer` and `ratatui_blit` copies it into the compositor's
+# cells. No backend, no terminal: default features stay off so neither
+# crate pulls a second crossterm beside the one pinned above. The plan
+# wrote "0.30"; the split crates version independently (the 0.30 umbrella
+# builds on exactly these), so the real lines are 0.1.x / 0.3.x.
+ratatui-core = { version = "0.1", default-features = false, features = ["std"] }
+ratatui-widgets = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 portable-pty = "0.9"
 # `pane wait --pattern RE`: regex over a pane's visible grid (script API).
@@ -38,6 +46,8 @@ regex = "1"
 # store_client.rs hashes long graph paths for the fallback keeper-socket
 # name; the same crate version fno-agents pins, so one build stack.
 sha2 = "0.10"
+# The shared event store: the native front door routes `fno doctor event`
+# onto this library; the runtime binary links the same types.
 # Re-verify a picked answer's region fingerprint against the live grid before
 # injecting. Must match the daemon's hash byte-for-byte across
 # processes, so the same content hash both sides use - not a per-process
@@ -55,10 +65,13 @@ toml = "0.8"
 # Native mux argv parsing: one typed declaration per flag, so the
 # flag registry is structural rather than a hand-copied convention.
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 # Popup chrome measures and paints in terminal columns: a fullwidth
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -71,3 +84,6 @@ tokio = { version = "1", features = [
     # bounded, fail-open shell-out to `fno-agents digest` on attach.
     "process",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

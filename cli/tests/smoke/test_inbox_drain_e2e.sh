@@ -24,7 +24,7 @@ YAML
 # ahead of anything we set. Redirect HOME instead so `state_dir()` resolves
 # here and not to the developer's ~/.fno.
 export HOME="$WORK"
-echo '{"_lock_version": 1, "entries": []}' > "$WORK/.fno/graph.json"
+printf '{"entries": []}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$WORK/.fno/graph.json"
 
 # Triage stub returning a deterministic create_node plan.
 STUB="$WORK/triage_stub.sh"
@@ -66,9 +66,10 @@ print(f'ok: heads-up={actions[\"heads-up\"]} question={actions[\"question\"]} fy
 
 # The heads-up's node really landed. Asserting only the drain's self-reported
 # `created_node` above would pass against a graph that was never written.
-WORK="$WORK" python3 -c "
-import json, os
-entries = json.load(open(os.path.join(os.environ['WORK'], '.fno', 'graph.json')))['entries']
+WORK="$WORK" uv run --project "$CLI_DIR" python3 -c "
+import os
+from fno.graph.store import read_graph_strict
+entries = read_graph_strict(os.path.join(os.environ['WORK'], '.fno', 'graph.json'))
 assert len(entries) == 1, entries
 node = entries[0]
 assert node['title'] == 'Stubbed node', node

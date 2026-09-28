@@ -45,7 +45,7 @@ On its first run it caught `$CLI` in `loop_dispatch.rs`, which nothing had scrub
 Isolation must not quietly change which code path runs.
 Three pins were tried and removed because they did:
 
-- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`, and `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain.
+- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`. `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain. Both legs honor it: the Python loader (`config_io._apply_search_ceiling`) and the Rust readers (`within_search_ceiling`). The Rust sites: `config_candidates`, the backlog settings walk, and the plans chain's `.claude/settings*.json` tier.
 - **`FNO_GLOBAL_SETTINGS_PATH`** - the global candidate is `Path.home()/.fno/settings.yaml`, so the sandboxed `HOME` covers it. Re-pinning additionally overrode the candidate for tests that monkeypatch `HOME` precisely to exercise the global-fallback path.
 - **`FNO_REPO_ROOT`** - pinning it points repo-root resolution at an empty sandbox, and a large part of the suite legitimately resolves the real checkout to find a lint script or the installed package. Unset is also exactly what CI has.
 
@@ -160,6 +160,8 @@ The rule names the directory, not a state root. `STATE_DIR` cannot be read here.
 
 The Rust runtime carries the same rule inside the lib crate, and only there. `AgentsHome::from_env` and `durable_spaces_root` refuse the ambient `$HOME` fallback under `cfg!(test)` unless a root is declared, because `cargo test` sandboxes no `HOME`. A test declares one with `paths::DeclaredRoot`, which pins `FNO_SPACES_DIR` and `FNO_AGENTS_HOME` under `std::env::temp_dir()` and restores them on drop.
 
+The fno porcelain follows the same rule. Under `cfg!(test)`, `scrape::fno_bin`, `scrape::fno_py` and `loopcheck::loopcheck_fno_bin` answer only a declared `FNO_BIN` / `FNO_PY` / `FNO_LOOPCHECK_FNO_BIN`; undeclared, each answers a path that cannot exec. A raw `cargo test` inherits the calling session's identity, and the installed fno's parent push would mail that session a false `[fno:blocked]` alarm, which is exactly what two distress lib tests did to a king session on 2026-09-21.
+
 Two resolvers, not every resolver. `claims::global_claims_root` carries the same `$HOME` fallback and is unfenced, so a bare `cargo test --lib` still creates `$HOME/.fno/claims`. That was measured on 2026-09-07. The poisoned-HOME canary is what catches it, so this page names the gap instead of claiming it closed.
 
 `cfg!(test)` is the stated limit, not an oversight. Integration targets under `crates/fno-agents/tests/` link the lib compiled WITHOUT `cfg(test)`. They get no fence. To them the crate is a dependency, which is the shape production sees. To reach them, the fence must become a runtime check. A runtime check fires in production, where an ambient `$HOME` resolution is the correct answer. So an integration target pins `FNO_AGENTS_HOME` or `FNO_SPACES_DIR` itself. If it does not, nothing refuses.
@@ -197,3 +199,11 @@ Only REGULAR files are hashed. A socket, fifo, device or symlink carries no byte
 ## The uncovered path
 
 Hermeticity is applied by the **runner**. `bash tests/whatever.sh` skips it and reads your real `HOME`, config chain, and carve-out ledger. A pass proves nothing about hermeticity. A failure can come from your machine. When someone runs these paths, `tests/README.md` and `fno doctor test smoke --help` both state the limitation. Closing it properly requires a per-file header enforced across 131 shell harnesses. That has not been done.
+
+## Session tripwire
+
+The ceiling bounds where config is READ from. It cannot stop a writer. The write-side guard is the session tripwire in `cli/tests/prod_tripwire.py`. At module load, `conftest.py` snapshots the live roots under the REAL env. It runs on the xdist controller only. The roots: the real `~/.fno` at depth 2, `~/.claude` at depth 1, and the real plans dir at depth 1. The two checkouts follow at depth 1: the canonical checkout and the running checkout's toplevel. The Rust binary resolves the plans dir, so the copy cannot drift from the answer tests actually read.
+
+When the session finishes, `pytest_sessionfinish` re-walks the roots and re-judges every new entry. A name matching the session's basetemp slug is a leak. The slug is parent-name + basetemp-name. It is never the bare `pytest-of-` prefix every other pytest run shares. File bytes containing the basetemp or sandbox path are a leak. The hook prints one line per leak and fails the run with `pytest.ExitCode.TESTS_FAILED`. A new `fno-probe-` entry warns and does not fail. A live codex spawn writes that name too. Entries under `worktrees/`, `cargo-build/`, `target/` and `.git/` are never walked. The tripwire reports and never deletes.
+
+What it cannot see: a leak carrying only another session's marker, a write deeper than the root's depth, and a modified EXISTING file. A bare `bash tests/whatever.sh` run is also unseen. The runner applies hermeticity. A bare run applies nothing.

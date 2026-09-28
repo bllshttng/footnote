@@ -195,12 +195,11 @@ def _cpu_admission_arm() -> ArmReading:
         # Zeros the instrument never measured are not a reading; the
         # admission's own words name why the arm is dark.
         return ArmReading("cpu admission", DARK, reason=admission.reason)
-    load_1m = load_5m = None
+    load_1m = load_5m = load_15m = None
     try:
-        load_1m, load_5m, _ = os.getloadavg()
+        load_1m, load_5m, load_15m = os.getloadavg()
     except (OSError, AttributeError):
-        pass  # trend line only; the decider carried its own load_15m
-    load_15m = admission.load_15m
+        pass  # trend line only; nothing decides on load
     return ArmReading(
         "cpu admission",
         MEASURED,
@@ -213,7 +212,6 @@ def _cpu_admission_arm() -> ArmReading:
             "verdict": admission.verdict,
             "bound": admission.bound,
             "load_15m": round(load_15m, 1) if load_15m is not None else None,
-            "backstop": round(admission.backstop, 1),
             "load_1m": round(load_1m, 1) if load_1m is not None else None,
             "load_5m": round(load_5m, 1) if load_5m is not None else None,
         },

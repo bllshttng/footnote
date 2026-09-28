@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from datetime import datetime
 
@@ -22,17 +23,16 @@ RUN = {
 
 
 def test_build_lanes_has_coverage_retrospective_and_live_sections():
+    live_row = {
+        "provider": "zai",
+        "model": "zai-coding-plan/glm-5.3",
+        "effort": "low",
+        "status": "live",
+    }
     result = build_lanes(
         [RUN],
         [{"id": "x-1", "size": "S"}],
-        [
-            {
-                "provider": "zai",
-                "model": "zai-coding-plan/glm-5.3",
-                "effort": "low",
-                "status": "live",
-            }
-        ],
+        [live_row],
         [{"kind": "provider_rate_limited", "provider": "zai", "ts": "2026-08-20T11:00:00Z"}],
         {"zai": 5},
         since_days=28,
@@ -53,6 +53,9 @@ def test_build_lanes_has_coverage_retrospective_and_live_sections():
     assert result["live"][0]["cap"] == 5
     assert result["rate_limited"] == 1
 
+    no_caps = build_lanes([], [], [live_row], [], {}, since_days=28, now=NOW)
+    assert no_caps["live"][0]["cap"] is None
+
 
 def test_lanes_cli_renders_coverage(tmp_path, monkeypatch):
     from fno.scoreboard import cli as sb_cli
@@ -61,7 +64,7 @@ def test_lanes_cli_renders_coverage(tmp_path, monkeypatch):
     monkeypatch.setattr(sb_cli._paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(sb_cli._paths, "agents_registry_path", lambda: tmp_path / "registry.json")
     (tmp_path / "ledger.json").write_text('{"entries": []}')
-    (tmp_path / "graph.json").write_text('{"entries": []}')
+    seed_graph(tmp_path / "graph.json", '{"entries": []}')
     (tmp_path / "registry.json").write_text('{"schema_version": 15, "agents": []}')
 
     app = typer.Typer()
@@ -71,15 +74,10 @@ def test_lanes_cli_renders_coverage(tmp_path, monkeypatch):
     assert "Coverage" in result.output
 
 
-def test_lanes_cli_reads_provider_limits_after_the_rename(tmp_path, monkeypatch):
-    # The lanes arm reads the cap table off settings.agents; after the
-    # max_lanes -> provider_limits rename an unchanged getattr silently
-    # passed {} and live occupancy rendered cap-less while the gate still
-    # enforced one. A settings object exposing ONLY the new field must reach
-    # build_lanes with the configured caps.
-    from types import SimpleNamespace
-
+def test_lanes_cli_reads_caps_from_probe(tmp_path, monkeypatch):
+    # The lanes arm uses the same probe caps the spawn gate enforces.
     from fno.scoreboard import cli as sb_cli
+    from fno.agents import spawn_gate
 
     captured: dict = {}
 
@@ -88,21 +86,24 @@ def test_lanes_cli_reads_provider_limits_after_the_rename(tmp_path, monkeypatch)
         return {"coverage": {"provider": 0, "model": 0, "effort": 0, "rows": 0}}
 
     monkeypatch.setattr(sb_cli, "build_lanes", fake_build_lanes)
-    monkeypatch.setattr(
-        "fno.config.load_settings",
-        lambda: SimpleNamespace(
-            agents=SimpleNamespace(provider_limits={"zai": {"lanes": 5, "subagents": 1}})
-        ),
-    )
+    probe_answers = [
+        {"lanes": {"zai": {"cap": 5, "live": 1}}},
+        {"lanes": None},
+    ]
+    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: probe_answers.pop(0))
     monkeypatch.setattr(sb_cli._paths, "ledger_json", lambda: tmp_path / "ledger.json")
     monkeypatch.setattr(sb_cli._paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(sb_cli._paths, "agents_registry_path", lambda: tmp_path / "registry.json")
     (tmp_path / "ledger.json").write_text('{"entries": []}')
-    (tmp_path / "graph.json").write_text('{"entries": []}')
+    seed_graph(tmp_path / "graph.json", '{"entries": []}')
     (tmp_path / "registry.json").write_text('{"schema_version": 15, "agents": []}')
 
     app = typer.Typer()
     app.command()(sb_cli.scoreboard_command)
     result = CliRunner().invoke(app, ["--lanes", "--json"])
     assert result.exit_code == 0, result.output
-    assert captured["caps"] == {"zai": {"lanes": 5, "subagents": 1}}
+    assert captured["caps"] == {"zai": 5}
+
+    result = CliRunner().invoke(app, ["--lanes", "--json"])
+    assert result.exit_code == 0, result.output
+    assert captured["caps"] == {}

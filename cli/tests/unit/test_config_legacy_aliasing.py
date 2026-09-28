@@ -60,6 +60,22 @@ def test_legacy_scalar_aliases_to_list(tmp_path):
     assert s.review.external_reviewers == ["gemini"]
 
 
+def test_retired_attention_rows_load_and_are_ignored(tmp_path):
+    """The md sink is retired: `[[attention]]` / `[[reach_me]]` rows in a
+    config still load, and the model carries no `attention` field."""
+    from fno.config import settings_from_files
+
+    f = _write(
+        tmp_path / "s.yaml",
+        "config:\n"
+        "  attention:\n    - name: new\n      path: p-new.md\n"
+        "  reach_me:\n    - name: old\n      path: p-old.md\n",
+    )
+    s = settings_from_files([f])
+    assert not hasattr(s, "attention")
+    assert not hasattr(s, "reach_me")
+
+
 def test_top_level_project_aliases_id_and_vision(tmp_path):
     """The whole top-level project block (id + vision) lifts to config.project."""
     from fno.config import settings_from_files

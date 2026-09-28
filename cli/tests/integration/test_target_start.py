@@ -1976,7 +1976,7 @@ def test_worktree_occupancy_dirty_recent_transcript_refuses(monkeypatch, tmp_pat
     wt = tmp_path / "wt"
     wt.mkdir()
     monkeypatch.setattr(
-        "fno.worktree_reapable.reapable",
+        "fno.worktree_gate.reapable_receipt",
         lambda path: SimpleNamespace(
             reapable=False, reason="modified-tracked", detail="src/app.py"
         ),
@@ -2006,7 +2006,7 @@ def test_worktree_occupancy_probe_failure_is_unknown(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
     monkeypatch.setattr(
-        "fno.worktree_reapable.reapable",
+        "fno.worktree_gate.reapable_receipt",
         lambda path: SimpleNamespace(reapable=False, reason="probe-failed", detail="git"),
     )
     verdict, info = target_cli._classify_worktree_occupancy(wt)
@@ -2018,7 +2018,7 @@ def test_worktree_occupancy_clean_is_available(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
     monkeypatch.setattr(
-        "fno.worktree_reapable.reapable",
+        "fno.worktree_gate.reapable_receipt",
         lambda path: SimpleNamespace(reapable=True, reason="clean", detail=""),
     )
     assert target_cli._classify_worktree_occupancy(wt) == ("available", None)

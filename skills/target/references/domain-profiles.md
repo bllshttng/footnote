@@ -10,7 +10,7 @@ domains:
   {domain-name}:
     phases:
       execute: {skill-name}     # default: fno:execute waves
-      review: {skill-name}      # default: native pre-push request-self-review (the rounds run before the PR opens)
+      review: {skill-name}      # default: the in-session fno lane (/fno:review <size> --comment; the rounds run before the PR opens)
       validate: {bash-command}  # default: detected from project
       ship: {skill-name}        # default: fno:pr create
       external: {skill-name}    # default: fno:pr check
@@ -29,8 +29,8 @@ The `code` domain is never declared — it's the implicit fallback. These are it
 | Phase | Default Skill/Command | Purpose |
 |-------|----------------------|---------|
 | execute | `fno:execute waves` | Wave orchestration with TDD |
-| review | `fno do target request-self-review` on the final local HEAD, before the PR; `--pr <n>` is the post-push form | Code quality + integration tests |
-| validate | *(project-detected)* | `npm run build` / `pytest` / etc. |
+| review | `/fno:review <size> --comment` on the final local HEAD, before the PR, in this session (Codex `$fno:review`) | Code quality + integration tests |
+| validate | the tests covering the changed files (`fno doctor test <files>` / `npm run build` / etc.) | Never the whole suite: CI runs it. A whole-suite run that is truly needed starts as a background task so the test:suite queue never blocks the turn |
 | ship | `fno:pr create` | Create GitHub PR |
 | external | `fno:pr check` | External AI review (Gemini, etc.) |
 | docs | `fno:ship-docs` | Architecture + how-to docs |

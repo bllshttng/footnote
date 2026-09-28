@@ -290,11 +290,10 @@ def validate_cmd(
     live_holder = _holder_of(claim)
 
     events_path = Path(events_file) if events_file else (wt / ".fno" / "events.jsonl")
+    # The store beside the journal answers even when no journal file exists.
     node_events = [
-        e
-        for e in read_node_events([events_path])
-        if _event_node(e) == node
-    ] if events_path.exists() else []
+        e for e in read_node_events([events_path]) if _event_node(e) == node
+    ]
 
     res: RevalidationResult = revalidate(
         receipt,

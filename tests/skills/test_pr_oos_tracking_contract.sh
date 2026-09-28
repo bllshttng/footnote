@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Contract test for the PR-create out-of-scope tracking flow.
 #
-# The flow ships as TWO reachable instruction paths - the pr-create role
-# subagent prompt and the bundled canonical create reference. A rule enforced in
-# one copy is decorative: the other path still runs. So this test forbids the
-# synthetic-carveout fallback in each surface AND pins the two extracted
-# sections byte-identical, which makes divergence itself a failure.
+# The flow ships as ONE reachable instruction path - the bundled canonical
+# create reference, which every harness runs inline. This test forbids the
+# synthetic-carveout fallback in that surface.
 #
 # Run: bash tests/skills/test_pr_oos_tracking_contract.sh
 
@@ -16,7 +14,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 GATE="$REPO_ROOT/scripts/ci/check-oos-tracked.sh"
 
 SURFACES=(
-  "$REPO_ROOT/skills/pr/agents/pr-creator.md"
   "$REPO_ROOT/skills/pr/references/create.md"
 )
 
@@ -91,13 +88,16 @@ for surface in "${SURFACES[@]}"; do
 done
 
 # Both shipped paths must stay behaviorally identical, or one can regain the
-# fallback while the other is clean.
-a="$(section_of "${SURFACES[0]}")"
-b="$(section_of "${SURFACES[1]}")"
-if [[ "$a" == "$b" && -n "$a" ]]; then
-  pass "both shipped instruction paths carry an identical tracking section"
-else
-  fail "shipped instruction paths diverged - one path can behave differently"
+# fallback while the other is clean. One path ships today, so the loop above
+# is the whole contract; the comparison returns if a second path ever lands.
+if [[ "${#SURFACES[@]}" -gt 1 ]]; then
+  a="$(section_of "${SURFACES[0]}")"
+  b="$(section_of "${SURFACES[1]}")"
+  if [[ "$a" == "$b" && -n "$a" ]]; then
+    pass "both shipped instruction paths carry an identical tracking section"
+  else
+    fail "shipped instruction paths diverged - one path can behave differently"
+  fi
 fi
 
 # AC18-CON: an explicitly cited deferred line stays valid through the real gate,

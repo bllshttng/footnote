@@ -285,6 +285,73 @@ class TestCachedNegativeNamesItsInput:
         assert data["coverage"] == "covered"
         assert "recomputed" in note
 
+    def test_a_later_pass_refreshes_a_covered_row_with_unsatisfied_posture(
+        self, monkeypatch, tmp_path
+    ):
+        _isolate_logs(monkeypatch, tmp_path)
+        stale = _covered_row("2026-08-28T07:15:38Z")
+        stale["data"]["review_posture"]["posture_satisfied"] = False
+        passed = _pass_attestation("2026-08-28T07:48:55Z")
+        _write_log(tmp_path, stale, passed)
+        fired = []
+
+        def fake_fire(pr_number, cwd, head):
+            fired.append((pr_number, head))
+            _write_log(tmp_path, stale, passed, _covered_row("2026-08-28T08:00:00Z"))
+            return True, ""
+
+        monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_fire)
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+
+        assert fired == [(1242, _H)]
+        assert data["coverage"] == "covered"
+        assert "recomputed" in note
+
+    def test_an_unsatisfied_covered_row_without_a_newer_pass_stays_cached(
+        self, monkeypatch, tmp_path
+    ):
+        _isolate_logs(monkeypatch, tmp_path)
+        stale = _covered_row("2026-08-28T07:15:38Z")
+        stale["data"]["review_posture"]["posture_satisfied"] = False
+        _write_log(tmp_path, stale)
+        fired = []
+        monkeypatch.setattr(
+            _reviews,
+            "_fire_review_coverage_verb",
+            lambda *a, **k: (fired.append(a) or (True, "")),
+        )
+
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+
+        assert fired == []
+        assert data["coverage"] == "covered"
+        assert data["review_posture"]["posture_satisfied"] is False
+        assert note == ""
+
+    def test_satisfied_or_postureless_covered_rows_do_not_use_this_refresh_arm(
+        self, monkeypatch, tmp_path
+    ):
+        _isolate_logs(monkeypatch, tmp_path)
+        passed = _pass_attestation("2026-08-28T07:48:55Z")
+        fired = []
+        monkeypatch.setattr(
+            _reviews,
+            "_fire_review_coverage_verb",
+            lambda *a, **k: (fired.append(a) or (True, "")),
+        )
+
+        _write_log(tmp_path, _covered_row("2026-08-28T07:15:38Z"), passed)
+        _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+        assert fired == []
+
+        postureless = _covered_row("2026-08-28T08:15:38Z")
+        del postureless["data"]["review_posture"]
+        _write_log(tmp_path, postureless, passed)
+        _reviews.review_coverage_for_gate(
+            1242, str(tmp_path), _H, recompute_postureless=False
+        )
+        assert fired == []
+
     def test_an_earlier_attestation_does_not_force_a_recompute(
         self, monkeypatch, tmp_path
     ):

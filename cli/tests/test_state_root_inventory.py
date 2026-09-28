@@ -1,5 +1,6 @@
 """Gate: the state root may hold nothing the inventory doc does not name (x-a469)."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from pathlib import Path
 
@@ -12,7 +13,7 @@ DOC = REPO_ROOT / "docs" / "state-root-inventory.md"
 
 def test_positive_control_names_the_undocumented_file(tmp_path):
     # A bare zero from the gate proves nothing; prove it can name a violation.
-    (tmp_path / "graph.json").touch()
+    (tmp_path / "graph.db").touch()
     marker = "totally-undocumented-marker-file"
     (tmp_path / marker).touch()
     assert undocumented(tmp_path, DOC) == [marker]
@@ -21,14 +22,24 @@ def test_positive_control_names_the_undocumented_file(tmp_path):
 def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     from fno import paths
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     root = Path(paths.state_dir())
+    seed_graph(root / "graph.json", '{"entries": []}\n')
     for pattern in top_level_patterns(DOC):
-        (root / pattern).touch()
+        path = root / pattern
+        if pattern in {"backups", "install", "heal"}:
+            # Folders the doc documents; materialize them as directories.
+            path.mkdir(exist_ok=True)
+        elif pattern in {"graph.json", "graph.db", "graph.db-wal", "graph.db-shm"}:
+            # SQLite creates and owns the db trio; graph.json is the retired
+            # export-only anchor, and an empty copy of it refuses the store
+            # at open ("could not be read: empty (zero bytes)").
+            continue
+        elif not path.exists():
+            path.touch()
     # A real writer's output must also read as documented, not just the
     # materialized mirror: the mutation emits the graph, its render, and the
     # backups/ rotation beside it.
-    (root / "graph.json").write_text('{"entries": []}\n', encoding="utf-8")
-    locked_mutate_graph(root / "graph.json", lambda entries: entries)
+    commit_rows_via_store(root / "graph.json", lambda entries: entries)
     assert undocumented(root, DOC) == []

@@ -528,5 +528,5 @@ done
 # The typed-verdict path prints its own receipt; the delegated path's receipt
 # is the verb's stderr line.
 if [[ -z "$findings_file" ]]; then
-  echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=<stamped-at-emit> provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
+  echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict run=${session_id:-none} run_harness=${harness:-unknown} attester=<stamped-at-emit> model=<stamped-at-emit> provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
 fi

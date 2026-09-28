@@ -468,8 +468,14 @@ printf 'artifact' > "$S/wt/target/file"
 STUBDIR=$(mktemp -d -t cwd-recheck-stub.XXXXXX)
 COUNTFILE="$STUBDIR/lsof.log"; : > "$COUNTFILE"
 PROTECTED_WT="$(cd "$S/wt" && pwd -P)"
+# live_shards()'s own `lsof -a -d cwd -c cargo -Fn` probe shares this PATH
+# stub. It must not touch the counter this test uses to pace the cwd-recheck
+# snapshots: a bump here shifts count-gated responses by one call.
 cat > "$STUBDIR/lsof" <<'EOF'
 #!/usr/bin/env bash
+case " $* " in
+    *" -c cargo "*) exit 0 ;;
+esac
 echo "$*" >> "$COUNTFILE"
 n=$(wc -l < "$COUNTFILE" | tr -d ' ')
 if [[ "$n" -ge 2 ]]; then
@@ -1418,25 +1424,71 @@ new_hash_dir() {
     printf 'artifact' > "$dir/blob"
 }
 
-# 9a. AC1-HP: the sweep's build-base delete unlinks; no bare rm ran.
+# 9a. AC1-HP: the build-base half is the Rust lane; the sweep delegates and
+# prints its lines, and the bash sweep never rm's a hash dir itself.
 S=$(new_sandbox)
 STUB=$(mktemp -d -t srm-sweep.XXXXXX)
 RM_LOG="$STUB/rm.log"
 new_rm_stub "$STUB/bin" "$RM_LOG"
 mkdir -p "$S/base/ab/c001"
 new_hash_dir "$S/base/ab/c001"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
-if [[ ! -d "$S/base/ab/c001" ]] && echo "$out" | grep -q 'cargo-target reaped'; then
-    pass "sweep unlinked the build-base hash dir (AC1)"
+# A stub fno-agents whose cargo-build-dirs claims the reap, so the delegate
+# contract is exercised without a built binary.
+mkdir -p "$STUB/fake-agents"
+cat > "$STUB/fake-agents/fno-agents" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "reclaim cargo-build-dirs --apply") printf 'cargo-build-dirs mode=apply reaped=1\n' ;;
+  *) printf 'cargo-build-dirs mode=dry-run\n' ;;
+esac
+EOF
+chmod +x "$STUB/fake-agents/fno-agents"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/fake-agents/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
+if echo "$out" | grep -q 'cargo-build-dirs mode=apply reaped=1'; then
+    pass "sweep delegates the build-base half to the lane (AC1)"
 else
-    fail "AC1 sweep unlink" "gone=$([[ -d "$S/base/ab/c001" ]] && echo n || echo y) out=[$out]"
+    fail "AC1 delegate prints the lane line" "out=[$out]"
 fi
-if [[ ! -s "$RM_LOG" ]]; then
-    pass "sweep delete never resolved through bare rm (AC1)"
-else
+# The lock teardown's own `rm -f` on its started-marker is lifecycle
+# noise; the assertion is that no bare rm ever names the hash dir.
+if [[ -s "$RM_LOG" ]] && grep -q 'ab/c001' "$RM_LOG"; then
     fail "AC1 stub-rm never ran" "log=[$(cat "$RM_LOG")]"
+else
+    pass "sweep delete never resolved through bare rm (AC1)"
 fi
 rm -rf "$S" "$STUB"
+
+# An fno-agents stand-in whose `reclaim remove-for` mirrors the lane's
+# ownership answer: it deletes the planted hash dir only when the dir sits
+# under the managed base named by FNO_CARGO_TARGETS_BASE. /bin/rm directly,
+# so the PATH rm-stub never sees a binary-lane delete. It also answers
+# `worktree-reapable` with the real classifier's receipt shape (a clean
+# fixture tree always reads reapable=yes), since archive-worktree.sh now
+# routes its strict check through this same binary.
+new_agents_stub() {
+    local bin="$1" hash_dir="$2"
+    mkdir -p "$bin"
+    cat > "$bin/fno-agents" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "worktree-reapable" ]]; then
+    target="\${@: -1}"
+    if [[ -z "\$(git -C "\$target" status --porcelain 2>/dev/null)" ]]; then
+        printf 'reapable=yes reason=clean recoverable_deletions=0\n'
+        exit 0
+    fi
+    printf 'reapable=no reason=dirty\n'
+    exit 1
+elif [[ "\$1 \$2" == "reclaim remove-for" && -n "\$FNO_CARGO_TARGETS_BASE" ]]; then
+    case "$hash_dir/" in
+        "\$FNO_CARGO_TARGETS_BASE"/*) /bin/rm -rf "$hash_dir"; printf '{"removed": 1}\n' ;;
+        *) printf '{"removed": 0}\n' ;;
+    esac
+else
+    printf '{"removed": 0}\n'
+fi
+EOF
+    chmod +x "$bin/fno-agents"
+}
 
 # Shared fixture for the removal-lane tests: a sandbox worktree whose
 # workspace resolves to a planted hash dir under a managed base.
@@ -1454,11 +1506,12 @@ new_removal_fixture() {
     RM_LOG="$STUB/rm.log"
     new_rm_stub "$STUB/bin" "$RM_LOG"
     new_cargo_stub "$STUB/bin" "$S/base/ab/c002"
+    new_agents_stub "$STUB/bin" "$S/base/ab/c002"
 }
 
 # 9b. AC2-HP: the WorktreeRemove hook reclaims the hash dir, then removes.
 new_removal_fixture
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
@@ -1471,7 +1524,7 @@ rm -rf "$S" "$STUB"
 
 # 9c. AC2b-HP: the archive lane reclaims the hash dir too.
 new_removal_fixture
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$ARCHIVE" "$S/wt" --yes 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
@@ -1492,7 +1545,8 @@ mkdir -p "$S/wt/crates/x" "$S/outside/c003"
 new_hash_dir "$S/outside/c003"
 STUB=$(mktemp -d -t srm-edge.XXXXXX)
 new_cargo_stub "$STUB/bin" "$S/outside/c003"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+new_agents_stub "$STUB/bin" "$S/outside/c003"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/outside/c003" ]]; then
@@ -1513,7 +1567,7 @@ mkdir -p "$S/wt/crates/x" "$S/base/ab/c004"
 new_hash_dir "$S/base/ab/c004"
 STUB=$(mktemp -d -t srm-fail.XXXXXX)
 new_cargo_stub "$STUB/bin" "FAIL"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="/nonexistent/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/base/ab/c004" ]]; then

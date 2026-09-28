@@ -5,8 +5,9 @@
 //! from the real clock too; every other test pins the fixed pair
 //! `2026-09-04T12:00:00Z` = 1_788_523_200 the tick_ledger tests pin.
 
-use fno_agents::arm_watch::tick_arm_watch;
-use fno_agents::tick_ledger::ArmStatus;
+use fno_agents::arm_repair::{annotate, RepairFacts};
+use fno_agents::arm_watch::{tick_arm_watch, tick_with_heal};
+use fno_agents::tick_ledger::{render_row, ArmStatus};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,14 @@ fn row(arm: &str) -> ArmStatus {
         failing_for_s: None,
         cause: None,
         line: String::new(),
+        repair: None,
+        heal: None,
+        upstream: None,
+        arm_key: None,
+        arm_value: None,
+        reader: None,
+        starved: false,
+        retries: Vec::new(),
     }
 }
 
@@ -46,6 +55,20 @@ fn stale(mut r: ArmStatus, cause: &str) -> ArmStatus {
     r.last_ts = Some(TS.to_string());
     r.age_s = Some(2400);
     r
+}
+
+/// The rows as a reader holds them: the line `explain` renders, then the
+/// cause, repair and owner `annotate` adds.
+fn lined(rows: &[ArmStatus]) -> Vec<ArmStatus> {
+    let mut rows = rows.to_vec();
+    for r in rows.iter_mut() {
+        r.line = render_row(r);
+        if let Some(cause) = r.cause.clone() {
+            r.line.push_str(&format!(" cause={cause} (hint)"));
+        }
+    }
+    annotate(&mut rows, &RepairFacts::new(false, &[]));
+    rows
 }
 
 fn temp_store(name: &str) -> PathBuf {
@@ -66,7 +89,7 @@ fn a_failing_arm_past_threshold_sends_one_notice() {
     let store = temp_store("ac1");
     let rows = vec![failing(row("king_wake"), "timeout", 2000)];
     let mut sends: Vec<(String, String)> = Vec::new();
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |title, body| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |title, body| {
         sends.push((title.to_string(), body.to_string()));
         true
     });
@@ -87,12 +110,12 @@ fn the_same_set_three_hundred_seconds_later_is_deduped() {
     let store = temp_store("ac2");
     let mut sends = 0usize;
     let first = vec![failing(row("king_wake"), "timeout", 2000)];
-    tick_arm_watch(&first, &[], 1800, &store, TS_UNIX, |_, _| {
+    tick_arm_watch(&lined(&first), &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
     let second = vec![failing(row("king_wake"), "timeout", 2300)];
-    let out = tick_arm_watch(&second, &[], 1800, &store, TS_UNIX + 300, |_, _| {
+    let out = tick_arm_watch(&lined(&second), &[], 1800, &store, TS_UNIX + 300, |_, _| {
         sends += 1;
         true
     });
@@ -109,14 +132,14 @@ fn a_new_arm_joining_the_set_sends_after_the_rate_floor() {
     let store = temp_store("ac3");
     let now = real_now();
     let first = vec![failing(row("king_wake"), "timeout", 2000)];
-    let out1 = tick_arm_watch(&first, &[], 1800, &store, now, |_, _| true);
+    let out1 = tick_arm_watch(&lined(&first), &[], 1800, &store, now, |_, _| true);
     assert_eq!(out1.acted, 1);
     let second = vec![
         failing(row("king_wake"), "timeout", 2000 + 1900),
         failing(row("notify_watch"), "timeout", 1900),
     ];
     let mut bodies: Vec<String> = Vec::new();
-    let out2 = tick_arm_watch(&second, &[], 1800, &store, now + 1900, |_, body| {
+    let out2 = tick_arm_watch(&lined(&second), &[], 1800, &store, now + 1900, |_, body| {
         bodies.push(body.to_string());
         true
     });
@@ -138,7 +161,7 @@ fn below_threshold_sends_nothing_and_forgets_the_stored_token() {
     )
     .unwrap();
     let rows = vec![failing(row("king_wake"), "timeout", 600)];
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| {
         panic!("no send below threshold")
     });
     assert_eq!(out.acted, 0);
@@ -160,7 +183,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
         stale(row("watchdog"), "scheduler_down"),
     ];
     let mut bodies: Vec<String> = Vec::new();
-    let out = tick_arm_watch(&rows, &[], 1800, &store, now, |_, body| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, now, |_, body| {
         bodies.push(body.to_string());
         true
     });
@@ -178,7 +201,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
 fn an_unexplained_stale_row_is_not_in_the_set() {
     let store = temp_store("ac6");
     let rows = vec![stale(row("notify_watch"), "unexplained")];
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 2400, |_, _| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX + 2400, |_, _| {
         panic!("unexplained never pages")
     });
     assert_eq!(out.acted, 0);
@@ -191,13 +214,13 @@ fn an_unexplained_stale_row_is_not_in_the_set() {
 fn a_failed_send_stores_no_token_so_the_next_tick_retries() {
     let store = temp_store("ac7");
     let rows = vec![failing(row("king_wake"), "timeout", 2000)];
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| false);
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| false);
     assert_eq!(out.acted, 0);
     assert_eq!(out.skip_reason.as_deref(), Some("notify_failed"));
     let text = std::fs::read_to_string(&store).unwrap_or_default();
     assert!(!text.contains("arm_failing"), "{text}");
     let mut sends = 0usize;
-    let out2 = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
+    let out2 = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
@@ -218,12 +241,12 @@ fn an_anchorless_failing_episode_pages_once_not_every_floor() {
     r.age_s = Some(30);
     let rows = vec![r];
     let mut sends = 0usize;
-    let first = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
+    let first = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
     assert_eq!(first.acted, 1);
-    let second = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 300, |_, _| {
+    let second = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX + 300, |_, _| {
         sends += 1;
         true
     });
@@ -242,7 +265,7 @@ fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
     unobserved.producer_evidence = fno_agents::tick_ledger::ProducerEvidence::Unobserved;
     let rows = vec![unobserved];
     let mut sends: Vec<(String, String)> = Vec::new();
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |title, body| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |title, body| {
         sends.push((title.to_string(), body.to_string()));
         true
     });
@@ -250,7 +273,7 @@ fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
     assert!(sends[0].1.contains("UNOBSERVED"), "{}", sends[0].1);
     assert!(!sends[0].1.contains("STALE"), "{}", sends[0].1);
 
-    let out2 = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 900, |_, _| {
+    let out2 = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX + 900, |_, _| {
         sends.push(("x".into(), "x".into()));
         true
     });
@@ -269,7 +292,7 @@ fn an_unobserved_event_driven_arm_pages_nothing() {
     unobserved_stop_hook.interval_s = 0;
     let rows = vec![unobserved_stop_hook];
     let mut sends = 0usize;
-    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
+    let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
@@ -288,6 +311,9 @@ fn a_stuck_finding_alone_pages_and_dedupes() {
         kind: "hung_verb",
         key: "hung:66853@1788520000".to_string(),
         line: "hung verb pid 66853 3h29m fno-py backlog advance --loose (over 1800s)".to_string(),
+        root: None,
+        holder: None,
+        claim_key: None,
     };
     let findings = vec![finding];
     let mut sends: Vec<(String, String)> = Vec::new();
@@ -320,6 +346,9 @@ fn a_failed_send_on_a_finding_stores_nothing() {
         kind: "dead_holder",
         key: "holder:flight:x@1".to_string(),
         line: "dead holder flight:x holder h pid 9 absent held 10m".to_string(),
+        root: None,
+        holder: None,
+        claim_key: None,
     }];
     let out = tick_arm_watch(&[], &findings, 1800, &store, TS_UNIX, |_, _| false);
     assert_eq!(out.acted, 0);
@@ -345,5 +374,370 @@ fn empty_arms_and_empty_findings_stay_clear() {
     assert_eq!(out.skip_reason.as_deref(), Some("clear"));
     let text = std::fs::read_to_string(&store).unwrap();
     assert!(!text.contains("arm_failing"), "{text}");
+    std::fs::remove_file(&store).ok();
+}
+
+/// AC9: the notice line for an overdue arm is that row's own line, and it
+/// names the cause and the owner.
+#[test]
+fn the_notice_line_is_the_rows_own_line() {
+    let store = temp_store("ac9");
+    let rows = lined(&[failing(row("king_wake"), "timeout", 2000)]);
+    let mut bodies: Vec<String> = Vec::new();
+    tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, body| {
+        bodies.push(body.to_string());
+        true
+    });
+    let first = bodies[0].lines().next().unwrap();
+    assert_eq!(first, rows[0].line.trim());
+    assert!(first.contains("cause=timeout"), "{first}");
+    assert!(first.contains("heal=operator"), "{first}");
+    std::fs::remove_file(&store).ok();
+}
+
+/// Lines the 600-char cap cuts are counted before the pointer, never dropped
+/// without a word.
+#[test]
+fn a_cut_notice_says_how_many_lines_it_cut() {
+    let store = temp_store("cut");
+    let mut rows = Vec::new();
+    for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+        let mut r = failing(row(arm), "timeout", 2000);
+        r.detail = Some("x".repeat(180));
+        rows.push(r);
+    }
+    let mut bodies: Vec<String> = Vec::new();
+    tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, body| {
+        bodies.push(body.to_string());
+        true
+    });
+    let last = bodies[0].lines().last().unwrap();
+    assert!(
+        last.starts_with('+') && last.ends_with("more: fno agents status"),
+        "{last}"
+    );
+    assert!(bodies[0].len() <= 600, "{}", bodies[0].len());
+    std::fs::remove_file(&store).ok();
+}
+
+fn dead_pid() -> i32 {
+    let mut candidate = 999_999i32;
+    while unsafe { libc::kill(candidate, 0) } == 0 {
+        candidate += 1;
+    }
+    candidate
+}
+
+fn host() -> String {
+    let mut buf = [0u8; 256];
+    unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+fn write_dead_flight(root: &std::path::Path, key: &str, holder: &str) {
+    let dir = root.join(".fno/claims");
+    std::fs::create_dir_all(&dir).unwrap();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let rec = serde_json::json!({
+        "schema_version": fno_agents::claims::SCHEMA_VERSION,
+        "key": key,
+        "holder": holder,
+        "acquired_at": now_ms - 600_000,
+        "pid": dead_pid(),
+        "host": host(),
+        "pid_unavailable": false,
+        "machine_id": fno_agents::claims::machine_id(),
+    });
+    std::fs::write(
+        dir.join(format!("{}.lock", fno_agents::claims::encode_key(key))),
+        rec.to_string(),
+    )
+    .unwrap();
+}
+
+/// AC11: one tick releases a dead flight hold, says so in its detail, and
+/// no notice names the holder.
+#[test]
+fn heal_releases_dead_holder_in_one_tick() {
+    let td = tempfile::TempDir::new().unwrap();
+    let store = td.path().join("signals.json");
+    write_dead_flight(td.path(), "flight:probe", "single-flight:1:probe");
+    let dirs = vec![td.path().join(".fno/claims")];
+    let before = fno_agents::stuck_work::dead_holders(&dirs).unwrap();
+    assert_eq!(before.len(), 1);
+    assert!(
+        before[0].line.contains("repair: FNO_CLAIMS_ROOT="),
+        "{}",
+        before[0].line
+    );
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || fno_agents::stuck_work::dead_holders(&dirs),
+        || Ok((Vec::new(), String::new())),
+        &mut |_| panic!("no launchd repair"),
+        |_, body| panic!("nothing left to page: {body}"),
+    );
+    assert!(
+        out.detail.starts_with("heal=dead_holder:1"),
+        "{}",
+        out.detail
+    );
+    assert_eq!(out.skip_reason.as_deref(), Some("clear"));
+    assert!(fno_agents::stuck_work::dead_holders(&dirs)
+        .unwrap()
+        .is_empty());
+}
+
+/// AC13: the switch off runs no repair, pages as before, and says heal=off.
+#[test]
+fn heal_off_leaves_the_hold_and_pages() {
+    let td = tempfile::TempDir::new().unwrap();
+    let store = td.path().join("signals.json");
+    write_dead_flight(td.path(), "flight:probe", "single-flight:1:probe");
+    let dirs = vec![td.path().join(".fno/claims")];
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let mut bodies: Vec<String> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        false,
+        1800,
+        &store,
+        TS_UNIX,
+        || fno_agents::stuck_work::dead_holders(&dirs),
+        || Ok((Vec::new(), String::new())),
+        &mut |_| panic!("heal is off"),
+        |_, body| {
+            bodies.push(body.to_string());
+            true
+        },
+    );
+    assert!(out.detail.starts_with("heal=off"), "{}", out.detail);
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].contains("flight:probe"), "{}", bodies[0]);
+    assert_eq!(
+        fno_agents::stuck_work::dead_holders(&dirs).unwrap().len(),
+        1
+    );
+}
+
+/// AC8-HP: the whole launchd tier paused under an armed breaker pages
+/// nothing, runs no self-heal repair, and says heal=paused.
+#[test]
+fn a_paused_tier_pages_nothing_and_heals_nothing() {
+    let td = tempfile::TempDir::new().unwrap();
+    let store = td.path().join("signals.json");
+    let paused: Vec<ArmStatus> = ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
+        .iter()
+        .map(|arm| {
+            let mut r = row(arm);
+            r.scheduler = Some("launchd:sh.fno.pr-watcher".to_string());
+            r.stale = false;
+            r.cause = Some("fleet_stop".to_string());
+            r.line = format!(
+                "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
+                 held on purpose; wait for the breaker to clear)",
+                render_row(&r)
+            );
+            r
+        })
+        .collect();
+    let mut rows = lined(&paused);
+    let mut sends = 0usize;
+    let mut runs = 0usize;
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
+        &mut |action| {
+            runs += 1;
+            assert_ne!(action, "refresh");
+            true
+        },
+        |_, body| {
+            sends += 1;
+            panic!("a paused tier pages nobody: {body}");
+        },
+    );
+    assert!(out.detail.starts_with("heal=paused"), "{}", out.detail);
+    assert_eq!(sends, 0);
+    assert_eq!(runs, 0);
+}
+
+/// The wire: a crown finding alone, with no overdue arms, still sends. The
+/// tick's clear gate is the empty SET, not the empty arm table - this is the
+/// whole point of the chain.
+#[test]
+fn a_crown_finding_alone_still_sends() {
+    let store = temp_store("crown-wire");
+    let mut sends: Vec<(String, String)> = Vec::new();
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        false,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || {
+            Ok((
+                vec![fno_agents::stuck_work::Finding {
+                    kind: "empty_crown",
+                    key: "crown_empty:x-1@1788520000".to_string(),
+                    line: "no king on scope x-1: empty 47m against a 30m grace; respawn: \
+                           fno agents spawn --crown x-1 --succeed"
+                        .to_string(),
+                    root: None,
+                    holder: None,
+                    claim_key: None,
+                }],
+                String::new(),
+            ))
+        },
+        &mut |_| panic!("no repair"),
+        |title, body| {
+            sends.push((title.to_string(), body.to_string()));
+            true
+        },
+    );
+    assert_eq!(out.acted, 1);
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].1.contains("no king on scope"), "{}", sends[0].1);
+    std::fs::remove_file(&store).ok();
+}
+
+/// A crown read that failed names itself in the tick row and never reads as
+/// a clear board.
+#[test]
+fn a_crown_read_failure_notes_crown_unread() {
+    let store = temp_store("crown-err");
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        false,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Err("the court read timed out after 30s".to_string()),
+        &mut |_| panic!("no repair"),
+        |_, body| panic!("no notice claims anything: {body}"),
+    );
+    assert_eq!(out.acted, 0);
+    assert!(
+        out.detail
+            .contains("crown unread: the court read timed out after 30s"),
+        "{}",
+        out.detail
+    );
+    std::fs::remove_file(&store).ok();
+}
+
+/// The x-e58f repro, end to end: alpha's select read times out at t1, a
+/// healthy auto_continue tick lands at t2 > t1, and the heal lane still
+/// retries alpha once through the daemon tick. Under the shared
+/// newest-row-per-arm fold the healthy tick masked the attempt, so this
+/// repro fails on the old shape.
+#[test]
+fn the_masked_unmeasured_attempt_is_still_retried_end_to_end() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let row = |ts: &str, skip: serde_json::Value, acted: u64, detail: serde_json::Value| {
+        serde_json::json!({
+            "ts": ts,
+            "type": "control_plane_tick",
+            "source": "loop",
+            "data": {
+                "arm": "auto_continue",
+                "scheduler": "session",
+                "acted": acted,
+                "skip_reason": skip,
+                "detail": detail,
+                "interval_s": 1800,
+            }
+        })
+        .to_string()
+    };
+    let masked = row(
+        "2026-09-04T11:58:20Z",
+        serde_json::json!("select-unmeasured"),
+        0,
+        serde_json::json!(
+            "project=alpha bound=120s: fno backlog next did not answer inside its 120s budget; the arm_watch heal lane retries it"
+        ),
+    );
+    let healthy = row(
+        "2026-09-04T11:59:20Z",
+        serde_json::json!(null),
+        1,
+        serde_json::json!(null),
+    );
+
+    // The masked journal: alpha's timeout, then the healthy tick that would
+    // have erased it under the single newest-row fold.
+    std::fs::write(&journal, format!("{masked}\n{healthy}\n")).unwrap();
+    let mut rows = fno_agents::tick_ledger::read_arms(&[journal.clone()], TS_UNIX);
+    let store = temp_store("masked-retry");
+    let mut runs: Vec<String> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
+        &mut |action| {
+            runs.push(action.to_string());
+            true
+        },
+        |_, _| true,
+    );
+    assert_eq!(runs, ["advance:alpha"]);
+    assert!(
+        out.detail.starts_with("heal=advance:alpha:spawned"),
+        "{}",
+        out.detail
+    );
+
+    // The clean journal: no unmeasured row, so no advance action runs.
+    std::fs::write(&journal, format!("{healthy}\n")).unwrap();
+    let mut rows = fno_agents::tick_ledger::read_arms(&[journal], TS_UNIX);
+    let mut clean_runs: Vec<String> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
+        &mut |action| {
+            clean_runs.push(action.to_string());
+            true
+        },
+        |_, _| true,
+    );
+    assert_eq!(clean_runs, Vec::<String>::new());
+    assert!(!out.detail.contains("advance:"), "{}", out.detail);
     std::fs::remove_file(&store).ok();
 }

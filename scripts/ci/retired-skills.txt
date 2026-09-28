@@ -12,3 +12,4 @@ codemap|demoted|existing retired-skill population
 git-worktrees|demoted|existing retired-skill population
 target-preflight|merged|existing retired-skill population
 target-postmortem|merged|existing retired-skill population
+king-for-a-day|merged|folded into reign as --once

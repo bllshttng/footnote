@@ -146,7 +146,6 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
             return _home_relative(raw) if raw.startswith("~") else raw
         return f"$STATE_DIR/{subdir}"
 
-    lines.append(f"export GRAPH_JSON_PATH={_bash_quote(_state_subpath(cfg.paths.graph_json, 'graph.json'))}")
     lines.append(f"export LEDGER_JSON_PATH={_bash_quote(_state_subpath(cfg.paths.ledger_json, 'ledger.json'))}")
     lines.append(f"export BRIEFS_DIR={_bash_quote(_state_subpath(cfg.paths.briefs_dir, 'briefs'))}")
     lines.append(f"export FLEET_DIR={_bash_quote(_state_subpath(cfg.paths.fleet_dir, 'fleet'))}")
@@ -163,7 +162,7 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     if _is_project_relative(plans_raw):
         plans_tmpl = f"$REPO_ROOT/{plans_raw}"
     elif _has_template(plans_raw):
-        plans_tmpl = str(_paths.plans_dir())
+        plans_tmpl = str(_paths.plans_content_dir())
     elif plans_raw.startswith("~"):
         plans_tmpl = _home_relative(plans_raw)
     else:

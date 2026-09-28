@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - cache keepalive inject
 # Inject cache-keepalive prompt at session start (conditional on project opt-in).
 # Checks .claude/settings.local.json for "cacheKeepalive": true.
 # If not opted in, exits silently.
 
 set -euo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 # Skip if a live target run owns this project (target manages its own lifecycle).
 # The guard rejects stale state from prior sessions so we still inject keepalive

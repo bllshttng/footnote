@@ -398,7 +398,7 @@ impl View {
         }
         let border_active = self.hover_feed_border || self.feed_drag.is_some();
         let (border_fg, border_flags) = if border_active {
-            (self.theme.accent, cell_flags::BOLD)
+            (self.theme.brand, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };

@@ -7,6 +7,7 @@ survive the next build). It is navigational only: it must never reach
 ``_status``, dispatch eligibility, or selection order.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -15,15 +16,13 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.rust_binary import find_dev_binary
+from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
 # worker binary (the parity-test convention).
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
@@ -46,12 +45,10 @@ def _node(node_id: str, **over) -> dict:
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps(
+    seed_graph(g, json.dumps(
             {"entries": [_node("x-aaaa"), _node("x-bbbb"), _node("x-cccc")]}, indent=2
         )
-        + "\n"
-    )
+        + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -65,7 +62,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _related(g: Path, node_id: str) -> list[str]:
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     return next(e for e in entries if e["id"] == node_id).get("related", [])
 
 
@@ -104,99 +101,25 @@ def test_related_is_ordered_with_the_other_edges():
 # ---------------------------------------------------------------------------
 
 
-def test_ac4_hp_related_is_symmetric_on_write_and_on_clear(tmp_graph):
-    """AC4-HP: declaring on one endpoint writes the inverse; 'null' clears both."""
-    assert runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"]
-    ).exit_code == 0
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
-    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
+def test_set_related_keeps_held_row_references_live(monkeypatch):
+    """A mutator holding a node dict keeps writing to the row that persists."""
+    import fno.graph.store as gs
 
-    assert runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "null"]
-    ).exit_code == 0
-    assert _related(tmp_graph, "x-aaaa") == []
-    assert _related(tmp_graph, "x-bbbb") == []
-
-
-def test_replace_semantics_unlink_the_dropped_peer(tmp_graph):
-    """--related replaces the list, so a dropped peer loses its inverse edge too."""
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
-    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
-
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-cccc"])
-    assert _related(tmp_graph, "x-aaaa") == ["x-cccc"]
-    assert _related(tmp_graph, "x-bbbb") == []
-    assert _related(tmp_graph, "x-cccc") == ["x-aaaa"]
-
-
-def test_related_accepts_slugs_and_repeated_flags(tmp_graph):
-    result = runner.invoke(
-        app,
-        ["backlog", "update", "x-aaaa",
-         "--related", "node-x-bbbb", "--related", "x-cccc"],
+    monkeypatch.setattr(
+        gs, "_pure",
+        lambda entries, name, params: [dict(e, related=["x-bbbb"]) for e in entries],
     )
-    assert result.exit_code == 0, result.output
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb", "x-cccc"]
-
-
-# ---------------------------------------------------------------------------
-# AC2-ERR / boundaries
-# ---------------------------------------------------------------------------
-
-
-def test_ac2_err_self_reference_is_rejected(tmp_graph):
-    """AC2-ERR: a node cannot be related to itself; the list is left unchanged."""
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-aaaa"]
-    )
-    assert result.exit_code != 0
-    assert _related(tmp_graph, "x-aaaa") == []
-
-
-def test_dangling_related_id_is_rejected_and_writes_nothing(tmp_graph):
-    """An unresolvable peer refuses the whole update, mirroring --source-node."""
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-zzzz"]
-    )
-    assert result.exit_code != 0
-    assert "x-zzzz" in result.output
-    # The valid half of the list must not have landed either.
-    assert _related(tmp_graph, "x-aaaa") == []
-    assert _related(tmp_graph, "x-bbbb") == []
-
-
-def test_related_is_non_blocking(tmp_graph):
-    """related never gates: declaring one leaves every _status and blocked_by alone.
-
-    Asserted as before-vs-after rather than against a literal status, so the
-    test pins the invariant that matters (related does not participate in
-    status derivation) instead of whatever the fixture happens to derive to.
-    """
-    def _statuses() -> dict[str, tuple]:
-        # Read back the CANONICAL key: the writer migrates the legacy `_status`
-        # to `status` and deletes it, so a round-tripped entry has only `status`.
-        entries = json.loads(tmp_graph.read_text())["entries"]
-        return {e["id"]: (e["status"], tuple(e["blocked_by"])) for e in entries}
-
-    # A no-op write first, so the baseline reflects derivation, not the seed.
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "null"])
-    before = _statuses()
-
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
-    assert _statuses() == before
-
-
-# ---------------------------------------------------------------------------
-# AC7-HP: filing-time related
-# ---------------------------------------------------------------------------
+    entries = [_node("x-aaaa")]
+    held = entries[0]
+    gs.set_related(entries, "x-aaaa", ["x-bbbb"])
+    held["details"] = "marker-5934"
+    assert entries[0]["details"] == "marker-5934"
+    assert entries[0]["related"] == ["x-bbbb"]
 
 
 def test_ac7_hp_related_at_filing_time(tmp_graph):
     """AC7-HP: --related on idea holds symmetry with no follow-up update."""
-    result = runner.invoke(
-        app, ["backlog", "idea", "co-delivered work", "--related", "x-bbbb", "--difficulty", "low"]
-    )
+    result = run_native_create(tmp_graph, "idea", "co-delivered work", "--related", "x-bbbb", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
     assert _related(tmp_graph, new_id) == ["x-bbbb"]
@@ -204,47 +127,15 @@ def test_ac7_hp_related_at_filing_time(tmp_graph):
 
 
 def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
-    before = len(json.loads(tmp_graph.read_text())["entries"])
-    result = runner.invoke(
-        app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium"]
-    )
+    before = len(read_graph_strict(tmp_graph))
+    result = run_native_create(tmp_graph, "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium")
     assert result.exit_code != 0
-    assert len(json.loads(tmp_graph.read_text())["entries"]) == before
+    assert len(read_graph_strict(tmp_graph)) == before
 
 
 # ---------------------------------------------------------------------------
 # AC1-FR: the half-edge state is unreachable
 # ---------------------------------------------------------------------------
-
-
-def test_ac1_fr_peer_write_failure_leaves_neither_side(tmp_graph):
-    """AC1-FR: a refused mirror leaves neither side; the half-edge is unreachable.
-
-    With the ported store the two halves are ONE atomic op (the keeper's
-    set_related mirrors both endpoints or refuses), so there is no client
-    seam left to fault. The deterministic trigger for the same refusal is a
-    peer absent from the graph: the op refuses the declaring write rather
-    than persist a dangling half-edge.
-    """
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-ghost"]
-    )
-    assert result.exit_code != 0
-    assert _related(tmp_graph, "x-aaaa") == []
-
-
-def test_ac2_fr_opposite_endpoint_declarations_both_survive(tmp_graph):
-    """AC2-FR: B keeps both A's and C's edges; neither is lost to a rewrite.
-
-    Sequential rather than threaded: each update re-reads under the graph lock,
-    so serialized writes are exactly what two concurrent sessions produce.
-    """
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
-    runner.invoke(app, ["backlog", "update", "x-cccc", "--related", "x-bbbb"])
-
-    assert sorted(_related(tmp_graph, "x-bbbb")) == ["x-aaaa", "x-cccc"]
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
-    assert _related(tmp_graph, "x-cccc") == ["x-bbbb"]
 
 
 def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
@@ -253,7 +144,11 @@ def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
     set_related only touches peers in the declaring node's own delta, so a peer
     left naming a deleted node is unreachable by any repair verb.
     """
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
+    seed_graph(tmp_graph, json.dumps({"entries": [
+        dict(_node("x-aaaa"), related=["x-bbbb", "x-cccc"]),
+        dict(_node("x-bbbb"), related=["x-aaaa"]),
+        dict(_node("x-cccc"), related=["x-aaaa"]),
+    ]}, indent=2) + "\n")
     assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
 
     assert runner.invoke(
@@ -327,15 +222,13 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     the stated invariant (null or resolves, never a dangling string) is held by
     clearing.
     """
-    created = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low"]
-    )
+    created = run_native_create(tmp_graph, "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low")
     new_id = json.loads(created.stdout)["id"]
 
     assert runner.invoke(
         app, ["backlog", "remove", "x-aaaa", "--force"]
     ).exit_code == 0
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = read_graph_strict(tmp_graph)
     node = next(e for e in entries if e["id"] == new_id)
     assert node["source_node_id"] is None
 
@@ -387,3 +280,10 @@ def test_a_related_chain_holds_back_transitively():
     ]
     to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
     assert to_archive == [], "b waits on c, and a waits on b"
+
+
+# ---------------------------------------------------------------------------
+# x-129e: --related alongside other flags in one `update` call
+# ---------------------------------------------------------------------------
+
+

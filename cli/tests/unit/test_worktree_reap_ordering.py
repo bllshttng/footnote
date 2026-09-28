@@ -149,9 +149,11 @@ def test_sweep_reap_is_reachable_at_all() -> None:
 def test_daemon_sweep_is_report_only() -> None:
     """A merged PR is external proof the work landed. A timer tick is not, so
     the daemon's sweep reports and the merge-triggered path removes."""
-    daemon = (REPO_ROOT / "crates" / "fno-agents" / "src" / "daemon.rs").read_text()
-    start = daemon.index("pub fn worktree_sweep(")
-    body = daemon[start : start + 2500]
+    module = (
+        REPO_ROOT / "crates" / "fno-agents" / "src" / "daemon" / "worktree_sweep.rs"
+    ).read_text()
+    start = module.index("pub fn worktree_sweep(")
+    body = module[start : start + 2500]
 
     assert "--apply" not in body
     assert '"report-only"' in body

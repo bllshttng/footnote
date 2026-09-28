@@ -6,6 +6,8 @@ mapped to the design's Failure Modes + Acceptance Criteria.
 """
 from __future__ import annotations
 
+from tests.fixtures.graph_seed import seed_graph
+
 from fno.graph.slug import (
     assign_unique_slug,
     derive_base_slug,
@@ -155,32 +157,28 @@ def test_format_handle_falls_back_to_hex_when_unslugged():
     assert format_handle({"id": "ab-1234abcd", "slug": None}) == "(ab-1234abcd)"
 
 
-# -- integration: locked_mutate_graph assigns slugs --------------------------
+# -- integration: commit_rows_via_store assigns slugs --------------------------
 
 
 def test_locked_mutate_assigns_slugs_to_all_nodes(tmp_path):
     """Every persisted mutation slugs both legacy and freshly-appended nodes,
     and a re-mutation does not rewrite the already-assigned handles."""
-    import json
-
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     p = tmp_path / "graph.json"
-    p.write_text(
-        json.dumps({"entries": [{"id": "ab-aaaaaaaa", "title": "Hello World"}]}) + "\n"
-    )
+    seed_graph(p, [{"id": "ab-aaaaaaaa", "title": "Hello World"}])
 
     def add_one(entries):
         entries.append({"id": "ab-bbbbbbbb", "title": "Second Node"})
         return entries
 
-    out = locked_mutate_graph(p, add_one)
+    out = commit_rows_via_store(p, add_one)
     by_id = {e["id"]: e for e in out}
     assert by_id["ab-aaaaaaaa"]["slug"] == "hello-world"
     assert by_id["ab-bbbbbbbb"]["slug"] == "second-node"
 
     # A later no-op mutation leaves the handles immutable.
-    out2 = locked_mutate_graph(p, lambda e: e)
+    out2 = commit_rows_via_store(p, lambda e: e)
     by_id2 = {e["id"]: e for e in out2}
     assert by_id2["ab-aaaaaaaa"]["slug"] == "hello-world"
     assert by_id2["ab-bbbbbbbb"]["slug"] == "second-node"

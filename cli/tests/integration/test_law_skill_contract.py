@@ -49,7 +49,7 @@ def test_beginner_example_has_no_shell_syntax() -> None:
     text = SKILL.read_text(encoding="utf-8")
     example = text.split("## Beginner example", 1)[1].split("##", 1)[0]
 
-    assert "/fno:law Merges belong to the operator" in example
+    assert "/fno:law Merges belong to the user" in example
     assert "bash" not in example.lower()
     assert "fno law" not in example
 

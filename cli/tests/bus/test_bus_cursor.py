@@ -142,3 +142,40 @@ def test_corrupt_cursor_file_treated_as_absent(bus):
     p.write_text("not json{{{", encoding="utf-8")
     # A corrupt cursor must not crash the scan; fail-open to "rescan retained".
     assert [m.body for m in scan_unread("me")] == ["msg-a"]
+
+
+# ---------------------------------------------------------------------------
+# x-5f26 AC1-ERR: a held bus read serves scan_unread without touching the log
+# ---------------------------------------------------------------------------
+
+def test_scan_unread_serves_a_held_read_without_touching_the_log(bus, monkeypatch):
+    from fno.bus import cursor as bus_cursor
+    from fno.bus import log as bus_log
+    from fno.bus.cursor import advance_cursor, scan_unread
+    from fno.bus.log import WITHDRAW_KIND, Envelope, append
+
+    m1 = _send("me", "before-cursor")
+    m2 = _send("me", "unseen")
+    _send("someone-else", "not mine")
+    retracted = _send("me", "retract me")
+    append(
+        Envelope.new(
+            from_="x",
+            to="me",
+            kind=WITHDRAW_KIND,
+            body=f"withdrawn: {retracted.id}",
+            meta={"withdraws": retracted.id},
+        )
+    )
+    advance_cursor("me", m1.id)
+
+    real = scan_unread("me")
+    assert [m.body for m in real] == ["unseen"]
+
+    held = list(bus_log.iter_messages())
+
+    def _refuse(*a, **k):
+        raise AssertionError("a held read must not re-read the log")
+
+    monkeypatch.setattr(bus_cursor, "iter_messages", _refuse)
+    assert [m.id for m in scan_unread("me", messages=held)] == [m2.id]

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - inject announcements
 # hooks/inject-announce.sh -- fleet announcements at a hook boundary.
 #
 # One announcement is ONE kind=announce bus line; every session reads it
@@ -13,6 +14,10 @@
 # block a session on announcement state.
 
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 command -v fno-agents >/dev/null 2>&1 || exit 0
 

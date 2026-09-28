@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - inject agent identity
 # SessionStart hook: inject `fno whoami` output as orientation context.
 #
 # Gives every fresh session an at-a-glance view of its operating stack
@@ -8,6 +9,10 @@
 # detail that disappears; this hook fires it automatically.
 
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 # Skip if fno is not installed - degrade silently rather than spam every
 # session with errors in projects that don't have the plugin.

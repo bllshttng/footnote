@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - guard target subagent lifecycle
 # SubagentStart/SubagentStop hook: git checkpoints around subagent execution
 # SubagentStart: stash uncommitted changes as a recovery point
 # SubagentStop: log completion, optionally verify build
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 STATE_FILE=".fno/target-state.md"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"

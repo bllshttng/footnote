@@ -6,6 +6,7 @@ refuses to write a stub, plus a redirect on the substitution-prone
 `fno do state init` bare bootstrap.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -556,7 +557,7 @@ def test_work_start_dispatch_reads_claimed_node(tmp_path, monkeypatch):
 
     node = {"id": "x-122a", "title": "lifecycle"}
     g = tmp_path / "graph.json"
-    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+    seed_graph(g, _json.dumps({"entries": [node]}))
 
     monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
     monkeypatch.setattr(_paths, "graph_json", lambda: g)
@@ -584,7 +585,7 @@ def test_work_start_dispatch_overlays_dispatch_pins(tmp_path, monkeypatch):
 
     node = {"id": "x-122a", "title": "lifecycle"}
     g = tmp_path / "graph.json"
-    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+    seed_graph(g, _json.dumps({"entries": [node]}))
 
     monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
     monkeypatch.setattr(_paths, "graph_json", lambda: g)
@@ -977,17 +978,15 @@ def _contained_graph(tmp_path, monkeypatch, *, owner="x-6320"):
     scope denominators, so the denominator gate at init must see it resolve; a
     placeholder path gets emptied at back-fill and the node reads as plan-less.
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("# plan\n", encoding="utf-8")
     plan_path = str(plan)
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": owner, "plan_path": plan_path, "status": "ready"},
         {"id": "x-261c", "plan_path": plan_path, "status": "ready",
          "contained_in": owner},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     return gp
 
@@ -1011,8 +1010,6 @@ def _init_env(tmp_path, monkeypatch):
 
 
 def _held_graph(tmp_path, monkeypatch):
-    import json
-
     plan = tmp_path / "held.md"
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
@@ -1023,21 +1020,10 @@ def _held_graph(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     gp = tmp_path / "graph-held.json"
-    gp.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-5a5c", "status": "ready", "plan_path": str(plan)},
-                    {
-                        "id": "x-1a2b",
-                        "status": "ready",
-                        "contained_in": "x-5a5c",
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    seed_graph(gp, {"entries": [
+        {"id": "x-5a5c", "status": "ready", "plan_path": str(plan)},
+        {"id": "x-1a2b", "status": "ready", "contained_in": "x-5a5c"},
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     return gp
 
@@ -1087,7 +1073,10 @@ def _unreadable_graph(tmp_path, monkeypatch):
     return gp
 
 
-def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("node", ["x-5a5c", "x47d8"])
+def test_target_init_refuses_named_node_when_graph_unreadable(
+    tmp_path, monkeypatch, node
+):
     """Round-12 finding 10: the resolver's fail-open swallowed an unreadable
     graph before the hold gate could refuse on it, so a named dispatch
     silently skipped the hold check exactly when nothing could prove the plan
@@ -1095,7 +1084,7 @@ def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypa
     _unreadable_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["do", "target", "init", "--input", "x-5a5c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", node])
     assert result.exit_code == 2, result.output
     assert "dispatch-hold-invalid" in result.output
     assert "backlog graph is unreadable" in result.output
@@ -1232,6 +1221,22 @@ def test_redirect_helper_ignores_non_contained_and_malformed_input():
 # ---------------------------------------------------------------------------
 
 
+def test_dispatch_node_resolves_dashless_literal_id():
+    """A dash-less literal id binds at the claim boundary like its dashed kin.
+
+    A config prefix with no separator once minted bare "<prefix><4hex>"
+    literals; resolution is format-agnostic everywhere else, so the dispatch
+    token shape must admit the literal and match it against the graph. An
+    all-hex-shaped token matches too (a letter-led prefix makes one); the
+    graph lookup, not the shape, decides identity.
+    """
+    assert target_cli._TARGET_NODE_TOKEN_RE.fullmatch("x4d12")
+    assert target_cli._TARGET_NODE_TOKEN_RE.fullmatch("a3f9c1d2")
+    assert not target_cli._TARGET_NODE_TOKEN_RE.fullmatch("4d12")  # digit-led stays out
+    entry = {"id": "x4d12", "title": "legacy id"}
+    assert target_cli._resolve_dispatch_node("x4d12", None, entries=[entry]) == entry
+
+
 def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
     """A plan held by a unit and its contained children is legal, not ambiguous.
 
@@ -1240,7 +1245,9 @@ def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
     one resolver, so the miss was doubled.
     """
     gp = _contained_graph(tmp_path, monkeypatch)
-    plan_path = json.loads(gp.read_text(encoding="utf-8"))["entries"][0]["plan_path"]
+    from fno.graph.store import read_graph_strict
+
+    plan_path = read_graph_strict(gp)[0]["plan_path"]
     node = target_cli._resolve_dispatch_node(None, plan_path)
     assert node is not None and node["id"] == "x-6320"
 
@@ -1251,27 +1258,23 @@ def test_two_uncontained_holders_stay_ambiguous(tmp_path, monkeypatch):
     Change 1.1 refuses to CREATE this state; a graph that predates it must not
     have one of the two picked silently.
     """
-    import json
-
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": "/p/one.md", "status": "ready"},
         {"id": "x-8a4f", "plan_path": "/p/one.md", "status": "ready"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
 
 
 def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypatch):
     """No delivery unit on the plan at all -> still a contained node."""
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
@@ -1333,15 +1336,13 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
     and skipped the redirect - the exact second-PR state the guard exists for.
     They all name one owner, so the destination is unambiguous.
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
         {"id": "x-3f8d", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
@@ -1353,13 +1354,11 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
 
 def test_contained_nodes_naming_different_owners_stay_ambiguous(tmp_path, monkeypatch):
     """Two owners means no single destination; do not pick one."""
-    import json
-
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
         {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-8a4f"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
 
@@ -1370,16 +1369,14 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     "run /fno:target <done node>" reads as a broken redirect rather than as
     "this already shipped".
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": str(plan), "pr_number": 700,
          "completed_at": "2026-07-29T00:00:00+00:00"},
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     _init_env(tmp_path, monkeypatch)
 
@@ -1467,18 +1464,16 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     Named separately from the shipped case because the remedy differs: this is
     stale containment that wants clearing, not work that already landed.
     """
-    import json
-
     owner_plan = tmp_path / "one.md"
     child_plan = tmp_path / "two.md"
     owner_plan.write_text("---\nstatus: ready\n---\n")
     child_plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": str(owner_plan), "superseded_by": "x-9999",
          "deferred_at": "2026-07-29T00:00:00+00:00"},
         {"id": "x-261c", "plan_path": str(child_plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
@@ -1689,7 +1684,7 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
     row = SimpleNamespace(cwd=str(wt), harness_session_id="s-1", harness="claude")
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
-        "fno.worktree_reapable.reapable",
+        "fno.worktree_gate.reapable_receipt",
         lambda p: SimpleNamespace(reapable=False, reason="dirty", detail=""),
     )
     facts = SimpleNamespace(last_event_epoch=1.0, last_role="assistant", last_text="x")
@@ -1709,3 +1704,22 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
     assert calls["quiet"] == QUIET_AFTER_S
     calls["done"] = True
     assert target_cli._classify_worktree_occupancy(wt)[0] == "available"
+
+
+def test_force_supersede_dispatch_node_records_its_reason(monkeypatch):
+    """The retro force-closer closes with a note, not a bare force.
+
+    The store refuses an evidence-less close, so the reason must ride as
+    the completion note for an addressed retro node to close at all.
+    """
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _run)
+    assert target_cli._force_supersede_dispatch_node("x-retro", "addressed upstream")
+    assert calls == [
+        ["fno", "backlog", "done", "x-retro", "--note", "addressed upstream"]
+    ]

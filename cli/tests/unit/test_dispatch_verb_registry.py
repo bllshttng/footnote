@@ -79,8 +79,8 @@ def test_descriptor_session_phase_parses_and_defaults_absent():
     """x-007c: the descriptor carries the row phase an outside verb's worker
     is stamped with; unset stays None so the spawn door keeps its refusal."""
     assert REG["/security-audit"].session_phase is None
-    d = DispatchVerbDescriptor(invocation="/marketing", session_phase="do")
-    assert d.session_phase == "do"
+    d = DispatchVerbDescriptor(invocation="/marketing", session_phase="execute")
+    assert d.session_phase == "execute"
 
 
 def _spawn_args(**over) -> NodeSpawnArgs:
@@ -101,8 +101,8 @@ def test_node_spawn_argv_carries_the_declared_phase():
     """A registry verb's declared phase rides the spawn argv: the door refuses
     an unlabeled --node spawn, so the builder is the one place the label is
     attached for every dispatching caller."""
-    argv = node_spawn_argv(_spawn_args(session_phase="do"), cwd="/w")
-    assert argv[argv.index("--session-phase") + 1] == "do"
+    argv = node_spawn_argv(_spawn_args(session_phase="execute"), cwd="/w")
+    assert argv[argv.index("--session-phase") + 1] == "execute"
     assert argv[argv.index("--node") + 1] == "x-1"
 
 

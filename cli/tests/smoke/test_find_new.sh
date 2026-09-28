@@ -8,7 +8,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/.fno"
-echo '{"entries": []}' > "$TMP/.fno/graph.json"
+printf '{"entries": []}\n' | uv run python tests/fixtures/graph_seed.py "$TMP/.fno/graph.json"
 
 export HOME="$TMP"
 
@@ -19,19 +19,31 @@ if [[ ! "$new_id" =~ ^ab-[0-9a-f]{8}$ ]]; then
   exit 1
 fi
 
-# Entry actually landed in graph.json
-count=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-print(sum(1 for e in d['entries'] if e['id'] == '$new_id'))
+# Entry actually landed in the store (graph.json is a fold-on-open seed)
+count=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+print(sum(1 for e in read_graph_strict('$TMP/.fno/graph.json') if e['id'] == '$new_id'))
 ")
 if [[ "$count" != "1" ]]; then
   echo "FAIL: expected 1 entry with id $new_id, got $count"
   exit 1
 fi
 
+# `fno backlog find` is native-owned since the find port: the Python leg is
+# deleted, so the find steps drive the fno-agents binary through the same
+# resolver the parity tests use.
+FIND_BIN=$(uv run python -c "
+from fno.rust_binary import find_dev_binary, resolve_binary
+binary = find_dev_binary() or resolve_binary()
+print(str(binary) if binary else '')
+")
+if [[ -z "$FIND_BIN" ]]; then
+  echo "SKIP: no fno-agents dev build (run: cargo build --manifest-path crates/fno-agents/Cargo.toml)"
+  exit 0
+fi
+
 # fno backlog find resolves the entry
-find_out=$(uv run fno-py backlog find "research task" 2>/dev/null)
+find_out=$("$FIND_BIN" backlog find "research task" 2>/dev/null)
 if ! echo "$find_out" | grep -q "$new_id"; then
   echo "FAIL: fno backlog find did not return $new_id:"
   echo "$find_out"
@@ -39,7 +51,7 @@ if ! echo "$find_out" | grep -q "$new_id"; then
 fi
 
 # fno backlog find --json returns valid JSON array
-json_out=$(uv run fno-py backlog find "research task" --json 2>/dev/null)
+json_out=$("$FIND_BIN" backlog find "research task" --json 2>/dev/null)
 python3 -c "
 import json, sys
 data = json.loads('''$json_out''')
@@ -49,7 +61,7 @@ assert data[0]['id'] == '$new_id', f\"expected $new_id, got {data[0]['id']}\"
 
 # fno backlog find for nonexistent exits 1
 set +e
-uv run fno-py backlog find nonexistent-xyzzy-smoke >/dev/null 2>&1
+"$FIND_BIN" backlog find nonexistent-xyzzy-smoke >/dev/null 2>&1
 find_rc=$?
 set -e
 if [[ "$find_rc" -ne 1 ]]; then
@@ -74,10 +86,9 @@ if [[ ! "$force_id" =~ ^ab-[0-9a-f]{8}$ ]]; then
   exit 1
 fi
 # Confirm domain is the verbatim "res", not "research"
-dom=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == '$force_id')
+dom=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+e = next(x for x in read_graph_strict('$TMP/.fno/graph.json') if x['id'] == '$force_id')
 print(e['domain'])
 ")
 if [[ "$dom" != "res" ]]; then

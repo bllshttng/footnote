@@ -299,6 +299,18 @@ _SPAWN_TIMEOUT_GRACE = 30.0
 # the dispatch (never the scan) and let the next tick re-decide.
 _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
+# one ritual completion at 96s vs 62 timeouts (2026-09-20/21): a merge needs 100s.
+_RITUAL_FLOOR_S = 100.0
+
+
+def _admission_refused_rcs() -> tuple[int, ...]:
+    """The admission gate's own refusal codes, imported lazily so the
+    harness layer stays off this module's launchd hot path. A refusal is
+    not a failed attempt: is_error=False carries that upstream so the
+    caller never burns a retry on a fire that never started."""
+    from fno.agents.spawn_gate import EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE
+
+    return (EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE)
 
 
 def fire_skill(
@@ -393,6 +405,11 @@ def fire_skill(
         return DispatchResult(ok=False, rc=-1, is_error=True, raw="")
 
     raw = result.stdout or ""
+
+    # The admission gate's own refusal codes: a durable stop answered the
+    # fire, not a failed attempt.
+    if result.returncode in _admission_refused_rcs():
+        return DispatchResult(ok=False, rc=result.returncode, is_error=False, raw=raw)
 
     if result.returncode != 0:
         log.warning(
@@ -506,6 +523,24 @@ def _ritual_timeout() -> float:
     if left is None:
         return 300.0
     return min(300.0, left - 10)
+
+
+def _gh_budget_backoff_left() -> float:
+    """Seconds left on the fleet gh budget's backoff; 0.0 when free or unreadable."""
+    try:
+        from fno.rust_binary import verb_call
+        answer = verb_call("fleet-incident", {"op": "status"}, timeout=5)
+        return max(0.0, float((answer or {}).get("backoff_remaining_s") or 0))
+    except Exception:  # noqa: BLE001 - the budget protects the fleet, not the tick
+        return 0.0
+
+
+#: Partial-work notes a phase body writes as it runs (the scan loop writes
+#: "scanned=N of M" per rich read), so a deadline cut hands back what the
+#: phase did instead of evaporating with its locals. The tick's _run_phase
+#: clears the phase's entry before each run and reads it on the cut path;
+#: module-level because the alarm can fire anywhere inside a body.
+SCAN_PROGRESS: dict[str, str] = {}
 
 
 def tick(
@@ -679,22 +714,23 @@ def _run_tick(
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
     from fno.graph._reconcile import ReconcileError
-    from fno.graph.api import wire_rows
     from fno.paths import graph_json as default_graph_json
     from fno.pr_watch import decide
+    from fno.pr_watch._king_wake import graph_entries
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
-    set_tick_phase("discover")
-    from fno.tracker import active_backend_name
+    set_tick_phase("sweep:discover")
 
     # PR discovery needs the done-at-PR-green grace window (recently closed
     # nodes still watched through merge), which list_open() cannot serve -
     # closed items are outside its contract by design. An external tracker
     # backend has no equivalent yet, so this tick degrades to "nothing to
     # sweep" rather than reading the wrong store (mirrors _catchup_roots'
-    # existing no-graph degrade for the same daemon).
-    entries = wire_rows(path=gpath) if active_backend_name() == "graph" and gpath.exists() else []
+    # existing no-graph degrade for the same daemon). graph_entries is the
+    # tick's one ident-keyed memo: sweep discovery and king_wake share a
+    # single real read of the 15 MB store instead of queueing on it twice.
+    entries = graph_entries(gpath)
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)
@@ -744,7 +780,7 @@ def _run_tick(
     query_keys = batch_keys | candidate_keys
     sweep_failures = 0
     batch_states: dict[str, str] = {}
-    set_tick_phase("sweep")
+    set_tick_phase("sweep:listing")
     if query_keys:
         try:
             # The seam returns (states, sweep_failures): a swallowed repo
@@ -804,26 +840,31 @@ def _run_tick(
             if isinstance(row, dict):
                 row["last_seen_state"] = current
 
-    # Order after the sweep so the listing's answer can lead the queue: OPEN
-    # candidates first (a merge among them is what the ritual is for), then
-    # least-recently-read (cache cursor, else the delivery record's; missing
-    # stamp first), discovery order breaking ties. The dispatch loop stamps
-    # each read, so a budget break resumes where the last tick stopped.
+    # Order after the sweep: OPEN candidates lead, then healthy rows by
+    # least-recently-read, then read-failed rows WITHIN their OPEN-ness
+    # group - a cross-group sort sinks OPEN rows below the wall in an outage.
+    # Discovery order breaks ties.
     def _poll_order(indexed):
         idx, cand = indexed
         try:
             key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
         except ValueError:
-            return (2, "", idx)
+            return (2, 1, "", idx)
         head = 0 if batch_states.get(key) == "OPEN" else 1
         row = state.get(key)
-        stamp = row.get("last_polled_at") if isinstance(row, dict) else None
-        if not (isinstance(stamp, str) and stamp):
-            drec = delivery_state.get(key)
-            stamp = drec.get("last_polled_at") if isinstance(drec, dict) else None
-            if not (isinstance(stamp, str) and stamp):
-                stamp = ""
-        return (head, stamp, idx)
+        drec = delivery_state.get(key)
+        failed = isinstance(row, dict) and row.get("last_seen_state") == "UNKNOWN"
+        failed = failed or isinstance(drec, dict) and drec.get("last_read_failed") is True
+        stamps = [
+            value
+            for value in (
+                row.get("last_polled_at") if isinstance(row, dict) else None,
+                drec.get("last_polled_at") if isinstance(drec, dict) else None,
+            )
+            if isinstance(value, str) and value
+        ]
+        stamp = max(stamps, default="")
+        return (head, int(failed), stamp, idx)
 
     candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
 
@@ -832,6 +873,13 @@ def _run_tick(
     # Rich reads completed: separates "the scan reached nothing" from "the
     # scan found nothing" (scanned=0 alone cannot).
     merge_scan_scanned = 0
+    read_failures = 0
+
+    def _scan_note() -> str:
+        note = f"scanned={merge_scan_scanned} of {len(candidates)}"
+        if read_failures:
+            note += f" read_failed={read_failures}"
+        return note
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -856,7 +904,7 @@ def _run_tick(
             quota_reset=quota_reset,
         )
 
-    set_tick_phase("dispatch")
+    set_tick_phase("sweep:dispatch")
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
@@ -880,17 +928,14 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
-        # Terminal memo: the listing called this candidate NOT_OPEN and a past
-        # tick already recorded the outcome (handled) or parked it. The rich
-        # read would return the same terminal state again, so skip it. A
-        # candidate the listing now calls OPEN (reopened) falls through and
-        # gets the read.
+        # Terminal memo: a past tick recorded the outcome (handled) or parked
+        # it; the rich read would return the same answer. A merged PR never
+        # reopens, so its memo holds even when the listing cannot answer.
         drec = delivery_state.get(key)
-        if (
-            batch_states.get(key) == "NOT_OPEN"
-            and isinstance(drec, dict)
-            and (drec.get("handled") or drec.get("parked"))
-        ):
+        handled = drec.get("handled") if isinstance(drec, dict) else None
+        parked = isinstance(drec, dict) and bool(drec.get("parked"))
+        listing_terminal = batch_states.get(key) in ("NOT_OPEN", "MERGED", "CLOSED")
+        if handled == "MERGED" or ((handled == "CLOSED" or parked) and listing_terminal):
             skipped += 1
             continue
 
@@ -913,29 +958,35 @@ def _run_tick(
             continue
 
         try:
-            # Stamp the poll cursor on the delivery record before the read:
-            # a merged candidate has no cache row to stamp, so this is what
-            # moves it to the back of the order. persist() in finally carries
-            # the stamp across a budget break.
-            if batch_states.get(key) == "NOT_OPEN":
-                drec = delivery_state.get(key)
-                drec = drec if isinstance(drec, dict) else {}
-                drec["last_polled_at"] = now_iso
-                delivery_state[key] = drec
+            # The sidecar keeps attempt cursors when the phase alarm cuts.
+            drec = delivery_state.get(key)
+            drec = drec if isinstance(drec, dict) else {}
+            drec["last_polled_at"] = now_iso
+            delivery_state[key] = drec
 
             # Fetch current state
             try:
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
+                drec = delivery_state.get(key)
+                if isinstance(drec, dict):
+                    drec.pop("last_read_failed", None)
                 swept.add(key)
                 merge_scan_scanned += 1
+                SCAN_PROGRESS["sweep"] = _scan_note()
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
                 failed.add(key)
+                read_failures += 1
+                SCAN_PROGRESS["sweep"] = _scan_note()
                 stale = state.get(key)
                 if isinstance(stale, dict):
                     stale["last_seen_state"] = "UNKNOWN"
+                drec = delivery_state.get(key)
+                drec = drec if isinstance(drec, dict) else {}
+                drec["last_read_failed"] = True
+                delivery_state[key] = drec
                 continue
 
             entry = store.get(key)
@@ -964,6 +1015,10 @@ def _run_tick(
                     entry["last_seen_state"] = obs.state
                     if obs.state in ("MERGED", "CLOSED"):
                         _drop_cached_terminal(state, dropped, key, obs.state)
+                # No checkout means no tick can ever act on the candidate;
+                # only a live claim is transient and keeps future reads.
+                if skip_reason == "no-checkout" and obs.state in ("MERGED", "CLOSED"):
+                    _mark_handled(delivery_state, key, obs.state)
                 continue
 
             # First-seen baseline: record state without firing
@@ -994,6 +1049,8 @@ def _run_tick(
                     "last_polled_at": now_iso,
                 }
             if entry is None:
+                if obs.state == "CLOSED":
+                    _mark_handled(delivery_state, key, "CLOSED")
                 continue
 
             # Suppression only. A parked entry synthesized from the delivery
@@ -1021,12 +1078,10 @@ def _run_tick(
             )
 
             if decision.kind == "noop":
-                # A merged candidate whose ritual already ran is terminal; the
-                # memo is what stops the next tick re-reading it. Not
-                # merge-not-ready: that one retries by design.
-                if decision.reason == "merge-already-dispatched" and obs.state in (
-                    "MERGED",
-                    "CLOSED",
+                # First sight ends a merged candidate's watch: the ritual ran,
+                # or readiness - repo-level config, never flips per PR - cannot.
+                if decision.reason in ("merge-already-dispatched", "merge-not-ready") and (
+                    obs.state in ("MERGED", "CLOSED")
                 ):
                     _mark_handled(delivery_state, key, obs.state)
 
@@ -1038,8 +1093,14 @@ def _run_tick(
                     _mark_handled(delivery_state, key, obs.state)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
-            elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
+            elif (
+                decision.kind in ("merge", "review")
+                and _ritual_timeout() >= (
+                    _RITUAL_FLOOR_S if decision.kind == "merge" else _FIRE_FLOOR_S
+                )
+            ):
                 dispatch_ok = False
+                refused = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
                     _finish_queue_merge(cand.repo_dir, pr, emit)
@@ -1103,6 +1164,7 @@ def _run_tick(
                 else:
                     result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
+                    refused = not result.ok and not result.is_error
 
                 if dispatch_ok:
                     acted += 1
@@ -1116,6 +1178,13 @@ def _run_tick(
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
+                elif refused:
+                    # Not an attempt: no retry burned. An open PR re-fires on
+                    # the next clear tick; a terminal one leaves the watch set.
+                    emit("pr_watch_skipped", {"pr": pr, "reason": "admission-refused"})
+                    skipped += 1
+                    if obs.state in ("MERGED", "CLOSED"):
+                        _mark_handled(delivery_state, key, obs.state)
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
                     try:
@@ -1123,24 +1192,18 @@ def _run_tick(
                     except (TypeError, ValueError):
                         retries = 1
                     entry["retries"] = retries
+                    emit("pr_watch_dispatch_failed", {"pr": pr, "retries": retries})
                     if obs.state in ("MERGED", "CLOSED"):
-                        delivery_state[key] = {"retries": retries, "parked": None}
+                        _mark_handled(delivery_state, key, obs.state)
                     else:
                         store.set(key, entry)
-                    emit("pr_watch_dispatch_failed", {"pr": pr, "retries": retries})
-                    if retries >= max_retries:
-                        entry["parked"] = "retries-exhausted"
-                        if obs.state in ("MERGED", "CLOSED"):
-                            delivery_state[key] = {
-                                "retries": retries,
-                                "parked": "retries-exhausted",
-                            }
-                        else:
+                        if retries >= max_retries:
+                            entry["parked"] = "retries-exhausted"
                             store.set(key, entry)
-                        emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
-                        _notify_parked_pr(
-                            notify, pr, slug, retries, "dispatch"
-                        )
+                            emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
+                            _notify_parked_pr(
+                                notify, pr, slug, retries, "dispatch"
+                            )
 
             elif decision.kind in ("merge", "review"):
                 # No room for one bounded fire in the phase slice: skip the
@@ -1204,6 +1267,10 @@ def _run_tick(
     )
 
 
+# A real merge took about 120s, and head attempts ran 115-128s under load.
+_MERGE_FLOOR_S = 150.0
+
+
 def run_execute_queue(
     queue: list,
     *,
@@ -1213,13 +1280,12 @@ def run_execute_queue(
     max_retries: int,
     claim: Any,
 ) -> dict[str, int]:
-    """Drain the merge phase's granted rows; returns executed, held, failed and
-    skipped counts that sum to len(queue). Contract: docs/architecture/pr-watch-merge-phase.md."""
+    """Drain granted rows; executed, held, failed, skipped and budget sum to len(queue)."""
     from fno.pr import _merge
     from fno.pr_watch._state import WatermarkStore
 
     holder = f"pr-watch-merge:{os.getpid()}"
-    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 0}
+    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 0, "budget": 0}
 
     def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
         emit("merge_grant_execution",
@@ -1231,6 +1297,7 @@ def run_execute_queue(
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
+        set_tick_phase("merge:prepare")
         try:
             claim.acquire_pr_lock(pr_lock_key, holder)
         except Exception:
@@ -1246,11 +1313,16 @@ def run_execute_queue(
                 continue
             why = ("merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
                    else "not-open" if entry.get("last_seen_state") == "NOT_OPEN"
-                   else "execute-budget" if left is not None and left < max(_FIRE_FLOOR_S, slowest)
+                   else "execute-budget" if left is not None and left < max(_MERGE_FLOOR_S, slowest)
                    else None)
             if why:
                 emit("pr_watch_skipped", {"pr": pr, "reason": why})
-                counts["skipped"] += 1
+                counts["budget" if why == "execute-budget" else "skipped"] += 1
+                continue
+            if (backoff_left := _gh_budget_backoff_left()) > 10.0:
+                _grant("held", pr, cand, grant_fields,
+                       reason=f"gh budget backoff {backoff_left:.0f}s left")
+                counts["held"] += 1
                 continue
             try:
                 prior_retries = int(entry.get("retries") or 0)
@@ -1283,10 +1355,25 @@ def run_execute_queue(
                 # Retryable, no failure budget; an already-terminal PR never retries.
                 counts["held"] += 1
                 entry["retries"] = prior_retries
-                if reason.startswith(_merge.ALREADY_TERMINAL):
+                bare = _merge.reason_after_outcome(reason)
+                # Terminal answers: decide's wording and the retired pre-gate's.
+                if (bare.startswith(_merge.ALREADY_TERMINAL)
+                        or "already merged" in bare or "already closed" in bare):
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
+                if bare.startswith("checks are red"):
+                    # A red hold never clears by retrying: the healer or the
+                    # worker owns the next push, so park with the why instead
+                    # of re-running the whole merge chain every tick. The park
+                    # sweep resumes the row on the next head change.
+                    entry["parked"] = "checks-red"
+                    store.set(key, entry)
+                    emit("pr_watch_parked", {"pr": pr, "reason": "checks-red"})
+                    _notify_parked_pr(
+                        notify, pr, cand.repo_slug, prior_retries,
+                        "durable-grant merge",
+                    )
             else:
                 counts["failed"] += 1
                 _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)
@@ -1428,7 +1515,10 @@ def _default_read_pr_state(
     """
     from fno.pr_watch._discover import read_pr_state
 
-    return read_pr_state(candidate, reviewers=reviewers, timeout_s=timeout_s)
+    # never outlive the slice: the alarm would cut the post-loop persist.
+    return read_pr_state(
+        candidate, reviewers=reviewers, timeout_s=min(timeout_s, max(1.0, _ritual_timeout())),
+    )
 
 
 def _noop_read_state(

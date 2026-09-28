@@ -5,8 +5,6 @@ model: sonnet
 color: magenta
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]
 disallowedTools: ["Task", "WebSearch", "WebFetch", "NotebookEdit"]
-skills:
-  - impeccable
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

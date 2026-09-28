@@ -46,11 +46,12 @@
 //! scalar-session-id dedup, first-writer-wins stamp, filename-keyed handoff).
 //!
 //! The proven Python helpers (`fno.cost._session_cost`, `fno.cost._register`,
-//! `fno.plan._stamp`, all in-package modules run via `python3 -m`) do the
-//! cost/dedup/flock/stamp work; this verb is a thin orchestrator (Locked
-//! Decision 6 - avoids the Python->Rust byte-parity trap), so the shim keeps
-//! its Rust-only dependency surface (Domain Pitfall).
+//! both in-package modules run via `python3 -m`) do the cost/dedup/flock work;
+//! the stamp is the in-process plan-doc writer. This verb is a thin
+//! orchestrator (Locked Decision 6 - avoids the Python->Rust byte-parity
+//! trap), so the shim keeps its Rust-only dependency surface (Domain Pitfall).
 
+use crate::finalize_run_summary;
 use crate::loopcheck::{emit_to_both, now_rfc3339_utc};
 use crate::run_outcome::classify_legacy;
 use serde_json::{json, Value};
@@ -129,14 +130,14 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DoneAwaitingReview|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DoneAwaitingReview|DonePlanned|NoWork|Budget|NoProgress|HeldOnQuestion|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 
 /// The three manifest fields finalize needs itself (everything else is read by
 /// the shelled Python helpers from the same manifest path).
 #[derive(Debug, Default)]
-struct ManifestFields {
+pub(crate) struct ManifestFields {
     /// Target-minted session id: idempotency key, handoff filename, event data.
     session_id: Option<String>,
     /// Canonical target-minted id, retained separately so it wins regardless of
@@ -149,7 +150,7 @@ struct ManifestFields {
     /// Feature title for the handoff header.
     input: Option<String>,
     /// Backlog node id (lives in the manifest BODY, below the frontmatter).
-    graph_node_id: Option<String>,
+    pub(crate) graph_node_id: Option<String>,
     /// Harness (conversation) session id captured at init: the do-stamp's
     /// identity-continuity input, passed through to the Python primitive.
     harness_session_id: Option<String>,
@@ -164,14 +165,15 @@ struct ManifestFields {
     cross_project: bool,
     /// Merge posture resolved by init (config folded with this run's modifiers,
     /// where every refusal outranks every grant). Gates arming GitHub's native
-    /// auto-merge at a green terminal. `None` = the key was absent.
-    auto_merge_approved: Option<bool>,
+    /// auto-merge at a green terminal. `None` = the key was absent. Pub(crate):
+    /// loopcheck's delegated-merge park reads it beside the source.
+    pub(crate) auto_merge_approved: Option<bool>,
     /// Which input set the posture: config | flag-no-merge |
     /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
     /// surfaced as `unknown`, never guessed. No longer advisory:
     /// `env-target-auto-merge` on an approved run satisfies the standing
     /// config arm on its own, exactly as init folded it and the docs promise.
-    auto_merge_source: Option<String>,
+    pub(crate) auto_merge_source: Option<String>,
     /// The run's node claim, written to the manifest body by init when it
     /// claimed `node:<id>`. The cancel settle releases it with
     /// `--stamp-do`, closing the do row the session's acquire opened.
@@ -210,7 +212,7 @@ fn ends_quoted_scalar(line: &str) -> bool {
 /// Scan the WHOLE manifest (frontmatter AND body) for the keys we need.
 /// `graph_node_id`/`target_claim_*` live below the closing `---`, so a
 /// frontmatter-only parse (like loop-check's) would miss them.
-fn parse_manifest_fields(content: &str) -> ManifestFields {
+pub(crate) fn parse_manifest_fields(content: &str) -> ManifestFields {
     let mut m = ManifestFields::default();
     // Init writes the run's raw argument as `input: "<...>"` (init:839), so a
     // MULTI-LINE argument spills real newlines into the manifest and every
@@ -343,15 +345,21 @@ fn canonical_session_id(m: &ManifestFields) -> Option<String> {
 /// first and then ships within the same session still runs its ship
 /// side-effects on the ship fire (the lockout bug, sigma-review HIGH).
 fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> {
-    let content = fs::read_to_string(project_events).ok()?;
+    crate::event_store::import_all(project_events).ok()?;
+    let rows = crate::event_store::query_events(
+        project_events,
+        &crate::event_store::EventQuery {
+            types: vec!["session_finalized".to_string()],
+            ..Default::default()
+        },
+    )
+    .ok()?;
     let mut seen = None;
-    for line in content.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
+    for row in rows {
+        let Ok(val) = serde_json::from_str::<Value>(&row.line) else {
             continue;
         };
-        if val.get("type").and_then(|v| v.as_str()) != Some("session_finalized")
-            || val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id)
-        {
+        if val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id) {
             continue;
         }
         let ship = val
@@ -364,143 +372,6 @@ fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> 
         seen = Some(false);
     }
     seen
-}
-
-// ── a2a status-breakpoint run_summary ──────────────────────────────
-
-/// Payload cap for the run_summary `data` object (the schema's
-/// `limits.max_data_bytes`, which the daemon EventEmitter also enforces).
-/// run_summary is lean by construction, but honoring the cap keeps the Rust
-/// path's behavior identical to the emitter.
-const RUN_SUMMARY_DATA_CAP: usize = 500;
-
-/// Count the run's task ticks in events.jsonl. Correlates on the envelope-level
-/// `run` (the target-run id), so a co-located second run's events never mix in.
-/// tasks_failed counts task_done events whose outcome is FAILED - the gap
-/// (tasks_started > tasks_done) is what exposes a crashed executor (AC2-FR).
-fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
-    use std::io::BufRead;
-    let (mut started, mut done, mut failed) = (0u64, 0u64, 0u64);
-    // Stream line-by-line and reuse one buffer: events.jsonl grows to the
-    // rotation cap, so reading it whole would balloon memory (gemini review).
-    if let Ok(file) = fs::File::open(project_events) {
-        let mut reader = std::io::BufReader::new(file);
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if v.get("run").and_then(|r| r.as_str()) == Some(run) {
-                    match v.get("type").and_then(|t| t.as_str()) {
-                        Some("task_started") => started += 1,
-                        Some("task_done") => {
-                            done += 1;
-                            if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
-                                failed += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            line.clear();
-        }
-    }
-    (started, done, failed)
-}
-
-/// Append a pre-built extended envelope through the shared Branch-A mutex.
-/// Non-fatal: a write failure logs and returns, never wedging finalize.
-fn append_envelope(path: &Path, envelope: &Value) {
-    if let Err(error) =
-        crate::claims::append_event_line(path, envelope, std::time::Duration::from_secs(2))
-    {
-        eprintln!(
-            "finalize: run_summary write to {} failed: {error}",
-            path.display()
-        );
-    }
-}
-
-/// Build + emit the run_summary terminal event to both event logs. Best-effort
-/// throughout: emission never changes the exit code or holds session_finalized.
-#[allow(clippy::too_many_arguments)]
-fn emit_run_summary(
-    project_events: &Path,
-    global_events: &Path,
-    run: &str,
-    node: Option<&str>,
-    ship: bool,
-    reason: &str,
-    pr_url: Option<&str>,
-) {
-    let (started, done, failed) = count_run_tasks(project_events, run);
-    // Terminal reason -> return-contract outcome: a ship terminal is SUCCESS
-    // (DONE_WITH_CONCERNS if any task failed); a non-ship terminal (Budget /
-    // NoProgress / Interrupted) is FAILED.
-    let outcome = if !ship {
-        "FAILED"
-    } else if failed > 0 {
-        "DONE_WITH_CONCERNS"
-    } else {
-        "SUCCESS"
-    };
-    let mut data = json!({
-        "tasks_started": started,
-        "tasks_done": done,
-        "tasks_failed": failed,
-        "termination_reason": reason,
-    });
-    if let Some(url) = pr_url {
-        data["pr_url"] = json!(url);
-    }
-    // Honor the payload cap (AC2-EDGE, Rust path): oversized data -> the small
-    // meta-event, so an auditor sees the drop rather than a silently huge line.
-    let payload_len = serde_json::to_string(&data).map(|s| s.len()).unwrap_or(0);
-    if payload_len > RUN_SUMMARY_DATA_CAP {
-        data = json!({"intended_kind": "run_summary", "size": payload_len});
-    }
-    let mut env = json!({
-        "ts": now_rfc3339_utc(),
-        "v": 1,
-        "type": "run_summary",
-        "source": "target",
-        "run": run,
-        "outcome": outcome,
-        "data": data,
-    });
-    if let Some(n) = node {
-        env["node"] = json!(n);
-    }
-    append_envelope(project_events, &env);
-    if project_events != global_events {
-        append_envelope(global_events, &env);
-    }
-}
-
-/// Push leg for run_summary: notify the parent handle. run_summary
-/// emits natively above, so the push shells the Python resolver (`fno doctor event
-/// push-parent`) rather than reimplementing registry lookup + mail in Rust.
-/// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
-/// events.jsonl line already landed independently (AC1-FR). `fno` (not a bare
-/// interpreter) is safe to shell - a PATH miss just skips.
-fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
-    let mut cmd = Command::new("fno");
-    cmd.args([
-        "doctor",
-        "event",
-        "push-parent",
-        "--type",
-        "run_summary",
-        "--run",
-        run,
-        "--reason",
-        reason,
-    ]);
-    if let Some(n) = node {
-        cmd.args(["--node", n]);
-    }
-    if let Err(e) = cmd.output() {
-        eprintln!("finalize: run_summary parent push skipped (non-fatal): {e}");
-    }
 }
 
 // ── public entry ────────────────────────────────────────────────────────────
@@ -594,7 +465,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // early-return here and never reach the always-run tail. A session that
         // hits Budget and then resumes to DoneAwaitingMerge would silently lose
         // its do stamp - the same "correct wiring, missing coverage" failure this
-        // backstop exists to fix. Everything downstream is idempotent.
+        // backstop exists to fix. Ledger, stamps and handoff are idempotent;
+        // the run_summary emit and push are deduped by run and reason.
         Some(false) if !ship && !predicates.do_stamp_terminal => {
             eprintln!(
                 "finalize: session {session_id} ledger already recorded (non-ship); early-return"
@@ -666,7 +538,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
             let do_graduate = predicates.graduate && (!m.cross_project || expected.is_some());
-            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
+            match stamp_and_graduate(
+                &cwd,
+                &plan,
+                &session_id,
+                expected,
+                do_graduate,
+                None,
+                &project_events,
+            ) {
                 Ok(()) => stamped = true,
                 Err(step) => {
                     eprintln!("finalize: {step} failed");
@@ -753,6 +633,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
                         expected,
                         do_graduate,
                         Some(&receipt.uri),
+                        &project_events,
                     ) {
                         Ok(()) => stamped = true,
                         Err(step) => failed.push(step),
@@ -887,16 +768,26 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
     // PR url only on a ship terminal.
     let run_summary_pr = if legacy_ship { gh_pr_url(&cwd) } else { None };
-    emit_run_summary(
-        &project_events,
-        &global_events,
-        &session_id,
-        m.graph_node_id.as_deref(),
-        ship,
-        &reason,
-        run_summary_pr.as_deref(),
-    );
-    push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
+    if finalize_run_summary::run_summary_already_emitted(&project_events, &session_id, &reason) {
+        eprintln!(
+            "finalize: run_summary for {session_id} ({reason}) already emitted; emit and push skipped"
+        );
+    } else {
+        finalize_run_summary::emit_run_summary(
+            &project_events,
+            &global_events,
+            &session_id,
+            m.graph_node_id.as_deref(),
+            ship,
+            &reason,
+            run_summary_pr.as_deref(),
+        );
+        finalize_run_summary::push_run_summary_to_parent(
+            &session_id,
+            m.graph_node_id.as_deref(),
+            &reason,
+        );
+    }
 
     // ── node<->PR pr_number backstop stamp ────────────────────────
     // Runs in the always-run tail (first fire of every reason), so it stamps
@@ -904,6 +795,20 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // deliberately not returned into `failed`.
     if !delivery_ship {
         stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+        // ── held-findings backstop ────────────────────────────────────
+        // A create flow that died between `gh pr create` and its
+        // publish-review step still owes the PR its pre-PR review comment.
+        // Idempotent by marker inside publish_held; log-only, never fatal.
+        // Reads the caller-pinned journal: events_path() migrates the
+        // checkout journal on read, and a backstop must not re-home the
+        // session's rows mid-finalize.
+        let held = held_findings_backstop(&cwd, &project_events);
+        if held.status != "skipped" {
+            eprintln!(
+                "finalize: held review findings: {} ({})",
+                held.status, held.reason
+            );
+        }
     }
 
     // ── guarded do-provenance backstop ────────────────────────────
@@ -1318,29 +1223,23 @@ fn stamp_and_graduate(
     expected_url_count: Option<u32>,
     do_graduate: bool,
     url_override: Option<&str>,
+    events_path: &Path,
 ) -> Result<(), String> {
     let pr_url = url_override.map(str::to_owned).or_else(|| gh_pr_url(cwd));
-    let mut stamp = py_module(cwd);
-    stamp
-        .arg("-m")
-        .arg("fno.plan._stamp")
-        .arg("stamp")
-        .arg("--plan-path")
-        .arg(plan_path)
-        .arg("--session-id")
-        .arg(session_id);
-    if let Some(n) = expected_url_count {
-        stamp.arg("--expected-url-count").arg(n.to_string());
-    }
-    if let Some(url) = &pr_url {
-        stamp.arg("--url").arg(url);
-    }
-    let out = stamp.output().map_err(|_| "stamp".to_string())?;
-    if !out.status.success() {
+    let urls: Vec<String> = pr_url.iter().map(|u| u.to_string()).collect();
+    let stamp_result = crate::plan_doc::stamp::cmd_stamp(
+        &cwd.join(plan_path),
+        session_id,
+        &urls,
+        expected_url_count,
+        false,
+        Some(events_path),
+    );
+    if stamp_result.exit != 0 {
         eprintln!(
-            "finalize: fno.plan._stamp stamp exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            "finalize: plan stamp exit {}: {}",
+            stamp_result.exit,
+            stamp_result.message.trim()
         );
         return Err("stamp".into());
     }
@@ -1356,19 +1255,13 @@ fn stamp_and_graduate(
         return Ok(());
     }
 
-    let out = py_module(cwd)
-        .arg("-m")
-        .arg("fno.plan._stamp")
-        .arg("graduate")
-        .arg("--plan-path")
-        .arg(plan_path)
-        .output()
-        .map_err(|_| "graduate".to_string())?;
-    if !out.status.success() {
+    let grad_result =
+        crate::plan_doc::stamp::cmd_graduate(&cwd.join(plan_path), false, Some(events_path));
+    if grad_result.exit != 0 {
         eprintln!(
-            "finalize: fno.plan._stamp graduate exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            "finalize: plan graduate exit {}: {}",
+            grad_result.exit,
+            grad_result.message.trim()
         );
         return Err("graduate".into());
     }
@@ -1376,7 +1269,7 @@ fn stamp_and_graduate(
 }
 
 /// Derive the expected URL count for graduation. Returns `None` for a
-/// single-project plan (let fno.plan._stamp keep any declared count, else
+/// single-project plan (let the plan-doc writer keep any declared count, else
 /// default to 1) and `Some(n)` for a cross-project plan, counting the direct keys under
 /// the plan's frontmatter `projects:` map. Returns `None` for a cross-project
 /// plan whose count can't be read (missing/garbled projects map) so the caller
@@ -1561,7 +1454,7 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
 /// `python3 -m`).
-fn resolve_handoffs_dir(
+pub(crate) fn resolve_handoffs_dir(
     override_dir: Option<&Path>,
     settings_override: Option<&Path>,
     cwd: &Path,
@@ -1589,9 +1482,11 @@ fn resolve_handoffs_dir(
             }
         }
     }
-    if let Some(vault) = resolve_obsidian_vault(&candidates) {
-        if let Some(vroot) = resolve_vault_root(&vault, home) {
-            return vroot.join("internal").join(&project).join("handoffs");
+    if !vault_write_is_temp_stray(home, cwd) {
+        if let Some(vault) = resolve_obsidian_vault(&candidates) {
+            if let Some(vroot) = resolve_vault_root(&vault, home) {
+                return vroot.join("internal").join(&project).join("handoffs");
+            }
         }
     }
     let base = home
@@ -1723,7 +1618,11 @@ fn read_path_setting(path: &Path, key: &str) -> Option<String> {
 /// Expand `~` and `{project}` in a handoffs_dir template. Returns None when the
 /// result still contains an unresolved `{...}` token (e.g. `{vault}`), so the
 /// caller falls back rather than writing to a literal-brace path.
-fn expand_handoffs_template(raw: &str, home: Option<&Path>, project: &str) -> Option<PathBuf> {
+pub(crate) fn expand_handoffs_template(
+    raw: &str,
+    home: Option<&Path>,
+    project: &str,
+) -> Option<PathBuf> {
     let mut s = raw.to_string();
     // Cannot expand a leading ~ without a home; return None so the caller falls
     // back to the default dir rather than writing to a literal "~..." path
@@ -1896,6 +1795,42 @@ pub(crate) fn resolve_project_name(
     repo_project_name(cwd)
 }
 
+/// True when [`resolve_project_name`] would fall back to the cwd's basename:
+/// no project id in the cwd or home config and no git remote slug. The vault
+/// writer refuses such a name for a temp-dir cwd, where a fallback scatters
+/// pages like `internal/fnoe123_0/questions` into the real vault.
+pub(crate) fn project_name_is_basename_fallback(home: Option<&Path>, cwd: &Path) -> bool {
+    if read_project_id(&cwd.join(".fno/config.toml")).is_some() {
+        return false;
+    }
+    if let Some(h) = home {
+        if read_project_id(&h.join(".fno/config.toml")).is_some() {
+            return false;
+        }
+    }
+    slug_from_git_remote(cwd).is_none()
+}
+
+/// A cwd under any standard temp root: the OS temp dir, or the macOS scratch
+/// trees (`/tmp`, `/private/tmp`, `/var/folders`) that `std::env::temp_dir()`
+/// does not cover. Tests and leaked daemons run there; real projects do not.
+pub(crate) fn cwd_is_temporary(cwd: &Path) -> bool {
+    let mut roots = vec![std::env::temp_dir()];
+    roots.push(PathBuf::from("/tmp"));
+    roots.push(PathBuf::from("/private/tmp"));
+    roots.push(PathBuf::from("/var/folders"));
+    roots.iter().any(|r| cwd.starts_with(r))
+}
+
+/// True when a vault write from `cwd` would be a temp-named stray: under a
+/// temp root with a basename-fallback project name. The vault writers
+/// (escalations, questions, handoffs) contain such writes in their
+/// space/fallback dir instead of scattering `internal/fnoe<pid>_<n>/` into
+/// the real vault.
+pub(crate) fn vault_write_is_temp_stray(home: Option<&Path>, cwd: &Path) -> bool {
+    cwd_is_temporary(cwd) && project_name_is_basename_fallback(home, cwd)
+}
+
 /// Read the project id from a flat config.toml (`[project]\nid = "..."`). The
 /// legacy top-level `project.id` and the canonical `config.project.id` both map
 /// to the same flat `project.id`, so one lookup covers both. An empty/`null`
@@ -1921,7 +1856,7 @@ fn valid_project_id(s: &str) -> bool {
 
 /// Best-effort PR metadata for the current HEAD/branch through the REST reader.
 pub(crate) fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
-    let mut command = Command::new("fno");
+    let mut command = Command::new(crate::scrape::fno_bin());
     command.args(["do", "pr", "info"]);
     if let Some(number) = number {
         command.arg(number.to_string());
@@ -1965,7 +1900,7 @@ fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
 }
 
 /// Deterministic node<->PR `pr_number` backstop: the create-time skill
-/// stamp (pr-creator §5.5) is best-effort and was skipped for /#358,
+/// stamp (the create flow's bind step) is best-effort and was skipped for /#358,
 /// leaving `pr_number` null so the derived `in_review` status never engaged.
 /// Gated on node-presence + PR-exists (NOT `ship`) so `DoneAwaitingMerge` - the
 /// exact terminal `in_review` covers - is included. Best-effort + non-fatal +
@@ -1977,7 +1912,7 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
         eprintln!("finalize: no open PR found for branch; skipped pr_number stamp for node {node}");
         return;
     };
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args([
             "backlog",
             "update",
@@ -2182,9 +2117,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
     let path = crate::paths::events_path(cwd);
-    let Ok(content) = fs::read_to_string(&path) else {
-        return false;
-    };
+    let content = crate::event_store::journal_text(&path, &["review_coverage"]);
     // Pin to the current HEAD: a coverage event for a prior commit doesn't
     // describe what finalize is about to arm. (finding 2.)
     let head = std::process::Command::new("git")
@@ -2240,6 +2173,30 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Option<String>) {
     use crate::authorized_merge::{Effect, Outcome, Request};
 
+    // The merges hold gates this door too: arming is a merge effect (the
+    // queue merges when checks pass). Best-effort like everything here, and
+    // the safe direction - a held arm leaves the green PR for a human.
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => {}
+        crate::fleet_incident::Verdict::Stopped(r) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident stop holds merges (generation {}, reason: {})",
+                    r.generation, r.reason
+                )),
+            );
+        }
+        crate::fleet_incident::Verdict::Unavailable(d) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident state is unreadable ({d}); arm fails closed"
+                )),
+            );
+        }
+    }
+
     let outcome = crate::authorized_merge::run(
         &crate::authorized_merge::RealProbes,
         &Request {
@@ -2256,10 +2213,18 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             // the same event journal the owner does.
             covered_head: None,
             decide_only: false,
+            authority: None,
+            accept_flake: false,
+            supplied_verdict: None,
+            supplied_counts: None,
+            supplied_rerun_recovered: None,
+            supplied_optional_unresolved: None,
+            supplied_github_blockers: None,
+            supplied_dispatch_hold: None,
         },
     );
     match outcome {
-        Outcome::Armed { head } => {
+        Outcome::Armed { head, .. } => {
             eprintln!("finalize: auto-merge armed for PR at {head}");
             (true, None)
         }
@@ -2349,7 +2314,7 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
         created_at,
         &now_rfc3339_utc(),
     );
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args(&args)
         .current_dir(cwd)
         .status()
@@ -2375,7 +2340,7 @@ fn do_stamp_args(
         "add".to_string(),
         node.to_string(),
         "--phase".to_string(),
-        "do".to_string(),
+        "execute".to_string(),
         "--require-session".to_string(),
         session.to_string(),
     ];
@@ -2431,7 +2396,7 @@ fn cancel_settle_claims(cwd: &Path, m: &ManifestFields) {
         eprintln!("finalize: cancel settle skipped for key {key} (not a node claim)");
         return;
     }
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args(cancel_release_args(key, holder))
         .current_dir(cwd)
         .status()
@@ -2801,7 +2766,7 @@ fn extract_operator_question(text: &str) -> Option<String> {
 /// inbox outstanding --json` an operator would run, so dedup can never drift
 /// from what is actually on record (never re-derived state).
 fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
-    let out = match Command::new("fno")
+    let out = match Command::new(crate::scrape::fno_bin())
         .current_dir(cwd)
         .args(["inbox", "outstanding", "--json"])
         .output()
@@ -2821,9 +2786,19 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 }
 
 fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
-    let mut cmd = Command::new("fno");
-    cmd.current_dir(cwd)
-        .args(["inbox", "outstanding", "ask", question]);
+    let mut cmd = Command::new(crate::scrape::fno_bin());
+    cmd.current_dir(cwd).args([
+        "inbox",
+        "outstanding",
+        "ask",
+        question,
+        // A rescued question records as a pin: the asker is gone, so the
+        // page carries the action, not a question (the ask port refuses a
+        // question with no context). Wording never says the session ended:
+        // a session has no terminal state.
+        "--ask",
+        "the asker went quiet on this question; resume its session or re-dispatch its node, then clear this with done",
+    ]);
     if let Some(n) = node {
         cmd.args(["--node", n]);
     }
@@ -3037,8 +3012,11 @@ fn assistant_text_blocks(val: &Value) -> String {
 }
 
 /// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
-/// autocorrect monthly review picks the postmortem up. Only writes when the log
-/// already exists (the autocorrect feature creates it) - never creates it.
+/// autocorrect monthly review picks the postmortem up. Creates the log when
+/// absent (mode 0600): both launchd jobs were live while the file never
+/// existed, so every pointer before 2026-09 was dropped on "autocorrect not
+/// enabled here" - the writer starved its own reader. An existing file keeps
+/// its mode; `corrections-log-init.sh` stays the manual creator.
 /// Format mirrors the pre-wedge generator:
 /// `{ts} | S1 | target-postmortem | {path} | {reason}: {detail_truncated}`.
 ///
@@ -3046,19 +3024,59 @@ fn assistant_text_blocks(val: &Value) -> String {
 /// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
 /// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
 /// FNO_HOME, then home-relative default.
-fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
-    let log = match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
-        Some(p) => PathBuf::from(p),
+/// The corrections.log path, the ONE resolution for the finalize writer and
+/// the corrections-verify reader alike: POSTMORTEM_CORRECTIONS_LOG override,
+/// then FNO_HOME, then home-relative default. None when no home resolves
+/// (mirrors scripts/lib/corrections-lock.sh corrections_log_path()).
+pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
+    match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
+        Some(p) => Some(PathBuf::from(p)),
         None => match std::env::var_os("FNO_HOME") {
-            Some(p) => PathBuf::from(p).join("corrections.log"),
-            None => match home {
-                Some(h) => h.join(".fno/corrections.log"),
-                None => return,
-            },
+            Some(p) => Some(PathBuf::from(p).join("corrections.log")),
+            None => home.map(|h| h.join(".fno/corrections.log")),
         },
+    }
+}
+
+/// The state root that holds the loop journals (events.jsonl sits directly
+/// under it): FNO_HOME override, then home-relative `.fno`. None when no
+/// home resolves.
+pub(crate) fn loop_state_root(home: Option<&Path>) -> Option<PathBuf> {
+    std::env::var_os("FNO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".fno")))
+}
+
+fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
+    let log = match corrections_log_path(home) {
+        Some(p) => p,
+        None => return,
     };
+    // Fixture guard: a postmortem outside the postmortems root of
+    // the home this log resolved through is a unit-test temp dir that fell
+    // through the ladder - 360 of 418 live rows. Refuse at the one writer
+    // rather than filtering in every reader. The FNO_HOME read stays HERE
+    // (one carrier of the ladder, per the reachable-paths twin baseline);
+    // the predicate itself reads no environment. It gates BEFORE creation:
+    // a refused row must not materialize an empty log either.
+    let fno_home = std::env::var_os("FNO_HOME").map(PathBuf::from);
+    let pm_root = crate::real_session::postmortems_root_for_home(fno_home.as_deref(), home);
+    if !crate::real_session::is_real_run(pm_root.as_deref(), postmortem) {
+        return;
+    }
     if !log.is_file() {
-        return; // autocorrect not enabled here; nothing to feed
+        // Create at 0600 rather than drop the row. create_new keeps the
+        // mode decision on the creator: an existing file (or a losing
+        // race) never has its mode touched.
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = log.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log);
     }
     let detail_trunc: String = detail.replace(['\n', '\r'], " ").chars().take(80).collect();
     let detail_trunc = if detail_trunc.trim().is_empty() {
@@ -3077,11 +3095,59 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
     }
 }
 
+/// The held-findings read for finalize: the caller-pinned journal only.
+/// `events_path` would migrate the checkout journal on read and re-home
+/// the session's rows mid-finalize; a finalize backstop scans for held
+/// attestations without mutating path state as a side effect.
+fn held_findings_backstop(cwd: &Path, journal: &Path) -> crate::publish_review::HeldAnswer {
+    let payload = serde_json::json!({ "cwd": cwd.to_string_lossy() });
+    crate::publish_review::publish_held(
+        &payload,
+        &crate::publish_review::GhReal,
+        &[journal.to_path_buf()],
+    )
+}
+
 // ── unit tests (process-free) ────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "finalize_pointer_tests.rs"]
+mod finalize_pointer_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_backstop_reads_the_pinned_journal_and_never_migrates_it() {
+        let base = std::env::temp_dir().join(format!("fno-held-backstop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let checkout_events = base.join("checkout").join(".fno").join("events.jsonl");
+        std::fs::create_dir_all(checkout_events.parent().unwrap()).unwrap();
+        std::fs::write(
+            &checkout_events,
+            "{\"ts\":\"t\",\"type\":\"delegated\",\"data\":{}}\n",
+        )
+        .unwrap();
+        let pinned = base.join("pinned-journal.jsonl");
+        std::fs::write(&pinned, "").unwrap();
+        let cwd = checkout_events
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let answer = held_findings_backstop(&cwd, &pinned);
+        assert_eq!(answer.status, "skipped");
+        // A read must not re-home the checkout journal into the space dir;
+        // the pre-backstop regression moved it as a side effect of resolving
+        // the path through events_path.
+        assert!(
+            checkout_events.exists(),
+            "checkout journal was migrated by a read"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parse_args_required_and_optional() {
@@ -4000,9 +4066,9 @@ mod tests {
         // S1: a non-ship finalize (Budget); S2: a ship finalize.
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"loop_check\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S2\",\"ship\":true}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"loop_check\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n\
+             {\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
+             {\"ts\":\"2026-01-01T00:00:02Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S2\",\"ship\":true}}\n",
         )
         .unwrap();
         assert_eq!(
@@ -4021,6 +4087,35 @@ mod tests {
     }
 
     #[test]
+    fn prior_finalize_ship_finds_a_store_committed_ship() {
+        // The cutover stopped journal appends: a ship recorded by the new
+        // writer lands only in the store, so the reader must answer from
+        // committed rows even though the journal file holds stale bytes only.
+        let dir = std::env::temp_dir().join(format!("finalize-store-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let log = dir.join("events.jsonl");
+        fs::write(
+            &log,
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"OLD\",\"ship\":true}}\n",
+        )
+        .unwrap();
+        let line = "{\"ts\":\"2026-01-01T00:00:05Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"NEW\",\"ship\":true}}";
+        let receipt = crate::event_store::append_envelope(&log, line, None).unwrap();
+        assert!(receipt.inserted);
+        assert_eq!(
+            prior_finalize_ship(&log, "NEW"),
+            Some(true),
+            "store-committed ship found"
+        );
+        assert_eq!(
+            prior_finalize_ship(&log, "OLD"),
+            Some(true),
+            "imported legacy ship still found"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ship_flag_wins_regardless_of_event_order() {
         // A non-ship finalize followed by a ship finalize for the SAME session
         // must report Some(true) (the lockout-bug fix: a ship is terminal-complete).
@@ -4029,8 +4124,8 @@ mod tests {
         let log = dir.join("events.jsonl");
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":true}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
+             {\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":true}}\n",
         )
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), Some(true));
@@ -4046,7 +4141,7 @@ mod tests {
         let log = dir.join("events.jsonl");
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"session_finalize_failed\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalize_failed\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n",
         )
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), None);
@@ -4073,7 +4168,7 @@ mod tests {
         std::env::set_var("FNO_HOME", &fno_home);
         append_corrections_pointer(
             Some(&unused_home),
-            Path::new("/tmp/pm.md"),
+            &fno_home.join("postmortems/pm.md"),
             "Budget",
             "detail",
         );
@@ -4100,7 +4195,12 @@ mod tests {
 
         std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::remove_var("FNO_HOME");
-        append_corrections_pointer(Some(&home), Path::new("/tmp/pm.md"), "NoProgress", "d");
+        append_corrections_pointer(
+            Some(&home),
+            &home.join(".fno/postmortems/pm.md"),
+            "NoProgress",
+            "d",
+        );
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
@@ -4124,6 +4224,34 @@ mod tests {
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_refuses_temp_cwd_basename_fallback() {
+        // A temp cwd with NO project id takes the basename fallback; the vault
+        // branch would scatter internal/<tmp-basename>/handoffs into the real
+        // vault (the stray-dir leak). The refusal contains it in the default
+        // handoffs dir; a declared project id keeps the vault branch.
+        let dir = std::env::temp_dir().join(format!("fin-hd-stray-{}", std::process::id()));
+        let cwd = dir.join("fnoe999_0");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(&home, "[obsidian]\nenabled = true\nvault = \"myvault\"\n");
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(
+            got,
+            home.join(".fno/handoffs/fnoe999_0"),
+            "a temp cwd with a fallback name never reaches the vault"
+        );
+        write_settings(&cwd, "[project]\nid = \"demo\"\n");
+        let declared = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(
+            declared,
+            home.join("myvault/internal/demo/handoffs"),
+            "a declared project id keeps the vault branch"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4797,66 +4925,43 @@ mod tests {
         );
     }
 
-    // ── run_summary ──────────────────────────────────────────────────
-
     #[test]
-    fn count_run_tasks_correlates_on_run_and_flags_failures() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        fs::write(
+    fn coverage_satisfied_reads_a_store_committed_covered_row() {
+        // AC5-EDGE: an older imported row with count 0 and a newer covered
+        // store-only row — the newest committed row answers.
+        let _root = crate::paths::DeclaredRoot::declare("fin_coverage_store_row");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let old = serde_json::json!({
+            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "h0", "coverage": "covered", "reviewed_count": 0}
+        })
+        .to_string();
+        let new = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "h1", "coverage": "covered", "reviewed_count": 3}
+        })
+        .to_string();
+        let events = crate::paths::events_path(cwd);
+        crate::event_store::append_envelope(&events, &old, None).unwrap();
+        crate::event_store::append_envelope(&events, &new, None).unwrap();
+        let rows = crate::event_store::query_events(
             &events,
-            "{\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
-             {\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
-             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"SUCCESS\",\"data\":{}}\n\
-             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"FAILED\",\"data\":{}}\n\
-             {\"type\":\"task_started\",\"run\":\"OTHER\",\"data\":{}}\n\
-             not json\n",
+            &crate::event_store::EventQuery::of_types(&["review_coverage"]),
         )
         .unwrap();
-        // R1: 2 started, 2 done, 1 failed; the OTHER-run line and the junk line
-        // are ignored.
-        assert_eq!(count_run_tasks(&events, "R1"), (2, 2, 1));
-    }
-
-    #[test]
-    fn emit_run_summary_writes_extended_envelope() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        // pre-seed one started with no matching done -> exposes the gap (AC2-FR).
-        fs::write(
-            &events,
-            "{\"type\":\"task_started\",\"run\":\"R9\",\"data\":{}}\n",
-        )
-        .unwrap();
-        emit_run_summary(
-            &events,
-            &events,
-            "R9",
-            Some("prj-0001"),
+        assert_eq!(rows.len(), 2, "both rows committed, oldest first");
+        assert_eq!(
+            rows[1].line.contains("\"reviewed_count\":3"),
             true,
-            "DonePRGreen",
-            None,
+            "seq order puts the covered row last: {}",
+            rows[1].line
         );
-        let content = fs::read_to_string(&events).unwrap();
-        let last: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
-        assert_eq!(last["type"], "run_summary");
-        assert_eq!(last["v"], 1);
-        assert_eq!(last["run"], "R9");
-        assert_eq!(last["node"], "prj-0001");
-        assert_eq!(last["outcome"], "SUCCESS");
-        assert_eq!(last["data"]["tasks_started"], 1);
-        assert_eq!(last["data"]["tasks_done"], 0);
-        assert_eq!(last["data"]["termination_reason"], "DonePRGreen");
+        assert!(
+            coverage_satisfied_in_latest_event(cwd),
+            "the store-only covered row satisfies"
+        );
     }
 
-    #[test]
-    fn emit_run_summary_non_ship_is_failed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        emit_run_summary(&events, &events, "R2", None, false, "NoProgress", None);
-        let content = fs::read_to_string(&events).unwrap();
-        let ev: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
-        assert_eq!(ev["outcome"], "FAILED");
-        assert!(ev.get("node").is_none(), "no node -> omitted, not null");
-    }
+    // ── run_summary ──────────────────────────────────────────────────
 }

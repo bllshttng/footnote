@@ -7,6 +7,7 @@
 
 use crate::client::AuxAction;
 use crate::popup::PopupRow;
+use crate::proto::Color;
 /// The four `[sideline.colors]` axis tables, in display order.
 const LANE_AXES: [&str; 4] = ["harness", "route", "model", "row"];
 
@@ -83,6 +84,44 @@ pub(crate) fn lane_axis_entries(
     }
 }
 
+/// One listing row for a configured value: a swatch in the color the ACTIVE
+/// theme paints for that value - a hex paints itself, an ANSI name paints the
+/// theme's Terminal 16 slot (the emulator's own slot when the theme defines
+/// no palette). The resolved hex rides the label when it is known; the theme
+/// changes, the squares repaint. An unparseable value renders a plain entry.
+fn value_row(
+    glyph: &str,
+    base: String,
+    v: &str,
+    theme: &crate::theme::Theme,
+    enabled: bool,
+) -> PopupRow {
+    let Some(c) = crate::sideline_color::parse_color(v) else {
+        return PopupRow::Entry {
+            glyph: glyph.into(),
+            label: base,
+            hint: String::new(),
+            enabled,
+        };
+    };
+    let painted = match c {
+        Color::Rgb(..) => Some(c),
+        Color::Indexed(n) => crate::theme::terminal16_slot(n, theme).or(Some(c)),
+        Color::Default => None,
+    };
+    let label = match painted.and_then(crate::theme::color_hex) {
+        Some(h) => format!("{base} {h}"),
+        None => base,
+    };
+    PopupRow::SwatchEntry {
+        glyph: glyph.into(),
+        label,
+        hint: String::new(),
+        enabled,
+        color: painted.unwrap(),
+    }
+}
+
 /// Push one axis's listing rows: every key the resolution cascade
 /// knows, configured entries first (unmarked - the operator set them), then
 /// each built-in default the config does NOT override, marked `(default)` so
@@ -94,16 +133,12 @@ fn push_lane_axis_rows(
     actions: &mut Vec<AuxAction>,
     pal: &crate::sideline_color::SidelinePalette,
     axis: &str,
+    theme: &crate::theme::Theme,
     add_label: Option<String>,
 ) {
     let entries = lane_axis_entries(pal, axis);
     for (k, v) in &entries {
-        rows.push(PopupRow::Entry {
-            glyph: "○".into(),
-            label: format!("{k} = {v}"),
-            hint: String::new(),
-            enabled: true,
-        });
+        rows.push(value_row("○", format!("{k} = {v}"), v, theme, true));
         actions.push(AuxAction::LaneColorEdit(axis.to_string(), k.clone()));
     }
     let configured: std::collections::HashSet<&str> =
@@ -112,17 +147,18 @@ fn push_lane_axis_rows(
         if configured.contains(k) {
             continue; // an override renders from config, unmarked
         }
-        rows.push(PopupRow::Entry {
-            glyph: "○".into(),
-            label: format!("{k} = {v} (default)"),
-            hint: String::new(),
-            enabled: true,
-        });
+        rows.push(value_row(
+            "○",
+            format!("{k} = {v} (default)"),
+            v,
+            theme,
+            true,
+        ));
         actions.push(AuxAction::LaneColorEdit(axis.to_string(), (*k).to_string()));
     }
     if let Some(label) = add_label {
         rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
+            glyph: "+".into(),
             label,
             hint: String::new(),
             enabled: true,
@@ -166,10 +202,12 @@ pub(crate) fn merged_axis_json(entries: &[(String, String)], key: &str, color: &
 /// axis list -> key list -> picker -> (replacing the picker) the free-form
 /// color entry. The free function is the testable seam: `palette()` is a
 /// process-global cache, so tests pass a literal palette instead of seeding
-/// the cache.
+/// the cache. `theme` is the active theme: its Terminal 16 palette paints
+/// the swatches and their hexes.
 pub(crate) fn build_lane_color_rows(
     pal: &crate::sideline_color::SidelinePalette,
     ui: &LaneColorsUi,
+    theme: &crate::theme::Theme,
 ) -> (Vec<PopupRow>, Vec<AuxAction>) {
     let mut rows = Vec::new();
     let mut actions = Vec::new();
@@ -188,18 +226,20 @@ pub(crate) fn build_lane_color_rows(
             });
             return (rows, actions);
         }
-        // Picker level: the named colors, the current value marked.
+        // Picker level: the named colors, each with a swatch in the theme's
+        // color for that slot; the current value marked.
         rows.push(PopupRow::Header(format!("{axis}.{key}")));
         rows.push(PopupRow::Rule);
         let current = current_lane_color(pal, axis, key);
         for name in LANE_COLOR_NAMES {
             let active = current.as_deref() == Some(name);
-            rows.push(PopupRow::Entry {
-                glyph: if active { "●" } else { "○" }.into(),
-                label: name.into(),
-                hint: if active { "current" } else { "" }.into(),
-                enabled: true,
-            });
+            rows.push(value_row(
+                if active { "●" } else { "○" },
+                name.to_string(),
+                name,
+                theme,
+                true,
+            ));
             actions.push(AuxAction::LaneColorSet(
                 axis.clone(),
                 key.clone(),
@@ -221,20 +261,26 @@ pub(crate) fn build_lane_color_rows(
         // (configured and default), so the operator names one that is new.
         rows.push(PopupRow::Header(format!("{axis} key: {buf}")));
         rows.push(PopupRow::Rule);
-        push_lane_axis_rows(&mut rows, &mut actions, pal, axis, None);
+        push_lane_axis_rows(&mut rows, &mut actions, pal, axis, theme, None);
         return (rows, actions);
     }
     if let Some(axis) = &ui.axis {
         // Key list: this axis's mappings + the add-key row.
         rows.push(PopupRow::Header(axis.clone()));
         rows.push(PopupRow::Rule);
-        push_lane_axis_rows(&mut rows, &mut actions, pal, axis, Some("add key".into()));
+        push_lane_axis_rows(
+            &mut rows,
+            &mut actions,
+            pal,
+            axis,
+            theme,
+            Some("add key".into()),
+        );
         return (rows, actions);
     }
     // Axis list: every axis's mappings grouped under its header, each group
-    // followed by its add-key row.
-    rows.push(PopupRow::Header("colors".into()));
-    rows.push(PopupRow::Rule);
+    // followed by its add-key row. No top "colors" header: the tab strip
+    // already names this section (the settings-tab cleanup).
     for axis in LANE_AXES {
         rows.push(PopupRow::Header((*axis).into()));
         push_lane_axis_rows(
@@ -242,6 +288,7 @@ pub(crate) fn build_lane_color_rows(
             &mut actions,
             pal,
             axis,
+            theme,
             Some(format!("add {axis} key")),
         );
     }
@@ -268,10 +315,18 @@ mod tests {
         }
     }
 
+    fn sup() -> Theme {
+        Theme::from_name("footnote-superscript").0
+    }
+
+    fn paper() -> Theme {
+        Theme::from_name("footnote-paper").0
+    }
+
     #[test]
     fn lane_colors_axis_list_groups_every_axis_under_its_header() {
         let pal = lane_pal(&[("zai", "green")]);
-        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default());
+        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default(), &sup());
         // One header per axis, in display order.
         let headers: Vec<&str> = LANE_AXES.to_vec();
         let mut seen_headers = rows.iter().filter_map(|r| match r {
@@ -285,10 +340,11 @@ mod tests {
                 "axis {h} header present in order"
             );
         }
-        // The one configured mapping renders as `key = color` and opens the picker.
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "zai = green")));
+        // The one configured mapping renders with the theme's slot hex beside
+        // the name (slot 2 = green, dark #9cc49c) and opens the picker.
+        assert!(rows.iter().any(
+            |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label == "zai = green #9cc49c")
+        ));
         assert!(actions.iter().any(
             |a| matches!(a, AuxAction::LaneColorEdit(axis, key) if axis == "route" && key == "zai")
         ));
@@ -305,12 +361,15 @@ mod tests {
 
     #[test]
     fn lane_color_picker_lists_the_parser_vocabulary_and_marks_the_current() {
+        // The ANSI names STAY; each name gains a filled
+        // square painted in the active theme's Terminal 16 slot and the
+        // resolved hex beside it. The pick still writes the name.
         let pal = lane_pal(&[("zai", "green")]);
         let ui = LaneColorsUi {
             pick: Some(("route".into(), "zai".into())),
             ..Default::default()
         };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        let (rows, actions) = build_lane_color_rows(&pal, &ui, &sup());
         // Drift guard: every picker name must satisfy parse_color, so a name
         // added without parser support fails here instead of refusing at save.
         let names: Vec<&str> = actions
@@ -327,15 +386,62 @@ mod tests {
                 "picker name {name} must parse"
             );
         }
+        // Every picker row paints the theme's slot color and carries the
+        // resolved hex in its label: green (slot 2, dark) reads `green
+        // #9cc49c`.
+        for (n, swatch) in rows.iter().filter_map(|r| match r {
+            PopupRow::SwatchEntry { label, color, .. } => Some((label.clone(), *color)),
+            _ => None,
+        }) {
+            let name = n.split(' ').next().unwrap_or_default();
+            let slot = LANE_COLOR_NAMES.iter().position(|c| c == &name).unwrap() as u8;
+            assert_eq!(
+                Some(swatch),
+                crate::theme::terminal16_slot(slot, &sup()),
+                "swatch paints the theme slot for {name}"
+            );
+            let hex = crate::theme::color_hex(swatch).unwrap();
+            assert!(n.ends_with(&hex), "hex {hex} beside the name: {n}");
+        }
         // The current value is marked, not just listed.
         assert!(rows.iter().any(|r| matches!(
             r,
-            PopupRow::Entry { glyph, hint, .. } if glyph == "●" && hint == "current"
+            PopupRow::SwatchEntry { glyph, .. } if glyph == "●"
         )));
         // The free-form entry is offered beside the names.
         assert!(actions
         .iter()
         .any(|a| matches!(a, AuxAction::LaneColorCustom(axis, key) if axis == "route" && key == "zai")));
+    }
+
+    #[test]
+    fn picker_squares_repaint_when_the_theme_changes() {
+        // The squares paint the ACTIVE theme's slot - the
+        // same name resolves to a different square under the paper twin.
+        let ui = LaneColorsUi {
+            pick: Some(("route".into(), "zai".into())),
+            ..Default::default()
+        };
+        let (dark, _) = build_lane_color_rows(&Default::default(), &ui, &sup());
+        let (light, _) = build_lane_color_rows(&Default::default(), &ui, &paper());
+        let pick = |rows: &[PopupRow], want: &str| {
+            rows.iter().find_map(|r| match r {
+                PopupRow::SwatchEntry { label, color, .. } if label.starts_with(want) => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        assert_ne!(
+            pick(&dark, "blue"),
+            pick(&light, "blue"),
+            "the blue square repaints under the other theme"
+        );
+        assert_ne!(
+            pick(&dark, "red"),
+            pick(&light, "red"),
+            "the red square repaints under the other theme"
+        );
     }
 
     #[test]
@@ -346,7 +452,7 @@ mod tests {
             custom_entry: Some("#12abF0".into()),
             ..Default::default()
         };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        let (rows, actions) = build_lane_color_rows(&pal, &ui, &sup());
         // The typed buffer echoes in the header.
         assert!(matches!(
             rows.first(),
@@ -367,15 +473,15 @@ mod tests {
             key_entry: Some(("route".into(), "o".into())),
             ..Default::default()
         };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        let (rows, actions) = build_lane_color_rows(&pal, &ui, &sup());
         assert!(matches!(
             rows.first(),
             Some(PopupRow::Header(h)) if h == "route key: o"
         ));
         // Existing keys are listed so an existing mapping is pickable.
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "openai = blue")));
+        assert!(rows.iter().any(
+            |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label == "openai = blue #9fb8e5")
+        ));
         // The configured pair (zai, openai) plus the two route defaults the
         // config does not override (openrouter, anthropic) are all pickable.
         assert_eq!(
@@ -391,22 +497,23 @@ mod tests {
     // cascade knows, marked, instead of four empty groups.
     #[test]
     fn unconfigured_palette_renders_the_cascade_defaults_marked() {
-        let (rows, actions) = build_lane_color_rows(&Default::default(), &LaneColorsUi::default());
+        let (rows, actions) =
+            build_lane_color_rows(&Default::default(), &LaneColorsUi::default(), &sup());
         let defaults = [
-            "zai = green (default)",
-            "openrouter = magenta (default)",
-            "openai = blue (default)",
-            "anthropic = cyan (default)",
-            "codex = blue (default)",
-            "agy = yellow (default)",
-            "opencode = light_magenta (default)",
-            "cursor = light_blue (default)",
-            "pi = light_yellow (default)",
+            "zai = green (default) #9cc49c",
+            "openrouter = magenta (default) #d7a6c6",
+            "openai = blue (default) #9fb8e5",
+            "anthropic = cyan (default) #83c6bd",
+            "codex = blue (default) #9fb8e5",
+            "agy = yellow (default) #c5b784",
+            "opencode = light_magenta (default) #d092b9",
+            "cursor = light_blue (default) #8ca8e2",
+            "pi = light_yellow (default) #b8a965",
         ];
         for want in defaults {
             assert!(
                 rows.iter()
-                    .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == want)),
+                    .any(|r| matches!(r, PopupRow::SwatchEntry { label, .. } if label == want)),
                 "default row {want:?} rendered"
             );
         }
@@ -422,7 +529,7 @@ mod tests {
         // No configured row and no "(default)" marker leaked into model/row,
         // the two config-only axes.
         assert!(!rows.iter().any(
-        |r| matches!(r, PopupRow::Entry { label, .. } if label.contains("(default)") && (label.starts_with("model") || label.contains("add")))
+        |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label.contains("(default)") && (label.starts_with("model") || label.contains("add")))
     ));
     }
 
@@ -431,22 +538,23 @@ mod tests {
     #[test]
     fn a_configured_override_renders_unmarked_and_hides_its_default_row() {
         let pal = lane_pal(&[("zai", "red")]);
-        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default());
+        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default(), &sup());
         assert!(
-            rows.iter()
-                .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "zai = red")),
+            rows.iter().any(
+                |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label == "zai = red #e1a6a3")
+            ),
             "the override renders from config"
         );
         assert!(
             !rows.iter().any(
-                |r| matches!(r, PopupRow::Entry { label, .. } if label.contains("zai = green"))
+                |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label.contains("zai = green"))
             ),
             "the overridden default row is suppressed"
         );
         assert!(
             rows.iter()
-                .any(|r| matches!(r, PopupRow::Entry { label, .. }
-                if label == "openrouter = magenta (default)")),
+                .any(|r| matches!(r, PopupRow::SwatchEntry { label, .. }
+                if label == "openrouter = magenta (default) #d7a6c6")),
             "the untouched defaults still render marked"
         );
         // Nothing in this render path writes config.
@@ -464,7 +572,8 @@ mod tests {
     // its spacer cell.
     #[test]
     fn colors_tab_render_path_keeps_the_right_border_on_one_column() {
-        let (rows, _) = build_lane_color_rows(&Default::default(), &LaneColorsUi::default());
+        let (rows, _) =
+            build_lane_color_rows(&Default::default(), &LaneColorsUi::default(), &sup());
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
             .tabs(vec![
@@ -490,19 +599,12 @@ mod tests {
             let row = r0 + i;
             let at = |col: usize| cells[row * cols + col].c;
             assert!(
-                matches!(at(c0 + w - 1), '│' | '┐' | '┘'),
+                matches!(at(c0 + w - 1), '│' | '╮' | '╯'),
                 "row {i} closes its right border on one column: {:?}",
                 line.text
             );
-            if line.text.contains('＋') {
+            if line.text.contains("+ add") {
                 add_rows += 1;
-                let lead = (c0..c0 + w)
-                    .find(|&col| cells[row * cols + col].c == '＋')
-                    .expect("the lead glyph is painted");
-                assert!(
-                    cells[row * cols + lead + 1].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
-                    "the fullwidth glyph claims its spacer cell"
-                );
             }
             // Body rows sit between the top chrome (title + tabs) and the
             // bottom chrome (footer + border); the scrollbar column rides
@@ -531,7 +633,10 @@ mod tests {
             .filter(|c| c.flags & crate::proto::cell_flags::WIDE_SPACER == 0)
             .map(|c| c.c)
             .collect();
-        assert!(painted.contains("light_magenta (default)"));
+        assert!(
+            painted.contains("#d092b9"),
+            "resolved hex visible on screen"
+        );
         assert!(painted.contains("(default)"), "defaults visible on screen");
     }
 

@@ -57,7 +57,7 @@ VERB_MOVES: dict[str, Move] = {
         kind="deprecated",
         to="inbox decide",
         leaf_destinations=(
-            ("list", "inbox decisions"),
+            ("list", "backlog decisions"),
             ("reindex", "backlog decide-reindex"),
             ("retract", "backlog decide-retract"),
         ),
@@ -71,7 +71,6 @@ VERB_MOVES: dict[str, Move] = {
         to="agents king",
         leaf_destinations=(("board", "inbox board"),),
     ),
-    "law": Move(kind="deprecated", to="inbox law"),
     "lint": Move(kind="deprecated", to="doctor lint"),
     "loops": Move(kind="deprecated", to="do loops"),
     "mail": Move(kind="deprecated", to="agents mail"),

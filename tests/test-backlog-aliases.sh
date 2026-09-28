@@ -9,11 +9,9 @@
 #   5. fno backlog done <id> marks the node complete
 #   6. fno backlog done <id> second time is a safe no-op
 #
-# Running this file directly is NOT hermetic: `bash tests/test-backlog-aliases.sh`
-# skips the runner that neutralises ambient state, so it reads your real HOME,
-# config chain and carve-out ledger - a pass proves nothing and a failure may be
-# your machine. Prefer `fno doctor test smoke --only 'backlog aliases'`. See
-# tests/README.md.
+# This script pins HOME, the state root, repo root and tracker backend below.
+# It uses the checkout's Python surface even when an unrelated installed `fno`
+# binary is on PATH, so direct runs exercise the same hermetic command shape.
 
 set -uo pipefail
 
@@ -26,6 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Path.home() / .fno resolves under $TMP. The real user graph
 # at ~/.fno/graph.json is never touched.
 export HOME="$TMP/home"
+unset FNO_CONFIG FNO_STATE_DIR FNO_SPACES_DIR FNO_CLAIMS_ROOT FNO_EVENTS_PATH FNO_TRACKER_BACKEND PYTHONPATH
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
 
@@ -42,26 +41,29 @@ GRAPH_JSON="$HOME/.fno/graph.json"
 # instead of climbing to the real checkout. Both are needed: the cd alone
 # leaves the fallback pointing at whatever ambient root it can find.
 export FNO_REPO_ROOT="$TMP/repo"
+export FNO_TRACKER_BACKEND=graph
 mkdir -p "$FNO_REPO_ROOT/.fno"
 cd "$TMP" || exit 1
-echo '{"entries": []}' > "$GRAPH_JSON"
+printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
 
 PASS=0
 FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Resolve the `fno` command: prefer an installed binary, fall back to
-# `python -m fno.cli` against the in-repo venv. Both spell the same
-# surface; the alias behavior is independent of invocation shape.
+# Resolve the `fno` command: prefer the in-repo venv (the TREE's surface,
+# which the menu assertions below pin), fall back to an installed binary,
+# then to a bare python3. An installed fno can lag the tree by whole verb
+# generations, and a menu test against it would pin a surface this checkout
+# no longer ships.
 resolve_fno() {
-    if command -v fno >/dev/null 2>&1; then
-        echo "fno"
-        return
-    fi
     local venv_py="$REPO_ROOT/cli/.venv/bin/python"
     if [[ -x "$venv_py" ]]; then
         echo "$venv_py -m fno.cli"
+        return
+    fi
+    if command -v fno >/dev/null 2>&1; then
+        echo "fno"
         return
     fi
     echo "python3 -m fno.cli"
@@ -93,9 +95,11 @@ verb_in_help() {
 
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
-# the advertised menu instead.
+# the advertised menu instead. `find` retired from the python surface; the
+# store serves it natively. `add` went native the same way (the create door
+# moved to the store), so the python help no longer lists it.
 out=$(run_fno backlog --help 2>&1)
-for verb in add done next find triage; do
+for verb in done next get triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else
@@ -167,17 +171,27 @@ else
 fi
 
 # --- Scenario 5: backlog done marks node complete ---------------------------
-# Extract the last adopted ID from graph.json (one of the two we just added)
-node_id=$(python3 -c "
-import json, sys
-data = json.load(open('$GRAPH_JSON'))
-entries = data.get('entries', [])
-print(entries[-1]['id'] if entries else '')
-")
+# The id comes from the intake receipt. The store owns the rows, and an
+# installed `fno` is no Python interpreter to read them with.
+node_id=$(printf '%s\n' "$intake_out" | sed -n 's/.*intake \(ab-[0-9a-z]*\).*/\1/p' | head -1)
 
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
+    # The close-evidence guard refuses a bare `done` on a node carrying no
+    # record of why, and the typer surface retired `update --completion-note`
+    # (the leaf the guard's own remedy names). Stamp the note through the
+    # native binary, the same door test_defer.py drives, resolved by the same
+    # finder the store's worker spawn uses.
+    native_fno=$(uv run --project "$REPO_ROOT/cli" python -c "from fno.rust_binary import resolve_binary; b = resolve_binary(); print(b if b else '')")
+    if [[ -z "$native_fno" ]]; then
+        fail "no fno-agents binary: cannot stamp the completion record done requires"
+    fi
+    stamp_rc=0
+    "$native_fno" backlog update "$node_id" --completion-note "smoke alias fixture" > /dev/null 2>&1 || stamp_rc=$?
+    if [[ "$stamp_rc" -ne 0 ]]; then
+        fail "native update could not stamp the completion record (rc=$stamp_rc)"
+    fi
     done_out=$(run_fno backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
@@ -185,16 +199,8 @@ else
         fail "done did not report completion: $done_out"
     fi
 
-    # Verify completed_at is set in the json
-    has_completed=$(python3 -c "
-import json
-data = json.load(open('$GRAPH_JSON'))
-for e in data.get('entries', []):
-    if e.get('id') == '$node_id':
-        print('yes' if e.get('completed_at') else 'no')
-        break
-")
-    if [[ "$has_completed" == "yes" ]]; then
+    # Verify completed_at landed on the store row
+    if run_fno backlog get "$node_id" 2>/dev/null | grep -q '"completed_at": "'; then
         pass "done sets completed_at timestamp"
     else
         fail "done did not set completed_at on the node"

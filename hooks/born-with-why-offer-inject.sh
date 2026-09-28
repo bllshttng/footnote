@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: UserPromptSubmit - born with why offer inject
 # hooks/born-with-why-offer-inject.sh -- surface a pending born-with-why offer.
 #
 # UserPromptSubmit hook. The attended born-with-why path (spawn_think.py) emits a
@@ -21,6 +22,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
 # the shared wall-clock helper rather than the harness's 30s hook timeout
 #. Fails closed like the other injection hooks: a missing helper exits 0.
@@ -31,6 +36,14 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+# HOME-as-repo guard (law d-8ddaba56): a cwd of $HOME outside git resolves
+# REPO_ROOT to $HOME, so the cursor write below would land a dot file at the
+# top level of the state root. No checkout, no offer to surface.
+if [[ "$REPO_ROOT" == "$HOME" ]] \
+    || [[ "$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P || true)" \
+        == "$(cd "$REPO_ROOT/.fno" 2>/dev/null && pwd -P || true)" ]]; then
+    exit 0
+fi
 # The project journal and the cursor both live in the repo's space, so every
 # worktree shares one daily offer budget. Resolution is deliberately
 # subprocess-free: the migration leaves a MOVED-TO pointer in the checkout, so

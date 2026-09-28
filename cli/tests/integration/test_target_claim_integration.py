@@ -11,6 +11,7 @@ itself is covered, not just the Python primitive (which test_claims_*.py
 already covers).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import os
 import subprocess
@@ -64,10 +65,8 @@ def test_init_target_state_writes_a_state_file_for_a_free_text_input_no_fno(tmp_
     fno_home = tmp_path / ".fno-home"
     fno_home.mkdir()
     graph = fno_home / "graph.json"
-    graph.write_text(
-        '{"entries":[{"id":"ab-testit","plan_path":"plans/test.md",'
-        '"status":"ready","priority":"p2","project":"fno"}]}'
-    )
+    seed_graph(graph, '{"entries":[{"id":"ab-testit","plan_path":"plans/test.md",'
+        '"status":"ready","priority":"p2","project":"fno"}]}')
 
     # Set up a fake repo root with .fno/ and the resolvable plan path
     repo = tmp_path / "repo"

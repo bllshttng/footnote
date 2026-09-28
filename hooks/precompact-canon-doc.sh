@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreCompact - precompact canon doc
 # precompact-canon-doc.sh - PreCompact mechanical backstop.
 #
 # Writes and refreshes the MECHANICAL sections of this session's canon handoff
@@ -18,6 +19,10 @@
 # never emits decision: block, and degrades to an omitted section (never a
 # failure) when fno / gh / the registry is unreadable or absent.
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
@@ -100,8 +105,18 @@ SHORT="${SID: -8}"
 # whole heredoc is wrapped in `|| true`).
 # ---------------------------------------------------------------------------
 REG_ROWS=""
+REG_RC=0
 if command -v fno >/dev/null 2>&1; then
-  REG_ROWS="$(fno agents registry-json 2>/dev/null || true)"
+  # A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin
+  # here has leaked off a spawned worker: strip it for this read, keep the
+  # exit code, and let a failed read read as `unknown`, never as uncrowned
+  # (under the pin the silent `|| true` took the failure for "no
+  # registry row" and a crowned king got a plain session doc).
+  REG_ROWS="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
+  REG_RC=$?
+  if [[ "$REG_RC" -ne 0 ]]; then
+    echo "precompact-canon-doc.sh: fno agents registry-json exited $REG_RC; the doc's crown line reads unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
+  fi
 fi
 
 CROWN_INFO="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
@@ -201,7 +216,7 @@ fi
 # with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
 AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
-             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
+             REG_ROWS="$REG_ROWS" REG_RC="$REG_RC" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
 import json
 import os
 import subprocess
@@ -228,7 +243,10 @@ r = mine[0] if mine else {}
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
 crowned = os.environ.get("IS_CROWNED") == "1"
-if not mine:
+reg_rc = os.environ.get("REG_RC", "")
+if reg_rc not in ("", "0"):
+    crown = "unknown (registry-json exit %s)" % reg_rc
+elif not mine:
     crown = "none (no registry row for this session)"
 elif not crowned:
     crown = "none (uncrowned)"
@@ -393,6 +411,45 @@ _session_block() {
   fi
 }
 
+_unowned_session_blocks() {
+  # Every fno:session-marked section whose heading is NOT one of the four the
+  # writer regenerates below, captured verbatim (heading + markers + body).
+  # The assembly re-emits only the four known sections, so without this pass a
+  # refresh deletes a king's hand-written "## HANDOFF (session)" whole. Only
+  # content below the hook's own title line is ours to keep: above it, PRIOR
+  # already preserves the body verbatim, and both passes would duplicate it.
+  awk -v k1="Merge order and why" -v k2="Open decisions awaiting the operator" \
+      -v k3="Gaps and open thinking" -v k4="Workarounds in force" '
+    /^# Canon doc: / { started = 1; heading = ""; next }
+    !started { next }
+    /^## / { heading = $0; next }
+    {
+      if (index($0, "<!-- fno:session -->") > 0) {
+        known = index(heading, k1) > 0 || index(heading, k2) > 0 \
+             || index(heading, k3) > 0 || index(heading, k4) > 0
+        keep = !known
+        bhead = heading
+        if (keep && heading != "") buf = buf heading "\n"
+        heading = ""
+      }
+      if (keep) {
+        buf = buf $0 "\n"
+        if (index($0, "<!-- /fno:session -->") > 0) {
+          # One copy per heading, ever: if the writer ever regenerates a
+          # section this pass also captures (a label list drift), the copy
+          # already on disk must not compound into a second one per fire.
+          if (bhead == "" || !(bhead in seen)) {
+            if (bhead != "") seen[bhead] = 1
+            printf "%s", buf
+          }
+          buf = ""; keep = 0
+        }
+      }
+    }
+    END { printf "%s", buf }
+  ' "$DOC_PATH" 2>/dev/null
+}
+
 DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
 DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
 DEFAULT_GAPS="_Gaps and open thinking only this crown holds. Nothing external knows this. The session fills it at full context._"
@@ -417,6 +474,15 @@ fi
 PRIOR=""
 if [[ -f "$DOC_PATH" ]]; then
   PRIOR="$(awk '/^# Canon doc: /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
+fi
+
+# Unowned session sections (any marked "## X (session)" heading beyond the
+# four regenerated above, e.g. a king's "## HANDOFF (session)") captured
+# before the truncate like the blocks above and re-emitted verbatim, so a
+# refresh keeps session-owned content instead of deleting it silently.
+EXTRA_SESSIONS=""
+if [[ -f "$DOC_PATH" ]]; then
+  EXTRA_SESSIONS="$(_unowned_session_blocks)"
 fi
 
 # The fno:user block is the one section the machine NEVER writes and ALWAYS
@@ -542,6 +608,10 @@ if [[ -n "$_TMP_OUT" ]]; then
     echo "<!-- fno:session -->"
     printf '%s\n' "$SB4"
     echo "<!-- /fno:session -->"
+    echo ""
+  fi
+  if [[ -n "$(printf '%s' "$EXTRA_SESSIONS" | tr -d '[:space:]')" ]]; then
+    printf '%s\n' "$EXTRA_SESSIONS"
     echo ""
   fi
   echo "## User notes (you write here; the machine only ever reads this)"

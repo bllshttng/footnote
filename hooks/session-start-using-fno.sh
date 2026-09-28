@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - session start using fno
 # SessionStart hook: inject the using-fno SKILL.md as additionalContext.
 #
 # It ensures every Claude session opened in a footnote-enabled project
@@ -22,6 +23,10 @@
 #   no-op response. Errors go to stderr where the harness logs them.
 
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 if [[ -z "${PLUGIN_ROOT}" ]]; then

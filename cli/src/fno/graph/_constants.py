@@ -26,7 +26,6 @@ def _state_dir() -> Path:
 
 
 def _graph_json() -> Path:
-    """Route through paths.graph_json() to honour config.paths.graph_json override."""
     try:
         from fno import paths as _paths
         return _paths.graph_json()
@@ -43,13 +42,7 @@ def _graph_html() -> Path:
 
 
 def _graph_archive_json() -> Path:
-    """Route through paths.graph_archive_json() so the archive tracks any
-    config.paths.graph_json override (it is a sibling of the working graph)."""
-    try:
-        from fno import paths as _paths
-        return _paths.graph_archive_json()
-    except Exception:
-        return _state_dir() / "graph-archive.json"
+    return _graph_json().parent / "graph-archive.json"
 
 
 def _ledger_json() -> Path:
@@ -119,13 +112,16 @@ LEGACY_HEX = 8
 ID_PREFIX = LEGACY_PREFIX
 
 # Liberal, bounded, config-FREE grammar for a well-formed node id: a lowercase
-# prefix (1-8 chars, letter-led) + '-' + 4-8 hex. Accepts the legacy
-# ``ab-{8hex}`` and any configured ``<prefix>-<4..8hex>``. Config-free on purpose
+# prefix (1-8 chars, letter-led) + an optional '-' + 4-8 hex. Accepts the legacy
+# ``ab-{8hex}``, any configured ``<prefix>-<4..8hex>``, and the dash-less
+# ``<prefix><4..8hex>`` ids the minter briefly minted before 2026-09-27
+# that remain first-class graph residents. Config-free on purpose
 # so pydantic validators (which run without a settings context) can use it. It is
 # deliberately liberal: it also matches sibling families like ``cv-12345678``, so
 # callers that EXTRACT ids from free text MUST filter the candidates against real
-# graph keys (never trust the grammar alone).
-NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
+# graph keys (never trust the grammar alone) - the graph, not the shape, is the
+# identity check (resolution is format-agnostic).
+NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}"
 _WELLFORMED_NODE_ID_RE = re.compile(NODE_ID_BODY)
 _NODE_ID_EXTRACT_RE = re.compile(r"\b" + NODE_ID_BODY + r"\b")
 
@@ -273,9 +269,7 @@ def _archived_id_pool() -> set[str]:
     try:
         import json as _json
 
-        from fno.paths import graph_archive_json
-
-        archive_path = graph_archive_json()
+        archive_path = _graph_archive_json()
         if not archive_path.exists():
             _ARCHIVE_ID_MEMO["key"] = None
             return set()

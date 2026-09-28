@@ -5,8 +5,8 @@
 # the project events log: without it, a guard that cannot prove it ran is
 # indistinguishable from one that never launched, and under
 # permissions.defaultMode = dontAsk the guards are the entire safety layer.
-# Best-effort by contract: every failure is swallowed and can never change
-# a decision.
+# Best-effort by contract: a failed append reports on stderr and can never
+# change a decision.
 
 _GUARD_MARK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Resolve the events file without forking git when the cwd is already the
@@ -41,5 +41,5 @@ _guard_mark() {
     printf -v row \
         '{"ts":"%s","type":"guard_decision","data":{"guard":"%s","decision":"%s","tool":"%s"},"source":"hook"}' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${tool:-unknown}"
-    _append_bounded_event "guard_mark" "$row" "${EVENTS_FILE:-.fno/events.jsonl}" 2>/dev/null || true
+    _append_bounded_event "guard_mark" "$row" "${EVENTS_FILE:-.fno/events.jsonl}" || true
 }

@@ -100,14 +100,20 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     projected = dict(row)
     # The measurement input never rides the projection out.
     projected.pop("pid_alive", None)
+    projected.pop("exited_at", None)
     event_at = _timestamp(row.get("last_event_at"))
     reconciled_at = _timestamp(row.get("last_reconciled_at"))
     message_at = _timestamp(row.get("last_message_at"))
+    # An exit-recorded verdict dates from the exit stamp. The reconcile stamp
+    # is rewritten every sweep tick, so a later event could never beat it.
+    verdict_at = reconciled_at
+    if row.get("basis") == "exit-recorded":
+        verdict_at = _timestamp(row.get("exited_at")) or reconciled_at
     if (
         row.get("status") in _TERMINAL_STATUSES
         and event_at is not None
-        and reconciled_at is not None
-        and event_at > reconciled_at
+        and verdict_at is not None
+        and event_at > verdict_at
     ):
         projected["status"] = "unknown"
         projected["basis"] = "stale-verdict-fresher-event"

@@ -142,13 +142,13 @@ def stamp_request_origin(
 ) -> "tuple[str | None, str | None]":
     """One birth record through the native owner (`fno-agents node-origin`).
 
-    Returns (origin, evidence); the evidence is the caller's own birth fact,
-    stamped regardless of the transport; the category fail-opens to unknown.
+    Returns the caller's evidence; Rust owns every origin category.
     """
     import subprocess
 
     ref = (origin_evidence or "").strip() or None
     origin = REQUEST_ORIGIN_DEFAULT
+    refused = "--source-kind operator_request could not be verified: fno-agents node-origin gave no answer"
     try:
         from fno.rust_binary import resolve_binary
 
@@ -165,9 +165,12 @@ def stamp_request_origin(
             rows = (json.loads(proc.stdout) if proc.returncode == 0 else None) or {}
             rows = rows.get("results")
             if isinstance(rows, list) and len(rows) == 1 and rows[0].get("origin") in REQUEST_ORIGINS:
-                origin = rows[0]["origin"]
+                origin, refused = rows[0]["origin"], rows[0].get("refused") or refused
     except Exception:  # noqa: BLE001 - fail open; birth never invents origin
         pass
+    if source_kind == "operator_request" and origin != "operator_request":
+        typer.echo(f"Error: {refused}", err=True)
+        raise typer.Exit(code=1)
     return origin, ref
 
 
@@ -204,7 +207,7 @@ def _build_backlog_node(
     completion_note: Optional[str] = None,
     source_session_id: Optional[str] = None,
 ) -> dict:
-    """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
+    """Build a backlog node dict shared by the Python creation verbs``.
 
     ``out``, when given, receives metadata ABOUT the capture that is not itself
     a node field (currently ``source_node_dropped``). A separate channel rather

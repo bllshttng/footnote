@@ -181,34 +181,107 @@ fn reseat_refusals_mutate_nothing() {
     assert!(msg.contains("no unique live worker row"), "{msg}");
     assert_eq!(snapshot(&core), before, "a rowless pane mutates nothing");
 
-    // A named slot whose seat is live is never displaced.
+    // A named slot whose seat is live is TUNED, not displaced: the worker
+    // pane becomes that portal's screen, the portal keeps its index and
+    // tab, the old screen is reaped, and the worker's own tab survives
+    // with its replacement shell.
     set_attach_program(&["/bin/cat"]);
     core.agents = vec![
         bg_row("target-a", "/tmp/seen", Some("deadbee9")),
         pane_worker_row("pane-worker", "deadbee1", w),
     ];
     core.command(client_id, portal_reach_cmd("deadbee9", 0));
-    assert!(
-        core.portals
+    let (old_screen, portal_tab) = {
+        let portal = core
+            .portals
             .get(&0)
-            .is_some_and(|p| core.panes.contains_key(&p.seat)),
-        "the setup reach opened a LIVE seat at portal 0"
-    );
-    // The refusal snapshot starts HERE, after the setup reach settled: what
-    // follows must mutate nothing.
-    let before = snapshot(&core);
-    let displaced = core.reseat_pane_into_portal(w, Some(0));
-    let ServerMsg::Err { msg, .. } = displaced else {
-        panic!("a live slot must refuse, got {displaced:?}")
+            .expect("the setup reach opened portal 0");
+        assert!(
+            core.panes.contains_key(&portal.seat),
+            "fixture: a LIVE seat at portal 0"
+        );
+        (portal.seat, portal.tab)
     };
-    assert!(msg.contains("portal 0 is live"), "{msg}");
-    assert!(
-        core.portals.values().all(|p| p.seat != w),
-        "the refused reseat seated nothing"
+    let tuned = core.reseat_pane_into_portal(w, Some(0));
+    let ServerMsg::Notice { text } = tuned else {
+        panic!("a live slot tunes, got {tuned:?}")
+    };
+    assert!(text.contains("portal 0"), "{text}");
+    assert_eq!(
+        (core.portals[&0].seat, core.portals[&0].row_key.as_str()),
+        (w, "deadbee1"),
+        "portal 0 kept its index and changed channel to the worker"
     );
     assert_eq!(
-        snapshot(&core),
-        before,
-        "the refusals never touched portal, attach, or tab state"
+        core.portals[&0].tab, portal_tab,
+        "the portal kept its placement"
+    );
+    assert!(
+        !core.panes.contains_key(&old_screen),
+        "the old screen was reaped"
+    );
+    assert_eq!(
+        core.attached.get("deadbee1"),
+        Some(&w),
+        "the attach mapping names the reseated worker"
+    );
+    assert!(
+        core.session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == _worker_tab),
+        "the worker's old tab survives the move"
+    );
+}
+
+/// The detach/resume identity join (spawn_journal::DetachedPane) must survive
+/// the registry backfill race: a detach inside the first tick captures no
+/// harness identity, and the member gains it only afterwards. The join
+/// narrows on the identity the SNAPSHOT carries, so an identity-less snapshot
+/// still pairs with the member it was created from.
+#[test]
+fn detached_pane_matches_member_after_identity_backfill() {
+    let identity_less = DetachedPane {
+        name: "keeper-worker".into(),
+        harness: None,
+        harness_session_id: None,
+        cwd: String::new(),
+        squad: 1,
+        squad_name: String::new(),
+        squad_key: String::new(),
+        origins: Vec::new(),
+        tab_name: None,
+    };
+    let enriched = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: true,
+        tab_name: None,
+        cwd: None,
+        worker: Some("keeper-worker".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("keeper-session".into()),
+        pane_id: None,
+    };
+    assert!(
+        identity_less.matches_member(&enriched),
+        "an identity-less detach snapshot joins its backfilled member"
+    );
+    let named = DetachedPane {
+        harness: Some("codex".into()),
+        harness_session_id: Some("keeper-session".into()),
+        ..identity_less
+    };
+    assert!(named.matches_member(&enriched), "full identity still joins");
+    let foreign = DetachedPane {
+        harness: Some("claude".into()),
+        ..named
+    };
+    assert!(
+        !foreign.matches_member(&enriched),
+        "a snapshot's own identity still narrows against the member"
     );
 }

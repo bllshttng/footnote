@@ -115,51 +115,6 @@ def test_resolve_session_pid_falls_back_on_miss():
     )
 
 
-class _FakeProc:
-    def __init__(self, rss, children=()):
-        self._rss = rss
-        self._children = children
-
-    def memory_info(self):
-        return SimpleNamespace(rss=self._rss)
-
-    def children(self, recursive=True):
-        assert recursive, "cost is the TREE; a False here re-opens the undercount"
-        return self._children
-
-
-class _FakePsutil:
-    class Error(Exception):
-        pass
-
-    @staticmethod
-    def Process(pid):  # noqa: N802 - mirrors the real API surface
-        # The session process plus the per-session MCP servers it forks.
-        return _FakeProc(300 * 1024 * 1024, [_FakeProc(80 * 1024 * 1024)])
-
-    @staticmethod
-    def ZombieProcessError(*a, **kw):  # an alias callers may catch
-        return _FakePsutil.Error()
-
-
-def test_tree_rss_sums_children_recursive():
-    from fno.agents.session_procs import tree_rss_mb
-
-    assert tree_rss_mb(37355, _psutil=_FakePsutil) == 380
-
-
-def test_tree_rss_none_for_dead_pid():
-    from fno.agents.session_procs import tree_rss_mb
-
-    class _DeadPsutil:
-        @staticmethod
-        def Process(pid):
-            raise _FakePsutil.Error("gone")
-
-    assert tree_rss_mb(999, _psutil=_DeadPsutil) is None
-    assert tree_rss_mb(None, _psutil=_FakePsutil) is None
-
-
 # ---------------------------------------------------------------------------
 # the joins: census rows and roster discovery carry the resolved pid
 # ---------------------------------------------------------------------------
@@ -206,7 +161,7 @@ def test_top_prices_tree_rss_off_the_resolved_pid(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(sp, "bg_socket_pid_map", lambda root=None: {"55f9847a": 37355})
     monkeypatch.setattr(
-        "fno.agents.top.tree_rss_mb", lambda pid, _psutil=None: 380 if pid == 37355 else None
+        "fno.agents.top._tree_rss", lambda pids: {37355: 380}
     )
     rows = [
         AgentEntry(

@@ -77,6 +77,7 @@ ALLOWLIST=(
     "docs/guides/cross-project-inbox.md"
     "docs/guides/reading-shipped-plans.md"
     "docs/path-config.md"
+    "docs/state-root-inventory.md"
     "docs/system-architecture.md"
     "docs/triage.md"
 )
@@ -119,6 +120,10 @@ NODE_ID_ALLOWLIST=(
     "x-dddd"
     "x-eeee"
     "x-ffff"
+    # The dash-less twins of the repeated-letter pool, for examples of the
+    # compact shape the grammar accepts. Same contract: provably synthetic.
+    "xbbbb"
+    "xaaaa"
     "x-0000"
     "x-1111"
     "x-2222"
@@ -145,6 +150,9 @@ NODE_ID_ALLOWLIST=(
     "ab-77777777"
     "ab-88888888"
     "ab-99999999"
+    # The question-id twin, same contract: a minted id is random hex, never
+    # one hex digit repeated. Backs the question-page name examples.
+    "q-aaaaaaaa"
 )
 
 # Echo the line with every allowlisted token removed. A line carrying ONLY

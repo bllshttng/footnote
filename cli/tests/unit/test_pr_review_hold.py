@@ -16,12 +16,8 @@ from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
-from fno.rust_binary import find_dev_binary
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 DEAD_PID = 2**30  # far above any live pid; is_live() reads it as dead
@@ -74,6 +70,30 @@ def test_key_is_branch_scoped_and_repo_local():
     from fno.claims.io import claims_root_for
 
     assert claims_root_for(key) is None
+
+
+def test_pr_worktree_resolution_from_canonical_subdir_uses_the_pr_branch(tmp_path: Path, monkeypatch):
+    canonical = tmp_path / "canonical"
+    feature = tmp_path / "feature-worktree"
+    canonical.mkdir()
+    nested = canonical / "nested"
+    nested.mkdir()
+    (canonical / ".git").mkdir()
+    feature.mkdir()
+    seen: list[dict] = []
+
+    def verb_call(verb, payload, unavailable=None):
+        assert verb == "pr-worktree"
+        assert payload == {"cwd": str(nested), "pr": 42}
+        seen.append(payload)
+        return {"worktree": str(feature)}
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", verb_call)
+
+    resolved = _review_hold.resolve_pr_worktree(42, str(nested))
+
+    assert resolved == str(feature)
+    assert seen == [{"cwd": str(nested), "pr": 42}]
 
 
 def test_free_hold_and_no_worktree_is_clear(tmp_path: Path):

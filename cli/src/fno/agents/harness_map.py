@@ -484,7 +484,7 @@ def _validate_row(harness: str, caps: dict) -> None:
     # loop through a shell hook and a `none` row closes it through nothing.
     # The converse is legal and load-bearing - an `extension` row with an
     # EMPTY path is a harness whose extension fno has not written yet, and
-    #:func:`check_loop_participation` refuses a looping dispatch at it.
+    # the loop gate in capability_leaves.rs refuses a looping dispatch at it.
     if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
         raise _contract_error(
             harness, "loop_extension",
@@ -539,58 +539,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         )
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
-    _validate_probe_decls(root.get("probe"))
     return version, harnesses
-
-
-#: The three ways a probe declaration says a field can be settled, kept
-#: identical to the Rust validator's PROBE_KINDS.
-_PROBE_KINDS = {"declared", "behavioral", "unprobeable"}
-
-
-def _validate_probe_decls(probe: object) -> None:
-    """Validate the ``[probe.*]`` instrument declarations : a kind
-    may carry only the fields its instrument needs, and a declared pattern
-    must compile. A declaration IS an instrument spec; a spec that cannot
-    run is a guess with extra steps."""
-    if probe is None:
-        return
-    if not isinstance(probe, dict):
-        raise DispatchResolveError("harness capability contract probe table is not a table")
-    for field, decl in probe.items():
-        if not isinstance(decl, dict) or decl.get("kind") not in _PROBE_KINDS:
-            raise _contract_error(field, "probe.kind", "unknown kind")
-        kind = decl["kind"]
-        need = {
-            "declared": ("authority", "pattern"),
-            "behavioral": ("marker",),
-            "unprobeable": ("reason",),
-        }[kind]
-        forbid = {
-            "declared": ("marker", "reason"),
-            "behavioral": ("authority", "pattern", "reason"),
-            "unprobeable": ("authority", "pattern", "marker"),
-        }[kind]
-        for key in need:
-            if not str(decl.get(key) or "").strip():
-                raise _contract_error(field, f"probe.{key}", f"kind {kind!r} needs {key}")
-        for key in forbid:
-            if str(decl.get(key) or "").strip():
-                raise _contract_error(
-                    field, f"probe.{key}", f"kind {kind!r} must not carry {key}"
-                )
-        if kind == "declared":
-            try:
-                re.compile(decl["pattern"])
-            except re.error as exc:
-                raise _contract_error(field, "probe.pattern", f"invalid pattern: {exc}") from exc
-
-
-def probe_declarations() -> dict[str, dict]:
-    """The ``[probe.*]`` instrument table: how each named field can be
-    settled. A field absent from it is UNDECLARED, and the probe reports it
-    as such instead of guessing an instrument."""
-    return deepcopy(_PROBE_DECLS)
 
 
 def normalize_command(command: str, harness: str) -> str:
@@ -681,6 +630,9 @@ def normalize_command(command: str, harness: str) -> str:
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if namespaced and prefix and first_word.startswith("/" + prefix):
             return cmd
+        # The Rust renderer's order: the row's prefix first, then agy, `fno:`.
+        if namespaced and prefix:
+            return "/" + prefix + verb + tail
         if namespaced and harness == "agy":
             return "/" + verb + tail
         if namespaced:
@@ -797,77 +749,43 @@ def spawn_seed_receipt_fragment(effective_message: Optional[str]) -> str:
     )
 
 
-def _loop_extension_installed(harness: str) -> bool:
-    """Whether this harness's shipped loop artifact is actually installed at
-    the harness's own load surface - not merely shipped in the repo.
-
-    A ``loop_extension`` row names a repo path, but the harness only loads
-    the copy fno's installer placed at its own extension dir. Advertising a
-    closable loop while that copy is absent or stale would dispatch a worker
-    with nothing to stop it - the hang the field exists to prevent. A row
-    whose harness declares no installer is treated as not installed: an
-    extension row ships together with its install arm (opencode and pi both
-    did), so the missing arm is a gap to refuse, never a claim to wave
-    through.
-    """
+def _loop_gate_answer(harness: str, command: str) -> dict:
     try:
-        from fno.setup import integration
+        from fno.rust_binary import call_binary_json
+        from fno.setup.integration import _pi_extension_src
     except ImportError:
-        return False
-    checkers = {
-        "opencode": integration._opencode_is_installed,
-        "pi": integration._pi_is_installed,
-    }
-    checker = checkers.get(harness)
-    if checker is None:
-        return False
-    try:
-        return bool(checker())
-    except OSError:
-        return False
+        return {"refusal": (
+            f"refused: the loop gate for harness {harness!r} could not be read "
+            f"(its transport failed to import), so the looping command "
+            f"{command!r} is not admitted."
+        )}
+    args = ["--target-family", "--message", command, "--harness", harness,
+            "--extension-src", str(_pi_extension_src())]
+    err, answer = call_binary_json("status", args, timeout=45)
+    if err is not None or not isinstance(answer, dict):
+        return {"refusal": (
+            f"refused: the loop gate for harness {harness!r} could not be read "
+            f"({err or 'unreadable answer'}), so the looping command {command!r} "
+            f"is not admitted. An fno-agents older than this fno answers "
+            f"'unknown argument'; run 'fno doctor update --rust'."
+        )}
+    return answer
 
 
 def check_loop_participation(harness: str, command: str) -> None:
     """Refuse a LOOPING dispatch at a harness that cannot close a loop.
 
-    ``command`` is judged by :func:`is_target_family`, the same vocabulary the
-    merge-posture carrier judges, so a one-shot ``/think`` or a bare
-    ``opencode run`` passes untouched. A harness
-    whose ``loop_participation`` names no reachable boundary would otherwise
-    take the dispatch and produce a worker with nothing to stop it: the hang
-    this field exists to prevent, not a failure anything reports.
-
-    The refusal text carries the fact rather than a code, because a runtime
-    string cannot drift from the behavior it describes the way a doc can.
+    ``command`` is judged by :func:`is_target_family`, so a one-shot passes
+    untouched. The decision lives in ``capability_leaves.rs`` (the
+    ``fno-agents status --target-family --harness`` leaf), which reads the
+    same packaged table and asks the per-harness install probes; an
+    unreadable leaf refuses, never admits.
     """
     if not is_target_family(command):
         return
-    caps = capabilities(harness)
-    participation = caps["loop_participation"]
-    if participation == "native":
-        return
-    if participation == "extension" and caps.get("loop_extension"):
-        if not _loop_extension_installed(harness):
-            raise DispatchResolveError(
-                f"refused: harness {harness!r} closes its loop through a "
-                f"fno-installed extension that is absent or stale on this "
-                f"machine. Run 'fno config setup' to install it, then "
-                f"dispatch again - a loop whose stop gate is not installed "
-                f"would take {command!r} and never stop."
-            )
-        return
-    if participation == "none":
-        why = "no lifecycle boundary invokes loop-check"
-    else:
-        why = (
-            "its loop rides a harness-native extension fno has not written yet "
-            "and nothing invokes loop-check"
-        )
-    raise DispatchResolveError(
-        f"refused: harness {harness!r} declares loop_participation = "
-        f"{participation!r}, so {why} and the looping command {command!r} would "
-        f"never stop. Dispatch a one-shot instead."
-    )
+    refusal = _loop_gate_answer(harness, command).get("refusal")
+    if refusal:
+        raise DispatchResolveError(refusal)
 
 
 def dispatch_command(harness: str, allow_merge: bool = False) -> str:
@@ -905,7 +823,6 @@ _PACKAGED_CONTRACT_TEXT = (
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
 MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
-_PROBE_DECLS: dict[str, dict] = tomllib.loads(_PACKAGED_CONTRACT_TEXT).get("probe") or {}
 # Non-empty subset of the complete roster, mirroring parse_capability_contract:
 # the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
 assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
@@ -1277,10 +1194,12 @@ def effort_values(harness: str) -> list[str]:
     return []
 
 
-#: claude's own --permission-mode vocabulary, its --help being the authority
-#: ; the CLI help and the doctor readout spell it from here.
+#: claude's own --permission-mode vocabulary. One home: the capability
+#: table's claude row (`permission_modes`), whose authority is claude's
+#: --help. The packaged copy this module already loads is the source, so the
+#: list cannot drift between the Rust and Python lanes.
 CLAUDE_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
+    tomllib.loads(_PACKAGED_CONTRACT_TEXT)["harness"]["claude"]["permission_modes"]
 )
 
 CLAUDE_PERMISSION_HELP = (
@@ -1316,57 +1235,6 @@ _BRIEF_MAX_BYTES = 8192
 
 #: The verbs the lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
-#: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
-_DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
-_RUNG_ANSWERS = {
-    "idea": "/blueprint",
-    "design": "/blueprint",
-    "ready": "/target",
-    "in_progress": "/target",
-    "in_review": "/target",
-}
-
-
-def resolve_effective_verb(
-    *,
-    verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
-    node_id: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    """The target/blueprint lifecycle conditional; full table:
-    docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides. The stored
-    ``verb`` reconciles through the table; out-of-family abstains to declared
-    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
-    Raises :class:`DispatchResolveError` on a refusal rung, or planless
-    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
-    refusal leads with ``node_id`` when the caller holds one, so the subject
-    of the failure is never read off a citation."""
-    raw_verb = (verb or "").strip()
-    if parse_verb_token(raw_verb):
-        raw_verb = canonical_verb_key(raw_verb)
-    if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
-        return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
-    if plan_rung is None:
-        return None, "verb=lifecycle(no-node-context)"
-    rung = plan_rung.strip().lower()
-    d = (difficulty or "").strip().lower()
-    if rung == "none" and d in _DIFFICULTY_ANSWERS:
-        answer = _DIFFICULTY_ANSWERS[d]
-        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
-    elif rung in _RUNG_ANSWERS:
-        answer = _RUNG_ANSWERS[rung]
-        note = f"verb=lifecycle(plan {rung} -> {answer}"
-    else:
-        who = f" for node {node_id}" if node_id else ""
-        raise DispatchResolveError(
-            f"dispatch verb cannot be derived{who}: plan rung {rung!r} with "
-            f"difficulty {d!r} answers no lifecycle rung"
-        )
-    if raw_verb and raw_verb != answer:
-        note += f"; stored dispatch_verb {raw_verb} reconciled"
-    return answer, note + ")"
 
 
 def resolve_dispatch(
@@ -1376,8 +1244,7 @@ def resolve_dispatch(
     node_id: Optional[str] = None,
     command: Optional[str] = None,
     verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
+    lifecycle: Optional[tuple[Optional[str], str]] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1391,11 +1258,7 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
-    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
-    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
-    an explicit command bypasses it (reconcile and the other explicit doors
-    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    per-harness builtin. ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
@@ -1409,14 +1272,11 @@ def resolve_dispatch(
     unsubstituted command, or an unanswerable node lifecycle.
     ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # The lifecycle rung derives the effective verb BEFORE the config read so
-    # the stage table resolves the DERIVED verb's profile row.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
-        lifecycle_verb, lifecycle_note = resolve_effective_verb(
-            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
-        )
-        decision.append(lifecycle_note)
+        if lifecycle is not None:
+            lifecycle_verb, lifecycle_note = lifecycle
+            decision.append(lifecycle_note)
     cfg = (
         dict(dispatch_cfg)
         if dispatch_cfg is not None
@@ -1630,14 +1490,8 @@ def resolve_dispatch(
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
-    # The loop gate, at the same choke point every spawn surface resolves
-    # through. It reads a CAPABILITY, never a harness name, and it fires after
-    # normalization so it judges the per-harness /target spelling the worker
-    # will actually receive. Deliberately not at registry load: an alien or
-    # one-shot dispatch must still resolve fine, matching the existing split
-    # where the load gate is a shape check and the dispatch gate is where a
-    # capability is required.
-    check_loop_participation(chosen_harness, template)
+    # Resolution is read-only. The spawn door checks loop readiness after it
+    # has the actual caller session context and before it launches a worker.
     # `{id}` must appear at least once; a template may reference it more than
     # once. A registry verb declaring takes_node_id=false is exempt: ignoring
     # the id is declared, not a dropped substitution.

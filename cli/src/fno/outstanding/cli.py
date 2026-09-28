@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 from pathlib import Path
 from typing import List
 
@@ -154,33 +153,21 @@ def report(
         typer.echo(block, nl=False)
 
 
-def _law_match(question: str, subject: str | None, node: str | None) -> dict:
-    """Live law-lane decisions that speak to this question, matched in the
-    fno-agents crate (d-b6cc1a2a puts new code in `crates/`; the matcher is
-    `fno-agents law-match`). This side keeps only the decision-lifecycle read:
-    `list_decisions` owns live-row state, and the verb takes rows, not a
-    filesystem. Losing the lookup is worse than one unneeded ask, so the
-    caller catches everything (d-0fa92eb9, q-8a3bf752: no agent asks a
-    question the operator already settled).
-    """
+def _law_rows() -> "list[dict]":
+    """Live law rows the Rust intake matches against (d-0fa92eb9: no agent
+    asks a question the operator already settled). ``lane`` is the verdict of
+    the same authority rule `backlog decide-retract` enforces, so the ask
+    gate reads the retraction constraint instead of re-deriving it."""
     from fno.decide import list_decisions
-    from fno.rust_binary import verb_call
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
-    laws = [
-        {key: row.get(key) for key in ("decision_id", "subject", "decision", "ts")}
+    return [
+        {
+            key: row.get(key)
+            for key in ("decision_id", "subject", "decision", "ts", "lane")
+        }
         for row in rows
     ]
-    return verb_call(
-        "law-match",
-        {
-            "mode": "ask",
-            "question": question,
-            "subject": subject,
-            "node": node,
-            "laws": laws,
-        },
-    )
 
 
 @outstanding_app.command("ask")
@@ -211,14 +198,13 @@ def ask(
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point: `session_truth` classifies from the transcript
-    tail, so an unrecorded question stops existing the moment another turn
-    lands.
+    The leg is the Rust `question-intake` transport (law refusal, context
+    parse, writes, receipt); this side keeps identity and the law-row read.
     """
     from fno.claims.self_identity import resolve_self_identity
-    from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle
-    from fno.outstanding.core import QuestionIndexWriteError, append_question_event
+    from fno.paths import project_log, questions_jsonl
+    from fno.rust_binary import verb_call
     from fno.text_or_file import read_text_arg
 
     question = read_text_arg(question, question_file, what="the question")
@@ -228,111 +214,31 @@ def ask(
         )
         raise typer.Exit(code=2)
 
-    if len(question) > QUESTION_CAP:
-        typer.echo(
-            f"outstanding: recorded truncated: the question is {len(question)} "
-            f"characters, the event stores {QUESTION_CAP}.",
-            err=True,
-        )
-    try:
-        answer = _law_match(question, subject, node)
-    except Exception as exc:  # noqa: BLE001 - fail open: record the question
-        typer.echo(
-            f"outstanding: live-law lookup failed ({exc}); recording anyway",
-            err=True,
-        )
-        answer = {"exact": [], "nearby_refusal": None}
-    for hit in answer.get("exact") or []:
-        key = hit["subject"]
-        ids = hit["ids"]
-        line = (
-            f"outstanding: refused: live law already rules on '{key}' "
-            f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
-            f"--lane law --state live. Act on the law; do not ask {display_name()}."
-        )
-        if not subject:
-            line += " If the question is about another subject, name it with --subject."
-        typer.echo(line, err=True)
-    if answer.get("exact"):
-        raise typer.Exit(2)
-    refusal = answer.get("nearby_refusal")
-    if refusal:
-        typer.echo(refusal, err=True)
-        raise typer.Exit(2)
-    qid = f"q-{secrets.token_hex(4)}"
-    session_id = _session_id()
-    # OWNED: the asker handle lands on a durable question event and is
-    # the address the answer comes back to.
     ident = resolve_self_identity()
+    try:
+        laws = _law_rows()
+    except Exception as exc:  # noqa: BLE001 - fail open: record the question
+        laws = []
+        typer.echo(f"outstanding: live-law lookup failed ({exc}); recording anyway", err=True)
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
-    try:
-        event = operator_question(
-            question_id=qid,
-            question=question,
-            session_id=session_id,
-            cwd=str(Path.cwd()),
-            node=node,
-            asker=asker,
-            ask=ask,
-            options=option or None,
-            blocks=blocks or None,
-            subject=subject,
-        )
-        append_question_event(event, _storage_root())
-    except QuestionIndexWriteError as exc:
-        typer.echo(
-            f"outstanding: recorded {exc.question_id} in the project journal, "
-            f"but the recall index write failed: {exc}. Run "
-            "`fno inbox outstanding reindex`; do not retry ask, which would mint a "
-            "second id for the same question.",
-            err=True,
-        )
-        raise typer.Exit(1)
-    except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
-        typer.echo(f"outstanding: failed to record question: {exc}", err=True)
-        raise typer.Exit(1)
-
-    typer.echo(
-        f"outstanding: recorded {qid}. Clear it once answered: "
-        f'fno inbox outstanding clear {qid} --answer "..."',
-        err=True,
+    answer = verb_call(
+        "question-intake",
+        {
+            "question": question, "ask": ask, "options": option, "blocks": blocks,
+            "node": node, "subject": subject, "session_id": _session_id(),
+            "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
+            "storage_root": str(_storage_root()),
+            "index_path": str(questions_jsonl()),
+            "journal_path": str(project_log("events.jsonl")),
+            "display_name": display_name(),
+        },
     )
-    # A receipt that names an id but says nothing about visibility is the shape
-    # that made two fleet blockers invisible (q-90982503, q-e6dc2881): the
-    # queue prints QUESTION_RENDER_CAP rows, so say where this one lands.
-    # liveness_budget_seconds=0.0: the receipt must not spend a liveness probe
-    # budget on a write path, and an unresolved lane reads None - the position
-    # is a lower bound on visibility, never an optimistic one.
-    position: "int | None" = None
-    total: "int | None" = None
-    try:
-        from fno.outstanding.core import QUESTION_RENDER_CAP, read_open_questions
-
-        ranked = read_open_questions(_storage_root(), liveness_budget_seconds=0.0)
-        position = next(i for i, q in enumerate(ranked) if q.id == qid) + 1
-        total = len(ranked)
-    except Exception:  # noqa: BLE001 - a receipt must never fail the recorded ask
-        position = total = None
-    if position is None:
-        typer.echo(
-            "outstanding: recorded, but its render position could not be read; "
-            "run fno inbox outstanding to check.",
-            err=True,
-        )
-    elif position <= QUESTION_RENDER_CAP:
-        typer.echo(
-            f"outstanding: {qid} renders at position {position} of {total}.",
-            err=True,
-        )
-    else:
-        typer.echo(
-            f"outstanding: {qid} does NOT render: position {position} of {total}, "
-            f"and fno inbox outstanding prints {QUESTION_RENDER_CAP}. Nothing will "
-            "show it to the operator; raise it another way or answer it yourself.",
-            err=True,
-        )
-    # stdout carries the value: the new question id.
-    typer.echo(qid)
+    # Every human word rides the answer's lines, composed Rust-side.
+    for line in answer.get("lines") or ():
+        typer.echo(line, err=True)
+    if (code := answer.get("exit_code")) and code != 0:
+        raise typer.Exit(code)
+    typer.echo(answer["qid"])
 
 
 @outstanding_app.command("clear")
@@ -357,214 +263,38 @@ def clear(
     ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno.decide import (
-        AUTHORITY_SOURCES,
-        IndexWriteError,
-        RefusedAuthorityError,
-        UnknownOriginError,
-        UnattributedAuthorityError,
-    )
-    from fno.events import QUESTION_CAP, operator_question_closed
-    from fno.outstanding.core import (
-        QuestionIndexWriteError,
-        append_question_event,
-        read_open_questions,
-    )
+    from fno import decide, events, paths, rust_binary
+    from fno.outstanding.deliver import deliver_answer
+    from types import SimpleNamespace
 
-    if answer is not None and len(answer) > QUESTION_CAP:
-        typer.echo(
-            f"outstanding: recorded truncated: the answer is {len(answer)} "
-            f"characters, the event stores {QUESTION_CAP}.",
-            err=True,
-        )
-
-    # --authority names how the answerer was entitled.
-    if authority is not None and authority not in AUTHORITY_SOURCES:
-        typer.echo(
-            f"outstanding: --authority '{authority}' is not one of "
-            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was closed.",
-            err=True,
-        )
+    if authority is not None and authority not in decide.AUTHORITY_SOURCES:
+        typer.echo(f"outstanding: --authority '{authority}' is not one of {', '.join(decide.AUTHORITY_SOURCES)}. Nothing was closed.", err=True)
         raise typer.Exit(2)
-
-    root = _storage_root()
-    try:
-        open_by_id = {q.id: q for q in read_open_questions(root)}
-    except OutstandingError as exc:
-        typer.echo(f"outstanding: failed to read: {exc}", err=True)
-        raise typer.Exit(1)
-
-    # An id that is not open is a no-op, not a failure: mirroring
-    # `carveout resolve`, a second clear must be safe to run.
-    targets = [q for q in question_ids if q in open_by_id]
-    skipped = [q for q in question_ids if q not in open_by_id]
-
-    closed_by = _session_id()
-    for qid in targets:
+    if answer is not None and len(answer) > events.QUESTION_CAP:
+        typer.echo(f"outstanding: recorded truncated: the answer is {len(answer)} characters, the event stores {events.QUESTION_CAP}.", err=True)
+    provenance = {}
+    if answer is not None:
         try:
-            # An answered question IS a decision, so the close path records it
-            # as one. A close with no answer is a withdrawal and decides
-            # nothing. Record it before closing, so a failure to record leaves
-            # the question open and therefore retryable. That no longer covers
-            # a failed graph PROJECTION: the machine-wide index carries recall
-            # now, so the answer is already findable and a retry would record
-            # it twice.
-            # Routed through record_decision so the decision gets both halves
-            # a `fno backlog decide` record has: the event AND the graph projection
-            # onto the subject node, which is what `fno backlog decisions` reads.
-            # decided_by is left unset on purpose, so record_decision stamps
-            # whoever actually ran the verb. Naming the operator here would
-            # assert it, and an agent clearing a question on their behalf would
-            # then be indistinguishable from the operator answering it.
-            recorded: "str | None" = None
-            if answer is not None:
-                from fno.decide import record_decision
-
-                record = open_by_id[qid]
-                try:
-                    recorded = record_decision(
-                        decision=answer,
-                        subject=record.node or f"question:{qid}",
-                        question_id=qid,
-                        question=record.question,
-                        asked_by=record.asker or record.session_id,
-                        asked_at=record.ts or None,
-                        authority_source=authority,
-                        origin=origin,
-                        events_root=root,
-                    )["decision_id"]
-                except UnknownOriginError as exc:
-                    # A bad --origin is a typo, not an authority problem. It
-                    # gets its own clause because the law two-step below would
-                    # tell the caller to drop a flag they never passed and
-                    # never name the value that actually failed.
-                    typer.echo(
-                        f"outstanding: refused: {exc}. Nothing was closed; "
-                        f"all {len(targets)} question(s) stay open.",
-                        err=True,
-                    )
-                    raise typer.Exit(3)
-                except (
-                    RefusedAuthorityError,
-                    UnattributedAuthorityError,
-                ) as exc:
-                    # Refuse the CLOSE too, never just the decision. Closing a
-                    # question whose answer was refused would retire it with
-                    # nothing on record, which is the worse of the two.
-                    #
-                    # Say NOTHING was closed, not that this id stayed open.
-                    # The refusal is a pure function of the ambient identity
-                    # and the flags, all invariant across this loop, so it
-                    # fires on the first id or never. Naming one id would be
-                    # the partial statement this verb's whole family of
-                    # messages exists to stop.
-                    #
-                    # THREE callers reach here and their remedies disagree, so
-                    # the remedy is chosen rather than shared. Handing one of
-                    # them another's advice is how a refusal becomes a loop.
-                    if isinstance(exc, UnattributedAuthorityError):
-                        # No identity AND no terminal: cron, CI, a piped run, a
-                        # scrubbed env. Not an agent, and with no chat to be
-                        # sent to. It has to become someone first.
-                        remedy = (
-                            "This process has no session identity and no "
-                            "terminal, so it is not an agent and has no chat "
-                            "to compose in. Run it from an attended terminal, "
-                            "or from a real agent session, and answer again."
-                        )
-                    elif exc.origin is not None:
-                        # The origin floor fired: the caller claimed a channel
-                        # above its station. This one IS fixed by changing a
-                        # flag, so it must never be told otherwise.
-                        remedy = (
-                            f"The refusal is about the claimed --origin "
-                            f"{exc.origin!r}, not about who you are. Drop "
-                            "--origin (or drop --authority operator) and "
-                            "answer again."
-                        )
-                    else:
-                        # A real agent session. After the gate deletion this is
-                        # only the --authority operator claim: an agent answer
-                        # as agent or crown records without refusing.
-                        remedy = (
-                            "An agent answers as agent or crown. The superuser "
-                            "lane is not an agent's to claim. Drop --authority "
-                            "operator and answer again."
-                        )
-                    typer.echo(
-                        f"outstanding: refused: {exc}. Nothing was closed; "
-                        f"all {len(targets)} question(s) stay open.\n{remedy}",
-                        err=True,
-                    )
-                    raise typer.Exit(3)
+            origin = decide.enforce_origin_floor(origin)
+            provenance = decide._resolve_decider(None, authority, origin=origin)._asdict()
+            provenance["origin"] = origin
+        except (decide.UnknownOriginError, decide.RefusedAuthorityError, decide.UnattributedAuthorityError) as exc:
+            remedy = "" if isinstance(exc, decide.UnknownOriginError) else "This process has no session identity and no terminal, so it is not an agent and has no chat to compose in. Run it from an attended terminal, or from a real agent session, and answer again." if isinstance(exc, decide.UnattributedAuthorityError) else f"The refusal is about the claimed --origin {exc.origin!r}, not about who you are. Drop --origin (or drop --authority operator) and answer again." if exc.origin is not None else "An agent answers as agent or crown. The superuser lane is not an agent's to claim. Drop --authority operator and answer again."
+            typer.echo(f"outstanding: refused: {exc}. Nothing was closed; all {len(question_ids)} question(s) stay open." + (f"\n{remedy}" if remedy else ""), err=True)
+            raise typer.Exit(3)
+    result = rust_binary.verb_call("question-clear", {"ids": question_ids, "answer": answer, "cap": events.QUESTION_CAP, "provenance": provenance, "closed_by": _session_id(), "journal_path": str(paths.project_log("events.jsonl")), "index_path": str(paths.questions_jsonl()), "decisions_path": str(paths.decisions_jsonl()), "graph": str(paths.graph_json()), "repo_root": str(Path.cwd())})
+    typer.echo("\n".join(result.get("lines") or ()))
+    for item in result.get("closed") or ():
+        if item.get("node") and item.get("decision_event"):
             try:
-                event = operator_question_closed(
-                    question_id=qid, answer=answer, closed_by=closed_by
-                )
-                append_question_event(event, root)
-            except QuestionIndexWriteError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # The close failed AFTER the decision landed (a contended
-                # journal lock, ENOSPC). The generic handler below would say
-                # "failed to close", the operator would re-run with --answer,
-                # and one answer would be recorded twice under two ids with no
-                # supersedes link. Name the id and the safe way out instead.
-                if recorded is None:
-                    raise
-                typer.echo(
-                    f"outstanding: the answer to {qid} is recorded as {recorded}, "
-                    f"but closing the question failed: {exc}. It stays open. "
-                    f"Close it with no --answer; clearing with --answer again "
-                    f"records the same ruling a second time.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-        except IndexWriteError as exc:
-            # The other producer of operator_decision, and it must give the
-            # same guidance: the durable event landed, so the documented
-            # "just run it again" would record one answer twice under two ids.
-            # A guard on one of two producer paths is decorative.
-            typer.echo(
-                f"outstanding: recorded the answer to {qid} as {exc.decision_id}, "
-                f"but the recall index write failed: {exc}. The question stays "
-                f"open. Run `fno backlog decide-reindex` to recover the answer, then "
-                f"close it with no --answer; clearing with --answer again "
-                f"records the same ruling a second time.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        except QuestionIndexWriteError as exc:
-            typer.echo(
-                f"outstanding: recorded the close for {exc.question_id} in the "
-                f"project journal, but the recall index write failed: {exc}. "
-                "Run `fno inbox outstanding reindex`; do not retry clear blindly.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        except typer.Exit:
-            # typer.Exit derives from RuntimeError, so the generic handler
-            # below would swallow the precise message just raised and replace
-            # it with "failed to close".
-            raise
-        except Exception as exc:  # noqa: BLE001
-            typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
-            raise typer.Exit(1)
-
-        # The delivery edge: an answer that reaches nobody trains producers to
-        # stop asking through this queue. The close above is durable, so
-        # delivery is best-effort - one stated posture line per closed id,
-        # never a failed clear and never a re-record.
-        if answer is not None:
-            from fno.outstanding.deliver import deliver_answer
-
-            typer.echo(deliver_answer(open_by_id[qid], answer, recorded), err=True)
-
-    if skipped:
-        typer.echo(
-            f"outstanding: not open, nothing to close: {', '.join(skipped)}", err=True
-        )
-    typer.echo(str(len(targets)))
+                projected = decide._project(item["decision_event"])
+            except (Exception, SystemExit) as exc:
+                projected = (None, f"the graph projection failed ({exc!r})")
+            if projected[0] is None:
+                typer.echo(f"outstanding: {item['qid']} decision {item['decision_id']} is recorded but not on node {item['node']}: {projected[1]}", err=True)
+    for item in result.get("deliveries") or ():
+        typer.echo(deliver_answer(SimpleNamespace(id=item["qid"], question=item["question"], asker=item["asker"], session_id=item.get("session_id")), answer, item["decision_id"]), err=True)
+    raise typer.Exit(result["exit_code"])
 
 
 @outstanding_app.command("reindex")

@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-KING_SKILL = REPO_ROOT / "skills" / "king-for-a-day" / "SKILL.md"
+KING_SKILL = REPO_ROOT / "skills" / "reign" / "references" / "once.md"
 # The eval worker runs with `--cwd <disposable-worktree>` and writes the
 # artifact relative to that cwd, which IS repo root inside the graded
 # worktree - never a fixed evals/runs/ path (grading.py's _grade_exit also
@@ -34,7 +34,7 @@ def _section_3d(text: str) -> str:
     match = re.search(
         r"\*\*3d\..*?(?=\n### 4\. Kick off)", text, re.S
     )
-    assert match, "3d batching block not found in king-for-a-day/SKILL.md"
+    assert match, "3d batching block not found in reign/references/once.md"
     return match.group(0)
 
 

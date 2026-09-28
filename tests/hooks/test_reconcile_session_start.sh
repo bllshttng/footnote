@@ -29,6 +29,7 @@ pass() { printf '[reconcile-ss] PASS: %s\n' "$*"; }
 command -v jq >/dev/null 2>&1 || fail "jq required for these tests"
 
 WORK=$(mktemp -d -t reconcile-ss-XXXXXX)
+git -C "$WORK" init -q
 trap 'rm -rf "$WORK"' EXIT
 
 # --- Fake `fno` on PATH: records its args and emits a reconcile-shaped JSON. ---
@@ -158,6 +159,7 @@ pass "throttle: stamp older than window re-fires"
 # ============================================================================
 log "render: closed nodes -> reminder emitted and result consumed"
 REPO4="$WORK/repo4"; mkdir -p "$REPO4/.fno"
+git -C "$REPO4" init -q
 RESULT4="$REPO4/.fno/.reconcile-result.json"
 # Pin a fresh stamp so the hook does NOT fire a reconcile during the render test.
 touch "$REPO4/.fno/.reconcile-stamp"
@@ -178,6 +180,7 @@ pass "render: closed-node reminder emitted; result consumed once"
 # ============================================================================
 log "render: empty sweep -> silent, still consumed"
 REPO5="$WORK/repo5"; mkdir -p "$REPO5/.fno"
+git -C "$REPO5" init -q
 RESULT5="$REPO5/.fno/.reconcile-result.json"
 touch "$REPO5/.fno/.reconcile-stamp"
 cat > "$RESULT5" <<'JSON'
@@ -233,6 +236,62 @@ grep -q "x-uu1" <<<"$OUT" || fail "render: reminder missing node id x-uu1"
 grep -q "Do not force these closed" <<<"$OUT" \
     || fail "render: unknown line missing the do-not-force warning (got: $OUT)"
 pass "render: retryable-unknown nodes get their own line and no --force advice"
+
+# ============================================================================
+# AC9-HP: the orphan-plan binder's result file renders one line
+# naming every bound id, then the file is consumed to .shown.
+# ============================================================================
+log "orphan: bound_now rows -> one bound line, consumed"
+REPO_OP="$WORK/repo-orphan-bound"; mkdir -p "$REPO_OP/.fno"
+RESULT_OP="$REPO_OP/.fno/.orphan-plans-result.json"
+touch "$REPO_OP/.fno/.reconcile-stamp"
+cat > "$RESULT_OP" <<'JSON'
+{"read_at":"2026-09-19T00:00:00Z","plans_dir":"/tmp/plans","rows":[{"node_id":"x-op1","plan_path":"/tmp/plans/a.md","verdict":"bound_now","detail":""},{"node_id":"x-op2","plan_path":"/tmp/plans/b.md","verdict":"bound_now","detail":""}],"counts":{"bound_now":2}}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OP" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "bound 2 orphan plan(s) to their nodes (x-op1,x-op2)" <<<"$OUT" \
+    || fail "orphan: bound line missing or wrong (got: $OUT)"
+[[ ! -f "$RESULT_OP" ]] || fail "orphan: result not consumed (should move to .shown)"
+[[ -f "$RESULT_OP.shown" ]] || fail "orphan: consumed result not preserved as .shown"
+pass "orphan: bound_now rows render one line and are consumed"
+
+# ============================================================================
+# AC10-EDGE: only terminal and settling rows stay silent (transient and
+# healthy history never surfaces).
+# ============================================================================
+log "orphan: terminal + settling rows -> silent, still consumed"
+REPO_OQ="$WORK/repo-orphan-quiet"; mkdir -p "$REPO_OQ/.fno"
+RESULT_OQ="$REPO_OQ/.fno/.orphan-plans-result.json"
+touch "$REPO_OQ/.fno/.reconcile-stamp"
+cat > "$RESULT_OQ" <<'JSON'
+{"read_at":"2026-09-19T00:00:00Z","plans_dir":"/tmp/plans","rows":[{"node_id":"x-t1","plan_path":"/tmp/plans/t.md","verdict":"terminal","detail":""},{"node_id":"x-s1","plan_path":"/tmp/plans/s.md","verdict":"settling","detail":""}],"counts":{"terminal":1,"settling":1}}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OQ" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "orphan plan" <<<"$OUT" \
+    && fail "orphan: terminal/settling rows wrongly surfaced (got: $OUT)"
+[[ -f "$RESULT_OQ.shown" ]] || fail "orphan: quiet result not consumed to .shown"
+pass "orphan: terminal + settling rows stay silent and are consumed"
+
+# ============================================================================
+# AC11-ERR: a result file that is not JSON must not kill the hook: the render
+# is cosmetic, so the run still reaches reconcile_maybe_fire and exits 0.
+# ============================================================================
+log "orphan: non-JSON result -> hook survives and still fires"
+REPO_OB="$WORK/repo-orphan-bad"; mkdir -p "$REPO_OB/.fno"
+RESULT_OB="$REPO_OB/.fno/.orphan-plans-result.json"
+cat > "$RESULT_OB" <<'TEXT'
+not json at all
+TEXT
+: > "$FNO_CALL_LOG"
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OB" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+_RC_OB=$?
+[[ "$_RC_OB" -eq 0 ]] \
+    || fail "orphan/bad: hook exited $_RC_OB on a non-JSON orphan result"
+[[ -f "$RESULT_OB.shown" ]] \
+    || fail "orphan/bad: non-JSON result not consumed"
+wait_for_file "$REPO_OB/.fno/.reconcile-result.json" \
+    || fail "orphan/bad: reconcile never fired - the orphan render killed the trigger"
+pass "orphan: non-JSON result survives and the reconcile still fires"
 
 # ============================================================================
 # AC: render - a PROVEN-STALE canonical catchup (outcome fresh, stale true)

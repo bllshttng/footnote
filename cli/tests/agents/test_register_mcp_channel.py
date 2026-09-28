@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from tests._event_rows import event_rows
 
 
 def _seed_claude_agent(name: str = "claude-bot", *, short_id: str = "abc12345") -> None:
@@ -110,8 +111,7 @@ class TestRegisterMCPChannel:
 
         register_mcp_channel("claude-bot")
 
-        events_text = (paths.state_dir() / "events.jsonl").read_text("utf-8")
-        records = [json.loads(line) for line in events_text.splitlines() if line.strip()]
+        records = event_rows(paths.state_dir() / "events.jsonl")
         registered = [r for r in records if r["kind"] == "mcp_channel_registered"]
         assert len(registered) == 1
         assert registered[0]["name"] == "claude-bot"
@@ -130,8 +130,7 @@ class TestRegisterMCPChannel:
         register_mcp_channel("claude-bot")
         register_mcp_channel("claude-bot")
 
-        events_text = (paths.state_dir() / "events.jsonl").read_text("utf-8")
-        records = [json.loads(line) for line in events_text.splitlines() if line.strip()]
+        records = event_rows(paths.state_dir() / "events.jsonl")
         registered = [r for r in records if r["kind"] == "mcp_channel_registered"]
         assert len(registered) == 2
         assert registered[0]["idempotent"] is False

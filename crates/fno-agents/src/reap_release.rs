@@ -37,7 +37,10 @@ pub fn run(home: &AgentsHome, cwd: &Path, handle: &str) -> i32 {
         .find(|h| h.id == handle)
         .or_else(|| {
             let row = load_registry_row(home, handle)?;
-            let id = crate::gc::row_handle(&row);
+            // Hold ids are REPORT ids (row_label, the short id), never the
+            // probe handle: row_handle answers the session uuid for a row
+            // carrying one, which no hold is keyed by.
+            let id = crate::gc::row_label(&row);
             dry.holds.iter().find(|h| h.id == id)
         })
         .cloned();

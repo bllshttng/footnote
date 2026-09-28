@@ -40,6 +40,21 @@ def test_partition_holds_on_real_models():
     assert "TrackerCandidate" in r.stdout
 
 
+def _rust_projection(tmp_path: Path, node_body: str) -> Path:
+    """A poisoned repo's minimal Rust projection file: the gate requires it
+    beside the Python models, with the same two structs the real one carries."""
+    rust = tmp_path / "poison" / "crates/fno-agents/src/tracker/mod.rs"
+    rust.parent.mkdir(parents=True, exist_ok=True)
+    rust.write_text(
+        f"pub struct TrackerNode {{\n{node_body}}}\n"
+        "pub struct Candidate {\n"
+        "    #[serde(flatten)]\n"
+        "    pub node: TrackerNode,\n"
+        "}\n"
+    )
+    return rust
+
+
 def test_gate_fails_on_subclass_projection_overlap(tmp_path):
     # A forbidden mirror smuggled onto a SUBCLASS projection (not TrackerNode
     # itself) must still fail the gate: the union rule covers every projection.
@@ -55,6 +70,10 @@ def test_gate_fails_on_subclass_projection_overlap(tmp_path):
         "    batch: str = None\n"
     )
     sidecar.write_text("class Sidecar:\n    id: str\n    batch: str = None\n")
+    _rust_projection(
+        tmp_path,
+        "    pub id: String,\n",
+    )
     r = subprocess.run(
         ["bash", str(GATE), str(poisoned)], capture_output=True, text=True
     )
@@ -69,9 +88,13 @@ def test_gate_fails_when_id_key_missing(tmp_path):
     types = poisoned / "cli/src/fno/tracker/types.py"
     sidecar = poisoned / "cli/src/fno/tracker/sidecar.py"
     types.parent.mkdir(parents=True)
-    # Neither class declares `id`:
+    # Neither model declares `id`:
     types.write_text("class TrackerNode:\n    title: str = None\n")
     sidecar.write_text("class Sidecar:\n    cwd: str = None\n")
+    _rust_projection(
+        tmp_path,
+        "    pub title: Option<String>,\n",
+    )
     r = subprocess.run(
         ["bash", str(GATE), str(poisoned)], capture_output=True, text=True
     )

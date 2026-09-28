@@ -263,6 +263,14 @@ pub enum StateError {
         current: u32,
         source_root: String,
     },
+    /// The shared-registry write guard refused at the choke point
+    /// (`registry_guard`): a test/probe process aimed at the real shared
+    /// registry, or a closure about to drop most live rows without the
+    /// override. Its own variant rather than `InvariantViolation` so the
+    /// remedy-bearing message stays grep-able as the guard, not as a
+    /// row-shape bug.
+    #[error("registry write guard: {0}")]
+    WriteGuard(String),
     /// The blocking-pool task reading the registry was cancelled by daemon
     /// shutdown before it ran, not by a failure in the read itself.
     #[error("cancelled during shutdown: {0}")]
@@ -826,6 +834,19 @@ pub struct RegistryEntry {
     /// `AgentEntry.related_session_id`; same X3 passthrough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_session_id: Option<String>,
+    /// The transcript file the harness itself reported at SessionStart
+    /// (v37), stamped by the session-report ingest. None when no hook
+    /// reported: absence means unknown, never missing. Mirrors Python's
+    /// `AgentEntry.transcript_path`; same X3 passthrough duty as every
+    /// daemon-stamped field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    /// WHY this session started (v37): the harness's own SessionStart
+    /// flavor - claude: startup|resume|clear|compact. None when no hook
+    /// reported. Mirrors Python's `AgentEntry.start_source`; same X3
+    /// passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_source: Option<String>,
     /// The backlog node this row WORKS (v21), mirroring Python's
     /// `AgentEntry.node`: stamped once at birth by the Python spawn seams from
     /// the spawn's resolved provenance and by the client-side ask lanes from
@@ -838,6 +859,23 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// v36: why a mint could not bind the node the spawn NAMED -
+    /// the seed's verb argument read as a node id but the seam resolved no
+    /// readable row for it. Set only in that one case; absent when the node
+    /// resolved and absent when the spawn genuinely named none, so the three
+    /// states stay distinguishable. Mirrors Python's `AgentEntry.node_reason`;
+    /// same X3 passthrough duty as `node` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_reason: Option<String>,
+    /// The sessions row a spawn owed but could not open because no harness
+    /// session id existed yet (`{phase, merge_grant?}`): parked by Python's
+    /// spawn stamp, consumed and cleared by SessionStart's first id
+    /// observation. Mirrors Python's `AgentEntry.pending_session_row`; Rust
+    /// only carries the payload, so it stays a raw Value (X3 passthrough duty
+    /// as `node` and `substrate` before it - without this mirror a daemon
+    /// write drops the parked row silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_session_row: Option<serde_json::Value>,
     /// v23: the spawn REQUEST, verbatim as the flags spelled it (any
     /// `[1m]` suffix included), stamped once at birth beside the observed
     /// axes. `model`/`model_basis` flip to a verified observation; these never
@@ -1133,6 +1171,24 @@ pub struct RegistryEntry {
     /// `workspaceWrite` alone are different workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_writable_roots: Vec<String>,
+    /// The permission_mode string the operator's spawn REQUESTED, verbatim
+    /// (schema v35): `read-only:on-request`, `yolo`, `full-auto`. `None` when
+    /// the spawn named no mode (the bare yolo bool or the bounded default).
+    /// Distinct from `sandbox_posture`, which records the resolved NAME of the
+    /// sandbox half only: the requested string is what a resume replays, and a
+    /// row without it cannot tell `read-only:on-request` from
+    /// `read-only:never`. Same X3 passthrough duty as the other posture
+    /// columns, and the same additive-optional writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
+    /// Where the current turn's sandboxPolicy came from (schema v35):
+    /// `resolved` when it echoes the server-reported posture, `requested`
+    /// when the server named no sandbox and the row's recorded request was
+    /// replayed instead. Stamped at spawn, refreshed by the resume
+    /// write-back. `None` on rows that predate the column; readers show
+    /// `unknown`, never a posture name and never a permission claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_policy_source: Option<String>,
     /// v9 backfill-only: the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1844,17 +1900,16 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 /// complete roster.
 pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), StateError> {
     // Lock the SAME sidecar `update_registry` locks (shared mode here), not the
-    // data file. This is the canonical cross-language lock target: a Python
-    // `fno` writer taking `flock` on `<registry>.lock` and the Rust daemon's
-    // exclusive write-lock then live in one domain, so reader/writer and
-    // cross-language writers actually mutually exclude (US6.12). Locking the
-    // data file directly would (a) not exclude against the sidecar-based
-    // writer and (b) reintroduce the rename-invalidates-fd footgun.
+    // data file. Python `fno` writers use `<agents>/locks/_registry.lock`; Rust
+    // must use that exact path or the two implementations can read and replace
+    // snapshots concurrently. Locking the data file directly would not exclude
+    // either sidecar-based writer and would reintroduce the rename-invalidates-
+    // fd footgun.
     // Acquire the lock FIRST, then decide existence: a `!path.exists()` check
     // before the lock could race a concurrent writer creating registry.json and
     // return a stale empty registry (Codex P2). The open-after-lock below is the
     // authoritative existence check.
-    let lock = acquire_shared(&lock_path(path))?;
+    let lock = acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1868,6 +1923,21 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
     };
     let _ = lock.unlock();
     result
+}
+
+/// Best-effort registry read for metadata that must not hold up delivery.
+/// Returns `None` when a writer owns the registry lock.
+pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
+    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
+        return Ok(None);
+    };
+    let result = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => read_registry_tolerant(path, &file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
+        Err(error) => Err(error.into()),
+    };
+    let _ = lock.unlock();
+    result.map(|(registry, _)| Some(registry))
 }
 
 /// The raw on-disk row count the typed decode is reconciled against:
@@ -2229,10 +2299,108 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     })
 }
 
+/// One migration pass over claude rows whose `short_id` is a byte-copy of
+/// the session uuid (the register path once wrote it that way): the
+/// transport key is the uuid's own leading 8-hex segment, and a full uuid
+/// refuses `claude attach`. Rewrites ONLY `short_id` - name, aliases and
+/// crown fields are untouched - under the registry lock, skips the write
+/// entirely when nothing matches, and never touches a short id that is an
+/// independent transport key (not a copy of the row's own session id).
+pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
+    let mut healed = 0usize;
+    update_registry(path, |registry| {
+        for entry in registry.entries.iter_mut() {
+            if entry.harness.as_deref() != Some("claude")
+                || entry.mux.is_some()
+                || entry.short_id.len() <= 8
+            {
+                continue;
+            }
+            let Some(session) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            if entry.short_id != session {
+                continue;
+            }
+            let lead = session.split('-').next().unwrap_or(session);
+            if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+                entry.short_id = lead.to_ascii_lowercase();
+                healed += 1;
+            }
+        }
+    })?;
+    Ok(healed)
+}
+
 /// Read-modify-write the registry under an exclusive lock, publishing the
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never
 /// interleave. The closure mutates the registry in place.
+/// How old the newest rolling snapshot may get before the next write takes
+/// another one.
+const REGISTRY_SNAPSHOT_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Pure: take a snapshot when none exists, the newest is
+/// REGISTRY_SNAPSHOT_EVERY old, or the file on disk collapsed to a tenth of
+/// the newest (another writer damaged it), so rotate_backups pins the last
+/// good copy.
+fn snapshot_due(newest: Option<(std::time::Duration, u64)>, current_len: u64) -> bool {
+    match newest {
+        None => true,
+        Some((age, newest_len)) => {
+            age >= REGISTRY_SNAPSHOT_EVERY || (newest_len > 0 && current_len <= newest_len / 10)
+        }
+    }
+}
+
+/// `(age, len)` of the newest `registry.json.*` copy in `snapshots`, oldest
+/// excluded: `pre-shrink.` pins sort before the prefix and never match.
+fn newest_snapshot(snapshots: &Path) -> Option<(std::time::Duration, u64)> {
+    let mut best: Option<(std::time::SystemTime, u64)> = None;
+    for entry in std::fs::read_dir(snapshots).ok()? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("registry.json.") {
+            continue;
+        }
+        let meta = entry.metadata().ok()?;
+        let modified = meta.modified().ok()?;
+        if best.as_ref().map_or(true, |(t, _)| modified > *t) {
+            best = Some((modified, meta.len()));
+        }
+    }
+    let (modified, len) = best?;
+    Some((modified.elapsed().ok()?, len))
+}
+
+/// Best effort: copy the bytes this write is about to replace into
+/// `<dir>/registry-snapshots/` and rotate. A failure anywhere never fails the
+/// write: a missing snapshot is the status quo, and the 2026-09-27 overwrite
+/// showed what recovering from a month-old backup costs instead.
+fn snapshot_registry(path: &Path) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let snapshots = dir.join("registry-snapshots");
+    if std::fs::create_dir_all(&snapshots).is_err() {
+        return;
+    }
+    if !snapshot_due(newest_snapshot(&snapshots), bytes.len() as u64) {
+        return;
+    }
+    let stamped = snapshots.join(format!(
+        "registry.json.{}",
+        crate::graph_store::backup_stamp()
+    ));
+    if std::fs::write(&stamped, &bytes).is_err() {
+        return;
+    }
+    let _ = crate::graph_store::rotate_backups(&snapshots, "registry.json.");
+}
+
 pub fn update_registry<F, T>(path: &Path, f: F) -> Result<T, StateError>
 where
     F: FnOnce(&mut Registry) -> T,
@@ -2243,7 +2411,11 @@ where
     // Lock on a stable sidecar so the rename of the data file never invalidates
     // the lock fd (renaming the locked file out from under a held flock is the
     // classic footgun; locking the sidecar sidesteps it entirely).
-    let lock = acquire_exclusive(&lock_path(path))?;
+    let lock_path = registry_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = acquire_exclusive(&lock_path)?;
     let mut registry = read_existing_registry(path)?;
     // The half of read-forward that protects the file. The read above drops
     // fields this binary does not know, so writing those rows back would erase
@@ -2271,6 +2443,38 @@ where
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
+    // Every transition into Exited carries its date, whichever closure wrote
+    // it. A row already Exited with no stamp stays unstamped: a stamp written
+    // now would date an old exit to an unrelated write. Any drive-eligible row
+    // drops an old stamp, even when another terminal status sat between the
+    // exit and revival, or the ladder can read the old exit as current again.
+    let was_exited: std::collections::HashSet<&str> = before_entries
+        .iter()
+        .filter(|b| b.status == AgentStatus::Exited)
+        .map(|b| b.name.as_str())
+        .collect();
+    let mut stamp = None;
+    for entry in &mut registry.entries {
+        let before_exited = was_exited.contains(entry.name.as_str());
+        if entry.status == AgentStatus::Exited && entry.exited_at.is_none() && !before_exited {
+            let now = stamp.get_or_insert_with(crate::daemon::now_rfc3339_like);
+            entry.exited_at = Some(now.clone());
+        } else if entry.status.is_drive_eligible() && entry.exited_at.is_some() {
+            entry.exited_at = None;
+        }
+    }
+    // The shared-registry write guard. Fires only on the real shared
+    // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -
+    // so the refusal names exactly the two shapes that cost the fleet its
+    // rows on 2026-09-27: a test or probe process writing fleet state, and a
+    // closure about to drop most live rows. Python's `write_registry` mirrors
+    // both arms.
+    crate::registry_guard::check_env(
+        path,
+        crate::registry_guard::count_live(&before_entries),
+        crate::registry_guard::count_live(&registry.entries),
+    )
+    .map_err(StateError::WriteGuard)?;
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde
@@ -2307,6 +2511,10 @@ where
     // a pre-host_mode reader would still accept it - defeating the forward-compat
     // bump for every store that predates it (the common case).
     registry.schema_version = REGISTRY_SCHEMA_VERSION;
+    // Rolling snapshot of the bytes this write replaces, under the lock so a
+    // racing writer cannot snapshot a half-read state. Best effort: never
+    // fails the write.
+    snapshot_registry(path);
     write_json_atomic(path, &registry)?;
     // Removal accounting runs AFTER the write persisted: a removal
     // that failed to persist never happened, and announcing it would be a
@@ -2326,11 +2534,39 @@ where
 /// (`find_name_or_full_session_id`: label, full session id + canonical handle,
 /// related/predecessor ids) plus the transport short id and a prior label held
 /// as an alias.
-pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String, String), String> {
+pub fn rename_agent(
+    path: &Path,
+    token: &str,
+    new_name: &str,
+    node: Option<&str>,
+) -> Result<(String, String), String> {
+    rename_agent_displacing(path, token, new_name, node, |_, _| false)
+}
+
+/// [`rename_agent`] with label displacement: when the target label is held
+/// only by rows that satisfy `may_displace`, the label and alias move off
+/// those rows inside this SAME transaction instead of refusing. The predicate
+/// receives the row and the transaction's own entries, so its verdict reads
+/// the state under the lock, not a pre-transaction snapshot. The crown
+/// check-in takes a carried label back from a predecessor row that holds no
+/// live crown; every other caller keeps the plain refusal.
+pub fn rename_agent_displacing(
+    path: &Path,
+    token: &str,
+    new_name: &str,
+    node: Option<&str>,
+    may_displace: impl Fn(&RegistryEntry, &[RegistryEntry]) -> bool,
+) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes"
+                .to_string(),
         );
+    }
+    if let Some(node) = node {
+        if node.trim().is_empty() {
+            return Err("registry node must be non-empty when provided".to_string());
+        }
     }
     // Resolve BEFORE the lock. The resolution reads the same file the
     // transaction re-reads under the lock, and the identity re-check inside the
@@ -2380,10 +2616,14 @@ pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String,
         source.short_id.clone(),
     );
     let old_name = source.name.clone();
+    let harness_session_id = source.harness_session_id.clone();
     if old_name == new_name {
         return Ok((old_name, new_name.to_string()));
     }
     let resolved_name = old_name.clone();
+    // (from, to, session) of rows displaced off the target label in this
+    // transaction, journaled beside the rename itself on success.
+    let mut displaced: Vec<(String, String, Option<String>)> = Vec::new();
     // The closure's Result IS the transaction verdict: update_registry hands it
     // back as the Ok payload, so an inner Err must propagate - dropping it would
     // report a refused rename as a success.
@@ -2407,28 +2647,136 @@ pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String,
         // "Names another worker" includes a label the worker still ANSWERS to:
         // a prior label held as another row's alias refuses too, or the renamed
         // label would resolve ambiguous (two rows) the moment anyone used it.
-        if registry.entries.iter().enumerate().any(|(i, e)| {
-            i != idx && (e.name == new_name || e.aliases.iter().any(|a| a == new_name))
-        }) {
-            return Err(format!(
-                "registry label {new_name:?} already names another worker"
-            ));
+        // Displaceable holders vacate the label here, in this transaction, so
+        // the label never resolves to two rows at any point.
+        let held_elsewhere: Vec<usize> = registry
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| {
+                *i != idx && (e.name == new_name || e.aliases.iter().any(|a| a == new_name))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !held_elsewhere.is_empty() {
+            if held_elsewhere
+                .iter()
+                .all(|&i| may_displace(&registry.entries[i], &registry.entries))
+            {
+                for &i in &held_elsewhere {
+                    let before = registry.entries[i].name.clone();
+                    vacate_label(&mut registry.entries, i, new_name, &resolved_name)?;
+                    // A displaced row whose NAME moved journals it too, or a
+                    // later --from-journal rebuild plans it back onto the
+                    // label this transaction just took from it.
+                    if registry.entries[i].name != before {
+                        displaced.push((
+                            before,
+                            registry.entries[i].name.clone(),
+                            registry.entries[i].harness_session_id.clone(),
+                        ));
+                    }
+                }
+            } else {
+                return Err(format!(
+                    "registry label {new_name:?} already names another worker"
+                ));
+            }
         }
         let target = &mut registry.entries[idx];
         if !target.aliases.iter().any(|a| a == &resolved_name) {
             target.aliases.push(resolved_name.clone());
         }
         target.name = new_name.to_string();
+        if let Some(node) = node {
+            target.node = Some(node.trim().to_string());
+        }
         Ok(())
     }) {
         Ok(inner) => inner?,
         Err(e) => return Err(e.to_string()),
     }
+    // Every explicit rename journals itself (the reconcile title rename was
+    // the only agent_renamed emitter before), so `rename --from-journal` can
+    // rebuild labels after a registry loss. The event rides the SUCCESSFUL
+    // write, keyed by the row's full session id (d-e952ed19).
+    if let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let emitter = crate::events::EventEmitter::new(
+            crate::paths::AgentsHome::at(home_dir).events_jsonl(),
+            "daemon",
+        );
+        let _ = emitter.emit(
+            "agent_renamed",
+            &serde_json::json!({
+                "name": new_name,
+                "harness_session_id": harness_session_id,
+                "from": old_name,
+                "to": new_name,
+            }),
+        );
+        for (from, to, session) in &displaced {
+            let _ = emitter.emit(
+                "agent_renamed",
+                &serde_json::json!({
+                    "name": to,
+                    "harness_session_id": session,
+                    "from": from,
+                    "to": to,
+                }),
+            );
+        }
+    }
     Ok((old_name, new_name.to_string()))
 }
 
+/// Move `label` off `entries[idx]` inside the caller's transaction: the alias
+/// goes, and a row whose NAME is the label takes a spare one - its first
+/// non-colliding alias, else its short id - so the label answers for one row
+/// again. Refuses rather than leaving the row nameless.
+fn vacate_label(
+    entries: &mut [RegistryEntry],
+    idx: usize,
+    label: &str,
+    reserved: &str,
+) -> Result<(), String> {
+    let taken = |candidate: &str| {
+        candidate == reserved
+            || entries.iter().enumerate().any(|(i, e)| {
+                i != idx && (e.name == candidate || e.aliases.iter().any(|a| a == candidate))
+            })
+    };
+    let row = &entries[idx];
+    let spare = if row.name != label {
+        None
+    } else {
+        Some(
+            row.aliases
+                .iter()
+                .find(|a| a.as_str() != label && is_valid_registry_label(a) && !taken(a))
+                .cloned()
+                .or_else(|| {
+                    let sid = row.short_id.clone();
+                    (!sid.is_empty() && is_valid_registry_label(&sid) && !taken(&sid))
+                        .then_some(sid)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "label {label:?} cannot be vacated: row {} holds no spare name",
+                        row.short_id
+                    )
+                })?,
+        )
+    };
+    let row = &mut entries[idx];
+    if let Some(spare) = spare {
+        row.name = spare;
+    }
+    row.aliases.retain(|a| a != label);
+    Ok(())
+}
+
 /// The label grammar `rename_agent` enforces (1..=64 chars from
-/// `[A-Za-z0-9_-]`). The ONE grammar predicate in this crate: the daemon's
+/// `[A-Za-z0-9_'-]`). The ONE grammar predicate in this crate: the daemon's
 /// `valid_agent_name` delegates here, so the spawn-time name rule and the
 /// rename-time rule cannot drift. (fno's proto.rs carries its own copy for the
 /// pre-subprocess notice; the crates do not link, only shell.)
@@ -2437,7 +2785,8 @@ pub fn is_valid_registry_label(name: &str) -> bool {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .enumerate()
+            .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (i > 0 && c == '\''))
 }
 
 /// The `agent.rename` RPC handler, beside the transaction it serves (the
@@ -2471,10 +2820,10 @@ pub(crate) fn rename_response(
         return Response::err(
             req.id,
             ErrorCode::InvalidParams,
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens",
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
         );
     }
-    match rename_agent(registry_path, token, new_name) {
+    match rename_agent(registry_path, token, new_name, None) {
         Ok((old, new)) => Response::ok(
             req.id,
             serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
@@ -2574,7 +2923,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
 /// to five following arguments, 200 chars. The binary name alone cannot tell
 /// `agents reap --apply` from `board --json`, and which door dropped rows is
 /// exactly the question the grouped loss event exists to answer.
-fn invocation_verb() -> String {
+pub(crate) fn invocation_verb() -> String {
     let mut parts: Vec<String> = std::env::args_os()
         .take(6)
         .map(|a| a.to_string_lossy().into_owned())
@@ -2760,16 +3109,26 @@ where
     Ok(result)
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
 }
 
+/// Lock shared with Python's `fno.agents.registry._registry_lock_path`.
+/// Registry readers and writers use this one path across languages; per-file
+/// state records continue to use [`lock_path`].
+fn registry_lock_path(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("locks")
+        .join("_registry.lock")
+}
+
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
 /// lock, blocking until acquired. The returned `File` holds the lock until it
 /// is unlocked or dropped.
-fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
+pub(crate) fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -2817,13 +3176,30 @@ fn acquire_shared(lock_file: &Path) -> Result<File, StateError> {
     Ok(file)
 }
 
+fn try_acquire_shared(lock_file: &Path) -> Result<Option<File>, StateError> {
+    if let Some(parent) = lock_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_file)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateError> {
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
     Ok(serde_json::from_str(&buf)?)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(

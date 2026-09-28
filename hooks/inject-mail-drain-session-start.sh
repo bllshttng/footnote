@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - inject mail drain session start
 # SessionStart hook: drain THIS session's own cross-harness mail (US5).
 #
 # The receive side of the a2a relay. `fno agents mail drain-self` computes this
@@ -9,6 +10,10 @@
 # or no unread mail; never blocks session start.
 
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 command -v fno >/dev/null 2>&1 || exit 0
 

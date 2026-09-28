@@ -139,21 +139,43 @@ pub(crate) fn find_manifest_for_session(
 ) -> Result<Option<ManifestIdentity>, ManifestLookupError> {
     let cwd = std::env::current_dir().map_err(|_| ManifestLookupError::CurrentDirectory)?;
     let mut candidates = git_worktree_paths(&cwd)?;
+    let space = crate::paths::space_dir_opt(&cwd);
+    // The slice rule of `paths::worktree_space_dir`, applied from one space
+    // read: the first porcelain record is the main checkout and owns the
+    // space root, every other worktree owns `<space>/worktrees/<basename>`.
+    // A git spawn per worktree would be too slow for a stop hook.
+    let slices: Vec<Option<PathBuf>> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, worktree)| {
+            let space = space.as_ref()?;
+            if index == 0 {
+                return Some(space.clone());
+            }
+            Some(space.join("worktrees").join(worktree.file_name()?))
+        })
+        .collect();
     if !candidates.iter().any(|path| paths_eq(path, &cwd)) {
         candidates.push(cwd);
     }
-    for worktree in candidates {
-        let manifest_path = worktree.join(".fno/target-state.md");
-        let Ok(content) = fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let mut identity = parse_manifest_identity(&content);
-        if identity.matches(session_id) {
-            if identity.owner_cwd.is_empty() {
-                identity.owner_cwd = worktree.to_string_lossy().into_owned();
+    for (index, worktree) in candidates.iter().enumerate() {
+        let slice = slices.get(index).cloned().flatten();
+        let paths = slice
+            .map(|dir| dir.join("target-state.md"))
+            .into_iter()
+            .chain(std::iter::once(worktree.join(".fno/target-state.md")));
+        for manifest_path in paths {
+            let Ok(content) = fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let mut identity = parse_manifest_identity(&content);
+            if identity.matches(session_id) {
+                if identity.owner_cwd.is_empty() {
+                    identity.owner_cwd = worktree.to_string_lossy().into_owned();
+                }
+                identity.manifest_path = fs::canonicalize(&manifest_path).unwrap_or(manifest_path);
+                return Ok(Some(identity));
             }
-            identity.manifest_path = fs::canonicalize(&manifest_path).unwrap_or(manifest_path);
-            return Ok(Some(identity));
         }
     }
     Ok(None)

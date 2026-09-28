@@ -231,25 +231,8 @@ def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch
     assert fields["COLLISION"] == owner
 
 
-def test_session_harness_stamp_honored_while_pid_alive(monkeypatch):
-    monkeypatch.setattr(_session_pid, "resolve_session_harness", _REAL_RESOLVE_HARNESS)
-    monkeypatch.setattr(_session_pid.psutil, "pid_exists", lambda pid: True)
-    monkeypatch.setenv("FNO_SESSION_HARNESS", "codex")
-    monkeypatch.setenv("FNO_SESSION_PID", "1234")
-    assert _session_pid.resolve_session_harness() == "codex"
-
-
-def test_session_harness_stamp_ignored_when_pid_dead(monkeypatch):
-    monkeypatch.setattr(_session_pid, "resolve_session_harness", _REAL_RESOLVE_HARNESS)
-    monkeypatch.setattr(_session_pid.psutil, "pid_exists", lambda pid: False)
-    monkeypatch.setattr(_session_pid, "_harness_name_of", lambda _proc: None)
-    monkeypatch.setenv("FNO_SESSION_HARNESS", "codex")
-    monkeypatch.setenv("FNO_SESSION_PID", "1234")
-    assert _session_pid.resolve_session_harness(from_pid=-1) is None
-
-
-def test_session_harness_stamp_ignored_for_unknown_harness(monkeypatch):
-    monkeypatch.setattr(_session_pid, "resolve_session_harness", _REAL_RESOLVE_HARNESS)
-    monkeypatch.setenv("FNO_SESSION_HARNESS", "not-a-harness")
-    monkeypatch.setenv("FNO_SESSION_PID", "1234")
-    assert _session_pid.resolve_session_harness() != "not-a-harness"
+# The session-harness stamp rules (honored while the pid is alive, ignored
+# when the pid is dead, ignored for an unknown harness) moved with the walk
+# into the native resolver; they are pinned Rust-side by
+# fno-agents' session_identity_ambient stamp tests. The Python module is a
+# shim over that verb and carries no stamp logic to test here.

@@ -131,10 +131,14 @@ fn socket_inode_matches_detects_unlink_and_rebind() {
 }
 
 fn read_events(home: &AgentsHome) -> Vec<Value> {
-    std::fs::read_to_string(home.events_jsonl())
+    // Committed rows, not journal bytes: the store cutover stopped journal
+    // appends, so emitted events live only in the store beside the journal.
+    let journal = home.events_jsonl();
+    let _ = crate::event_store::import_all(&journal);
+    crate::event_store::query_events(&journal, &crate::event_store::EventQuery::default())
         .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .iter()
+        .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
         .collect()
 }
 
@@ -692,15 +696,15 @@ fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
         .expect("refusal names the kill command")
         .split('`')
         .next()
-        .expect("the printed command is backtick-closed");
-    let selector = selector
+        .expect("the printed command is backtick-closed")
         .strip_prefix("fno mux pane kill ")
         .expect("the printed command is the pane kill verb");
-    let args: Vec<std::ffi::OsString> = vec!["kill".into(), selector.into()];
-    let parsed =
-        fno::mux_cli::parse_pane_args(&args).expect("the refusal's own command must parse");
+    let op = fno::cli_args::PaneOp::Kill(fno::cli_args::MuxTail { tail: Vec::new() });
+    let parsed = fno::mux_cli::parse_pane_args(&op, &[selector.into()])
+        .expect("the refusal's own command must parse");
+    let cmd = parsed.cmd;
     assert_eq!(parsed.session.as_deref(), Some("main"));
-    assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76 });
+    assert!(matches!(cmd, fno::mux_cli::PaneCmd::Kill { pane: 76, .. }));
 }
 
 #[test]
@@ -711,291 +715,6 @@ fn mux_missing_pane_receipt_is_idempotent_absence() {
     ));
     assert!(!mux_pane_is_absent("mux configuration not found"));
     assert!(!mux_pane_is_absent("fno mux: permission denied"));
-}
-
-/// The real summary line, copied from this machine's output.
-const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
-Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned, 1 permanent), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
-
-#[test]
-fn sweep_summary_parses_the_real_line() {
-    let r = parse_worktree_sweep(REAL_SUMMARY).expect("parses");
-    assert_eq!(r.eligible, 12);
-    assert_eq!(r.kept, 37);
-    assert_eq!(r.dirty, 5);
-}
-
-#[test]
-fn sweep_summary_parses_the_apply_mode_line() {
-    // The apply pass says "archived", not "would archive"; the eligible
-    // count must read from whichever verb the line carries.
-    let line = "archived         feature/x-3e17   /some/wt\n\
-Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
-    let r = parse_worktree_sweep(line).expect("parses");
-    assert_eq!(r.eligible, 3);
-    assert_eq!(r.kept, 4);
-    assert_eq!(r.dirty, 1);
-}
-
-#[test]
-fn sweep_summary_absent_is_none_not_zero() {
-    // A zeroed report is indistinguishable from a clean machine. An absence
-    // has two explanations and only a real reading may produce a count.
-    assert!(parse_worktree_sweep("").is_none());
-    assert!(parse_worktree_sweep("some other output\n").is_none());
-}
-
-#[test]
-fn sweep_reports_every_repo_including_the_quiet_ones() {
-    let home = tmp_home("wt-sweep-quiet");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let quiet = "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into(), "/repo/b".into()],
-        &|_| false.into(),
-        &|_, _| WorktreeSweepOutput {
-            exit_code: Some(0),
-            stdout: quiet.into(),
-            stderr: String::new(),
-        },
-    );
-
-    assert_eq!(swept, 2, "a tick that finds nothing must still report");
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert_eq!(log.matches("worktree_sweep").count(), 2);
-    assert!(log.contains("report-only"));
-    assert!(!log.contains("apply-orders"));
-}
-
-#[test]
-fn sweep_applies_only_when_a_reap_order_stands() {
-    // Ruling preserved: a merged PR is proof, a timer tick is not. The
-    // timer lane applies ONLY when the merge ritual minted an order.
-    let home = tmp_home("wt-sweep-ordered");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let quiet = "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into()],
-        &|_| true.into(),
-        &|_, apply| {
-            assert!(apply, "a standing order must reach the verb as --apply");
-            WorktreeSweepOutput {
-                exit_code: Some(0),
-                stdout: quiet.into(),
-                stderr: String::new(),
-            }
-        },
-    );
-
-    assert_eq!(swept, 1);
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(log.contains("apply-orders"));
-    assert!(!log.contains("report-only"));
-}
-
-#[test]
-fn sweep_reads_reap_orders_in_each_repository_scope() {
-    let home = tmp_home("wt-sweep-repo-orders");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let seen = std::sync::Mutex::new(Vec::new());
-    let quiet = "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into(), "/repo/b".into()],
-        &|root| (root == "/repo/b").into(),
-        &|root, apply| {
-            seen.lock().unwrap().push((root.to_string(), apply));
-            WorktreeSweepOutput {
-                exit_code: Some(0),
-                stdout: quiet.into(),
-                stderr: String::new(),
-            }
-        },
-    );
-
-    assert_eq!(swept, 2);
-    assert_eq!(
-        seen.into_inner().unwrap(),
-        vec![("/repo/a".into(), false), ("/repo/b".into(), true)]
-    );
-}
-
-#[test]
-fn sweep_skips_a_repo_when_its_order_probe_is_unreadable() {
-    let home = tmp_home("wt-sweep-order-unreadable");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let ran_cleanup = std::sync::atomic::AtomicBool::new(false);
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into()],
-        &|_| WorktreeSweepOrderRead {
-            standing: None,
-            exit_code: Some(7),
-            stderr: "claim store unreadable\nextra detail\n".into(),
-        },
-        &|_, _| {
-            ran_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
-            unreachable!("an unreadable order probe must skip cleanup")
-        },
-    );
-
-    assert_eq!(swept, 0);
-    assert!(!ran_cleanup.load(std::sync::atomic::Ordering::Relaxed));
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(log.contains("\"error\":\"unreadable-orders\""));
-    assert!(log.contains("\"exit_code\":7"));
-    assert!(log.contains("\"stderr\":\"claim store unreadable\""));
-    assert!(!log.contains("extra detail"));
-    assert!(!log.contains("report-only"));
-}
-
-#[test]
-fn sweep_honours_its_own_6h_floor() {
-    let home = tmp_home("wt-sweep-floor");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let out = |_: &str, _: bool| WorktreeSweepOutput {
-        exit_code: Some(0),
-        stdout: REAL_SUMMARY.into(),
-        stderr: String::new(),
-    };
-    let now = 1_000_000;
-
-    assert_eq!(
-        worktree_sweep(
-            &home,
-            &emitter,
-            now,
-            &["/repo/a".into()],
-            &|_| false.into(),
-            &out,
-        ),
-        1
-    );
-    // Same window: skipped entirely, no second reading.
-    assert_eq!(
-        worktree_sweep(
-            &home,
-            &emitter,
-            now + 60,
-            &["/repo/a".into()],
-            &|_| false.into(),
-            &out
-        ),
-        0
-    );
-    // A little over six hours later: fires again.
-    assert_eq!(
-        worktree_sweep(
-            &home,
-            &emitter,
-            now + 21_601,
-            &["/repo/a".into()],
-            &|_| false.into(),
-            &out
-        ),
-        1
-    );
-}
-
-#[test]
-fn sweep_never_passes_apply_on_its_own_authority() {
-    // Ruling: a merged PR is proof, a timer tick is not. The fn body may
-    // not carry an --apply literal: applying is decided by the injected
-    // orders read (merge-minted claims), never by the sweep itself.
-    let src = include_str!("daemon.rs");
-    let idx = src
-        .find("fn worktree_sweep(")
-        .expect("worktree_sweep exists");
-    let body = &src[idx..idx + 2000.min(src.len() - idx)];
-    assert!(!body.contains("--apply"));
-}
-
-#[test]
-fn sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
-    let home = tmp_home("wt-sweep-unreadable");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into()],
-        &|_| false.into(),
-        &|_, _| WorktreeSweepOutput {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-        },
-    );
-
-    assert_eq!(swept, 0);
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(log.contains("unreadable-summary"));
-    assert!(!log.contains("\"eligible\""));
-}
-
-#[test]
-fn sweep_records_a_nonzero_exit_and_first_stderr_line() {
-    let home = tmp_home("wt-sweep-nonzero");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let output = WorktreeSweepOutput {
-        exit_code: Some(7),
-        stdout: String::new(),
-        stderr: "permission denied\nextra detail\n".into(),
-    };
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into()],
-        &|_| false.into(),
-        &|_, _| output.clone(),
-    );
-
-    assert_eq!(swept, 0);
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(log.contains("\"exit_code\":7"));
-    assert!(log.contains("\"stderr\":\"permission denied\""));
-    assert!(!log.contains("extra detail"));
-}
-
-#[test]
-fn sweep_distinguishes_a_zero_exit_with_no_summary() {
-    let home = tmp_home("wt-sweep-zero-no-summary");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-
-    let swept = worktree_sweep(
-        &home,
-        &emitter,
-        1_000_000,
-        &["/repo/a".into()],
-        &|_| false.into(),
-        &|_, _| WorktreeSweepOutput {
-            exit_code: Some(0),
-            stdout: "no summary here\n".into(),
-            stderr: String::new(),
-        },
-    );
-
-    assert_eq!(swept, 0);
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(log.contains("\"exit_code\":0"));
-    assert!(log.contains("\"stderr\":\"\""));
 }
 
 #[test]
@@ -1050,7 +769,7 @@ fn stale_summary_absent_is_none_not_zero() {
 fn stale_sweep_takes_no_apply_form() {
     // The lane routes information and changes no removal path: the fn
     // body may not carry an apply decision at all.
-    let src = include_str!("daemon.rs");
+    let src = include_str!("daemon/sweeps.rs");
     let idx = src.find("fn stale_sweep(").expect("stale_sweep exists");
     let body = &src[idx..idx + 2000.min(src.len() - idx)];
     assert!(!body.contains("--apply"));
@@ -1420,7 +1139,7 @@ fn pre_v19_row_without_posture_parses_with_the_safe_default() {
     let entry: RegistryEntry = serde_json::from_value(raw).expect("pre-v19 row parses");
     assert_eq!(entry.sandbox_posture, None);
     assert!(
-        !entry_posture_is_full_access(&entry),
+        !crate::codex_posture::entry_posture_is_full_access(&entry),
         "an unrecorded posture reads the safe default, never full access"
     );
 }
@@ -1839,10 +1558,9 @@ fn emit_inside_leg_completion_publishes_only_for_report_bearing_rows() {
     emit_inside_leg_completion(&emitter, &with_report);
     emit_inside_leg_completion(&emitter, &rentry("plain", AgentStatus::Live, None));
 
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let log = read_events(&home);
     let events: Vec<serde_json::Value> = log
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .into_iter()
         .filter(|v: &serde_json::Value| v["type"] == "inside_leg_completed")
         .collect();
     assert_eq!(
@@ -1922,7 +1640,7 @@ fn flush_buffered_inside_leg_drains_onto_row_under_seq_gate() {
     // event. A newer report that raced onto the row's store path first is NOT
     // regressed (codex P2: highest-seq-wins survives the flush).
     let home = tmp_home("inside-leg-flush");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let report = |seq| state::InsideLegReport {
         state: state::InsideLegState::Working,
         seq,
@@ -3087,33 +2805,12 @@ pub(super) fn probe_with_age(
 }
 
 pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
-    Ctx {
-        home,
-        emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
-        opts: DaemonOptions {
-            idle_exit: Duration::from_secs(1800),
-            worker_bin,
-            reconcile_on_start: true,
-            agents_config_cwd: PathBuf::from("/dev/null"),
-            // Off in tests: a unit test must never spawn a real `fno inbox notify`.
-            notify_on_blocked: false,
-            notify_on_done: false,
-        },
-        started_at: std::time::Instant::now(),
-        exe_fingerprint: crate::drift::ExeFingerprint::current(),
-        pid_start_time: process_start_time(std::process::id()),
-        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
-        codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    }
-}
-
-/// Like `test_ctx` but wires the emitter to `home.events_jsonl()` so
-/// that tests checking emitted events can read them back with `read_events`.
-fn test_ctx_with_events(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+    // The emitter commits to the store beside the home journal: `/dev/null`
+    // was a sink under the journal regime, but the store needs a real path.
     let events_path = home.events_jsonl();
     Ctx {
-        home,
         emitter: EventEmitter::new(events_path, "daemon"),
+        home,
         opts: DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin,
@@ -3379,8 +3076,8 @@ fn list_row_key_set_matches_shared_contract() {
     let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
     assert_eq!(
         contract["projection_omissions"],
-        json!(["model", "model_basis"]),
-        "projection omissions must stay canonical and sorted"
+        json!([]),
+        "model and model_basis are projected with their basis, never omitted"
     );
     let mut expected: std::collections::BTreeSet<String> = contract["required"]
         .as_array()
@@ -3447,14 +3144,13 @@ fn list_row_key_set_matches_shared_contract() {
         "the list row carries the recorded substrate"
     );
 
-    // v23 (x-2019), by VALUE and not merely by presence: a substituted
-    // row names both values; an unknown request renders null, never a
-    // fabricated match. The seeded row carries no request and the probe
-    // answers no model, so both keys ride null on the baseline read.
+    // By VALUE: an unknown request renders null, never a fabricated match.
     assert_eq!(row["requested_model"], Value::Null);
     assert_eq!(row["model_substituted"], Value::Null);
     state::update_registry(&home.registry_json(), |r| {
         r.entries[0].requested_model = Some("glm-5.3[1m]".into());
+        r.entries[0].model = Some("glm-5.3-flash[1m]".into());
+        r.entries[0].model_basis = Some("requested".into());
     })
     .unwrap();
     let mut contradicting = probe("working").unwrap();
@@ -3467,11 +3163,14 @@ fn list_row_key_set_matches_shared_contract() {
     let row = &response.result().unwrap()["agents"][0];
     assert_eq!(row["requested_model"], "glm-5.3[1m]");
     assert_eq!(
+        (&row["model"], &row["model_basis"]),
+        (&json!("glm-5.3-flash[1m]"), &json!("requested"))
+    );
+    assert_eq!(
         row["model_substituted"],
         json!({"requested": "glm-5.3[1m]", "observed": "glm-5.3-flash"})
     );
-    // Suffix-only difference is a MATCH: the marker stays null. The
-    // operator's specimen table calls glm-5.3[1m] vs glm-5.3 ok.
+    // Suffix-only difference is a MATCH: the marker stays null.
     let mut agreeing = probe("working").unwrap();
     agreeing.observed_model = json!({"kind": "observed", "model": "glm-5.3"});
     let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| Some(agreeing.clone())));
@@ -3479,9 +3178,7 @@ fn list_row_key_set_matches_shared_contract() {
     assert_eq!(row["requested_model"], "glm-5.3[1m]");
     assert_eq!(row["model_substituted"], Value::Null);
 
-    // Presence in the key set is not the bug being guarded: a key that is
-    // always null is the same lie in a different shape. Assert the values
-    // reach the row.
+    // An always-null key is the same lie as a missing one: assert values.
     assert_eq!(row["harness"], "claude");
     // `provider` carries the stored vendor axis, never a harness (AC8,
     // post x-f273). Emitting it from one serializer only would be worse
@@ -3492,7 +3189,7 @@ fn list_row_key_set_matches_shared_contract() {
     assert!(row.get("effort").is_some(), "effort key must be emitted");
     assert_eq!(row["effort"], "xhigh");
     assert_eq!(row["node"], "x-cafe");
-    assert!(row.get("model").is_none());
+    assert!(["no-pr", "graph-unreadable"].contains(&row["pr_basis"].as_str().unwrap()));
     assert_eq!(
         row["harness_session_id"],
         "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
@@ -4272,41 +3969,6 @@ fn acquire_session_claim_maps_native_outcomes() {
 }
 
 #[test]
-fn claude_stream_worker_args_carry_stream_flags_and_child_argv() {
-    let child = crate::provider::claude_stream_json_resume_argv("U-9");
-    let args = claude_stream_worker_args(
-        "sw9",
-        std::path::Path::new("/home/agents"),
-        std::path::Path::new("/work"),
-        "U-9",
-        "stream:sw9",
-        &child,
-    );
-    // Selector + claim pair are present, the child argv follows `--`, and the
-    // resume target is the FULL uuid (never the jobId).
-    assert!(args.contains(&"--stream".to_string()));
-    assert_eq!(
-        args.iter()
-            .position(|a| a == "--session-uuid")
-            .map(|i| &args[i + 1]),
-        Some(&"U-9".to_string())
-    );
-    assert_eq!(
-        args.iter()
-            .position(|a| a == "--holder")
-            .map(|i| &args[i + 1]),
-        Some(&"stream:sw9".to_string())
-    );
-    let sep = args
-        .iter()
-        .position(|a| a == "--")
-        .expect("missing -- separator");
-    assert_eq!(&args[sep + 1..], child.as_slice());
-    assert_eq!(child[0], "claude");
-    assert!(child.contains(&"--resume".to_string()) && child.contains(&"U-9".to_string()));
-}
-
-#[test]
 fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
     let e = crate::claude_stream_entry::build_claude_stream_entry(
         "adopted",
@@ -4510,7 +4172,7 @@ async fn switchboard_drives_b_and_mirrors_into_a() {
     seed_stream_row(&home, "B", "swB");
     let _a = start_stream_worker(&home, "swA", FAKE_STREAM_EMITTER).await;
     let _b = start_stream_worker(&home, "swB", FAKE_STREAM_EMITTER).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let req = Request::new(
         1,
@@ -4672,7 +4334,7 @@ async fn switchboard_failed_drive_does_not_orphan_restamped_recipient() {
     let restamp_done = home.root().join("restamp-done");
     let script = format!(
         r#"
-printf '%s\n' '{{"type":"system","subtype":"init","session_id":"s1"}}'
+printf '%s\n' '{{"ts":"2026-01-01T00:00:00Z","source":"test","type":"system","subtype":"init","session_id":"s1"}}'
 while IFS= read -r line; do
   touch '{}'
   while [ ! -f '{}' ]; do sleep 0.01; done
@@ -4683,7 +4345,7 @@ done
         restamp_done.display()
     );
     let _b = start_stream_worker(&home, "swB", &script).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let registry_path = home.registry_json();
     let restamp_signal = turn_started.clone();
@@ -5033,7 +4695,7 @@ async fn handle_ask_resolves_a_full_session_id_to_the_named_row() {
 fn handle_report_stores_on_matching_row() {
     let home = tmp_home("report-store");
     seed_stream_row(&home, "worker-A", "repA"); // claude_session_uuid = uuid-repA
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let req = Request::new(
         1,
         "agent.report",
@@ -5075,7 +4737,7 @@ fn handle_report_marks_a_matching_model_as_verified() {
         r.entries[0].model_basis = Some("requested".into());
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -5115,7 +4777,7 @@ fn handle_report_capability_flip_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -5154,7 +4816,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -5186,7 +4848,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
 fn handle_report_drops_stale_seq() {
     let home = tmp_home("report-stale");
     seed_stream_row(&home, "worker-A", "repB");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     // seq=2 stored, then a reordered seq=1 arrives.
     let _ = handle_report(
         &ctx,
@@ -5227,7 +4889,7 @@ fn handle_report_drops_stale_seq() {
 #[test]
 fn handle_report_buffers_early_push_for_unknown_session() {
     let home = tmp_home("report-unknown");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(

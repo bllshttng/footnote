@@ -27,10 +27,10 @@ Work every angle in this same context, in one pass - do not skip angles for lack
 | level | angles | cap | bias |
 |-------|--------|-----|------|
 | low | one careful pass (below) | 4 | precision |
-| medium | A B C Reuse Simplification Efficiency Altitude Conventions | 8 | precision |
-| high | the 8-angle set | 10 | recall |
-| xhigh | the 10-angle set, adds D and E | 15 | recall |
-| max | the 10-angle set, adds D and E | 15 | recall |
+| medium | A B C Reuse Simplification Efficiency Altitude Conventions Test value | 9 | precision |
+| high | the 9-angle set | 10 | recall |
+| xhigh | the 11-angle set, adds D and E | 15 | recall |
+| max | the 11-angle set, adds D and E | 15 | recall |
 
 Angle F (sibling answerer) runs at every level, low through max, on top of the sets above: it reads the plan's `surface:` block rather than more hunks, so it costs one grep, not a wider pass.
 
@@ -61,6 +61,10 @@ When the PR adds or modifies a type that wraps another (cache, proxy, decorator,
 ### Angle F - sibling answerer
 
 For the one question this diff answers (take it from the plan's `surface:` block when the PR has one; phrase it yourself when it does not), find one answerer the diff did not touch: another read or write of the same field, a second timeout on the same read, a second id format for the same thing, a second constant for the same limit. Grep the symbol, not the word. Grep it in every language tree, not only the diff's own. If you find one the block does not list, that is a candidate: the plan undercounted, and the next PR on this feature is already visible. If the block lists it as `out-of-scope`, check that the reason still holds against the diff.
+
+### Test value
+
+When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. When authoring answers are incomplete or a junk-pattern match lacks a verified retention-bar contract, raise a BLOCKING finding. Do not label it advisory or cleanup. If its independent retention-bar contract is named and verified, retain the matching test. Check assertion-free probes, exact source greps, self-comparisons, duplicate owner-boundary proofs, and fixtures supplying the asserted receipt. This angle costs nothing on a diff that touches no test.
 
 ### Reuse
 
@@ -198,8 +202,10 @@ Write the array to a temp file, classify it, and attest in the same command. The
 fno do review classify --findings-file "$FINDINGS" --emit-record --attest code-review
 ```
 
+When earlier rounds on this branch raised blocking findings, the payload carries them and their dispositions: `{"findings": [...], "dispositions": [{"finding_key", "disposition", "reason"}]}`. Dispose each blocking finding as `fixed`, or as `declined` with a reason. A pass that leaves one out is refused at emit. Never drop a finding from the array to reach a pass. A round that declines its own finding stays a fail, and under the two-round law a fail row counts once the cap is reached. `nonblocking` never clears a finding the gate reads as blocking.
+
 ## Flags
 
-`--comment`: when the target is a GitHub PR, post each finding as an inline PR comment (`gh api repos/{owner}/{repo}/pulls/<n>/comments`, one call per finding, a suggestion block only when it fully fixes the issue). When the target is not a PR, print the findings and note the flag was ignored.
+`--comment`: on a GitHub PR target, post each finding as an inline PR comment, one call per finding (`gh api repos/{owner}/{repo}/pulls/<n>/comments`). Add a suggestion block only for a fix that resolves the finding whole. On any other target the findings are HELD, not dropped. The `review_attestation` row the attest step writes already carries the branch and HEAD. When the branch's PR opens, the create flow's `fno do pr publish-review` step posts the held findings as one PR comment. The post is idempotent by marker. A reviewed head behind the PR head posts with both shas named. Print `held for PR: branch <b> head <sha>, N findings`. If HEAD later moves, review the new head as owed.
 
 `--fix`: apply the findings to the working tree after the report: fix each one directly - correctness bugs and reuse/simplification/efficiency cleanups alike. Skip any finding whose fix would change intended behavior, require changes well outside the reviewed diff, or that you judge to be a false positive - note the skip rather than arguing with it. Then emit on the NEW head after the fix commit: a pass on a superseded commit is discarded, so the attestation must name the head the fixes landed on. Verify the fix delta first.

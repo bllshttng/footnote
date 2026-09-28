@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: WorktreeRemove - worktree remove
 # WorktreeRemove hook: cleanup with lifecycle awareness
 #
 # Contract (Claude Code delegation): when this hook is configured, the harness
@@ -13,6 +14,10 @@
 # job record is deleted out from under a worktree that still exists and nothing
 # points at it anymore.
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 # The build hash dir outlives git's removal; reclaim it while the manifest
 # can still answer. A partial deploy without the lib leaves the dir to the

@@ -16,7 +16,7 @@ fn receipt(approved: bool, source: &str, at: &str) -> Value {
 
 fn do_row(grant: Option<Value>, session: &str) -> Value {
     let mut row = json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": "claude",
         "session_id": session,
         "started_at": "2026-08-24T11:00:00Z",
@@ -543,4 +543,228 @@ fn an_unknown_grant_op_returns_an_error_receipt() {
     let out = run_op("grant-nope", &json!({"cwd": "/tmp"}));
     let o: Value = serde_json::from_str(&out).expect("receipt is json");
     assert_eq!(o["error"], json!("unknown op grant-nope"));
+}
+
+// --- narrowed store reads (AC1-AC4) ----------------------------------------
+
+fn granted_node(id: &str, pr: i64, status: &str) -> Value {
+    json!({
+        "id": id, "title": id, "slug": id, "type": "feature",
+        "status": status, "priority": "p2",
+        "pr_number": pr,
+        "pr_url": format!("https://github.com/owner/repo/pull/{pr}"),
+        "cwd": "/tmp/grant-fixture",
+        "sessions": [do_row(Some(receipt(true, "config", "2026-09-21T00:00:00Z")), "w1")],
+    })
+}
+
+fn plain_node(id: &str) -> Value {
+    json!({
+        "id": id, "title": id, "slug": id, "type": "feature",
+        "status": "ready", "priority": "p2",
+    })
+}
+
+fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let entries = json!([
+        granted_node("ab-ac1open", 11, "ready"),
+        granted_node("ab-ac1done", 12, "done"),
+        json!({
+            "id": "ab-ac1merged", "title": "m", "slug": "m", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "pr_number": 13, "merge_status": "merged",
+            "pr_url": "https://github.com/owner/repo/pull/13",
+            "cwd": "/tmp/grant-fixture",
+        }),
+        json!({
+            "id": "ab-ac1carry", "title": "c", "slug": "c", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "cwd": "/tmp/grant-fixture",
+            "additional_prs": [
+                {"number": 11, "url": "https://github.com/owner/repo/pull/11"}
+            ],
+        }),
+        json!({
+            "id": "ab-ac1urlonly", "title": "u", "slug": "u", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "cwd": "/tmp/grant-fixture",
+            "additional_prs": [
+                {"url": "https://github.com/external/repo/pull/11"}
+            ],
+        }),
+        plain_node("ab-ac1plain1"),
+        plain_node("ab-ac1plain2"),
+    ]);
+    crate::graph_store::seed_rows(&graph, entries.as_array().unwrap()).unwrap();
+    (dir, graph)
+}
+
+/// AC1-HP: the narrowed read keeps the open grant node and the grantless
+/// PR-11 carrier, in ordinal order, each equal to its full-read row on the
+/// keys the grant ops read.
+#[test]
+fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
+    let (_dir, graph) = grant_sqlite_fixture();
+    let narrowed = crate::graph_store::read_pr_rows(&graph, None).unwrap();
+    let ids: Vec<&str> = narrowed
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(ids, vec!["ab-ac1open", "ab-ac1carry", "ab-ac1urlonly"]);
+    let full = crate::graph_store::read_rows(&graph).unwrap();
+    for key in [
+        "id",
+        "status",
+        "pr_number",
+        "pr_url",
+        "additional_prs",
+        "merge_status",
+        "cwd",
+        "sessions",
+    ] {
+        for row in &narrowed {
+            let id = row.get("id").and_then(Value::as_str).unwrap();
+            let want = full
+                .iter()
+                .find(|e| e.get("id").and_then(Value::as_str) == Some(id));
+            assert_eq!(row.get(key), want.and_then(|e| e.get(key)), "{key} of {id}");
+        }
+    }
+}
+
+/// AC3-HP: the queue receipt is identical over the narrowed and full reads.
+#[test]
+fn queue_receipt_is_identical_over_the_narrowed_read() {
+    let (_dir, graph) = grant_sqlite_fixture();
+    let full = Ok(crate::graph_store::read_rows(&graph).unwrap());
+    let narrowed = Ok(crate::graph_store::read_pr_rows(&graph, None)
+        .map(|rows| crate::backlog::api::rows_in(&rows))
+        .unwrap());
+    let a = queue_op(full, 0, std::time::Instant::now());
+    let b = queue_op(narrowed, 0, std::time::Instant::now());
+    let strip = |mut receipt: Value| {
+        receipt.as_object_mut().unwrap().remove("elapsed_ms");
+        receipt
+    };
+    assert_eq!(strip(a), strip(b));
+}
+
+/// AC4-ERR: two open grant nodes carrying the same PR stay ambiguous over
+/// the narrowed read, naming both ids, as the full read does.
+#[test]
+fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let entries = json!([
+        granted_node("ab-ac4one", 11, "ready"),
+        granted_node("ab-ac4two", 11, "ready"),
+    ]);
+    crate::graph_store::seed_rows(&graph, entries.as_array().unwrap()).unwrap();
+    let narrowed = crate::graph_store::read_pr_rows(&graph, Some(11)).unwrap();
+    let full = crate::graph_store::read_rows(&graph).unwrap();
+    for rows in [&narrowed, &full] {
+        let v = verdict_for_pr(rows, 11, None, &stale_claims(), &live);
+        assert_eq!(v.state, UNKNOWN);
+        assert!(v.reason.contains("ab-ac4one"), "{}", v.reason);
+        assert!(v.reason.contains("ab-ac4two"), "{}", v.reason);
+    }
+}
+
+// ── the head-scoped operator merge grant ──────────────────────────────────
+
+fn law_row(authority: &str, decision: Option<&str>) -> Value {
+    let mut row = json!({"authority_source": authority});
+    if let Some(d) = decision {
+        row["decision"] = json!(d);
+    }
+    row
+}
+
+fn decisions_payload(rows: Vec<Value>) -> Vec<u8> {
+    json!({ "decisions": rows }).to_string().into_bytes()
+}
+
+#[test]
+fn head_grant_subject_scopes_repo_pr_and_head() {
+    assert_eq!(
+        head_grant_subject("o/r", 42, "abc"),
+        "merge-grant:o/r#42@abc"
+    );
+}
+
+#[test]
+fn attended_grant_command_names_subject_decision_and_authority() {
+    let cmd = attended_grant_command("o/r", 42, "abc");
+    assert!(cmd.starts_with("fno backlog decide '"), "{cmd}");
+    assert!(cmd.contains("'merge-grant:o/r#42@abc'"), "{cmd}");
+    assert!(cmd.contains("'merge authorized for this head'"), "{cmd}");
+    assert!(cmd.ends_with("--authority operator"), "{cmd}");
+}
+
+#[test]
+fn one_affirmative_operator_row_reads_granted() {
+    let payload = decisions_payload(vec![law_row("operator", Some(MERGE_GRANT_DECISION))]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
+}
+
+#[test]
+fn identical_affirmative_rows_read_granted_once() {
+    let payload = decisions_payload(vec![
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
+}
+
+#[test]
+fn no_operator_rows_read_absent() {
+    let payload = decisions_payload(vec![]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
+}
+
+#[test]
+fn chat_attested_and_unattributed_rows_are_not_grants() {
+    // AC2-ERR: only a person at a terminal carries the grant. Rows recorded
+    // through the law door by a harness session (`chat_attested`) or without
+    // an authority read as no operator row at all: Absent, never granted.
+    let payload = decisions_payload(vec![
+        law_row("chat_attested", Some(MERGE_GRANT_DECISION)),
+        law_row("unknown", Some(MERGE_GRANT_DECISION)),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
+}
+
+#[test]
+fn a_differing_decision_reads_conflict() {
+    let payload = decisions_payload(vec![
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+        law_row("operator", Some("not this head")),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
+}
+
+#[test]
+fn an_operator_row_without_a_readable_decision_reads_conflict() {
+    let payload = decisions_payload(vec![law_row("operator", None)]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
+}
+
+#[test]
+fn a_missing_stdout_reads_unreadable_never_absent() {
+    // AC2-ERR fail-closed polarity: a dead probe is not "no grant".
+    assert_eq!(
+        head_grant_status(None),
+        HeadGrant::Unreadable("the decisions read did not answer".to_string())
+    );
+}
+
+#[test]
+fn a_payload_without_the_decisions_array_reads_unreadable() {
+    let payload = br#"{"error": "damaged index"}"#.to_vec();
+    assert_eq!(
+        head_grant_status(Some(&payload)),
+        HeadGrant::Unreadable("malformed decisions payload".to_string())
+    );
 }

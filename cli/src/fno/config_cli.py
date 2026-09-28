@@ -267,26 +267,31 @@ def _repo_has_fno_activity(repo_root: Path, project_id: Optional[str]) -> bool:
 
     # 3. Global graph holds a node mapping this repo (by project.id or cwd).
     try:
-        import fno.paths as paths
+        from fno.graph.store import (
+            GraphCorruptError,
+            GraphUnreadableError,
+            StoreUnavailable,
+            read_graph_strict,
+        )
+        from fno.tracker import active_backend_name
 
-        graph = paths.graph_json()
-        if graph.is_file():
-            data = json.loads(graph.read_text(encoding="utf-8"))
-            entries = data.get("entries") if isinstance(data, dict) else data
-            if isinstance(entries, list):
-                root_str = str(repo_root.resolve())
-                for node in entries:
-                    if not isinstance(node, dict):
-                        continue
-                    if project_id and node.get("project") == project_id:
-                        return True
-                    for key in ("_resolved_cwd", "cwd"):
-                        cwd = node.get(key)
-                        if isinstance(cwd, str) and cwd and (
-                            cwd == root_str or cwd.startswith(root_str + "/")
-                        ):
-                            return True
-    except (OSError, ValueError):
+        if active_backend_name() != "graph":
+            return False  # an external backend has no local graph: dormant
+
+        entries = read_graph_strict()
+        root_str = str(repo_root.resolve())
+        for node in entries:
+            if not isinstance(node, dict):
+                continue
+            if project_id and node.get("project") == project_id:
+                return True
+            for key in ("_resolved_cwd", "cwd"):
+                cwd = node.get(key)
+                if isinstance(cwd, str) and cwd and (
+                    cwd == root_str or cwd.startswith(root_str + "/")
+                ):
+                    return True
+    except (OSError, ValueError, StoreUnavailable, GraphUnreadableError, GraphCorruptError):
         pass  # bias dormant
 
     return False
@@ -841,14 +846,13 @@ def _report_band_routing() -> None:
         settings = load_settings()
     except Exception:  # noqa: BLE001 - an unreadable config reads as absent
         settings = None
-    capacity = route_resolve.runtime_capacity(inventory=inventory)  # never raises
     read_verbs = route_resolve.slot_verbs(settings=settings)
     # Silent once any verb's slot would take a lane: routing is armed, and
     # the unconfigured verbs are a per-verb choice, not a dead router.
     empty_verbs = [
         verb for verb in read_verbs
         if not str(route_resolve.slot_states(
-            verb, capacity, inventory=inventory, settings=settings
+            verb, inventory=inventory, settings=settings
         ).get("would_take", "")).startswith(f"agents.profiles.{verb}.lanes")
     ]
     if len(empty_verbs) < len(read_verbs):
@@ -1239,13 +1243,13 @@ def set_cmd(
 
       fno config set <key> <value>        # single key (value may contain '=')
       fno config set a.b=1 c.d=2 ...       # atomic multi-key set
+      fno config set agents.profiles.target.lanes '["codex-luna","zai"]'
 
-    Each value is coerced to the field's type and validated against the schema
-    (e.g. ``config.agents.a2a.turn_ceiling`` must be >= 1), then written
-    atomically under a single file lock. In the multi-key form the batch is
-    all-or-nothing: if ANY value is invalid the file is left unchanged and the
-    command exits non-zero (AC2-ERR / AC2-FR). A key repeated in one call uses
-    the last value (AC2-EDGE).
+    A list takes a JSON array or `a,b`. Each value is coerced to the field's
+    type and schema-validated (``config.agents.a2a.turn_ceiling`` must be >= 1),
+    then written atomically under one file lock. The multi-key batch is
+    all-or-nothing: any invalid value leaves the file unchanged and exits
+    non-zero. A key repeated in one call uses the last value.
     """
     import sys
 

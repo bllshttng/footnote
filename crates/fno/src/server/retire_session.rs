@@ -75,7 +75,7 @@ impl Core {
             // close_pane inherits the established close semantics: empty-tab
             // removal, portal stand-in replacement and the de-persist
             // contract all stay one code path with every other close.
-            if self.close_pane_reasoned(pid, "session retired") == Flow::Shutdown {
+            if self.close_viewer_died(pid, "session retired") == Flow::Shutdown {
                 flow = Flow::Shutdown;
             }
         }

@@ -203,6 +203,29 @@ def test_envelope_from_falls_back_to_source_session(tmp_path):
     assert 'from="20260506T213611Z-58489-6764ea"' in brief
 
 
+def test_envelope_shows_reading_above_details(tmp_path):
+    """A node carrying the derived marker leads the body with it, above the
+    details block, so a dispatched worker sees which prose field is live."""
+    node = {
+        "id": "x-1",
+        "title": "T",
+        "details": "the original filing, possibly stale " * 20,
+        "_reading": "plan_path is authoritative for the file list; "
+        "details is the original filing and may be stale",
+    }
+    brief, tag = resolve_dispatch_brief(node, briefs_dir=tmp_path)
+    assert tag == "synth-details"
+    assert brief.index("plan_path is authoritative") < brief.index("details:")
+
+
+def test_envelope_unchanged_without_reading(tmp_path):
+    """No marker -> the envelope is byte-for-byte what it was before."""
+    node = {"id": "x-1", "title": "T", "details": "d " * 300}
+    brief, _ = resolve_dispatch_brief(node, briefs_dir=tmp_path)
+    assert "_reading" not in brief
+    assert brief.index("title: T") < brief.index("details:")
+
+
 # --------------------------------------------------------------------------- #
 # AC7-EDGE / AC8-EDGE: transcript tail
 # --------------------------------------------------------------------------- #

@@ -1,7 +1,7 @@
 ---
 name: execute
-description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves, alias operator). Use when: 'do this plan', 'execute the plan', 'run the waves'."
-argument-hint: "[flat|waves|operator] <plan-path>"
+description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves). Use when: 'do this plan', 'execute the plan', 'run the waves'."
+argument-hint: "[flat|waves] <plan-path>"
 metadata:
   requires:
     binaries:
@@ -70,15 +70,11 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 
 ## Step 1.5: do provenance is stamped at claim release
 
-The `do` lifecycle row is no longer stamped here. It is written when the session
-releases its node claim at a finished terminal (`DonePRGreen`, `DoneAdvisory`,
-`DoneDelivery`, `NoWork`): `started_at` from the claim's acquire time, `ended_at`
-at the release instant - a true per-session hold window, the operator's "who
-touched this node, and for how long". This is the third code choke point (ship =
-pr_number, blueprint = plan_path, do = claim release), so a direct CLI call or a
-non-Claude worker that skips this skill still gets the row. A session that stops
-without finishing (PR open, more work coming) keeps holding the claim and lands
-no `do` window yet; `fno-agents finalize` remains the ship-terminal backstop.
+The `do` lifecycle row is no longer stamped here. The session writes it upon releasing its claim at a finished terminal: `DonePRGreen`, `DoneAdvisory`, `DoneDelivery`, or `NoWork`. `started_at` uses claim acquisition time. `ended_at` uses release time. This records a per-session hold window: how long a user touched the node.
+
+This is the third code choke point. Ship writes `pr_number`. Blueprint writes `plan_path`. Claim release writes `do`. If a direct CLI call or non-Claude worker skips this skill, the row still records.
+
+A session that stops before finishing keeps the claim and has no `do` window yet. This includes an open PR or more work ahead. `fno-agents finalize` remains the ship-terminal backstop.
 
 ## Step 2: flat mode (lightweight single-session, default)
 

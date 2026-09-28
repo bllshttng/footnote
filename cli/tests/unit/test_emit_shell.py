@@ -147,35 +147,6 @@ def test_emit_paths_sh_sourceable_bash(
 
 
 # ---------------------------------------------------------------------------
-# AC2-HP: Bash stub echoes GRAPH_JSON_PATH too
-# ---------------------------------------------------------------------------
-
-
-def test_emit_paths_sh_graph_json_exported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-HP: GRAPH_JSON_PATH is exported and accessible after sourcing."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    paths_file = tmp_path / "paths.sh"
-    paths_file.write_text(stub, encoding="utf-8")
-
-    result = subprocess.run(
-        ["bash", "-c", f"source {paths_file} && echo \"$GRAPH_JSON_PATH\""],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, f"bash sourcing failed: {result.stderr}"
-    assert result.stdout.strip().endswith("graph.json"), (
-        f"GRAPH_JSON_PATH should end with graph.json, got: {result.stdout.strip()!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # AC2-EDGE: Output is well-formed even with default (no custom overrides) schema
 # ---------------------------------------------------------------------------
 
@@ -195,7 +166,6 @@ def test_emit_paths_sh_no_custom_paths_well_formed(
     assert "def " not in stub, "stub must not contain Python def"
     # Must contain export statements
     assert "export STATE_DIR=" in stub, "must export STATE_DIR"
-    assert "export GRAPH_JSON_PATH=" in stub, "must export GRAPH_JSON_PATH"
     # Must end with newline
     assert stub.endswith("\n"), "stub must end with newline"
 

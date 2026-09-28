@@ -15,25 +15,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Optional
-
-
-class LegacyKind(str, Enum):
-    QUESTION = "question"
-    ANSWER = "answer"
-    HEADS_UP = "heads-up"
-    NOTIFICATION = "notification"
-    LESSON = "lesson"
-    COMPLETE = "complete"
-    FYI = "fyi"
-
-
-class LegacyStatus(str, Enum):
-    UNREAD = "unread"
-    READ = "read"
-    ANSWERED = "answered"
 
 
 @dataclass

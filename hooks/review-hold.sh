@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - hold the active review slot
 # Register (and clear) the hold that says a review of this branch is RUNNING.
 #
 # Merge readiness models a review as a RECORDED VERDICT: `review_coverage`
@@ -37,6 +38,10 @@
 #
 # Usage: review-hold.sh acquire   (hook JSON on stdin)
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 action="${1:-}"
 [[ "$action" == "acquire" ]] || exit 0

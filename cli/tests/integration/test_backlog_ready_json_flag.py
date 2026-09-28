@@ -5,6 +5,7 @@ passing the flag (inbox triage.py) got a Typer exit 2 and silently fell back to
 an empty backlog summary. The flag is now accepted (output unchanged).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -35,7 +36,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def test_ready_accepts_json_flag(tmp_graph):
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-R", "title": "R", "status": "ready",
          "plan_path": "p.md", "project": "x"}
     ]}))

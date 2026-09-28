@@ -6,13 +6,13 @@ backlog::api function -> typed reply parsed back into
 fno.graph.types models.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
 from fno.graph import api
 from fno.graph.types import (
     Comment,
@@ -27,10 +27,7 @@ from fno.graph.types import (
     SessionRecord,
 )
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
@@ -52,7 +49,7 @@ def _row(id: str, title: str, status: str, **extra) -> dict:
 
 def _seed(tmp_path: Path, rows: list[dict]) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": rows}) + "\n")
+    seed_graph(graph, json.dumps({"entries": rows}) + "\n")
     return graph
 
 
@@ -69,12 +66,6 @@ def _fixture(tmp_path: Path) -> Path:
                  archived_at="2026-09-10T00:00:00+00:00"),
         ],
     )
-
-
-def test_entry_is_node_alias():
-    from fno.graph import types
-
-    assert types.Entry is types.Node
 
 
 def test_node_query_returns_typed_models(tmp_path):

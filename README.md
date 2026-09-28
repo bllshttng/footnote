@@ -22,7 +22,7 @@ The **crown** is that authority itself, three levels deep at most, and a session
 
 ## Install
 
-**Agent integration** - the `/fno:*` commands and the walk-away workflow. Each AI CLI installs its own integration; the Claude plugin also bundles the `fno` CLI (its postinstall puts it on your PATH in a new session), so you don't need a separate CLI install:
+**Agent integration** - the `/fno:*` commands and the walk-away workflow. Each AI CLI installs its own integration. The Claude plugin also bundles the `fno` CLI, so you do not need a separate CLI install. Its first session runs the installer in the background. From the next session, `fno` is on your PATH:
 
 ```
 Claude Code:   /plugin marketplace add bllshttng/footnote
@@ -95,8 +95,8 @@ It runs the whole loop with or without you watching, and prints the PR URL when 
 **Loop harnesses together.** Spawn an agent on another provider and work alongside it:
 
 ```
-fno agents spawn "review the diff" -H codex --name reviewer   # a Codex agent on this repo
-fno agents ask reviewer "what did you find?"            # message it; it works on its own
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
+fno agents ask helper "what did you find?"
 ```
 
 Each agent runs its own loop and they coordinate over a message bus. Claude, Codex, and Gemini, one project.

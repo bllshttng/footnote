@@ -8,13 +8,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from fno.rust_binary import VerbUnavailable, verb_call
+from fno import rust_binary
+from fno.rust_binary import VerbUnavailable
 
 
 class RouteSlotUnavailable(VerbUnavailable):
     """The fno-agents binary is missing, failed, or answered malformed JSON."""
 
 
-def route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
-    """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
-    return verb_call("route-slot", payload, RouteSlotUnavailable)
+def route_slot_call(payload: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+    """One subprocess round-trip: JSON payload in, parsed JSON answer out.
+
+    ``timeout`` rides through to the subprocess. The refreshing walk (a
+    capacity_refresh payload) probes every account record, so its caller
+    raises this above the 30s a pure local resolver needs: the bound must
+    cover the refresh, or the spawn runs on defaults for a decision that was
+    merely still running."""
+    # Late-bound through the module: a from-import frozen at first import
+    # would keep a monkeypatched probe alive past its test, and the spawn
+    # chain imports this module lazily inside exactly such a test.
+    return rust_binary.verb_call("route-slot", payload, RouteSlotUnavailable, timeout=timeout)

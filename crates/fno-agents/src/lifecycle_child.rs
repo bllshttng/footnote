@@ -40,15 +40,29 @@ pub(crate) async fn bounded_claude_stop(
     short: &str,
     timeout: Duration,
 ) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
-    let stop = tokio::process::Command::new("claude")
+    bounded_claude_stop_in(short, timeout, None).await
+}
+
+/// The same stop, pinned to one claude account root. A session born under an
+/// isolated account is invisible to the ambient root, so a stop sent there
+/// exits nonzero and leaves the session running.
+pub(crate) async fn bounded_claude_stop_in(
+    short: &str,
+    timeout: Duration,
+    config_dir: Option<&Path>,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let mut command = tokio::process::Command::new("claude");
+    command
         .arg("stop")
         .arg(short)
         .current_dir(lifecycle_child_cwd(
             crate::paths::AgentsHome::from_env().root(),
         ))
-        .kill_on_drop(true)
-        .output();
-    tokio::time::timeout(timeout, stop).await
+        .kill_on_drop(true);
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    tokio::time::timeout(timeout, command.output()).await
 }
 
 fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
@@ -90,7 +104,7 @@ fn token_helper_output(
     scope_cwd: Option<&Path>,
 ) -> std::io::Result<std::process::Output> {
     let registry_path = helper_registry_path(registry_path)?;
-    let mut command = std::process::Command::new("fno");
+    let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
         .args(token_helper_args(token, &registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
@@ -132,7 +146,15 @@ pub(crate) fn heal_token(
     // The healer adopts best-effort: a failed registry write still returns the
     // row, with the reason on stderr. Swallowing that would make the degradation
     // invisible -- the verb works, the roster silently does not.
-    let parsed = parse_heal_token_output(token, &out);
+    let mut parsed = parse_heal_token_output(token, &out);
+    if let Ok(Some(mut row)) = parsed {
+        recover_onto_healed_row(
+            &mut row,
+            registry_path,
+            &crate::claude_ask::ClaudeHome::from_env().projects_dir(),
+        );
+        parsed = Ok(Some(row));
+    }
     if matches!(&parsed, Ok(Some(_))) {
         let warn = String::from_utf8_lossy(&out.stderr);
         if !warn.trim().is_empty() {
@@ -227,6 +249,43 @@ fn parse_heal_token_output(
             "cannot safely resolve token {} because the all-source identity helper returned malformed JSON. Use the full session id.",
             py_repr_str(token)
         )),
+    }
+}
+
+/// Fill a freshly healed bare claude row with the route its transcript's
+/// birth identity proves, so `fno agents adopt` records the route at the
+/// heal door instead of at the first relaunch. Acts only on a claude row
+/// that records no route and no launch account; every miss (no transcript,
+/// an Anthropic birth, no usable route file, a failed write) leaves the row
+/// exactly as the healer wrote it - a refusal here belongs to the relaunch,
+/// not to adopt.
+fn recover_onto_healed_row(row: &mut Value, registry_path: &Path, projects: &Path) {
+    if row.get("harness").and_then(Value::as_str) != Some("claude") {
+        return;
+    }
+    let non_empty = |k: &str| {
+        row.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
+    if non_empty("route_settings_path") || non_empty("launch_account") {
+        return;
+    }
+    let Some(sid) = ["claude_session_uuid", "harness_session_id"]
+        .iter()
+        .find_map(|k| non_empty(k).then(|| row[k].as_str().unwrap_or_default().to_string()))
+    else {
+        return;
+    };
+    let pins = crate::resume_pin::RowPins::from_json(row);
+    let Ok(Some(r)) = crate::route_recovery::recover(pins, &sid, projects) else {
+        return;
+    };
+    if crate::route_recovery::persist(registry_path, &sid, &r).is_ok() {
+        row["route_settings_path"] = Value::String(r.route_settings_path.clone());
+        row["provider"] = Value::String(r.provider.clone());
+        row["requested_model"] = Value::String(r.model.clone());
+        row["launch_account"] = Value::String("default".into());
     }
 }
 
@@ -349,17 +408,11 @@ mod tests {
     }
 
     fn marked_helper_fno(dir: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fake_fno = dir.join("fno");
-        std::fs::write(
-            &fake_fno,
+        crate::write_exec_stub(
+            dir,
+            "fno",
             "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&fake_fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_fno, permissions).unwrap();
+        );
     }
 
     #[test]
@@ -383,7 +436,11 @@ mod tests {
         let caller_cwd = std::env::current_dir().unwrap();
         let relative_registry = Path::new("relative/registry.json");
         let expected_registry = caller_cwd.join(relative_registry);
+        let prev_bin = std::env::var_os("FNO_BIN");
         std::env::set_var("PATH", path_with(dir.path()));
+        // The helper execs through scrape::fno_bin, which under cfg!(test)
+        // answers only a declared FNO_BIN: pin the same stub PATH pins.
+        std::env::set_var("FNO_BIN", dir.path().join("fno"));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =
@@ -391,6 +448,10 @@ mod tests {
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
         }
         std::env::remove_var("FNO_TEST_HELPER_CWD");
         std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
@@ -426,13 +487,21 @@ mod tests {
 
         let old_path = std::env::var_os("PATH");
         let registry = dir.path().canonicalize().unwrap().join("registry.json");
+        let prev_bin = std::env::var_os("FNO_BIN");
         std::env::set_var("PATH", path_with(dir.path()));
+        // The helper execs through scrape::fno_bin, which under cfg!(test)
+        // answers only a declared FNO_BIN: pin the same stub PATH pins.
+        std::env::set_var("FNO_BIN", dir.path().join("fno"));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output = token_helper_output("deadbeef", &registry, false, None).unwrap();
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
         }
         std::env::remove_var("FNO_TEST_HELPER_CWD");
         std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
@@ -451,5 +520,101 @@ mod tests {
             Path::new(std::fs::read_to_string(registry_marker).unwrap().trim()),
             registry
         );
+    }
+
+    #[test]
+    fn healed_bare_glm_row_gets_recovered_route() {
+        // AC4-EDGE: a heal of a glm-born bare row carries the recovered
+        // provider, requested_model and route onto the returned row AND the
+        // registry; an Anthropic-born heal writes nothing new.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let routes = dir.path().join("routes");
+        std::fs::create_dir_all(&routes).unwrap();
+        std::fs::write(
+            routes.join("zai.json"),
+            serde_json::json!({"env": {
+                "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_BASE_URL": "https://repro.invalid/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                "FNO_ROUTE_PROVIDER": "zai",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &routes);
+        let projects = dir.path().join("projects");
+        let slug = projects.join("staged-project");
+        std::fs::create_dir_all(&slug).unwrap();
+        let sid = "77770014-2222-3333-4444-555555555555";
+        std::fs::write(
+            slug.join(format!("{sid}.jsonl")),
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"glm-5.3-flash[1m]","marketingName":null}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        let reg = dir.path().join("registry.json");
+        crate::state::update_registry(&reg, |r| {
+            r.entries.push(crate::state::RegistryEntry {
+                name: "wk-heal".into(),
+                harness: Some("claude".into()),
+                harness_session_id: Some(sid.into()),
+                claude_session_uuid: Some(sid.into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let mut row = serde_json::json!({
+            "name": "wk-heal",
+            "cwd": dir.path().to_string_lossy(),
+            "log_path": dir.path().join("log").to_string_lossy(),
+            "harness": "claude",
+            "claude_session_uuid": sid,
+            "harness_session_id": sid,
+        });
+        recover_onto_healed_row(&mut row, &reg, &projects);
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(row["provider"], "zai");
+        assert_eq!(row["requested_model"], "glm-5.3-flash[1m]");
+        assert_eq!(row["launch_account"], "default");
+        let stored = crate::state::load_registry(&reg).unwrap();
+        let e = stored
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some(sid))
+            .unwrap();
+        assert_eq!(e.provider.as_deref(), Some("zai"));
+        assert_eq!(e.requested_model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(
+            e.route_settings_path.as_deref().map(str::len) > Some(0),
+            true
+        );
+
+        // An Anthropic-born transcript writes nothing new onto a bare row.
+        let sid2 = "77770015-2222-3333-4444-555555555555";
+        std::fs::write(
+            slug.join(format!("{sid2}.jsonl")),
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-opus-5","marketingName":"Opus 5"}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        let reg2 = dir.path().join("registry2.json");
+        crate::state::update_registry(&reg2, |r| {
+            r.entries.push(crate::state::RegistryEntry {
+                name: "wk-heal2".into(),
+                harness: Some("claude".into()),
+                harness_session_id: Some(sid2.into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let mut row2 = serde_json::json!({
+            "name": "wk-heal2",
+            "cwd": dir.path().to_string_lossy(),
+            "log_path": dir.path().join("log2").to_string_lossy(),
+            "harness": "claude",
+            "harness_session_id": sid2,
+        });
+        recover_onto_healed_row(&mut row2, &reg2, &projects);
+        assert!(row2.get("provider").is_none());
+        assert!(row2.get("route_settings_path").is_none());
     }
 }

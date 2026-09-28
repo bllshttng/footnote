@@ -1,12 +1,12 @@
-"""Plugin-script resolution + the self-healing persisted pointer (#2).
+"""Plugin-script resolution + the persisted pointer (#2).
 
 The bug: `fno do target init` / `fno gate set` could not find their plugin scripts
 when run from a foreign project with no env hint. `fno` is a uv-tool install
 whose wheel does not carry hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to
 arbitrary `fno` subprocesses, so env + package-relative both miss and the agent
-had to export FNO_REPO_ROOT by hand. resolve_plugin_script adds a persisted
-~/.fno/plugin-root pointer, primed on any env/pkg resolve and by the
-session-start hook, as the env-less source.
+had to export FNO_REPO_ROOT by hand. resolve_plugin_script falls back to the
+persisted ~/.fno/install/plugin-root pointer, written only by the session-start hook
+from an installed or canonical root, as the env-less source.
 
 The resolver reads os.environ fresh on every call (no lru_cache), so tests just
 monkeypatch FNO_HOME / the plugin-root env vars - nothing to clear.
@@ -35,6 +35,7 @@ def _make_plugin(root: Path) -> Path:
 def isolated_home(tmp_path, monkeypatch):
     """FNO_HOME -> tmp dir; all plugin-root env hints cleared."""
     home = tmp_path / "fno-home"
+    (home / "install").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_HOME", str(home))
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
@@ -43,47 +44,49 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-def test_persist_gated_on_manifest(tmp_path, isolated_home):
-    """A root without the plugin manifest is never written (no test poisoning)."""
-    no_manifest = tmp_path / "fake"
-    (no_manifest / "hooks" / "helpers").mkdir(parents=True)
-    (no_manifest / "hooks" / "helpers" / "init-target-state.sh").write_text("x")
-    paths._persist_plugin_root(no_manifest)
-    assert not (isolated_home / "plugin-root").exists()
-
-    plugin = _make_plugin(tmp_path / "plugin")
-    paths._persist_plugin_root(plugin)
-    assert (isolated_home / "plugin-root").read_text().strip() == str(plugin)
+def _pointer_path(home: Path) -> Path:
+    path = home / "install" / "plugin-root"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def test_read_persisted_returns_none_when_stale(tmp_path, isolated_home):
     isolated_home.mkdir(parents=True, exist_ok=True)
-    (isolated_home / "plugin-root").write_text(str(tmp_path / "gone") + "\n")
+    _pointer_path(isolated_home).write_text(str(tmp_path / "gone") + "\n")
     assert paths._read_persisted_plugin_root() is None
 
 
-def test_env_hint_resolves_and_self_heals_pointer(tmp_path, monkeypatch, isolated_home):
+def test_env_hint_resolves_without_writing_pointer(tmp_path, monkeypatch, isolated_home):
+    """The hook is the sole pointer writer, so an env resolve writes none
+    (an env-hint root is just as often a worker's linked worktree)."""
     plugin = _make_plugin(tmp_path / "plugin")
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin))
     got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
-    # env resolve primed the pointer for later env-less runs
-    assert (isolated_home / "plugin-root").read_text().strip() == str(plugin)
+    assert not _pointer_path(isolated_home).exists()
 
 
-def test_codex_env_hint_resolves_and_self_heals_pointer(tmp_path, monkeypatch, isolated_home):
+def test_codex_env_hint_resolves_without_writing_pointer(tmp_path, monkeypatch, isolated_home):
     plugin = _make_plugin(tmp_path / "plugin")
     monkeypatch.setenv("CODEX_PLUGIN_ROOT", str(plugin))
     got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
-    assert (isolated_home / "plugin-root").read_text().strip() == str(plugin)
+    assert not _pointer_path(isolated_home).exists()
+
+
+def test_repo_root_env_hint_resolves_without_writing_pointer(tmp_path, monkeypatch, isolated_home):
+    plugin = _make_plugin(tmp_path / "plugin")
+    monkeypatch.setenv("FNO_REPO_ROOT", str(plugin))
+    got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
+    assert got == plugin / "scripts" / "lib" / "set-gate.sh"
+    assert not _pointer_path(isolated_home).exists()
 
 
 def test_resolve_falls_to_persisted_when_env_and_pkg_miss(tmp_path, monkeypatch, isolated_home):
     """The env-less foreign-project case: only the persisted pointer remains."""
     plugin = _make_plugin(tmp_path / "plugin")
     isolated_home.mkdir(parents=True, exist_ok=True)
-    (isolated_home / "plugin-root").write_text(str(plugin) + "\n")
+    _pointer_path(isolated_home).write_text(str(plugin) + "\n")
     # Force package-relative (the in-tree repo root) to NOT count as a plugin,
     # so resolution must reach the persisted pointer.
     monkeypatch.setattr(paths, "_is_plugin_root", lambda r: Path(r) == plugin)
@@ -98,7 +101,7 @@ def test_resolve_skips_persisted_when_relpath_missing(tmp_path, monkeypatch, iso
     candidate instead of returning a path that 404s at call time."""
     plugin = _make_plugin(tmp_path / "plugin")
     isolated_home.mkdir(parents=True, exist_ok=True)
-    (isolated_home / "plugin-root").write_text(str(plugin) + "\n")
+    _pointer_path(isolated_home).write_text(str(plugin) + "\n")
     monkeypatch.setattr(paths, "_is_plugin_root", lambda r: Path(r) == plugin)
     repo_root = tmp_path / "repo"
     (repo_root / "scripts" / "analysis").mkdir(parents=True)
@@ -146,7 +149,7 @@ def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_h
     cold-start receipt stays clean. This is the sole canonicalization point."""
     canon, wt = _make_worktree_plugin(tmp_path)
     isolated_home.mkdir(parents=True, exist_ok=True)
-    (isolated_home / "plugin-root").write_text(str(wt) + "\n")
+    _pointer_path(isolated_home).write_text(str(wt) + "\n")
     got = paths._read_persisted_plugin_root()
     assert got is not None and got.resolve() == canon.resolve()
 
@@ -165,17 +168,4 @@ def test_canonical_fails_open_on_subprocess_error(tmp_path, monkeypatch):
         returncode = 0
     monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: _NoStdout())
     assert paths._canonical_plugin_root(plugin) == plugin
-
-
-def test_persist_stays_subprocess_free(tmp_path, isolated_home, monkeypatch):
-    """Persisting must not shell out (a git call here would trip the target-init
-    'must not shell out' guards): it stores the raw root; the reader canonicalizes."""
-    canon, wt = _make_worktree_plugin(tmp_path)  # git setup BEFORE the boom patch
-
-    def _boom(*a, **k):
-        raise AssertionError("persist must not shell out")
-    monkeypatch.setattr(paths.subprocess, "run", _boom)
-    paths._persist_plugin_root(wt)  # would raise if it shelled out
-    assert (isolated_home / "plugin-root").read_text().strip() == str(wt)
-
 

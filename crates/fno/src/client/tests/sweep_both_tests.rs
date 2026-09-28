@@ -167,7 +167,7 @@ fn sweep_modal_draws_kept_reasons_and_offers_named_tabs_and_stale_rows() {
         "{labels:?}"
     );
     assert!(
-        labels.contains(&("+ stale squad rows (3)".into(), true)),
+        labels.contains(&("+ stale workspace rows (3)".into(), true)),
         "{labels:?}"
     );
     let headers: Vec<&str> = modal

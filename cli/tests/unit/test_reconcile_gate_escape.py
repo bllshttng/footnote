@@ -32,10 +32,9 @@ def _record(cwd: Path, *, pr: int = 218, node: str = "x-cccc") -> MergeDriftReco
 
 
 def _events(cwd: Path) -> list[dict]:
-    p = cwd / ".fno" / "events.jsonl"
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(cwd / ".fno" / "events.jsonl")
 
 
 def _gate_escapes(cwd: Path) -> list[dict]:
@@ -104,12 +103,12 @@ def test_ac4_inv_no_double_count_same_pr_reason(tmp_path):
 
 def test_ac5_err_fail_open_and_ac7_failure_logged(tmp_path, monkeypatch):
     """AC5-ERR: a failed emit never raises. AC7-FR: it is logged durably."""
-    import fno.events as events_mod
+    import fno.events.store_client as store_client_mod
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(events_mod, "append_event", _boom)
+    monkeypatch.setattr(store_client_mod, "emit_envelope", _boom)
     rec = _record(tmp_path)
     # Must NOT raise (fail open).
     out = emit_gate_escape_for_record(

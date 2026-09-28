@@ -4,9 +4,8 @@
 ``typer.Option`` declarations exist but structurally cannot catch a Click
 registration failure, because every touched sub-app is lazily loaded
 (``cli/src/fno/cli.py`` ``LAZY_SUBCOMMANDS``) and the scan never
-imports the command tree. These tests drive the REAL root app so each
-touched sub-app imports, registers, and parses - the runtime counterpart
-the Phase 1 review established with ``test_cmd_ask_short_flags_behave_like_long``.
+imports the command tree. These tests drive the Python root app for its remaining
+leaves and the native binary for backlog add/idea, whose Python legs were retired.
 
 Three layers, coarsest sufficient grain (one registration probe per surface,
 one short-vs-long parity proof per previously-untested risk):
@@ -18,6 +17,7 @@ one short-vs-long parity proof per previously-untested risk):
   prior CLI test of any kind).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -34,13 +34,11 @@ runner = CliRunner()
 # --------------------------------------------------------------------------- #
 
 PHASE2_HELP_SURFACES: dict[str, list[str]] = {
-    "backlog-add": ["backlog", "add", "--help"],
-    "backlog-idea": ["backlog", "idea", "--help"],
     "backlog-intake": ["backlog", "intake", "--help"],
-    "backlog-update": ["backlog", "update", "--help"],
+    # backlog-update moved with the update port: the native binary answers
+    # --help now (pinned below, next to native-find).
     "backlog-next": ["backlog", "next", "--help"],
     "backlog-ready": ["backlog", "ready", "--help"],
-    "backlog-find": ["backlog", "find", "--help"],
     "backlog-capture-add": ["backlog", "capture", "add", "--help"],
     "mail-send": ["mail", "send", "--help"],
     "config-accounts-add": ["config", "accounts", "add", "--help"],
@@ -53,12 +51,19 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
 
 
 @pytest.mark.parametrize(
-    "argv",
-    list(PHASE2_HELP_SURFACES.values()),
+    ("surface", "argv"),
+    list(PHASE2_HELP_SURFACES.items()),
     ids=list(PHASE2_HELP_SURFACES.keys()),
 )
-def test_phase2_surface_registers(argv: list[str]) -> None:
-    """Each lazily-loaded sub-app imports and Click accepts its flag decls."""
+def test_phase2_surface_registers(surface: str, argv: list[str]) -> None:
+    """Creation verbs register natively; remaining Phase 2 leaves stay Python."""
+    if surface in {"backlog-add", "backlog-idea"}:
+        from tests._native_door import run_native
+
+        code, out, err = run_native(*argv)
+        assert code == 0, f"{out}\n{err}"
+        return
+
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, result.output
 
@@ -67,10 +72,50 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 # Parity: backlog find (read-only graph path).
 # --------------------------------------------------------------------------- #
 
+def test_backlog_create_native_help_registers() -> None:
+    """`backlog add|idea --help` moved with the create port: the binary's
+    flag decls still parse and the surface answers."""
+    from tests._native_door import run_native
+
+    for verb in ("add", "idea"):
+        code, out, err = run_native("backlog", verb, "--help")
+        assert code == 0, err
+        assert "Usage" in out + err
+
+
+def test_backlog_find_native_help_registers() -> None:
+    """`backlog find --help` is the native binary's now; the flag decl still
+    parses and the surface answers."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "find", "--help")
+    assert code == 0, err
+    assert "Usage" in out + err
+
+
+def test_backlog_update_native_help_registers() -> None:
+    """`backlog update --help` moved with the update port: the binary's flag
+    decls still parse and the surface answers."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "update", "--help")
+    assert code == 0, err
+    assert "Usage" in out + err
+
+
+def test_backlog_native_help_registers_add_and_idea() -> None:
+    """The Rust dispatcher owns the backlog create groups after the port."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "--help")
+    assert code == 0, err
+    assert "add" in out
+    assert "idea" in out
+
+
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -79,28 +124,41 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # find routes through the guarded display reader, which resolves
     # paths.graph_json at call time.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native binary resolves the store through FNO_CONFIG's state_dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
 
 
+def _native_find(*args: str) -> tuple[int, str, str]:
+    from tests._native_door import run_native
+
+    return run_native("backlog", "find", *args)
+
+
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
-    """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    """AC4: `backlog find -p X -s Y -d Z -J` is byte-identical to the long form.
+
+    The Phase 2 lowercase table's find pin moved here with the find port:
+    the native binary owns the surface, so the -p/-s/-d decls are readable
+    only at this door.
+    """
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
         {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",
-         "domain": "code", "project": "other"},
+         "domain": "docs", "project": "other"},
     ]}) + "\n")
-    long = runner.invoke(app, [
-        "backlog", "find", "rollout",
-        "--project", "fno", "--status", "done", "--json",
-    ])
-    short = runner.invoke(app, [
-        "backlog", "find", "rollout", "-p", "fno", "-s", "done", "-J",
-    ])
-    assert long.exit_code == 0, long.output
-    assert short.exit_code == long.exit_code
-    assert short.stdout == long.stdout
-    assert "ab-sf000001" in short.stdout
+    long_code, long_out, long_err = _native_find(
+        "rollout", "--project", "fno", "--status", "done", "--domain", "code", "--json",
+    )
+    short_code, short_out, _short_err = _native_find(
+        "rollout", "-p", "fno", "-s", "done", "-d", "code", "-J",
+    )
+    assert long_code == 0, long_err
+    assert short_code == long_code
+    assert short_out == long_out
+    assert "ab-sf000001" in short_out
 
 
 # --------------------------------------------------------------------------- #

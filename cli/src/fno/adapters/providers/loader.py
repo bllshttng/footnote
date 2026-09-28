@@ -257,7 +257,6 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "footprint_sustained_cpu_cores",
         "gemini",
         "happy_routed_panes",
-        "hard_max_load_per_cpu",
         "hold_escalate_after_s",
         # Legacy spelling of provider_limits (W5); still parsed by the
         # model's before-validator, so it stays reserved here too.

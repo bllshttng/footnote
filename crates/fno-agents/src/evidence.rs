@@ -57,6 +57,14 @@ fn negative_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(&format!(r"\b(?:no|zero)\s+{}", nouns())).expect("negative regex"))
 }
 
+/// The cited-ruling shape, case-sensitive like
+/// `scripts/ci/check-skill-decision-ids.sh`: the all-capitals form is the
+/// escape for an illustrative id.
+fn decision_id_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bd-[0-9a-f]{8}\b").expect("decision id regex"))
+}
+
 /// A code fact stated with no read attached, or a read that could not run
 /// (`kind: "unmeasured"`); a citation the repo contradicts (`kind:
 /// "citation"`). The refusal strings are the durable teaching text.
@@ -85,34 +93,77 @@ pub fn find_code_claims(text: &str) -> Vec<String> {
     claims
 }
 
-fn tracked_files(root: &Path) -> Vec<String> {
+/// The bounded-walk ceiling on entries (files or directories) visited in a
+/// non-repo root. A hermetic test tmp dir holds a handful of files; a state
+/// root like ~/.fno holds worktrees and build dirs no citation can name.
+const WALK_CAP: usize = 1_000;
+
+/// Why the bounded walk stopped. `Full` is the caller-visible bound; `Io`
+/// keeps today's ignore-and-continue posture for an unreadable dir.
+enum WalkStop {
+    Full,
+    Io,
+}
+
+impl From<std::io::Error> for WalkStop {
+    fn from(_: std::io::Error) -> Self {
+        WalkStop::Io
+    }
+}
+
+fn tracked_files(root: &Path) -> Result<Vec<String>, String> {
     if let Ok(out) = Command::new("git")
         .arg("ls-files")
         .current_dir(root)
         .output()
     {
         if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout)
+            return Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect();
+                .collect());
         }
     }
-    // Not a repo (a hermetic test tmp dir): every file counts.
+    // Not a repo (a hermetic test tmp dir): a bounded walk stands in for
+    // ls-files. Nested checkouts and target dirs are skipped, and past
+    // WALK_CAP entries the root refuses the citation check - a state root
+    // is not a citation target, and walking it is the 120s decide timeout.
     let mut files: Vec<String> = Vec::new();
-    let _ = walk_files(root, root, &mut files);
+    let mut budget = WALK_CAP;
+    match walk_files(root, root, &mut files, &mut budget) {
+        Err(WalkStop::Full) => {
+            return Err(format!(
+                "the root {} is not a usable git repository (the walk stopped at \
+                 {WALK_CAP} entries); run from the repo so citations resolve against \
+                 tracked files",
+                root.display()
+            ));
+        }
+        _ => {}
+    }
     files.sort();
-    files
+    Ok(files)
 }
 
-fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+fn walk_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    budget: &mut usize,
+) -> Result<(), WalkStop> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
+        if *budget == 0 {
+            return Err(WalkStop::Full);
+        }
+        *budget -= 1;
         if p.is_dir() {
-            if p.file_name().and_then(|n| n.to_str()) != Some(".git") {
-                walk_files(root, &p, out)?;
+            let name = p.file_name().and_then(|n| n.to_str());
+            let nested_checkout = p.join(".git").exists();
+            if name != Some(".git") && name != Some("target") && !nested_checkout {
+                walk_files(root, &p, out, budget)?;
             }
         } else if let Ok(rel) = p.strip_prefix(root) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
@@ -129,7 +180,10 @@ pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
     if !claims.iter().any(|c| citation_re().is_match(c)) {
         return Vec::new();
     }
-    let tracked = tracked_files(root);
+    let tracked = match tracked_files(root) {
+        Ok(tracked) => tracked,
+        Err(message) => return vec![message],
+    };
     let tracked_norm: Vec<String> = tracked.iter().map(|p| p.replace('\\', "/")).collect();
     let mut failures: Vec<String> = Vec::new();
     for claim in claims {
@@ -181,6 +235,83 @@ pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
         }
     }
     failures
+}
+
+/// The cited ids whose lowercase form names no known ruling, first-seen
+/// order, deduped. Pure: the store read stays in
+/// [`check_decision_citations`].
+pub fn unknown_decision_ids(text: &str, known: &HashSet<String>) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in decision_id_re().find_iter(text) {
+        if seen.insert(m.as_str().to_string()) && !known.contains(&m.as_str().to_lowercase()) {
+            ids.push(m.as_str().to_string());
+        }
+    }
+    ids
+}
+
+/// Whether the text cites the decision-id shape at all. A caller scanning
+/// many texts (the push's commit loop) uses it to load the known set once,
+/// on the first match, instead of paying a store read per text.
+pub fn cites_decision_id(text: &str) -> bool {
+    decision_id_re().is_match(text)
+}
+
+/// The known decision ids: every `decision_id` on an operator_decision row
+/// of the store, retired rows included (supersession history honestly cites
+/// retired ids), lowercase.
+pub fn known_decision_ids() -> Result<HashSet<String>, String> {
+    let (rows, _) = crate::decision_index::read_store_rows(
+        &crate::graph_get::default_graph_path(),
+        &crate::decision_index::default_state_path("decisions.jsonl"),
+    )?;
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            row.get("_event_type")
+                .and_then(Value::as_str)
+                .map_or(true, |t| t == "operator_decision")
+        })
+        .filter_map(|row| row.get("decision_id").and_then(Value::as_str))
+        .map(|id| id.to_lowercase())
+        .collect())
+}
+
+/// The refusal line for one unknown id: the durable teaching text.
+fn unknown_id_failure(id: &str) -> String {
+    format!(
+        "{id}: no ruling on this machine carries this id. Check it with \
+         fno backlog decisions {id}, cite the live ruling, or write the id \
+         as {} (capitals) when it is an example",
+        id.to_uppercase()
+    )
+}
+
+/// The decision-id arm: one failure per cited id no ruling on this machine
+/// carries. Text with no id reads nothing. A store read that fails is one
+/// failure naming the error: a citation that cannot be checked is not a
+/// pass.
+pub fn check_decision_citations(text: &str) -> Vec<String> {
+    if !cites_decision_id(text) {
+        return Vec::new();
+    }
+    match known_decision_ids() {
+        Ok(known) => check_decision_citations_against(text, &known),
+        Err(reason) => vec![format!(
+            "the decision store could not be read ({reason}); the citation cannot be \
+             checked, and an unchecked citation is not a pass"
+        )],
+    }
+}
+
+/// The arm against a caller-supplied known set, so one store read serves a
+/// whole scan.
+pub fn check_decision_citations_against(text: &str, known: &HashSet<String>) -> Vec<String> {
+    unknown_decision_ids(text, known)
+        .into_iter()
+        .map(|id| unknown_id_failure(&id))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -347,15 +478,16 @@ pub fn run_reads(
 /// Ruling-lane gate: the rows to store, or None when the body has no claim.
 ///
 /// Order matters: a citation the repo contradicts is refused whatever is
-/// attached to it, then a claim with no read. No claim, no change from
-/// today's behavior.
+/// attached to it, then a cited id no ruling carries, then a claim with no
+/// read. No claim, no change from today's behavior.
 pub fn check_ruling_evidence(
     text: &str,
     reads: &[String],
     root: &Path,
     runner: &mut Runner,
 ) -> Result<Option<Vec<Value>>, GateRefusal> {
-    let failures = check_citations(text, root);
+    let mut failures = check_citations(text, root);
+    failures.extend(check_decision_citations(text));
     if !failures.is_empty() {
         return Err(refusal(
             "citation",
@@ -373,10 +505,12 @@ pub fn check_ruling_evidence(
         return Err(refusal(
             "unmeasured",
             format!(
-                "the ruling asserts a code fact ('{}') and carries no read. Attach \
-                 --read with the command that produced it; the command runs at \
-                 record time and its output is stored on the row. Example: --read \
-                 \"rg -c 'def record' cli/src/fno/law.py\". Pair a zero with a control.",
+                "the ruling asserts a code fact ('{}') and carries no read. Attach --read <command>: \
+                 it runs at record time and its output is stored on the row. fno inbox decide and \
+                 fno inbox law set take --read. fno inbox outstanding clear does not: record the answer \
+                 with fno inbox decide <subject> \"<answer>\" --question-id <q> --read \"<command>\", \
+                 then run fno inbox outstanding clear <q> with no --answer. Example: --read \
+                 \"rg -n '<term>' <file>\". Pair a zero with a control.",
                 claims[0]
             ),
         ));
@@ -395,7 +529,8 @@ pub fn note_evidence(
     root: &Path,
     runner: &mut Runner,
 ) -> Result<(Option<Vec<Value>>, Option<Vec<String>>), GateRefusal> {
-    let failures = check_citations(text, root);
+    let mut failures = check_citations(text, root);
+    failures.extend(check_decision_citations(text));
     if !failures.is_empty() {
         return Err(refusal("citation", failures.join("; ")));
     }
@@ -733,6 +868,10 @@ mod tests {
         assert_eq!(err.kind, "unmeasured");
         assert!(err.message.contains("167 lines"));
         assert!(err.message.contains("Pair a zero with a control"));
+        assert!(err.message.contains("fno inbox decide"));
+        assert!(err.message.contains("--question-id"));
+        assert!(err.message.contains("fno inbox outstanding clear"));
+        assert!(err.message.contains("with no --answer"));
     }
 
     #[test]
@@ -815,8 +954,64 @@ mod tests {
     fn tracked_paths_normalize_windows_separators() {
         let dir = tempfile::tempdir().expect("tmp");
         write_file(dir.path(), "src/a.py", 5);
-        let tracked = tracked_files(dir.path());
+        let tracked = tracked_files(dir.path()).expect("tracked");
         assert_eq!(tracked, vec!["src/a.py"]);
+    }
+
+    // Inside a non-repo root a nested checkout and a target dir are
+    // skipped, so a state root never walks its worktrees.
+    #[test]
+    fn bounded_walk_skips_nested_checkouts_and_target_dirs() {
+        let dir = tempfile::tempdir().expect("tmp");
+        write_file(dir.path(), "src/a.py", 5);
+        write_file(dir.path(), "worktrees/wt/cli/b.py", 5);
+        std::fs::write(dir.path().join("worktrees/wt/.git"), "gitdir: elsewhere").expect("marker");
+        write_file(dir.path(), "target/debug/c.rs", 5);
+        let tracked = tracked_files(dir.path()).expect("tracked");
+        assert_eq!(tracked, vec!["src/a.py"]);
+    }
+
+    // A non-repo root past the cap refuses the citation check instead of
+    // walking unbounded, and names the root.
+    #[test]
+    fn oversized_non_repo_root_refuses_naming_the_root() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP + 1 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").expect("write");
+        }
+        let failures = check_citations("see a.py:1", dir.path());
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains(&dir.path().to_string_lossy().to_string()),
+            "{}",
+            failures[0]
+        );
+        assert!(failures[0].contains("run from the repo"), "{}", failures[0]);
+    }
+
+    // A root holding exactly the cap is not oversized: the refusal fires
+    // only on the entry past it.
+    #[test]
+    fn root_at_the_exact_cap_is_returned_whole() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").expect("write");
+        }
+        let tracked = tracked_files(dir.path()).expect("tracked");
+        assert_eq!(tracked.len(), WALK_CAP);
+    }
+
+    // Directory entries spend the same budget as files, so a wide tree of
+    // empty dirs is bounded too.
+    #[test]
+    fn dir_entries_spend_the_walk_budget() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP + 1 {
+            std::fs::create_dir_all(dir.path().join(format!("d{i}"))).expect("mkdir");
+        }
+        let failures = check_citations("see a.py:1", dir.path());
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("run from the repo"), "{}", failures[0]);
     }
 
     #[test]
@@ -843,5 +1038,90 @@ mod tests {
             .contains("no tracked file"));
         let empty: Map<String, Value> = Map::new();
         assert!(empty.is_empty());
+    }
+
+    // Pure half: first-seen order, dedupe, lowercase known-set match, the
+    // capitals escape never cited.
+    #[test]
+    fn unknown_ids_keep_first_seen_order_and_match_case_insensitively() {
+        let known: HashSet<String> = ["d-aaaa0001", "d-bbbb0002"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ids = unknown_decision_ids(
+            "per d-bbbb0002 then d-deadbeef, again d-bbbb0002 and D-DEADBEEF",
+            &known,
+        );
+        assert_eq!(ids, vec!["d-deadbeef"]);
+    }
+
+    fn decision_envelope(id: &str, ts: &str) -> String {
+        format!(
+            "{{\"type\":\"operator_decision\",\"ts\":\"{ts}\",\"data\":{{\"decision_id\":\"{id}\",\
+             \"subject\":\"s\",\"decision\":\"R.\",\"text\":\"R.\",\
+             \"authority_source\":\"operator\"}}}}"
+        )
+    }
+
+    // AC2-HP, AC2-ERR, AC2-EDGE, the read-error refusal and AC3-ERR, against
+    // seeded FNO_HOME stores so nothing here touches the machine store. One
+    // test body: set_var is process-global and cargo runs tests in parallel.
+    #[test]
+    fn decision_id_arm_refuses_unknown_ids_and_a_dead_store() {
+        let old_home = std::env::var("FNO_HOME").ok();
+        let seeded = tempfile::tempdir().expect("tmp");
+        std::env::set_var("FNO_HOME", seeded.path());
+        std::fs::write(
+            seeded.path().join("decisions.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                decision_envelope("d-aaaa0001", "2026-09-12T00:00:00Z"),
+                decision_envelope("d-eeee0005", "2026-09-05T00:00:00Z"),
+                "{\"type\":\"decision_retracted\",\"ts\":\"2026-09-13T00:00:00Z\",\
+                 \"data\":{\"retraction_id\":\"d-rrrr0009\",\
+                 \"target_decision_id\":\"d-eeee0005\",\"reason\":\"r\"}}"
+            ),
+        )
+        .expect("write index");
+        // AC2-HP: a live id on a JSONL-only store passes.
+        assert!(check_decision_citations("per d-aaaa0001").is_empty());
+        // AC2-ERR: the unknown id is refused, named, with the check verb.
+        let failures = check_decision_citations("per d-deadbeef");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("d-deadbeef"), "{}", failures[0]);
+        assert!(
+            failures[0].contains("fno backlog decisions d-deadbeef"),
+            "{}",
+            failures[0]
+        );
+        // AC2-EDGE: a retired id is known, and the capitals form escapes.
+        assert!(check_decision_citations("per d-eeee0005 and D-DEADBEEF").is_empty());
+
+        // AC3-ERR: against the seeded store the ruling lane refuses, names
+        // the id, and no read runs past the refusal.
+        let mut ran = false;
+        let mut runner = |_cmd: &str, _root: &Path| {
+            ran = true;
+            ok_run("1\n", 0)
+        };
+        let err = check_ruling_evidence("per d-deadbeef we ruled", &[], seeded.path(), &mut runner)
+            .expect_err("unknown id refuses");
+        assert_eq!(err.kind, "citation");
+        assert!(err.message.contains("d-deadbeef"), "{}", err.message);
+        assert!(!ran, "no read ran past the refusal");
+
+        // An empty FNO_HOME: no id never reads the store, an id names the
+        // read error instead of passing.
+        let empty = tempfile::tempdir().expect("tmp");
+        std::env::set_var("FNO_HOME", empty.path());
+        assert!(check_decision_citations("no citation in this note").is_empty());
+        let failures = check_decision_citations("per d-deadbeef");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("could not be read"), "{}", failures[0]);
+
+        match old_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
     }
 }

@@ -43,6 +43,16 @@ When one is proven, `from` holds the sender's FULL session id (the collision-saf
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 
+If no session identity resolves, fixed machine arms use named senders.
+
+The PR nudge uses `pr-nudge` with scheduler origin.
+
+Without a resolved identity, events push uses `events-push`. If a session resolves, the mail CLI stamps that session. Both paths declare scheduler origin.
+
+Without a resolved identity, note pointer uses `note-pointer`. If a session resolves, it keeps the existing canonical session handle.
+
+Mux peek always names `mux-peek` as sender. It declares no operator origin. Its socket cannot prove an attended human sent the message.
+
 ## Where the envelope lands: per-harness transcript map
 
 A live `hosted` delivery puts the `<fno_mail>` turn into the recipient's session transcript by construction: the claude path injects it over `control.sock` and the `mail-inject` verb only reports `delivered` once that transcript grew; the codex/gemini path types it into the PTY worker, which the session records. So `grep <fno_mail>` reconstructs delivered a2a history, but you have to know where each harness keeps its transcript:

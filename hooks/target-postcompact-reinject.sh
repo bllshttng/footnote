@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - restore target context after compaction
 # Re-inject plan goal + current phase after a context compaction.
 #
 # Carrier (the load-bearing decision, verified against the harness reference):
@@ -15,6 +16,10 @@
 # and the payload emission live in scripts/lib/postcompact-carrier.sh, shared with
 # hooks/king-postcompact-reinject.sh.
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 STATE_FILE=".fno/target-state.md"
 FNO_DIR=".fno"

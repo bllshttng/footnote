@@ -9,6 +9,7 @@ AC1-ERR, AC1-UI, AC1-EDGE, AC1-FR from
 internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import tempfile
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+
+from fno.graph.store import read_graph_strict
 
 
 # -- fixtures --
@@ -81,7 +84,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         cwd=str(tmp_path),
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -89,7 +92,9 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     def read_entries():
-        return json.loads(g.read_text())["entries"]
+        from fno.graph.store import read_graph_strict
+
+        return read_graph_strict(g)
 
     return g, read_entries
 
@@ -176,9 +181,11 @@ def test_inherits_epic_project_cwd(graph_env, tmp_path):
 
 def test_inherits_epic_difficulty(graph_env):
     g, read_entries = graph_env
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     entries[0]["difficulty"] = "high"
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
 
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
@@ -388,7 +395,9 @@ def test_ac2_edge_redecompose_preserves_filled_child_plan_path(graph_env):
     child1 = _child(entries, "1")
     filled_path = "/plans/big.group-1.md"
     child1["plan_path"] = filled_path
-    Path(g).write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(Path(g), lambda _e: entries)
 
     # Re-decompose with an edited group set (titles bumped).
     changed = [dict(grp, title=grp["title"] + " v2") for grp in THREE_GROUPS]
@@ -520,7 +529,9 @@ def test_redecompose_orphaning_shipped_group_rejected(graph_env):
     entries = read_entries()
     g3 = _child(entries, "3")
     g3["pr_number"] = 999
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     before = read_entries()
 
     two = [
@@ -539,7 +550,9 @@ def test_redecompose_orphaning_shipped_group_allowed_with_force(graph_env):
     entries = read_entries()
     g3 = _child(entries, "3")
     g3["pr_number"] = 999
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
 
     two = [
         {"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []},
@@ -564,7 +577,6 @@ def test_config_fallback_ceiling_applied(graph_env, tmp_path, monkeypatch):
         "schema_version: 1\nconfig:\n  blueprint:\n    max_prs_per_epic: 2\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-    from fno import config as config_mod
 
     before = read_entries()
     # 3 groups exceed the config ceiling of 2 -> rejected, nothing created.
@@ -583,7 +595,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
         "schema_version: 1\nconfig:\n  blueprint:\n    max_prs_per_epic: 0\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-    from fno import config as config_mod
 
     before = read_entries()
     # --max-prs omitted -> reads config, which is invalid -> structured error.
@@ -619,9 +630,8 @@ def graph_env_real_doc(
     Returns (graph_path, read_entries, doc_path) so a test can assert that
     decompose stamps expected_url_count onto the shared design doc.
 
-    The decompose -> set-expected path now runs the in-package
-    ``fno.plan._stamp`` module via ``python3 -m``, which resolves regardless of
-    cwd, so no FNO_REPO_ROOT pinning is needed to locate it.
+    The decompose -> set-expected path is a keeper client call, so no
+    FNO_REPO_ROOT pinning is needed to locate a script.
     """
     import fno.graph._constants as gc
     import fno.graph.store as gs
@@ -637,7 +647,7 @@ def graph_env_real_doc(
         priority="p1",
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -645,7 +655,9 @@ def graph_env_real_doc(
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     def read_entries():
-        return json.loads(g.read_text())["entries"]
+        from fno.graph.store import read_graph_strict
+
+        return read_graph_strict(g)
 
     return g, read_entries, doc
 
@@ -683,10 +695,9 @@ def test_decompose_missing_doc_is_benign(graph_env, tmp_path):
 
 
 def _wire_graph(tmp_path, monkeypatch, epic):
-    """Wire a one-epic graph.json into the CLI. The set-expected path runs the
-    in-package ``fno.plan._stamp`` module via ``python3 -m`` (resolves regardless
-    of cwd), so no FNO_REPO_ROOT pinning is needed. Returns (graph_path,
-    read_entries)."""
+    """Wire a one-epic graph.json into the CLI. The set-expected path is a
+    keeper client call, so no FNO_REPO_ROOT pinning is needed. Returns
+    (graph_path, read_entries)."""
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -694,10 +705,10 @@ def _wire_graph(tmp_path, monkeypatch, epic):
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
     monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [epic]}) + "\n")
 
     def read_entries():
-        return json.loads((tmp_path / "graph.json").read_text())["entries"]
+        return read_graph_strict(tmp_path / "graph.json")
 
     return tmp_path / "graph.json", read_entries
 
@@ -745,22 +756,17 @@ def test_decompose_malformed_doc_warns_but_exits_zero(tmp_path, monkeypatch):
     assert len([e for e in read_entries() if e.get("parent") == "ab-epic0001"]) == 3
 
 
-def test_set_expected_count_spawn_failure_is_failed_not_skipped(tmp_path, monkeypatch):
-    """A spawn failure is indeterminate, so it maps to 'failed' (surfaced), not a
-    silent 'skipped' (an absent doc would prove no early-graduation risk; a spawn
-    error does not). The stamp module runs via ``python3 -m`` so no repo-root
-    resolution precedes the subprocess.run we stub to raise."""
+def test_set_expected_count_unreachable_writer_is_failed_not_skipped(monkeypatch):
+    """An unreachable writer is indeterminate, so it maps to 'failed' (surfaced),
+    not a silent 'skipped' (only an absent doc proves no early-graduation risk)."""
     import fno.graph.cli as gcli
-    import subprocess
+    import fno.plan._project as project_client
 
-    def _boom(*a, **k):
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(project_client, "plan_docs", lambda op, **params: None)
 
     status, detail = gcli._set_expected_count("/some/doc.md", 3)
     assert status == "failed"
-    assert "spawn failed" in detail
+    assert "unavailable" in detail
 
 
 # -- G2: hard|contract dependency classification --
@@ -1178,7 +1184,9 @@ def test_redecompose_reattempts_unlinked_flagged_skips_linked(graph_env, monkeyp
     fanout.clear()
     entries = read_entries()
     _child(entries, "1")["plan_path"] = "/plans/big.group-1.md"
-    Path(g).write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(Path(g), lambda _e: entries)
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
     assert fanout == []  # linked child is not re-designed
 
@@ -1446,7 +1454,9 @@ def test_legacy_fragment_children_repointed_to_separate(tmp_path, monkeypatch):
             _node(f"ab-frag000{slug}", parent="ab-epic0001",
                   plan_path=f"{base}#group-{slug}")
         )
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     frag_ids = sorted(e["id"] for e in read_entries() if e.get("parent") == "ab-epic0001")
 
     two = [
@@ -1553,7 +1563,9 @@ def test_ac1_edge_redecompose_across_day_is_idempotent(tmp_path, monkeypatch):
                   cwd=str(tmp_path), created_at="2026-01-01T00:00:00+00:00",
                   plan_path=None)
     entries.append(child)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     # The stub an earlier decompose left, dated from created_at (not today).
     stub = _canonical(child)
     stub.parent.mkdir(parents=True, exist_ok=True)
@@ -1578,7 +1590,9 @@ def test_ac2_edge_legacy_group_file_grandfathered(tmp_path, monkeypatch):
     child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
                   cwd=str(tmp_path), plan_path=None)
     entries.append(child)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     legacy = Path(separate_plan_path(str(doc), "1"))
     legacy.write_text("# legacy builder content - keep\n", encoding="utf-8")
 
@@ -1603,7 +1617,9 @@ def test_redecompose_no_route_uses_persisted_child_cwd(tmp_path, monkeypatch):
     child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
                   project="web", cwd=str(web_root), plan_path=None)
     entries.append(child)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
 
     one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
     result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
@@ -1630,7 +1646,9 @@ def test_ac3_edge_already_linked_child_not_rescaffolded(tmp_path, monkeypatch):
     child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
                   cwd=str(tmp_path), plan_path=str(filled))
     entries.append(child)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
 
     one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
     result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
@@ -1833,9 +1851,12 @@ def _epic_child(node_id: str, **overrides) -> dict:
 
 
 def _seed_children(g, *children) -> None:
-    entries = json.loads(g.read_text())["entries"]
+    from fno.graph.store import commit_rows_via_store
+
+    entries = read_graph_strict(g)
     entries.extend(children)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    # The db outlives the json file, so an append re-seeds through the store.
+    commit_rows_via_store(g, lambda _e: entries)
 
 
 ADOPT_GROUP = [
@@ -1920,14 +1941,14 @@ def test_adopt_rerun_is_an_idempotent_noop(graph_env):
     assert _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
     ).exit_code == 0
-    settled = g.read_text()
+    settled = read_graph_strict(g)
 
     result = _invoke(
         ["--json", "backlog", "decompose", "ab-epic0001",
          "--groups", _groups_json(ADOPT_GROUP)]
     )
     assert result.exit_code == 0, result.output
-    assert g.read_text() == settled
+    assert read_graph_strict(g) == settled
 
     # Adoption itself is a no-op from run 2 on: nothing minted, nothing
     # deleted, no parent moved, and the receipt says so.
@@ -2024,12 +2045,14 @@ def test_adopt_the_epic_itself_is_refused(graph_env):
 def test_adopt_ancestor_of_the_epic_is_refused_as_a_cycle(graph_env):
     """The re-parent cycle guard cli.py already carried for exactly this path."""
     g, read_entries = graph_env
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     entries.append(_node("ab-grand0001"))
     for e in entries:
         if e["id"] == "ab-epic0001":
             e["parent"] = "ab-grand0001"
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     before = read_entries()
 
     result = _invoke(
@@ -2065,7 +2088,7 @@ def test_adopt_a_shipped_node_is_permitted(graph_env):
     """
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001", pr_number=612,
-                                  merge_status="merged", status="done"))
+                                  merge_status="merged", status="done", completed_at="2026-01-01T00:00:00+00:00"))
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
             {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
@@ -2123,10 +2146,32 @@ def test_contained_in_survives_a_later_unrelated_mutation(graph_env):
     ).exit_code == 0
     unit = _child(read_entries(), "one")["id"]
 
-    # Any other locked mutation: a priority bump on an unrelated node.
-    assert _invoke(
-        ["backlog", "update", "ab-epic0001", "--priority", "p0", "--blocks-everything"]
-    ).exit_code == 0
+    # Any other locked mutation: a priority bump on an unrelated node. The
+    # update leaf answers natively, so the bump drives the dev binary over
+    # the same store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", "ab-epic0001",
+         "--priority", "p0", "--blocks-everything"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    assert proc.returncode == 0, proc.stderr
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid["contained_in"] == unit
@@ -2164,20 +2209,20 @@ def test_adopt_backfills_contained_in_on_an_already_reparented_node(graph_env):
 
 
 def test_ac10_no_adopt_key_leaves_contained_in_off_the_wire_entirely(graph_env):
-    """AC10: a containment-free graph serializes exactly as it did pre-change.
+    """AC10: a containment-free graph keeps its rows unchanged.
 
     The field is listed in CANONICAL_FIELD_ORDER but deliberately never
     setdefault-ed. Defaulting it beside the other nullable scalars would stamp
     `"contained_in": null` onto every node in every graph in existence - which
-    reads as harmless and is precisely the byte-level change AC10 forbids.
-    Asserting on the raw bytes, not on read_entries(), because the read path is
-    what would paper over a setdefault.
+    reads as harmless and is precisely the row-level change AC10 forbids.
     """
     g, _read_entries = graph_env
     assert _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
     ).exit_code == 0
-    assert "contained_in" not in g.read_text()
+    from fno.graph.store import _client_for, _read_snapshot
+
+    assert all("contained_in" not in entry for entry in _read_snapshot(_client_for(g))[1])
 
 
 def test_adopt_rerun_leaves_contained_in_byte_stable(graph_env):
@@ -2193,10 +2238,11 @@ def test_adopt_rerun_leaves_contained_in_byte_stable(graph_env):
     spec = ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
     assert _invoke(spec).exit_code == 0
     assert _invoke(spec).exit_code == 0
-    settled = g.read_text()
+    settled = read_graph_strict(g)
     assert _invoke(spec).exit_code == 0
-    assert g.read_text() == settled
-    assert '"contained_in"' in settled
+    assert read_graph_strict(g) == settled
+    kid = next(e for e in settled if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in")
 
 
 # -- warn on epic children that no group adopted (x-b9d7 US3) --
@@ -2601,13 +2647,13 @@ def test_every_refusal_leaves_the_graph_byte_identical(graph_env, spec, code):
     """
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001"))
-    raw_before = g.read_bytes()
+    before = read_entries()
 
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
     )
     assert result.exit_code == code, result.output
-    assert g.read_bytes() == raw_before
+    assert read_entries() == before
 
 
 def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
@@ -2624,7 +2670,7 @@ def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
 
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001"))
-    before = g.read_text()
+    before = read_entries()
     monkeypatch.setattr(gcli, "_live_worker",
                         lambda nid: "target-session:S1" if nid == "ab-kid00001" else None)
 
@@ -2637,7 +2683,7 @@ def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
     assert "being built right now" in result.output
     assert "target-session:S1" in result.output
     # Atomic: a refused decompose leaves the graph untouched.
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_adopt_proceeds_when_no_worker_holds_the_node(graph_env, monkeypatch):
@@ -2699,7 +2745,7 @@ def test_adopt_does_not_contain_a_node_that_owns_a_pr(graph_env, monkeypatch):
     g, read_entries = graph_env
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
     _seed_children(g, _epic_child("ab-kid00001", pr_number=612,
-                                  merge_status="merged", status="done"))
+                                  merge_status="merged", status="done", completed_at="2026-01-01T00:00:00+00:00"))
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
             {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
@@ -2761,7 +2807,7 @@ def test_adopt_refuses_a_node_with_descendants(graph_env, monkeypatch):
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
     _seed_children(g, _epic_child("ab-kid00001"),
                    _node("ab-sub00001", parent="ab-kid00001", status="ready"))
-    before = g.read_text()
+    before = read_entries()
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
             {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
@@ -2770,7 +2816,7 @@ def test_adopt_refuses_a_node_with_descendants(graph_env, monkeypatch):
     assert result.exit_code == 2, result.output
     assert "one level" in result.output
     assert "ab-sub00001" in result.output
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_rehoming_between_groups_still_restamps_containment(graph_env, monkeypatch):
@@ -2891,7 +2937,7 @@ def test_adopt_refuses_an_unfinished_node_that_owns_a_pr(graph_env, monkeypatch)
     g, read_entries = graph_env
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
     _seed_children(g, _epic_child("ab-kid00001", pr_number=613, status="ready"))
-    before = g.read_text()
+    before = read_entries()
 
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
@@ -2901,7 +2947,7 @@ def test_adopt_refuses_an_unfinished_node_that_owns_a_pr(graph_env, monkeypatch)
     assert result.exit_code == 2, result.output
     assert "613" in result.output
     assert "has not landed" in result.output
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_adopt_still_permits_a_landed_pr_bearing_node(graph_env, monkeypatch):
@@ -2962,11 +3008,13 @@ def _legacy_deferred_unit(g, read_entries):
     _seed_children(g, _epic_child("ab-kid00001"))
     assert _decompose(BARE_ONE).exit_code == 0
     unit = _child(read_entries(), "one")["id"]
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     parked = next(e for e in entries if e["id"] == unit)
     parked["completed_at"] = "deferred:2026-07-01T00:00:00+00:00"
     parked.pop("deferred_at", None)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
     return unit
 
 
@@ -3094,17 +3142,15 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
 def test_a_refused_decompose_leaves_the_graph_byte_identical(graph_env):
     """AC5: read-and-raise inside the mutator, so nothing is written at all.
 
-    `locked_mutate_graph` calls `_create_backup` only after the mutator
+    `commit_rows_via_store` calls `_create_backup` only after the mutator
     returns, so a raise means no write, no `.bak`, and no re-rendered `.md`.
     """
     g, read_entries = graph_env
     _deferred_unit(g, read_entries)
-    before = g.read_text()
-    baks_before = sorted(p.name for p in g.parent.glob("graph.json.bak.*"))
+    before = read_entries()
 
     assert _decompose(ADOPT_ONE).exit_code == 2
-    assert g.read_text() == before
-    assert sorted(p.name for p in g.parent.glob("graph.json.bak.*")) == baks_before
+    assert read_entries() == before
 
 
 def test_defer_keeps_an_existing_adoptee_folded(graph_env):
@@ -3145,11 +3191,14 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
 
     # Model what `_apply_completion_fields` does on close: stamp completed_at
     # and clear deferred_at, leaving superseded_by behind.
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     closed = next(e for e in entries if e["id"] == unit)
     closed["completed_at"] = "2026-07-01T00:00:00+00:00"
+    closed["artifact_url"] = "https://example.test/artifact"
     closed.pop("deferred_at", None)
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(g, lambda _e: entries)
 
     result = _decompose(ADOPT_ONE)
     assert result.exit_code == 0, result.output
@@ -3338,7 +3387,7 @@ def test_scaffold_without_an_epic_strategy_names_why():
     assert "## Execution Strategy" not in text
     assert "no parsable execution strategy section" in text
     # The pre-change section list survives untouched.
-    assert [l for l in text.splitlines() if l.startswith("## ")] == [
+    assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Why (from epic)",
         "## Context",
         "## Changes",

@@ -37,7 +37,6 @@ REQUIRED_SCENARIOS = (
     "warm-daemon-session-a",
     "warm-daemon-session-b",
     "mission-drain-autonomous",
-    "blueprinter-autonomous",
     "shell-tty-operator",
     "standalone-test",
     "session-launched-test",

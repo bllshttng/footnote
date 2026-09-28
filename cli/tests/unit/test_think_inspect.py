@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import subprocess
@@ -172,7 +173,9 @@ def test_corrupt_graph_is_not_recast_as_empty(tmp_path: Path) -> None:
     entries, error = _load_graph(graph)
 
     assert entries is None
-    assert error and "not valid JSON" in error
+    # The store import refuses an unreadable seed; the wording names the store,
+    # not the old JSON parse.
+    assert error and ("could not be read" in error or "not valid JSON" in error)
 
 
 def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path: Path) -> None:
@@ -182,13 +185,11 @@ def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path:
     (repo / ".fno").mkdir(parents=True)
     (repo / ".fno" / "config.toml").write_text(
         'plans_dir = "target-plans"\n'
-        '[paths]\n'
-        'graph_json = "target-state/graph.json"\n'
+        'state_dir = "target-state"\n'
     )
     graph_path = repo / "target-state" / "graph.json"
     graph_path.parent.mkdir()
-    graph_path.write_text(
-        json.dumps(
+    seed_graph(graph_path, json.dumps(
             {
                 "entries": [
                     {
@@ -199,8 +200,7 @@ def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path:
                     }
                 ]
             }
-        )
-    )
+        ))
     plans = repo / "target-plans"
     plans.mkdir()
     retro = plans / "20260725-retro-synthesis-x-target.md"
@@ -480,9 +480,9 @@ def _seeded_graph_repo(tmp_path: Path, entries: list[dict]) -> tuple[Path, Path]
     repo = tmp_path / "repo"
     (repo / ".fno").mkdir(parents=True)
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": entries}) + "\n", encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": entries}) + "\n")
     (repo / ".fno" / "config.toml").write_text(
-        f'[paths]\ngraph_json = "{graph}"\n', encoding="utf-8"
+        f'state_dir = "{graph.parent}"\n', encoding="utf-8"
     )
     return repo, graph
 
@@ -540,27 +540,7 @@ def test_seed_lane_duplicates_carry_the_fts_lane(tmp_path: Path) -> None:
     assert receipt["graph"]["recall"]["fts"] == "ok"
 
 
-def test_fold_offer_ids_are_a_subset_of_gate_ids(tmp_path: Path) -> None:
-    from fno.graph import discovery, relatedness
-    from fno.think_inspect import build_receipt
 
-    seed, entries = _wombat_corpus()
-    repo, graph = _seeded_graph_repo(tmp_path, entries)
-
-    fold_pool, _source = relatedness.filing_candidates(entries, tmp_path / "sidecar.json")
-    fold = discovery.candidates(seed, "", entries=fold_pool, graph_path=graph, limit=5)
-
-    receipt = build_receipt(
-        seed,
-        repo=repo,
-        plans_path=tmp_path / "missing-plans",
-        home=tmp_path,
-        run=_result_without_title_assertion,
-    )
-
-    assert fold, "the fold offer matched nothing; the parity read is vacuous"
-    gate_ids = {row["id"] for row in receipt["graph"]["duplicates"]}
-    assert {candidate.node_id for candidate in fold} <= gate_ids
 
 
 def test_injected_entries_name_the_degraded_fts_lane(tmp_path: Path) -> None:

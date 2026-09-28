@@ -230,7 +230,21 @@ run_hook() {  # run_hook <payload> ; sets OUT, RC
   OUT=$(printf '%s' "$1" | bash "$HOOK" 2>/dev/null); RC=$?
 }
 
-events_has() { grep -q "\"type\":\"$1\"" "$SBX/.fno/events.jsonl" 2>/dev/null; }
+# Same resolution order as scripts/lib/events.sh. The store commit is the
+# write boundary: the pinned journal keeps no byte trace, so the assertion
+# reads committed rows through the verb and jq -r unwraps the escapes.
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+    for _profile in debug release; do
+        if [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]]; then
+            ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"
+            break
+        fi
+    done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+
+events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
 
 # === AC9: the hook gates on nothing it isn't handed ============================
 assert_absent "AC9: no kill -0"        "$(cat "$HOOK")" "kill -0"
@@ -782,7 +796,7 @@ rm -rf "$COUNT_BINDIR"
 # clock, not on a defect.
 # events.jsonl accumulates for the whole file (no other case here truncates
 # it) - clear it once so the all-dead case below can trust a fresh read.
-rm -f "$SBX/.fno/events.jsonl" 2>/dev/null
+rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
 
 write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
@@ -834,7 +848,7 @@ CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
   {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-rm -f "$SBX/.fno/events.jsonl" 2>/dev/null
+rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
 write_registry_liveness "$CHILDREN"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"

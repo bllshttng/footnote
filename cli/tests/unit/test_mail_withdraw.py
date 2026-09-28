@@ -134,13 +134,42 @@ def test_sent_separates_hosted_audit_from_durable_unclaimed(env):
 
     # Hosted rows now enter the outstanding scan too (they used to be
     # excluded by `is_deliverable`, which is why `claimed` could only ever
-    # read `true` on one). With no recorded transcript coordinates on this
-    # test row, the landed check cannot prove it either way, so it stays
-    # outstanding right alongside the durable message.
+    # read `true` on one). This row carries no transcript coordinates, so
+    # the landed check cannot prove it either way: unknown is not lost, and
+    # only the durable message, whose consume cursor is its evidence, stays
+    # outstanding.
     unclaimed = json.loads(
         _run("mail", "sent", "--unclaimed", "--json").stdout
     )
-    assert [row["id"] for row in unclaimed] == [hosted, durable]
+    assert [row["id"] for row in unclaimed] == [durable]
+
+
+def test_sent_labels_an_unprovable_hosted_row_landing_unknown(env, monkeypatch):
+    # "transcript unreadable" named a false cause: with no recipient session
+    # on the row the check never read any transcript at all. Unknown is its
+    # own state, so the label says so instead of blaming the transcript.
+    from fno.mail.cli import cmd_sent
+
+    class _Tty:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, s):
+            self.parts.append(s)
+            return len(s)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return True
+
+    _send(MY_HANDLE, PEER, "already delivered", ts=_ts_ago(3600), delivery="hosted")
+    fake = _Tty()
+    monkeypatch.setattr("fno.mail.cli.sys.stdout", fake)
+    cmd_sent(unclaimed_only=False, from_name=None, json_out=False)
+    out = "".join(fake.parts)
+    assert "handed, landing unknown" in out
 
 
 def test_sent_does_not_call_a_just_sent_message_claimed(env):

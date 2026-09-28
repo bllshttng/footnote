@@ -33,6 +33,28 @@ pub(crate) fn str_cols(s: &str) -> usize {
     s.chars().map(char_cols).sum()
 }
 
+/// Cut `s` to at most `w` display columns, ending in `…` when anything was
+/// cut. The one ellipsis rule: a wide char that does not fully fit is dropped
+/// whole rather than straddling the cut.
+pub(crate) fn fit_ellipsis(s: &str, w: usize) -> String {
+    if str_cols(s) <= w {
+        return s.to_string();
+    }
+    let keep = w.saturating_sub(1);
+    let mut t = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if used + cw > keep {
+            break;
+        }
+        t.push(ch);
+        used += cw;
+    }
+    t.push('…');
+    t
+}
+
 /// How much chrome a block wears. Derived from the anchor; never passed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -58,6 +80,10 @@ pub struct Chrome {
     pub tabs: Vec<(String, bool)>,
     pub footer: Option<String>,
     level: Level,
+    /// The flat frame: chrome rows wear the backlog panel's palette-following
+    /// slots instead of the inverse chrome, so a framed surface sits on the
+    /// terminal's own bg under every theme.
+    flat: bool,
 }
 
 impl Chrome {
@@ -70,10 +96,26 @@ impl Chrome {
             tabs: Vec::new(),
             footer: None,
             level: Self::level_for(anchor),
+            flat: false,
         }
+    }
+
+    /// The flat frame (construction-time, like [`Self::full`]): border,
+    /// title, chip and footer resolve through the panel slots - thin rules,
+    /// bold head, dim meta - with no INVERSE band anywhere on the frame.
+    pub fn flat(mut self) -> Self {
+        self.flat = true;
+        self
     }
     pub fn subtitle(mut self, s: impl Into<String>) -> Self {
         self.subtitle = Some(s.into());
+        self
+    }
+    /// The full level, for a caller that must opt an anchored chrome into
+    /// the title and footer rows (the composer's pickers). Construction-time
+    /// only - there is still no `set_level`.
+    pub fn full(mut self) -> Self {
+        self.level = Level::Full;
         self
     }
     pub fn tabs(mut self, tabs: Vec<(String, bool)>) -> Self {
@@ -166,11 +208,11 @@ impl Chrome {
         self.rows_above() + self.rows_below()
     }
 
-    /// The minimum INNER width the chrome itself needs, so a title or the esc
-    /// chip can never make a border row wider than the body rows (which would
-    /// break the rectangle). Normal modals are far wider than this; it only
-    /// kicks in for a tiny body with a long title.
-    fn min_inner_w(&self) -> usize {
+    /// The minimum INNER width the chrome itself needs, so a title, the esc
+    /// chip, or the tab strip can never make a border row wider than the body
+    /// rows (which would break the rectangle). Normal modals are far wider
+    /// than this; it only kicks in for a tiny body with a long title.
+    pub(crate) fn min_inner_w(&self) -> usize {
         // ` esc ` is 5; every level reserves at least that plus a leading `─`.
         const ESC_INNER: usize = 6;
         let title_w = match self.level {
@@ -183,10 +225,23 @@ impl Chrome {
         // footer longer than the body used to overhang the right border by the
         // difference, so the box rendered one column ragged - visible the first
         // time a modal set a footer wider than its content. Widen to fit them
-        // instead of cutting them.
+        // instead of cutting them. The tab strip is the same shape of chrome
+        // (popup width rules): ` tab ` rows need the strip inside the border.
         let sub_w = self.subtitle.as_ref().map_or(0, |s| str_cols(s));
         let foot_w = self.footer.as_ref().map_or(0, |f| str_cols(f));
-        title_w.max(sub_w).max(foot_w)
+        // Strip: a leading space, then per tab `● label` with two spaces
+        // between tabs - matching `tab_row`'s assembly.
+        let tabs_w = if self.tabs.is_empty() {
+            0
+        } else {
+            1 + self
+                .tabs
+                .iter()
+                .map(|(l, _)| 2 + str_cols(l))
+                .sum::<usize>()
+                + 2 * (self.tabs.len() - 1)
+        };
+        title_w.max(sub_w).max(foot_w).max(tabs_w)
     }
 }
 
@@ -200,19 +255,23 @@ pub struct Scroll {
     pub visible: usize,
 }
 
-/// One body line handed to [`frame`]. Family A fills `header` / `sel_span` /
+/// One body line handed to [`frame`]. Family A fills `sel_span` /
 /// `hits` (the last is the mouse hit-test spans, which `frame` shifts past the
 /// left border so a click in the framed block still resolves); family B leaves
 /// them default.
 #[derive(Debug, Clone, Default)]
 pub struct BodyLine {
     pub text: String,
-    pub header: bool,
     /// A greyed, inert row (a disabled `PopupRow::Entry`): every cell takes
     /// [`Role::BodyDim`] regardless of selection, so it reads as inert.
     pub disabled: bool,
     /// `(offset, len)` within `text` that is the selected cut-out.
     pub sel_span: Option<(usize, usize)>,
+    /// `(offset, len, role)` per-char role spans. A char a span covers takes
+    /// the span's role; one no span covers takes `pad_role`.
+    pub segs: Vec<(usize, usize, Role)>,
+    /// The role for chars no seg covers and for the tail pad.
+    pub pad_role: Role,
     /// `(target, offset, len)` hit spans within `text`, offsets relative to the
     /// line's first char.
     pub hits: Vec<(usize, usize, usize)>,
@@ -323,7 +382,32 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     }
     out.push(bottom_border(chrome, inner_w));
 
+    // The flat frame maps its chrome rows to the panel slots after building,
+    // so every row helper keeps one shape and the mapping lives here, once.
+    if chrome.flat {
+        for line in &mut out {
+            for role in &mut line.roles {
+                *role = flat_role(*role);
+            }
+        }
+    }
+
     Framed { lines: out, width }
+}
+
+/// The flat frame's role map: chrome rank becomes panel rank. INVERSE
+/// disappears with the roles that carried it - a border reads as a thin
+/// rule, a footer as dim text, and no row of the frame is a band.
+fn flat_role(r: Role) -> Role {
+    match r {
+        Role::Border => Role::PanelRule,
+        Role::Title => Role::PanelHead,
+        Role::Chip => Role::PanelLabel,
+        Role::Subtitle | Role::Footer | Role::Tab(_) => Role::PanelMeta,
+        Role::ScrollTrack => Role::PanelRule,
+        Role::ScrollThumb => Role::PanelHead,
+        other => other,
+    }
 }
 
 /// The hit target marking a chrome esc-close span - a footer's `esc close`
@@ -378,7 +462,7 @@ pub(crate) fn paint_line(
         if sc >= cols {
             break;
         }
-        let role = roles.get(j).copied().unwrap_or(Role::Body);
+        let role = roles.get(j).copied().unwrap_or(Role::PanelBody);
         let (fg, bg, flags) = cell_style(role, theme);
         cells[sr * cols + sc] = Cell {
             c: ch,
@@ -556,8 +640,10 @@ fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize)
 
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
-        Level::Bare => edge_row('┌', '┐', '─', Vec::new(), inner_w),
-        // `┌─ Title ──── esc ─┐`: title left (after `─`), esc chip right. A
+        // Bare: `╭─ esc ─╮` - the chip rides the TOP border at every level,
+        // so the affordance lives in one corner of every modal.
+        Level::Bare => chip_border_row('╭', '╮', vec![('─', Role::Border)], inner_w),
+        // `╭─ Title ──── esc ─╮`: title left (after `─`), esc chip right. A
         // Left click on the chip closes the modal, identical to pressing esc
         // - the title bar's chip was decorative chrome; only the footer's
         // ever carried a hit target (fixed that one).
@@ -571,18 +657,15 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
                 inner.push((' ', Role::Title));
                 inner.push(('─', Role::Border));
             }
-            chip_border_row('┌', '┐', inner, inner_w)
+            chip_border_row('╭', '╮', inner, inner_w)
         }
     }
 }
 
-fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
-    match chrome.level {
-        Level::Full => edge_row('└', '┘', '─', Vec::new(), inner_w),
-        // Bare: `└─ esc ─┘` - the esc hint rides the bottom border at zero
-        // row, the same clickable chip as the Full title bar.
-        Level::Bare => chip_border_row('└', '┘', vec![('─', Role::Border)], inner_w),
-    }
+fn bottom_border(_chrome: &Chrome, inner_w: usize) -> FramedLine {
+    // The chip lives on the top border at every level, so the bottom is
+    // plain for both.
+    edge_row('╰', '╯', '─', Vec::new(), inner_w)
 }
 
 /// A body row: `│` + body text (padded/truncated to `body_w`, per-char roles
@@ -603,42 +686,70 @@ fn body_row(
     text.push('│');
     roles.push(Role::Border);
 
+    // Side padding between the border and the body text: two cells when the
+    // row has room (degrading 2 -> 1 -> 0 as the width shrinks), matching the
+    // popup's own right-edge gap. The pad joins the row's own treatment, so a
+    // whole-row selection highlight reads edge to edge, pad included
+    // (highlight-span fix).
+    let pad = if body_w >= 4 {
+        2
+    } else {
+        usize::from(body_w > 1)
+    };
+    let sel_from_start = line.sel_span.is_some_and(|(off, _)| off == 0);
+    let pad_role = if line.disabled {
+        Role::BodyDim
+    } else if sel_from_start {
+        Role::BodySel
+    } else {
+        line.pad_role
+    };
+    for _ in 0..pad {
+        text.push(' ');
+        roles.push(pad_role);
+    }
+    let text_w = body_w.saturating_sub(pad);
+
     let in_sel = |j: usize| {
         line.sel_span
             .is_some_and(|(off, len)| j >= off && j < off + len)
     };
-    // Walk by DISPLAY columns: a wide char claims two of the `body_w` cells,
+    // Walk by DISPLAY columns: a wide char claims two of the `text_w` cells,
     // so a row of N chars is not N columns. `sel_span` offsets are
     // char-based (full-row spans from the popup), so the role walk stays
     // char-indexed while the cell walk is column-indexed.
     let mut col = 0usize;
     for (char_idx, &c) in chars.iter().enumerate() {
-        if col >= body_w {
+        if col >= text_w {
             break;
         }
         let cw = char_cols(c);
-        if col + cw > body_w {
+        if col + cw > text_w {
             break;
         }
         let role = if line.disabled {
             Role::BodyDim
-        } else if line.header {
-            Role::BodyHead
         } else if in_sel(char_idx) {
             Role::BodySel
         } else {
-            Role::Body
+            line.segs
+                .iter()
+                .find(|(off, len, _)| char_idx >= *off && char_idx < *off + *len)
+                .map(|(_, _, r)| *r)
+                .unwrap_or(line.pad_role)
         };
         text.push(c);
         roles.push(role);
         col += cw;
     }
-    for _ in col..body_w {
+    for _ in col..text_w {
         text.push(' ');
         roles.push(if line.disabled {
             Role::BodyDim
+        } else if sel_from_start {
+            Role::BodySel
         } else {
-            Role::Body
+            line.pad_role
         });
     }
 
@@ -654,7 +765,9 @@ fn body_row(
     let hits = line
         .hits
         .iter()
-        .map(|(t, off, len)| (*t, off + 1, *len))
+        // +1 the left border, + the body's side padding (2 when the row has
+        // room, 1 when it barely fits, 0 at a 1-col body).
+        .map(|(t, off, len)| (*t, off + 1 + pad, *len))
         .collect();
 
     FramedLine { text, roles, hits }
@@ -695,6 +808,41 @@ mod tests {
 
     fn bl(s: &str) -> BodyLine {
         BodyLine::plain(s)
+    }
+
+    #[test]
+    fn the_tab_strip_stays_inside_the_border() {
+        // The strip-width rule: min_inner_w counts the tab strip, so a strip
+        // wider than the body widens the frame instead of overhanging.
+        let chrome = Chrome::new("settings", Anchor::Center)
+            .tabs(vec![
+                ("general".into(), true),
+                ("theme".into(), false),
+                ("keys".into(), false),
+                ("colors".into(), false),
+            ])
+            .footer("esc");
+        let framed = frame(&[bl("row")], &chrome, 3, None);
+        assert!(
+            framed.width >= "○ colors".len() + 4,
+            "the strip fits: {}",
+            framed.width
+        );
+        for line in &framed.lines {
+            assert_eq!(
+                str_cols(&line.text),
+                framed.width,
+                "every row closes the box: {:?}",
+                line.text
+            );
+        }
+        assert!(
+            framed
+                .lines
+                .iter()
+                .any(|l| l.text.contains("colors") && l.text.contains('│')),
+            "the strip row carries the tabs and closes its own border"
+        );
     }
 
     #[test]
@@ -862,8 +1010,8 @@ mod tests {
         let c = Chrome::new("Settings", Anchor::Center);
         let framed = frame(&[bl("body")], &c, 6, None);
         let top = &framed.lines[0];
-        assert!(top.text.starts_with('┌'));
-        assert!(top.text.ends_with('┐'));
+        assert!(top.text.starts_with('╭'));
+        assert!(top.text.ends_with('╮'));
         assert!(top.text.contains("Settings"));
         assert!(top.text.contains("esc"));
         // Positive markers: the chip and title carry their own roles.
@@ -880,18 +1028,23 @@ mod tests {
     }
 
     #[test]
-    fn bare_bottom_border_carries_inline_esc() {
+    fn bare_top_border_carries_inline_esc() {
         let c = Chrome::new("", Anchor::At { row: 0, col: 0 });
         let framed = frame(&[bl("body")], &c, 6, None);
-        let bottom = framed.lines.last().unwrap();
-        assert!(bottom.text.contains("esc"));
-        assert!(bottom.roles.contains(&Role::Chip));
-        // Same clickable chip as the Full title bar.
-        assert_eq!(bottom.hits.len(), 1);
-        let (t, off, len) = bottom.hits[0];
+        // The chip rides the TOP border at every level, so the affordance
+        // lives in one corner of every modal.
+        let top = &framed.lines[0];
+        assert!(top.text.contains("esc"));
+        assert!(top.roles.contains(&Role::Chip));
+        assert_eq!(top.hits.len(), 1);
+        let (t, off, len) = top.hits[0];
         assert_eq!(t, ESC_CLOSE_HIT);
-        let word: String = bottom.text.chars().skip(off).take(len).collect();
+        let word: String = top.text.chars().skip(off).take(len).collect();
         assert_eq!(word, "esc");
+        // The bottom border is plain now.
+        let bottom = framed.lines.last().unwrap();
+        assert!(!bottom.text.contains("esc"));
+        assert!(bottom.hits.is_empty());
     }
 
     #[test]
@@ -908,7 +1061,9 @@ mod tests {
             .iter()
             .find(|l| l.hits.iter().any(|(t, _, _)| *t == 0))
             .unwrap();
-        assert_eq!(body.hits[0], (0, 1, 5));
+        // The body's two-cell side pad sits between the border and the text,
+        // so the span starts two columns deeper than border+1.
+        assert_eq!(body.hits[0], (0, 3, 5));
     }
 
     #[test]
@@ -1072,11 +1227,11 @@ mod tests {
                 "every row is the framed width in columns: {:?}",
                 line.text
             );
-            // A closing border sits on the last column of every row: '┐' on
-            // the top, '│' on body rows, '┘' on the bottom.
+            // A closing border sits on the last column of every row: '╮' on
+            // the top, '│' on body rows, '╯' on the bottom.
             let last = line.text.chars().last();
             assert!(
-                matches!(last, Some('┐') | Some('┘') | Some('│')),
+                matches!(last, Some('╮') | Some('╯') | Some('│')),
                 "the right border closes every row: {:?}",
                 line.text
             );
@@ -1090,8 +1245,9 @@ mod tests {
         // terminal writer skips, and the char after the glyph lands two
         // columns on - the alignment that was off by one before.
         // Geometry for body "a＋b" in a 6-column body (empty title: the ESC
-        // chip's minimum is 6, so body_w stays 6): col0 border, col1 'a',
-        // col2 lead, col3 spacer, col4 'b', col5-6 padding, col7 border.
+        // chip's minimum is 6, so body_w stays 6): col0 border, col1-col2 the
+        // two pad cells, col3 'a', col4 lead, col5 spacer, col6 'b', col7
+        // border.
         let c = Chrome::new("", Anchor::Center);
         let framed = frame(&[bl("a＋b")], &c, 6, None);
         let theme = Theme::default_theme();
@@ -1100,16 +1256,18 @@ mod tests {
         // Row 0 is the top border; the body row is row 1.
         let row = &cells[framed.width..2 * framed.width];
         assert_eq!(row[0].c, '│');
-        assert_eq!(row[1].c, 'a');
-        assert_eq!(row[2].c, '＋', "the lead cell carries the glyph");
-        assert_eq!(row[3].c, ' ', "the continuation cell renders nothing");
+        assert_eq!(row[1].c, ' ', "the body's side padding");
+        assert_eq!(row[2].c, ' ', "the second pad cell");
+        assert_eq!(row[3].c, 'a');
+        assert_eq!(row[4].c, '＋', "the lead cell carries the glyph");
+        assert_eq!(row[5].c, ' ', "the continuation cell renders nothing");
         assert!(
-            row[3].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
+            row[5].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
             "and it is flagged WIDE_SPACER"
         );
-        assert_eq!(row[4].c, 'b', "the next char lands at column+2");
+        assert_eq!(row[6].c, 'b', "the next char lands at column+2");
         assert!(
-            row[4].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
+            row[6].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
             "no spacer on a narrow char"
         );
         assert_eq!(row[7].c, '│', "the right border stays inside the frame");
@@ -1156,7 +1314,7 @@ mod tests {
         let theme = Theme::default_theme();
         let mut cells = vec![Cell::default(); 2 * 40]; // 2 rows clips the taller block
         blit(&mut cells, 2, 40, (0, 0), &framed, &theme);
-        assert_eq!(cells[0].c, '┌');
+        assert_eq!(cells[0].c, '╭');
         let (fg, bg, _) = cell_style(Role::Border, &theme);
         assert_eq!((cells[0].fg, cells[0].bg), (fg, bg));
     }
@@ -1168,7 +1326,37 @@ mod tests {
         let theme = crate::theme::Theme::from_name("catppuccin").0;
         let mut cells = vec![Cell::default(); 10 * 40];
         blit(&mut cells, 10, 40, (0, 0), &framed, &theme);
-        assert_eq!(cells[0].c, '┌');
+        assert_eq!(cells[0].c, '╭');
         assert_eq!(cells[0].fg, theme.border);
+    }
+
+    #[test]
+    fn flat_frame_carries_no_inverse_or_bg_under_any_theme() {
+        // The backlog surfaces' frame: every chrome row resolves through the
+        // panel slots - thin rule, bold head, dim meta - so the framed board
+        // sits on the terminal's own bg under every theme, cursor band
+        // aside (that pair is explicit and readable by design).
+        let chrome = Chrome::new("backlog", Anchor::Center)
+            .footer("j/k move - esc back")
+            .flat();
+        // The board's body lines arrive with panel segs (to_body_line), so
+        // the body chars resolve through pad_role, never Role::Body.
+        let mut body_line = bl("row");
+        body_line.pad_role = Role::PanelBody;
+        let framed = frame(&[body_line], &chrome, 20, None);
+        for name in ["", "catppuccin", "tokyo-night", "gruvbox"] {
+            let t = crate::theme::Theme::from_name(name).0;
+            for line in &framed.lines {
+                for &r in &line.roles {
+                    let (_, bg, flags) = cell_style(r, &t);
+                    assert_eq!(bg, crate::proto::Color::Default, "{r:?} bg under {name:?}");
+                    assert_eq!(
+                        flags & crate::proto::cell_flags::INVERSE,
+                        0,
+                        "{r:?} INVERSE under {name:?}"
+                    );
+                }
+            }
+        }
     }
 }

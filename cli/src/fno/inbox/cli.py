@@ -20,11 +20,11 @@ from __future__ import annotations
 import typer
 
 from fno.approvals.cli import approvals_app
-from fno.decide.cli import backlog_decide, backlog_decisions
+from fno.decide.cli import backlog_decide
 from fno.inbox.operator_turns import operator_app
 from fno.king.cli import board_cmd
-from fno.law import law_app
 from fno.notify.cli import notify_app
+from fno.outstanding.day import day_app
 from fno.outstanding.cli import outstanding_app
 
 inbox_app = typer.Typer(
@@ -38,11 +38,11 @@ inbox_app = typer.Typer(
 inbox_app.add_typer(approvals_app, name="approvals")
 inbox_app.add_typer(notify_app, name="notify")
 inbox_app.add_typer(outstanding_app, name="outstanding")
-inbox_app.add_typer(law_app, name="law")
+inbox_app.add_typer(day_app, name="day")
+# `fno inbox law` is the Rust front's nested group; no Python mount.
 # The queue verb is `user`; the pre-rename spelling stays as a hidden
 # alias so existing scripts keep working.
 inbox_app.add_typer(operator_app, name="user")
 inbox_app.add_typer(operator_app, name="operator", hidden=True)
 inbox_app.command("board")(board_cmd)
 inbox_app.command("decide")(backlog_decide)
-inbox_app.command("decisions")(backlog_decisions)

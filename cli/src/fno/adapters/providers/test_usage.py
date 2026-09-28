@@ -1067,7 +1067,6 @@ class TestRequiredBotHeadroomCheck:
     def test_exhausted_required_bot_warns_and_emits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import json as _json
         import time as _t
         from types import SimpleNamespace
 
@@ -1096,11 +1095,9 @@ class TestRequiredBotHeadroomCheck:
         assert warnings[0]["bot"] == "chatgpt-codex-connector"
         assert warnings[0]["provider"] == "codex-pro"
         # AC3-HP: one decision event emitted naming bot + provider + reset.
-        rows = [
-            _json.loads(ln)
-            for ln in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-            if ln.strip()
-        ]
+        from tests._event_rows import event_rows
+
+        rows = event_rows(tmp_path / ".fno" / "events.jsonl")
         ev = [r for r in rows if r["type"] == "quota_required_bot_exhausted"]
         assert len(ev) == 1
         assert ev[0]["data"]["bot"] == "chatgpt-codex-connector"
@@ -1332,6 +1329,13 @@ class TestUntaintedStampDrift:
         monkeypatch.setattr(
             managed_mod, "bearer_principal_verdict",
             lambda cli, record_id, r, bearer, **kw: verdicts[bearer],
+        )
+        # The bearer lane proves the shared slot's blobs before the per-bearer
+        # verdict, so every planted blob must resolve to one principal
+        # or the lane refuses before the table above is consulted.
+        monkeypatch.setattr(
+            managed_mod, "slot_principal",
+            lambda blob: ({"account_uuid": "acc-slot", "organization_uuid": "org-1"}, None),
         )
         monkeypatch.setattr(
             managed_mod, "reconcile_slot",

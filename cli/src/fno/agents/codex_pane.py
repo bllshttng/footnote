@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -37,32 +38,42 @@ def ensure_codex_daemon(
             "pane would mint a thread the shared app-server daemon cannot serve",
             exit_code=2,
         )
+    # A daemonized child may inherit stdout/stderr; regular files avoid
+    # communicate() waiting for those descriptors after the start command exits.
+    output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
     try:
         proc = runner(
             cmd,
-            capture_output=True,
+            stdout=output,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=_CODEX_DAEMON_START_TIMEOUT_S,
             **({"env": env} if env is not None else {}),
         )
     except subprocess.TimeoutExpired:
+        output.close()
         raise DispatchAskError(
             f"codex pane launch refused: `{display}` timed out after "
             f"{_CODEX_DAEMON_START_TIMEOUT_S}s",
             exit_code=2,
         ) from None
     except OSError as exc:
+        output.close()
         raise DispatchAskError(
             f"codex pane launch refused: `{display}` failed: {exc}",
             exit_code=2,
         ) from None
     if proc.returncode != 0:
-        stderr = (proc.stderr or proc.stdout or "no output").strip()
+        output.flush()
+        output.seek(0)
+        details = (proc.stderr or proc.stdout or output.read() or "no output").strip()
+        output.close()
         raise DispatchAskError(
             f"codex pane launch refused: `{display}` exited "
-            f"{proc.returncode}: {stderr}",
+            f"{proc.returncode}: {details}",
             exit_code=2,
         )
+    output.close()
 
 
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:

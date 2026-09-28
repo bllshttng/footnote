@@ -8,10 +8,10 @@ import pytest
 from fno import paths
 
 
-def _settings(state_dir: str, graph_json: str | None = None):
+def _settings(state_dir: str):
     return SimpleNamespace(
         state_dir=state_dir,
-        paths=SimpleNamespace(graph_json=graph_json),
+        paths=SimpleNamespace(),
     )
 
 

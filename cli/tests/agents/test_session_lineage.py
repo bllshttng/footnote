@@ -71,9 +71,11 @@ def _observe(name: str, session_id: str, *, predecessor_reachable=None, **kwargs
 def _transition_events(tmp_path: Path) -> list[dict]:
     """The daemon lifecycle log, where births, deaths, and transitions join."""
     path = tmp_path / ".fno" / "agents" / "events.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # No exists() gate: the store holds the rows even when the raw journal
+    # was never written.
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 # ---------------------------------------------------------------------------

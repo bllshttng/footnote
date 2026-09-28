@@ -38,6 +38,38 @@ def test_set_int_coercion(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
+def test_mux_theme_set_persists_for_the_settings_picker(tmp_path):
+    # The composer settings theme picker persists its apply through this key;
+    # the Rust client latches it back at startup (same config ladder).
+    res = set_config_value(
+        "config.mux.theme", "footnote-paper", scope="project", repo_root=tmp_path
+    )
+    assert res.value == "footnote-paper"
+    assert _read(tmp_path)["mux"]["theme"] == "footnote-paper"
+
+
+def test_set_max_open_ideas_round_trips(tmp_path):
+    """The Rust idea cap's key sets through the setter and stores an int."""
+    res = set_config_value(
+        "config.backlog.max_open_ideas", "400", scope="project", repo_root=tmp_path
+    )
+    assert res.value == 400
+    assert _read(tmp_path)["backlog"]["max_open_ideas"] == 400
+
+
+def test_set_max_open_ideas_rejects_negative(tmp_path, monkeypatch):
+    """0 is cap-off; a negative is refused and writes nothing (ge=0)."""
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(app, ["set", "config.backlog.max_open_ideas", "--", "-1"])
+    assert res.exit_code != 0, res.output
+    assert "error:" in res.output
+    target = tmp_path / ".fno" / "config.toml"
+    written = tomllib.loads(target.read_text()) if target.exists() else {}
+    assert "max_open_ideas" not in written.get("backlog", {})
+
+
 def test_set_repairs_stored_quoted_bool_in_union_field(tmp_path):
     # `enabled: bool | dict[str, bool]` stored a hand-quoted "true"; setting
     # the same logical value must rewrite it as a bare bool, not no-op on
@@ -321,6 +353,34 @@ def test_set_list_single_item_round_trips(tmp_path):
     assert _read(tmp_path)["review"]["external_reviewers"] == ["gemini"]
 
 
+def test_set_raw_list_field_stores_a_list_not_a_string(tmp_path):
+    # `lanes` is typed Any so a bad list never breaks a config read. The verb
+    # stored the JSON argument as a string, and the router saw no lanes.
+    set_config_value(
+        "agents.profiles.target.lanes",
+        '["codex-luna", {"provider": "zai", "model": "glm"}]',
+        scope="project",
+        repo_root=tmp_path,
+    )
+    assert _read(tmp_path)["agents"]["profiles"]["target"]["lanes"] == [
+        "codex-luna",
+        {"provider": "zai", "model": "glm"},
+    ]
+    set_config_value(
+        "agents.profiles.fix.lanes", "codex-luna, zai", scope="project", repo_root=tmp_path
+    )
+    assert _read(tmp_path)["agents"]["profiles"]["fix"]["lanes"] == ["codex-luna", "zai"]
+
+
+@pytest.mark.parametrize("value", ['{"a": 1}', '"codex-luna"', "[not json"])
+def test_set_raw_list_field_rejects_a_non_list(tmp_path, value):
+    with pytest.raises(ConfigSetError):
+        set_config_value(
+            "agents.profiles.target.lanes", value, scope="project", repo_root=tmp_path
+        )
+    assert not (tmp_path / ".fno" / "config.toml").exists()
+
+
 # ---------------------------------------------------------------------------
 # Post-write override detection and positive receipt markers (x-389d)
 # ---------------------------------------------------------------------------
@@ -343,7 +403,6 @@ def _pin_two_layers(
     glob_yaml = gdir / "settings.yaml"
 
     import fno.paths as paths_mod
-    from fno import config as config_mod
 
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")

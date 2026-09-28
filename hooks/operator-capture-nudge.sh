@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - surface captured operator turns
 # Stop + SessionStart hook: report the operator-capture queue depth, so the
 # king's capture loop is a measured number at the moment, not prose to
 # remember.
@@ -27,6 +28,10 @@
 # handler must print one JSON object or nothing, and this script prints
 # prompt Markdown.
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 command -v fno >/dev/null 2>&1 || exit 0
 

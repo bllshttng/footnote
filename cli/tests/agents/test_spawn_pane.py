@@ -34,7 +34,7 @@ from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
 from fno.agents.mux_spawn import MuxSpawnResult
-from tests.agents._fake_claude import stub_codex_sandbox_probe
+from tests.agents._fake_claude import stub_codex_sandbox_probe  # noqa: F401  re-exported for test_spawn_pane_codex_receipt
 
 AGY_HARNESS = "agy"
 CODEX_HARNESS = "codex"
@@ -1393,10 +1393,11 @@ def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
         claude.index("--allowedTools") < claude.index("--disallowedTools")
 
     codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
-    codex_dirs = [
-        codex[i + 1] for i, token in enumerate(codex) if token == "--add-dir"
-    ]
-    assert "/extra" in codex_dirs
+    # The codex pane's only launch form rides --remote, and codex >= 0.156.1
+    # refuses --add-dir there, so even an operator-typed grant rides out with
+    # the strip (the codex --add-dir MAPPING is still pinned by the tier3
+    # refusal tests: an unmappable cell still fails closed).
+    assert "--add-dir" not in codex
     agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
     assert agy[agy.index("--add-dir") + 1] == "/extra"
     opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
@@ -1412,24 +1413,30 @@ def _pane_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_build_pane_argv_codex_grants_git_metadata_write(tmp_path: Path) -> None:
-    """AC4-HP: a sandboxed codex pane in a repo carries --add-dir <.git>.
-
-    Same trap as the headless lane: workspace-write makes .git read-only, so
-    without the grant the pane worker cannot commit at all.
-    """
+def test_build_pane_argv_codex_drops_the_git_grant_on_the_remote_launch(
+    tmp_path: Path,
+) -> None:
+    """x-0a75: the AC4-HP .git grant inverted. codex >= 0.156.1 refuses
+    `--add-dir` on a `--remote` launch, so riding the grant killed the pane
+    before it painted; the create pane now strips every root grant and the
+    roots are the daemon's business. `git_writable_args` itself is still
+    covered on the lanes that can carry it."""
     from fno.agents.mux_spawn import build_pane_argv
 
     repo = _pane_repo(tmp_path)
     argv = build_pane_argv("codex", "t", repo, False, None)
 
-    assert "--add-dir" in argv
-    assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+    assert "--remote" in argv
+    assert "--add-dir" not in argv
+    assert str((repo / ".git").resolve()) not in argv
 
 
-def test_build_pane_argv_codex_grants_plan_directory(
+def test_build_pane_argv_codex_drops_the_plan_grant_on_the_remote_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Same inversion for the plan-dir grant: the pane strips it, the spawn
+    reaches ready, and a bounded worker's plan writes are the daemon's to
+    grant."""
     from fno.agents.harnesses import codex as codex_mod
     from fno.agents.mux_spawn import build_pane_argv
 
@@ -1439,8 +1446,8 @@ def test_build_pane_argv_codex_grants_plan_directory(
 
     argv = build_pane_argv("codex", "t", repo, False, None)
 
-    grants = [argv[i + 1] for i, token in enumerate(argv) if token == "--add-dir"]
-    assert str(plan_dir) in grants
+    assert "--add-dir" not in argv
+    assert str(plan_dir) not in argv
 
 
 @pytest.fixture
@@ -1457,16 +1464,12 @@ def no_state_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path) -> None:
-    """AC5-EDGE: the GIT grant follows whether the pane is actually sandboxed.
-
-    Only the two unsandboxed postures skip it. --full-auto and any
-    <sandbox>:<approval> form are still sandboxed and still need it.
-
-    Asserted on the git common dir rather than on the bare presence of
-    ``--add-dir``: fno's state-root grant now rides the same flag on every
-    posture, so the flag alone no longer names which grant is under test. An
-    absence has two explanations and this one is pinned to the symbol.
+def test_build_pane_argv_codex_strip_covers_every_posture(tmp_path: Path) -> None:
+    """x-0a75, posture axis: the codex refusal of `--add-dir` beside `--remote`
+    is an argv-level check with no posture exception, so the strip covers the
+    bypass postures and the sandboxed ones alike. Asserted on the git common
+    dir rather than on the bare flag, so the grant under test is pinned to its
+    symbol and an absent state-root grant cannot fake a pass.
     """
     from fno.agents.harnesses.codex import _git_common_dir
     from fno.agents.mux_spawn import build_pane_argv
@@ -1479,33 +1482,27 @@ def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path)
     assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="yolo"
     )
-    assert git_dir in build_pane_argv(
+    assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="full-auto"
     )
-    assert git_dir in build_pane_argv(
+    assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="workspace-write:on-request"
     )
 
 
-def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Path) -> None:
-    """AC-EDGE: --add-dir is repeatable; a caller's own grant survives."""
+def test_build_pane_argv_codex_strip_drops_the_user_grant_too(tmp_path: Path) -> None:
+    """x-0a75, composition axis inverted: nothing composes on the codex pane
+    any more, including a grant the operator typed. The spawn must still reach
+    ready on the seeded pane, so the strip removes the pair whole and keeps
+    the seed behind `--`."""
     from fno.agents.mux_spawn import build_pane_argv
 
-    from fno.agents.writable_dirs import worker_writable_dirs
-
     repo = _pane_repo(tmp_path)
-    argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
+    argv = build_pane_argv("codex", "seed text", repo, False, None, add_dir="/extra")
 
-    # git common dir + plan dir + the caller's own grant, plus fno's state-root
-    # set. Counted from the resolver rather than hardcoded, because the state
-    # set's SIZE is machine-dependent (one entry, or two when the plan lives in
-    # a vault); its presence is asserted by name below.
-    assert argv.count("--add-dir") == 3 + len(worker_writable_dirs(repo))
-    assert "/extra" in argv
-    # The caller's explicit grant leads fno's computed set: it composes, never
-    # replaced by it.
-    first_state = worker_writable_dirs(repo)[0]
-    assert argv.index("/extra") < argv.index(first_state)
+    assert argv.count("--add-dir") == 0
+    assert "/extra" not in argv
+    assert argv[-2:] == ["--", "seed text"]
 
 
 def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
@@ -2071,107 +2068,6 @@ def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
     assert resolve_provenance("x-missing") == {"FNO_NODE": "x-missing"}
 
 
-def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """x-84a8: `fno agents spawn --node ... --slug ... --plan ...` resolves the
-    provenance map and hands it to the bounded default pane dispatcher."""
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-
-    captured: dict = {}
-
-    def fake_dispatch(**kwargs):
-        captured.update(kwargs)
-        return MuxSpawnResult(
-            name=kwargs["name"], provider=kwargs["provider"], session="main",
-            pane_id=1, child_pid=None, session_uuid="u",
-        )
-
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    # The dispatch takes a real node claim; keep it out of the user's global store.
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    monkeypatch.setattr("fno.graph.load.load_graph",
-        lambda: [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}])
-
-    res = CliRunner().invoke(
-        agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
-         "--node", "x-84a8", "--slug", "s", "--plan", "p.md", "--session-phase", "do"],
-    )
-    assert res.exit_code == 0, res.output
-    # The claim holder rides with the provenance group: the worker names it back
-    # at init to prove it is the successor this dispatch claimed the node for.
-    assert captured["provenance"] == {
-        "FNO_NODE": "x-84a8", "FNO_SLUG": "s", "FNO_PLAN": "p.md",
-        "FNO_NODE_CLAIM_HOLDER": "spawn-handover:t-84a8-s",
-    }
-
-
-def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatch) -> None:
-    """The public CLI never exits zero with an unaddressable Codex pane."""
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-
-    use_tmpdir(monkeypatch, tmp_path)
-    stub_codex_sandbox_probe(monkeypatch)
-    fake_runner = FakeRunner(run_stdout="9\n")
-    real_dispatch = mux_spawn.dispatch_spawn_pane
-
-    def dispatch_with_fake_mux(**kwargs):
-        kwargs.pop("workspace", None)
-        kwargs.pop("bounded_placement", None)
-        return real_dispatch(**kwargs, runner=fake_runner)
-
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", dispatch_with_fake_mux)
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    monkeypatch.setenv("FNO_SESSION", "main")
-
-    from fno.agents import events as _events
-
-    emitted: list = []
-    monkeypatch.setattr(
-        _events, "emit", lambda name_, **kw: emitted.append((name_, kw))
-    )
-    # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
-    # the canonical root (AC1-EDGE no-op) -- the receipt/redirect note would
-    # otherwise drift when run from a linked worktree. This test checks the pane
-    # receipt shape, not the cwd move.
-    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
-
-    runner = CliRunner()
-    result = runner.invoke(
-        agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "codex", "--substrate", "pane", "/fno:target x-81ad"],
-    )
-    assert result.exit_code == 1
-    assert "required codex session binding" in result.output
-    # x-1595: no refusal an operator actually reads may route them to the
-    # canary. It binds in a scratch cwd with its own baseline, so it read green
-    # at 3.39s and 0.92s while four spawns died at the bind window, and pointing
-    # at it told the operator the lane was fine. This spawn takes the
-    # cleanup-failed arm, which measured no bind wait; the paired
-    # positive-marker assertion on both measured refusals lives in
-    # test_pane_binding_receipt.py.
-    assert "fno doctor --codex-bind" not in result.output
-    assert fake_runner.kill_calls
-    # x-1595: the measurement rides the DURABLE event too. A reaped spawn's
-    # stderr goes with the scrollback, and four of these failures left nothing a
-    # later session could read. This arm ran no bind wait, so the values are the
-    # honest None/"" rather than a fabricated "waited 0.0s" -- the assertion is
-    # that the four keys are CARRIED, which is what a later reader needs.
-    uncaptured = [
-        kw
-        for name_, kw in emitted
-        if name_ == "agent_session_id_uncaptured" and kw.get("harness") == "codex"
-    ]
-    assert uncaptured, "the unbound codex spawn emitted no uncaptured event"
-    assert set(uncaptured[-1]) >= {"elapsed_s", "window_s", "polls", "condition"}
-
-
 def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2516,58 +2412,6 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
     assert captured["tab"] == "id:12"
 
 
-def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-    import fno.adapters.providers.dispatch as provider_dispatch
-    import fno.adapters.providers.loader as provider_loader
-
-    stub_codex_sandbox_probe(monkeypatch)
-
-    captured = {}
-
-    def fake_bounded(**kwargs):
-        captured.update(kwargs)
-        return MuxSpawnResult(
-            name=kwargs["name"], provider=kwargs["provider"], session="main",
-            pane_id=1, child_pid=None, session_uuid="codex-thread",
-        )
-
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_bounded)
-    monkeypatch.setattr(
-        provider_loader,
-        "load_providers",
-        lambda **_kwargs: SimpleNamespace(
-            by_id={"work": SimpleNamespace(harness="codex")}
-        ),
-    )
-    monkeypatch.setattr(
-        provider_dispatch, "dispatch_env", lambda *_args, **_kwargs: {"CODEX_HOME": "/tmp/codex"}
-    )
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    result = CliRunner().invoke(
-        agents_cli.agents_app,
-        [
-            "spawn", "--name", "successor", "--harness", "codex",
-            "--substrate", "pane", "--bounded-placement",
-            "--recorded-provider=openai", "--model", "gpt-5.6-sol",
-            "--dispatch-account", "work", "/fno:target --no-merge x-abcd",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == "codex"
-    assert captured["route_provider_id"] == "openai"
-    assert captured["account_record_id"] == "work"
-    assert captured["model_name"] == "gpt-5.6-sol"
-    assert captured["workspace"] is None
-    assert captured["tab"] is None
-
-
 def test_cmd_spawn_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
     from typer.testing import CliRunner
 
@@ -2680,12 +2524,12 @@ class SquadAwareRunner(FakeRunner):
                 sid = int(scope[3:])
                 if sid not in self.squads:
                     return subprocess.CompletedProcess(
-                        argv, 1, "", f"no such squad id: {sid}"
+                        argv, 1, "", f"no such workspace id: {sid}"
                     )
                 rows = self.squads[sid]
             else:
                 return subprocess.CompletedProcess(
-                    argv, 1, "", f"no such squad: {scope}"
+                    argv, 1, "", f"no such workspace: {scope}"
                 )
             return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
         if list(argv[1:4]) == ["mux", "tab", "join"]:

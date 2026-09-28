@@ -91,6 +91,9 @@ impl Scratch {
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
         cmd.envs(test_owner::self_owner_env());
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
+        }
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -122,6 +125,9 @@ impl Scratch {
         // CommandBuilder has no batch envs(); apply the pair one call each.
         for (k, v) in test_owner::self_owner_env() {
             cmd.env(k, v);
+        }
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
         }
     }
 
@@ -171,9 +177,23 @@ pub fn strip_prompts(line: &str) -> &str {
 
 /// True when any screen row is exactly `want` once leading prompts are
 /// stripped. The one matcher for "did this command's output line render?" -
-/// an exact trim-equality compare misses output wearing a late prompt.
+/// an exact trim-equality compare misses output wearing a late prompt. A
+/// framed pane wears sideline text, the panel divider and two frame rules on
+/// the same physical row, so every `│`-delimited segment gets its own compare.
 pub fn screen_has_line(screen: &str, want: &str) -> bool {
-    screen.lines().any(|l| strip_prompts(l) == want)
+    screen.lines().any(|l| line_is_segment(l, want))
+}
+
+/// True when the row's pane-content segment (between the frame rules) is
+/// exactly `want` once leading prompts are stripped.
+pub fn line_is_segment(line: &str, want: &str) -> bool {
+    line.split('│').any(|seg| strip_prompts(seg.trim()) == want)
+}
+
+/// True when the row ends a shell prompt: a `$` at the end of any
+/// `│`-delimited segment (the framed prompt row closes with its border rule).
+pub fn line_ends_with_prompt(line: &str) -> bool {
+    line.split('│').any(|seg| seg.trim_end().ends_with('$'))
 }
 
 impl Drop for Scratch {
@@ -207,6 +227,55 @@ impl Drop for Scratch {
     }
 }
 
+/// Replace the fixture graph through the mux crate's store client.
+pub fn seed_graph(graph: &Path, rows: &[serde_json::Value]) -> Result<(), String> {
+    if let Some(worker) = store_worker() {
+        std::env::set_var("FNO_AGENTS_WORKER", worker);
+    }
+    let snapshot = fno::store_client::call(graph, "begin", serde_json::json!({}))?;
+    let version = snapshot
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "the store returned no snapshot version".to_string())?;
+    fno::store_client::call(
+        graph,
+        "commit",
+        serde_json::json!({"version": version, "entries": rows}),
+    )?;
+    Ok(())
+}
+
+fn store_worker() -> Option<PathBuf> {
+    let worker = std::env::var_os("FNO_AGENTS_WORKER")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            std::env::var_os("FNO_AGENTS_FRONT").and_then(|front| {
+                let path = PathBuf::from(front).parent()?.join("fno-agents-worker");
+                path.is_file().then_some(path)
+            })
+        })
+        // Test executables live under target/debug/deps; the worker is their
+        // sibling, or under the separately rooted fno-agents crate target.
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent()?
+                        .parent()
+                        .map(|dir| dir.join("fno-agents-worker"))
+                })
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(|root| root.join("fno-agents/target/debug/fno-agents-worker"))
+                .filter(|path| path.is_file())
+        });
+    worker
+}
+
 /// The `fno` client running on a real PTY, plus a human-eye view of it.
 pub struct ClientHarness {
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -227,13 +296,20 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
-        Self::spawn_full(scratch, &[], &[])
+        Self::spawn_sized_full(scratch, 24, 60, &[], &[])
+    }
+
+    /// The sideline-visible size (panel 28 + min content 40 needs >68 cols):
+    /// chrome tests that assert on sideline rows spawn at 24x120.
+    #[allow(dead_code)]
+    pub fn spawn_sized(scratch: &Scratch, rows: u16, cols: u16) -> Self {
+        Self::spawn_sized_full(scratch, rows, cols, &[], &[])
     }
 
     /// Like [`ClientHarness::spawn`] with extra environment on the client
     /// process (the nested-guard cases need `FNO_SESSION` preset).
     pub fn spawn_with(scratch: &Scratch, envs: &[(&str, &str)]) -> Self {
-        Self::spawn_full(scratch, envs, &[])
+        Self::spawn_sized_full(scratch, 24, 60, envs, &[])
     }
 
     /// Like [`ClientHarness::spawn`] but attaching an explicit `--session`.
@@ -243,20 +319,40 @@ impl ClientHarness {
     /// the session outright and bypasses the picker (AC5-FR).
     #[allow(dead_code)]
     pub fn spawn_session(scratch: &Scratch, session: &str) -> Self {
-        Self::spawn_full(scratch, &[], &["--session", session])
+        Self::spawn_sized_full(scratch, 24, 60, &[], &["--session", session])
     }
 
-    fn spawn_full(scratch: &Scratch, envs: &[(&str, &str)], args: &[&str]) -> Self {
-        // 60 columns: below the sideline's auto-hide threshold (panel 28 +
-        // min content 40), so the panel stays hidden and Phase-1-era screen
-        // assertions see bare content lines under the 1-row tab bar. The
+    /// A sized spawn with extra client env - the composer e2e tests pin the
+    /// agent list against scratch-local fake harness bins (a clean CI home
+    /// has none on PATH), which need both the size and the PATH override.
+    #[allow(dead_code)]
+    pub fn spawn_sized_with(
+        scratch: &Scratch,
+        rows: u16,
+        cols: u16,
+        envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_sized_full(scratch, rows, cols, envs, &[])
+    }
+
+    fn spawn_sized_full(
+        scratch: &Scratch,
+        rows: u16,
+        cols: u16,
+        envs: &[(&str, &str)],
+        args: &[&str],
+    ) -> Self {
+        // The default 60 columns sit below the sideline's auto-hide threshold
+        // (panel 28 + min content 40), so the panel stays hidden and Phase-1-era
+        // screen assertions see bare content lines under the 1-row tab bar. The
         // sideline-visible chrome has its own compose unit tests + the
         // layout e2e suite; here it would only salt every line with the
-        // divider column.
+        // divider column. Sizes that show the sideline opt in via
+        // [`ClientHarness::spawn_sized`].
         let pty = native_pty_system()
             .openpty(PtySize {
-                rows: 24,
-                cols: 60,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -304,7 +400,7 @@ impl ClientHarness {
             writer,
             output,
             consumed: 0,
-            pane: Pane::new(24, 60),
+            pane: Pane::new(rows, cols),
             scratch_dir: scratch.0.clone(),
             reader_done: done_rx,
             _master: pty.master,
@@ -333,7 +429,7 @@ impl ClientHarness {
                 if self
                     .screen()
                     .lines()
-                    .any(|line| strip_prompts(line) == "fno-input-ready")
+                    .any(|line| line_is_segment(line, "fno-input-ready"))
                 {
                     return;
                 }
@@ -460,8 +556,17 @@ impl ClientHarness {
             s.lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
-                .take(2)
-                .any(|l| l.trim_end().ends_with('$'))
+                // A framed pane keeps its bottom edge and the status row below
+                // the prompt, so the prompt is no longer one of the last two
+                // rendered lines.
+                .take(8)
+                .any(|l| {
+                    // A framed pane closes the prompt row with its border
+                    // rule, so strip one trailing rule before looking for `$`.
+                    let l = l.trim_end();
+                    let l = l.strip_suffix('│').unwrap_or(l).trim_end();
+                    l.ends_with('$')
+                })
         };
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
@@ -720,14 +825,43 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
 
 #[allow(dead_code)]
 pub fn connect_with_retry(sock: &Path) -> std::os::unix::net::UnixStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    connect_with_retry_for(sock, Duration::from_secs(10), "server startup")
+}
+
+/// Wait for a specific server startup phase and include its stderr tail on failure.
+pub fn connect_with_retry_for(
+    sock: &Path,
+    budget: Duration,
+    phase: &str,
+) -> std::os::unix::net::UnixStream {
+    let deadline = Instant::now() + budget;
     loop {
         match std::os::unix::net::UnixStream::connect(sock) {
             Ok(s) => return s,
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => panic!("server never came up at {}: {e}", sock.display()),
+            Err(e) => {
+                let server_log = sock
+                    .parent()
+                    .map(|parent| parent.join("server.log"))
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .map(|log| {
+                        log.lines()
+                            .rev()
+                            .take(40)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_else(|| "(no server log available)".into());
+                panic!(
+                    "server never came up during {phase} within {budget:?} at {}: {e}\nserver stderr (last 40 lines):\n{server_log}",
+                    sock.display()
+                );
+            }
         }
     }
 }
@@ -787,6 +921,8 @@ pub struct FakeClient {
     pub link_hovers: Vec<(u64, u64, Vec<(u16, u16)>)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
+    /// Launcher progress updates, newest last.
+    pub launch_updates: Vec<fno::proto::AgentLaunchUpdate>,
     /// Bytes read off the socket that do not yet form a whole message.
     ///
     /// The stream carries length-prefixed frames and the socket has a short read
@@ -831,6 +967,7 @@ impl FakeClient {
             search_results: Vec::new(),
             link_hovers: Vec::new(),
             order: Vec::new(),
+            launch_updates: Vec::new(),
             carry: Vec::new(),
         }
     }
@@ -838,6 +975,13 @@ impl FakeClient {
     pub fn input(&mut self, bytes: &[u8]) {
         let mut w = self.stream.try_clone().unwrap();
         write_msg_sync(&mut w, &ClientMsg::Input(bytes.to_vec())).unwrap();
+    }
+
+    /// Send any typed message (the launcher suites use this for
+    /// `ClientMsg::AgentLaunch`).
+    pub fn raw(&mut self, msg: &ClientMsg) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, msg).unwrap();
     }
 
     pub fn cmd(&mut self, cmd: Command) {
@@ -989,6 +1133,8 @@ impl FakeClient {
             ServerMsg::PeekBody { .. } => {}
             // (v78) Server stats: one-shot control reply, never an attached client.
             ServerMsg::ServerStats { .. } => {}
+            // (v83) Launcher progress: recorded for the launcher suites.
+            ServerMsg::AgentLaunch(u) => self.launch_updates.push(u),
         }
     }
 

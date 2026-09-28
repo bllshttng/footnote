@@ -10,13 +10,13 @@ footnote can launch a worker agent on Claude, Codex, or Gemini and coordinate wi
 ## Spawn a peer
 
 ```bash
-fno agents spawn "review the diff on this branch" --name reviewer -H codex
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
 ```
 
 `spawn <name> "<initial message>" -H <harness>` creates a named, persistent peer and hands it the first message. A Claude peer runs as a `claude --bg` thread; a Codex or Gemini peer runs as a PTY-backed worker under the `fno-agents` daemon. You get back one JSON receipt line carrying the peer's `short_id`:
 
 ```json
-{"name": "reviewer", "short_id": "7c5dcf5d", "provider": "codex", "status": "live"}
+{"name": "helper", "short_id": "7c5dcf5d", "provider": "codex", "status": "live"}
 ```
 
 Pipe it: `fno agents spawn "task" --name w1 -H claude | jq -r .short_id`.
@@ -24,7 +24,7 @@ Pipe it: `fno agents spawn "task" --name w1 -H claude | jq -r .short_id`.
 ## Message a peer that exists
 
 ```bash
-fno agents ask reviewer "what did you find?"
+fno agents ask helper "what did you find?"
 ```
 
 `ask <name> "<message>"` delivers to the running session and prints the recipient's reply on stdout, verbatim, no banner or wrapper. The peer keeps working on its own loop between messages. Asking a name that doesn't exist errors with exit 16 ("spawn it first"); creation and messaging are deliberately separate verbs.
@@ -43,14 +43,14 @@ fno agents spawn "summarize the failing tests" --name q -H codex --once
 
 ```bash
 fno agents list                 # registered agents and their status
-fno agents logs reviewer        # tail a peer's output
-fno agents stop reviewer        # stop the underlying session
-fno agents rm reviewer          # remove the registry row
+fno agents logs helper        # tail a peer's output
+fno agents stop helper        # stop the underlying session
+fno agents rm helper          # remove the registry row
 ```
 
 ## Where this goes
 
-Each agent runs its own loop and they coordinate over the bus, so you can put a Claude builder and a Codex reviewer on the same repo and let them work in parallel. From a phone or any runner-less surface, the `/fno:agent` skill is a friendlier router over these same verbs (it normalizes messy input and confirms a billed launch before it happens).
+Each agent runs its own loop and messages peers over the bus. Pair a Claude builder with a Codex helper on one repo. Use `/fno:agent` to route peers from a phone or runner-less surface. The skill normalizes requests and confirms a billed launch.
 
 ## See also
 

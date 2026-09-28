@@ -1,0 +1,12 @@
+dsh_version=0.1.5-rc.1
+measured_at=2026-09-17
+fresh_home_boot=ok
+initialize.protocolVersion=1
+initialize.agentInfo.name=deepseek-harness-acp
+session_new.sessionId=c24af481-cbc7-482b-9449-12b3979dd029
+session_new.uuid_shaped=True
+session_list_before_close.contains_id=False
+prompt_without_key.shape=jsonrpc-error
+prompt_without_key.text=Internal error: turn failed: llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service (the web Models page writes it), or export DEEPSEEK_API_KEY in the launching environment
+session_list_after_close.contains_id=True
+session_resume_after_close=ok

@@ -119,6 +119,16 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     monkeypatch.setattr(claude, "_SPAWN_UUID_RETRY_BACKOFF_SEC", 0.0)
     monkeypatch.setattr(claude, "resolve_session_uuid", lambda short_id: None)
     monkeypatch.setattr(_claude_session_registry, "seed_unverified_reason", lambda *a, **k: None)
+    # The revival liveness gate (the fno-agents binary's revive-proof op)
+    # polls real claude roots for a transcript; the fake-claude journeys
+    # write none, so the suite auto-passes it. The patch must land on the
+    # CALL SITE's binding: harnesses/claude.py imports the name directly, so
+    # patching the registry module's own attribute would never be seen.
+    # Tests that exercise the gate (test_revival_liveness.py) re-arm it by
+    # restoring the real function on THIS binding and faking
+    # `_revive_proof_verdict` on the registry module; faking the verdict
+    # alone cannot reach the neutered call site.
+    monkeypatch.setattr(claude, "revive_proof_or_refuse", lambda *a, **k: None)
 
 
 FAKE_CHILD_PID = 4242

@@ -7,7 +7,6 @@ Phase 03 will wire in staging.stage(record) inside the `add` command.
 """
 from __future__ import annotations
 
-import datetime as _dt
 import os
 import shutil
 import subprocess
@@ -326,12 +325,6 @@ def _fmt_resets_in(resets_at: float | None, now: float) -> str:
     return f"in {hours}h{rem:02d}m"
 
 
-_MANUAL_SWITCH = (
-    "manual switch: sign out of claude and sign back in as the other account "
-    "(about a minute; live sessions need remote control re-enabled)"
-)
-
-
 def _identity_for(record, by_id: dict, now: float):
     """The effective-account verdict for one claude record, or None.
 
@@ -372,7 +365,7 @@ def _identity_lines(record, got, worst_pct: float, threshold: float, now: float)
     else:
         lines = [prefix + got.receipt]
     if worst_pct >= threshold:
-        lines.append(prefix + _MANUAL_SWITCH)
+        lines.append(prefix + "manual switch: " + managed.slot_switch_remedy("the other account"))
     return lines
 
 
@@ -1035,7 +1028,7 @@ def register_provider(
             f"error: the current {record.harness} login is already registered as "
             f"'{holder_id}'; registering it again as '{record.id}' would store one "
             f"credential under two ids.\n"
-            f"  sign into the {record.id} account first:  {record.harness} /logout && "
+            f"  sign into the {record.id} account first (no /logout first):  "
             f"{record.harness} /login\n"
             f"  or give it its own dir:  fno config accounts register {record.id} "
             f"--config-dir ~/.claude-{record.id}",
@@ -1049,7 +1042,7 @@ def register_provider(
             f"  a rotated token hides this from the credential check, but the "
             f"proven identity is the same, so two ids would share one quota pool "
             f"and reconciliation could never tell them apart.\n"
-            f"  sign into the {record.id} account first:  {record.harness} /logout && "
+            f"  sign into the {record.id} account first (no /logout first):  "
             f"{record.harness} /login",
             err=True,
         )
@@ -1058,7 +1051,8 @@ def register_provider(
         typer.echo(
             f"error: the {record.harness} slot currently holds credentials for two "
             f"different accounts, so registering '{record.id}' could bind the wrong "
-            f"one.\n  sign out and back in as {record.id}, then re-run this command",
+            f"one.\n  " + managed.slot_switch_remedy(record.id)
+            + ", then re-run this command",
             err=True,
         )
         raise typer.Exit(1)
@@ -1356,17 +1350,14 @@ def pick_env_lines(account_id: str) -> list[str]:
 def _doctor_findings() -> list[dict]:
     """Per-record + per-slot problems in the managed store. Read-only.
 
-    A stale capture, an expired blob, a config dir with no login, and a tainted
+    A stale capture, a missing login, an unproven identity, and a tainted
     slot are four separate silent degradations that each surface only as
     ``unknown`` somewhere downstream. This collects them into one answerable
     question so the operator sees the store's real condition instead of a
     symptom. Never mutates; never prints a secret.
     """
-    import time as _time
-
     config = _load()
     findings: list[dict] = []
-    now = _time.time()
 
     for record in config.records:
         blob = managed.read_blob(record.id)
@@ -1380,16 +1371,6 @@ def _doctor_findings() -> list[dict]:
                         f"holds the same credential as '{holder}'; one of them "
                         f"was captured while the other account was signed in"
                     ),
-                })
-            expires_at = managed.credential_expiry(blob)
-            if expires_at is not None and expires_at <= now:
-                stamp = _dt.datetime.fromtimestamp(
-                    expires_at, _dt.timezone.utc
-                ).strftime("%Y-%m-%dT%H:%MZ")
-                findings.append({
-                    "record": record.id,
-                    "problem": "expired-credential",
-                    "detail": f"stored credential expired {stamp}",
                 })
 
         if (
@@ -1484,9 +1465,10 @@ def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
     got = resolve_account_binding(None, harness=harness_kind, root=root, by_id=by_id)
     if got.status == AMBIGUOUS and got.reason == "ambiguous-slot":
         return _finding("ambiguous-slot", (
-            "the slot's stored credentials belong to different accounts (a stale "
-            "scoped Keychain item beside a live unscoped one), so whichever is "
-            f"stamped, some reader gets the other; sign out and back in, then {repair}"
+            "the slot's stored credentials belong to different accounts, so whichever is "
+            "stamped, some reader gets the other; "
+            + managed.slot_switch_remedy("the account to keep")
+            + f", then {repair}"
         ))
     if got.observed_principal is None:
         # An unreadable slot cannot demonstrate drift, so this used to be quiet.
@@ -1514,7 +1496,7 @@ def doctor_providers(
     """Report the managed store's real condition. Exits non-zero on any problem.
 
     Read-only. Checks each record for a credential another account already
-    holds, an expired stored credential, and a config_dir that holds no login;
+    holds and a config_dir that holds no login;
     then checks each CLI's slot for taint. Usable as a check in a script.
     """
     import json as _json

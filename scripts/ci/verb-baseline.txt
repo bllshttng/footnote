@@ -56,7 +56,6 @@ backlog get
 backlog next
 backlog queued
 backlog reconcile
-backlog update !--model-tier !--tag !--untag
 bundle
 carveout
 claim
@@ -69,9 +68,7 @@ config set
 context
 cost
 decide
-decide list
 decide reindex
-decide retract !--origin
 delivery
 do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
@@ -85,9 +82,9 @@ inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
 inbox board
+inbox day end
+inbox day start
 inbox decide !--decision !--origin !--subject
-inbox decisions !--subject
-inbox law set
 inbox notify
 inbox operator ack
 inbox operator list
@@ -108,7 +105,6 @@ king init
 king manifest-path
 king shape
 king term
-law set
 lint
 loops
 loops resume-all

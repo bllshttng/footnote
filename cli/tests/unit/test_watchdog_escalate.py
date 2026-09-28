@@ -1,8 +1,10 @@
-"""The watchdog's unfinished-work findings become one durable operator question.
+"""The watchdog's unfinished-work findings become one fleet task.
 
-Replaces the stale-session question: rows no verb can clear are noise, and
-the durable ask now names the finding identities and the one command that
-clears each. Dedup keys on outcome identity, not session rows.
+After the fleet-task port, the fold behind ``escalate_unfinished``
+lives in ``crates/fno-agents/src/fleet_task.rs`` and the channel is ONE
+transport call. The fold's behavior is characterized in Rust
+(``fleet_task_reconcile_parity.rs``); what stays testable here is the text
+the lane renders and the payload it sends.
 """
 from __future__ import annotations
 
@@ -10,8 +12,6 @@ import importlib
 from pathlib import Path
 
 import pytest
-
-from fno.outstanding.core import read_open_questions
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,32 @@ def _finding(node: str = "x-7d02", *, basis: str = "in_progress, claim free, idl
     )
 
 
-def _run(root: Path, findings):
+def _run(root: Path, findings, monkeypatch=None, captured=None):
+    if monkeypatch is not None:
+        import fno.rust_binary
+
+        def fake_verb_call(verb, payload, *args, **kwargs):
+            # The stub folds like the Rust door, deriving its state from the
+            # shared capture list so it survives across _run calls: the same
+            # (lane, key) twice reads duplicate, an empty set reads none.
+            assert verb == "fleet-task", verb
+            if captured is not None:
+                captured.append(payload)
+            earlier = captured[:-1] if captured else []
+            if payload["empty"]:
+                any_open = any(not p["empty"] for p in earlier)
+                outcome, id_out = ("closed", "") if any_open else ("none", "")
+            else:
+                prior = [
+                    p
+                    for p in earlier
+                    if not p["empty"]
+                    and (p["lane"], p["key"]) == (payload["lane"], payload["key"])
+                ]
+                outcome, id_out = ("duplicate", "ft-watchd00") if prior else ("asked", "ft-watchd00")
+            return {"outcome": outcome, "id": id_out}
+
+        monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
     return _subject().escalate_unfinished(
         findings,
         root=root,
@@ -52,16 +77,20 @@ def _run(root: Path, findings):
     )
 
 
-def test_same_finding_set_records_exactly_one_question(tmp_path: Path) -> None:
+def test_same_finding_set_keys_on_identity(tmp_path: Path, monkeypatch) -> None:
+    captured: list = []
     findings = [_finding("x-a"), _finding("x-b")]
 
-    first_outcome, first_id = _run(tmp_path, findings)
-    second_outcome, second_id = _run(tmp_path, list(reversed(findings)))
+    first_outcome, first_id = _run(tmp_path, findings, monkeypatch, captured)
+    second_outcome, second_id = _run(tmp_path, list(reversed(findings)), monkeypatch, captured)
 
     assert first_outcome == "recorded"
     assert second_outcome == "duplicate"
     assert second_id == first_id
-    assert len(read_open_questions(tmp_path)) == 1
+    subject = _subject()
+    key = subject.dedupe_key([f"{f.kind}:{f.subject}" for f in findings])
+    assert captured[0]["key"] == key
+    assert captured[0]["lane"] == subject.MARKER
 
 
 def test_question_names_the_clearing_verbs_not_session_rows() -> None:
@@ -92,33 +121,21 @@ def test_identity_change_reasks() -> None:
     assert key_one != key_two
 
 
-def test_large_finding_set_keeps_marker_count_and_cap(tmp_path: Path) -> None:
-    from fno.events import QUESTION_CAP
-
+def test_large_finding_set_keeps_marker_count_and_cap(tmp_path: Path, monkeypatch) -> None:
+    captured: list = []
     findings = [_finding(f"x-{i:04d}") for i in range(150)]
 
-    first_outcome, first_id = _run(tmp_path, findings)
-    second_outcome, _second_id = _run(tmp_path, list(reversed(findings)))
+    first_outcome, first_id = _run(tmp_path, findings, monkeypatch, captured)
+    second_outcome, _second_id = _run(tmp_path, list(reversed(findings)), monkeypatch, captured)
 
-    (question,) = read_open_questions(tmp_path)
-    assert len(question.question) <= QUESTION_CAP
-    assert "150 unfinished-work finding(s)" in question.question
     assert first_outcome == "recorded"
     assert second_outcome == "duplicate"
     assert first_id
+    assert "150 unfinished-work finding(s)" in captured[0]["text"]
+    assert captured[0]["text"].startswith(f"[{_subject().MARKER}:")
 
 
-def test_unreadable_store_raises_instead_of_recording_again(tmp_path: Path) -> None:
-    from fno.outstanding.core import OutstandingError, events_path
-
-    path = events_path(tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.mkdir()
-
-    with pytest.raises(OutstandingError):
-        _run(tmp_path, [_finding("x-a")])
-
-
-def test_empty_finding_set_is_a_named_noop(tmp_path: Path) -> None:
-    assert _run(tmp_path, []) == ("none", "")
-    assert read_open_questions(tmp_path) == []
+def test_empty_finding_set_is_a_named_noop(tmp_path: Path, monkeypatch) -> None:
+    captured: list = []
+    assert _run(tmp_path, [], monkeypatch, captured) == ("none", "")
+    assert captured[0]["empty"] is True

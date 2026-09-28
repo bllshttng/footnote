@@ -41,14 +41,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(events_path: Path) -> list[dict]:
-    if not events_path.exists():
-        return []
-    return [
-        event
-        for line in events_path.read_text().splitlines()
-        if line.strip()
-        and not (event := json.loads(line))["type"].startswith("claim_")
-    ]
+    from tests._event_rows import event_rows
+
+    return [e for e in event_rows(events_path) if not e["type"].startswith("claim_")]
 
 
 def _node(**over) -> dict:
@@ -778,6 +773,26 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     assert "--model" not in cmd
 
 
+def test_spawn_failure_keeps_a_non_gate_error_line(monkeypatch):
+    """AC2-ERR (x-d769): no spawn-gate line on stderr -> the whole stderr is
+    the message. The verdict reader's fallback must not eat it."""
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: pane launch failed\n"
+
+    def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        return _Proc()
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    with pytest.raises(st.SpawnError) as ei:
+        st._spawn_think_worker("x-1", "prompt", None, "slug")
+    assert "Error: pane launch failed" in str(ei.value)
+
+
 def test_spawn_worker_tags_the_spawn_subprocess_with_its_cause(monkeypatch):
     """x-42c5: the reason this spawn happened rides FNO_SPAWN_TRIGGER in the
     `fno agents spawn` subprocess's own environment, so the registry row it
@@ -828,6 +843,9 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
 
     def fake_run(cmd, **kw):
         if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; it is not the spawn argv.
             return _REAL_SUBPROCESS_RUN(cmd, **kw)
         seen["cmd"] = cmd
         return _Proc()
@@ -918,8 +936,8 @@ def test_think_output_path_reuses_existing_node_doc_on_redispatch(monkeypatch, t
     """AC-EDGE: a re-dispatch reuses this node's existing doc keyed on the node id,
     not a fresh date file - and is stable across a slug edit between dispatches."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno.paths import plans_dir
-    plans = plans_dir(tmp_path)  # the resolver, where the product reads
+    plans = tmp_path / "plans"  # what the (patched) resolver answers
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
     plans.mkdir(parents=True)
     prior = plans / "2020-01-01-old-slug-x-2222aaaa.md"
     prior.write_text("# earlier dispatch\n")
@@ -933,8 +951,8 @@ def test_think_output_path_reuses_frontmatter_claiming_stub(monkeypatch, tmp_pat
     """AC-FR: a pre-created stub whose frontmatter claims the node is the doc's
     home even though its name carries no node-id suffix (reuse-if-claimed)."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno.paths import plans_dir
-    plans = plans_dir(tmp_path)  # the resolver, where the product reads
+    plans = tmp_path / "plans"  # what the (patched) resolver answers
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
     plans.mkdir(parents=True)
     stub = plans / "2020-01-01-hand-created-stub.md"
     stub.write_text("---\nclaims: x-2222aaaa\nstatus: design\n---\n# stub\n")
@@ -947,8 +965,8 @@ def test_think_output_path_reuses_legacy_slug_only_doc(monkeypatch, tmp_path):
     frontmatter claim) is reused on re-dispatch under the same slug, not
     duplicated by a fresh …-<slug>-<node_id>.md mint."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno.paths import plans_dir
-    plans = plans_dir(tmp_path)  # the resolver, where the product reads
+    plans = tmp_path / "plans"  # what the (patched) resolver answers
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
     plans.mkdir(parents=True)
     legacy = plans / "2020-01-01-my-slug.md"
     legacy.write_text("# legacy dispatch, no frontmatter link\n")
@@ -962,8 +980,8 @@ def test_think_output_path_node_id_doc_beats_legacy_slug(monkeypatch, tmp_path):
     """A node-id-suffixed doc wins over a legacy slug-only doc for the same node
     (node-id resolution stays primary; the legacy glob is only a last resort)."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno.paths import plans_dir
-    plans = plans_dir(tmp_path)  # the resolver, where the product reads
+    plans = tmp_path / "plans"  # what the (patched) resolver answers
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
     plans.mkdir(parents=True)
     (plans / "2020-01-01-my-slug.md").write_text("# legacy\n")
     suffixed = plans / "2020-02-02-my-slug-x-2222aaaa.md"
@@ -975,8 +993,8 @@ def test_think_output_path_node_id_doc_beats_legacy_slug(monkeypatch, tmp_path):
 def test_think_output_path_claim_beats_name_suffix(monkeypatch, tmp_path):
     """A frontmatter claim outranks a mere name-suffix match for the same node."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno.paths import plans_dir
-    plans = plans_dir(tmp_path)  # the resolver, where the product reads
+    plans = tmp_path / "plans"  # what the (patched) resolver answers
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
     plans.mkdir(parents=True)
     (plans / "2020-01-01-suffix-x-2222aaaa.md").write_text("# name match only\n")
     claimed = plans / "2020-02-02-the-real-home.md"
@@ -1041,7 +1059,9 @@ def test_enabled_honors_project_root(monkeypatch, tmp_path):
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
-    path.write_text(json.dumps({"entries": entries}) + "\n")
+    from tests.fixtures.graph_seed import seed_graph
+
+    seed_graph(path, entries)
 
 
 def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
@@ -1049,9 +1069,9 @@ def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
     monkeypatch.setenv("FNO_THINK_SPAWN", "0")
     reached = []
     monkeypatch.setattr(st, "maybe_spawn_think", lambda *a, **k: reached.append(1))
-    # Any graph re-read would import read_graph; assert it is never called.
+    # Any graph re-read would import read_graph_strict; assert it is never called.
     import fno.graph.store as gs
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read"))
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read"))
     assert st.on_node_born(_node()) is None
     assert reached == []
 
@@ -1136,7 +1156,7 @@ def test_on_node_born_persisted_skips_reread(iso, monkeypatch):
 
     import fno.graph.store as gs
     reached: list = []
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read") or [])
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read") or [])
 
     st.on_node_born(_node(slug="durable-slug"), persisted=True)
 
@@ -1733,7 +1753,7 @@ def test_an_empty_session_is_not_stamped_over_the_node(monkeypatch, tmp_path):
         captured["out"] = mutator(entries)
 
     monkeypatch.setattr(
-        "fno.graph.store.locked_mutate_graph", fake_mutate, raising=False
+        "fno.graph.store.commit_rows_via_store", fake_mutate, raising=False
     )
     st._stamp_forward("x-1", "", None, output_path="/tmp/doc.md")
     if "out" in captured:

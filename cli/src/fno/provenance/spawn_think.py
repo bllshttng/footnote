@@ -185,7 +185,7 @@ def _settings_for(project_root: Optional[Path]):
     Honors ``project_root`` (gemini PR #9): in a multi-repo / cross-project run
     the gate must read the node's repo settings, not whatever repo the birth
     process happens to be cwd'd in. Falls back to the ambient ``load_settings``
-    when no root is given (the cmd_idea path, which defaults project_root to cwd).
+    when no root is given (the native add/idea path, which defaults project_root to cwd).
     """
     from fno.config import load_settings, load_settings_for_repo
 
@@ -864,9 +864,11 @@ def _spawn_think_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        from fno.backlog.advance import _gate_refusal_detail
+
         raise SpawnError(
             f"fno agents spawn exited {proc.returncode}: "
-            f"{(stderr or proc.stdout or '').strip()[:200]}"
+            f"{_gate_refusal_detail(stderr or proc.stdout or '')}"
         )
     short_id = _parse_short_id(proc.stdout or "")
     if short_id:

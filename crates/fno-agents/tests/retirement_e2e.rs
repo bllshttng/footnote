@@ -169,7 +169,8 @@ fn ac2_hp_receipt_v2_keeps_identity_locator_and_resume_past_retention() {
     );
     // No ledger entry exists for this session at all: the receipt is the
     // ONLY mapping, which is the AC2 case.
-    let receipt = build_reap_receipt(&row, None).expect("a claude row builds a receipt");
+    let receipt = build_reap_receipt(&row, None, fno_agents::receipt::Writer::GcSweep)
+        .expect("a claude row builds a receipt");
 
     // v2 stamping at build time.
     assert_eq!(receipt.schema_version, Some(2));
@@ -254,7 +255,8 @@ fn wrapper_failure_recovery_names_harness_session_cwd_and_native_argv() {
         "cccccccc-1111-2222-3333-444444444444",
         &cwd,
     );
-    let receipt = build_reap_receipt(&row, None).expect("a claude row builds a receipt");
+    let receipt = build_reap_receipt(&row, None, fno_agents::receipt::Writer::GcSweep)
+        .expect("a claude row builds a receipt");
     fno_agents::receipt::write_reap_receipt(&home, &receipt).unwrap();
     std::fs::remove_dir_all(&cwd_dir).unwrap();
 

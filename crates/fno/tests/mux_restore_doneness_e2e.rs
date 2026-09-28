@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{spawn_server, FakeClient, Scratch};
+use common::{seed_graph, spawn_server, FakeClient, Scratch};
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -52,8 +52,17 @@ fn kill_server(sock: &Path) {
 /// (done + in-flight) and three trees (done slot, in-flight slot, plain
 /// shell).
 fn write_fixture(iso: &Path) {
-    let graph = r#"{"entries":[{"id":"x-done","status":"done","sessions":[{"harness":"codex","session_id":"done-sess"}]}]}"#;
-    std::fs::write(iso.join("iso-graph.json"), graph).unwrap();
+    let graph = iso.join("iso-graph.json");
+    seed_graph(
+        &graph,
+        &[serde_json::json!({
+            "id": "x-done", "slug": "x-done", "title": "done member",
+            "type": "feature", "status": "done", "priority": "p2",
+            "completed_at": "2026-09-01T00:00:00Z",
+            "sessions": [{"phase": "review", "harness": "codex", "session_id": "done-sess"}]
+        })],
+    )
+    .unwrap();
     let home = iso.join("home");
     std::fs::create_dir_all(home.join(".fno")).unwrap();
     let origin = iso.join("repo");

@@ -1,6 +1,6 @@
 ---
 name: autocorrect
-description: Self-improvement loop for the toolkit. Passive capture (git post-commit, verifiers, /insights tags) into ~/.fno/corrections.log; a monthly review surfaces patches; the user triages in about 20 minutes. Use when asked to review corrections, triage proposed patches, install or check the schedule, ingest /insights, or audit recurring mistake classes.
+description: Self-improvement loop for the toolkit. Passive capture (git post-commit, verifiers, /fno:intel corrections) into ~/.fno/corrections.log; a monthly review surfaces patches; the user triages in about 20 minutes. Use when asked to review corrections, triage proposed patches, install or check the schedule, ingest the intel report, or audit recurring mistake classes.
 ---
 
 # Autocorrect
@@ -15,13 +15,13 @@ Capture surfaces (write to `~/.fno/corrections.log`, never invoked by the agent)
 
 1. **git post-commit hook on `~/.claude/`** records every edit to rule/skill/CLAUDE.md files. Severity S1 by default; S0 if the commit subject starts with `urgent:` or `revert:`.
 2. **pre-commit verifier wrapper** (`scripts/corrections-verifier-log.sh`) any verifier in any repo calls when it blocks a commit. Verifier decides the severity (S0 for secret-scanner, S1 for style/lint, S2 for drift).
-3. **`/insights` tag ingester** (`scripts/corrections-insights-tag.sh`) ports `#agent-correction`-tagged `/insights` entries as S2 events.
+3. **`/fno:intel` correction ingester** (`scripts/corrections-insights-tag.sh`) ports `#agent-correction`-tagged `/fno:intel` report lines as S2 events.
 
 Consumer surface (this skill):
 
 - **Monthly review** (1st of each month, 09:00 local) sends the last 30 days of S1+S2 events plus the current full text of every implicated rule file to a fresh Claude API call. Output is a numbered patch list.
 - **S0 watcher** (every 15 minutes) catches any unprocessed S0 events and fires an immediate review.
-- **Triage** walks the patch list interactively; accept/reject/defer/skip/quit per item.
+- **Triage** walks the patch list interactively with accept/reject/defer/skip/quit per item. An accepted diff to a shipped skill (`skills/<name>/SKILL.md` in this repo) is never applied locally. Triage files a backlog node, and a worker ships it through the normal PR path. The shipping commit carries the trailer `Autocorrect-Ref: <review_id>#<N>`, so the post-commit hook's row links back to the proposal.
 
 ## Commands
 
@@ -31,7 +31,7 @@ Consumer surface (this skill):
 | `/autocorrect triage [--review-id <id>]` | Walk the latest (or specified) patch list interactively. |
 | `/autocorrect status` | Show scheduled jobs, latest review, pending patches, watermark state. |
 | `/autocorrect install` | Register the monthly cron and the S0 watcher (idempotent). |
-| `/autocorrect ingest-insights` | Manually run the `/insights` ingestion path. |
+| `/autocorrect ingest-insights` | Manually run the `/fno:intel` report ingestion path (`--insights-file <intel report>`). |
 
 All commands are thin wrappers over scripts in this plugin's `scripts/` directory.
 
@@ -52,7 +52,7 @@ All commands are thin wrappers over scripts in this plugin's `scripts/` director
 | `~/.claude/.corrections-watermark` | Last monthly review window end. |
 | `~/.claude/.s0-watcher-watermark` | Last S0 watcher tick. |
 | `~/.claude/.s0-processed.log` | Per-event hashes of S0 events already dispatched. |
-| `~/.claude/.insights-watermark` | Per-event hashes ingested from /insights. |
+| `~/.fno/corrections.log.wm` | Per-event hashes ingested from the intel report. |
 | `~/.fno/corrections-rejected.log` | Items the user rejected during triage. |
 | `~/.claude/corrections-malformed.log` | Items where the patch did not apply cleanly. |
 | `~/.claude/proposed-patches/{review_id}.md` | The reviewer's patch list per review. |

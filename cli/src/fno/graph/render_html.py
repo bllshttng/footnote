@@ -18,6 +18,7 @@ import html
 import json
 import os
 import re
+import sys
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -76,7 +77,8 @@ def group_for(entry: dict) -> str:
 # can never drift into disagreeing about what counts as a leak.
 LEAK_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
-    ("node-id", re.compile(r"\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b", re.I)),
+    # Generic compact prefixes can resemble CSS hex colors; legacy compact x ids cannot.
+    ("node-id", re.compile(r"\b(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})\b", re.I)),
     ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
     (
         "session-id",
@@ -108,6 +110,29 @@ def leak_offender_lines(offenders: list[tuple[str, str, tuple[str, ...]]]) -> li
         f"  {node_id}: {','.join(classes)}: {title}"
         for node_id, title, classes in offenders
     ]
+
+
+def leak_refusal_report(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
+    """The audible refusal, shared by the manual roadmap verb and the
+    auto-render so the two leak-gate reports cannot drift apart: one stderr
+    line per offender, then a best-effort OS alert. A bare exit under
+    launchd is invisible and the live page can sit stale with no reader, so
+    the alert rides the same `fno inbox notify` lane the push script fires.
+    An alert failure never masks the refusal."""
+    print(f"Error: public title leak gate refused {subject}:", file=sys.stderr)
+    for line in leak_offender_lines(offenders):
+        print(line, file=sys.stderr)
+    try:
+        from fno.notify._impl import send_notification
+
+        detail = "; ".join(f"{i} {'+'.join(c)}" for i, _, c in offenders[:3])
+        code, err = send_notification(
+            "roadmap render refused", f"{subject}: leak gate refused ({detail})"
+        )
+        if err:
+            print(f"warning: render alert degraded ({code}): {err}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - an alert must never mask the refusal
+        pass
 
 
 def atomic_write_documents(documents: dict[Path, str]) -> None:

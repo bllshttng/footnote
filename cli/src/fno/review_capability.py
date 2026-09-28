@@ -465,19 +465,6 @@ def resolve_reviewers(
     return out
 
 
-@dataclass(frozen=True)
-class PreShipReviewPlan:
-    """What the target spine does at its pre-ship review step.
-
-    The single codified answer the skill prose and docs defer to, so the skip
-    direction cannot drift on one surface while the others keep the old one.
-    A prose edit that re-inverts the default flips this contract red.
-    """
-
-    kind: Literal["native", "skip"]
-    reason: str
-
-
 def harness_can_self_review(harness: Optional[str]) -> bool:
     """Whether this harness can run the review this machinery recommends.
 
@@ -664,9 +651,8 @@ def render_self_review_invocation(
     branch: Optional[str] = None,
     head_sha: Optional[str] = None,
     base_branch: Optional[str] = None,
-    raw_transport: bool = False,
 ) -> str:
-    """Render the native review request, pinned to one PR head or one local branch.
+    """Render the inline fno review request, pinned to one PR head or local branch.
 
     The render every refusal site names : a worker held at the stop
     gate reads THIS string, not a `<level>` placeholder it has no renderer for.
@@ -691,13 +677,7 @@ def render_self_review_invocation(
         # print "flag ignored" on every default run, so the pre-push payload
         # never carries it.
         with_comment = branch is None
-        if raw_transport and h == "codex":
-            # Raw Codex review routing reaches the app-server review/start RPC,
-            # whose payload grammar requires the native slash verb. `$fno:review`
-            # is the skill spelling for a model prompt, not a raw RPC payload.
-            rendered = f"/review {level or '<level>'}" + (" --comment" if with_comment else "")
-        else:
-            rendered = self_review_invocation(h, level=level, comment=with_comment)
+        rendered = self_review_invocation(h, level=level, comment=with_comment)
         if branch is not None or any(
             value is not None for value in (pr_number, head_sha, base_branch)
         ):
@@ -737,29 +717,6 @@ def render_self_review_invocation(
         if any(value is not None for value in (pr_number, branch, head_sha, base_branch)):
             raise
         return self_review_invocation(harness, level=None)
-
-
-def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
-    """Decide the target spine's pre-ship review step from `config.review.reviewers`.
-
-    The plan is always the same review: the fno lane on the final local HEAD,
-    requested through the bare `fno do target request-self-review` BEFORE the
-    PR exists, never downgraded to advisory prose. The `--pr` form is the
-    post-push form, for a round requested after the PR exists. There is no
-    sigma branch to consult anymore: a config still naming sigma is refused
-    at init by the retired descriptor, so it cannot reach this decision.
-    `reviewers` is read for shape only - a registered harness-skill reviewer
-    keeps its own invocation contract at the ship step regardless of this
-    plan.
-    """
-    names = {str(r).strip().lstrip("/") for r in reviewers}
-    return PreShipReviewPlan(
-        "native",
-        f"run fno do target request-self-review (no --pr) on the final local "
-        f"HEAD before the PR; --pr is the post-push form; "
-        f"the fno lane (/fno:review) is the review producer on every harness "
-        f"(reviewers resolved: {sorted(names) or ['none']})",
-    )
 
 
 def automerge_floor_refusal(resolved: "ResolvedReviewPosture") -> Optional[str]:

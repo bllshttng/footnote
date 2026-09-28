@@ -1,6 +1,6 @@
 # Kill Criteria Reference
 
-Abort conditions declared on the plan that target, operator, and do evaluate
+Abort conditions declared on the plan that target, `waves`, and do evaluate
 at iteration or wave boundaries. When a predicate fires, the engine emits
 `<aborted reason="{name}">`, the stop hook treats it symmetrically to
 `<promise>` (clean exit, state archive, ledger entry), and the session

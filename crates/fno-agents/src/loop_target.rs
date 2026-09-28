@@ -276,6 +276,9 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         // what a wrapper reads to see it declined the autonomous merge.
         | TerminationReason::DoneUnreviewed
         | TerminationReason::NoWork => 0,
+        // HeldOnQuestion: a clean stop for input, exit 0 - the loop did its
+        // job by stopping once with the question named; it is not a failure.
+        TerminationReason::HeldOnQuestion => 0,
         TerminationReason::Budget | TerminationReason::NoProgress | TerminationReason::Aborted => 1,
         TerminationReason::Interrupted => 130,
     }
@@ -371,12 +374,34 @@ fn king_wake_detail_clause(detail: Option<&str>) -> String {
     }
 }
 
+fn should_resume_codex_goal(king_wake: bool, successor: bool, harness: Option<&str>) -> bool {
+    king_wake && !successor && harness == Some("codex")
+}
+
+fn try_resume_codex_goal_on_wake(
+    king_wake: bool,
+    successor: bool,
+    harness: Option<&str>,
+    resume: impl FnOnce() -> Result<serde_json::Value, String>,
+) -> Result<Option<serde_json::Value>, String> {
+    if !should_resume_codex_goal(king_wake, successor, harness) {
+        return Ok(None);
+    }
+    resume().map(Some)
+}
+
 fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // ── subcommand check ──────────────────────────────────────────────────────
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
+    if subcommand == "readiness" {
+        return Ok(crate::loop_readiness::run(&args[1..]));
+    }
+    if subcommand == "command" {
+        return Ok(crate::reign_goal::run_provider_command(&args[1..]));
+    }
     if subcommand != "run" {
-        eprintln!("fno-agents loop: expected subcommand 'run', got '{subcommand}'");
-        eprintln!("Usage: fno-agents loop run --driver <name> [options]");
+        eprintln!("fno-agents loop: expected subcommand 'run', 'readiness', or 'command', got '{subcommand}'");
+        eprintln!("Usage: fno-agents loop run --driver <name> [options] | readiness [options] | command [options]");
         return Ok(2);
     }
     let args = &args[1..]; // skip "run"
@@ -650,7 +675,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             );
             return Ok(2);
         };
-        let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = crate::loopcheck::loopcheck_fno_bin();
         match crate::loop_king::KingQueue::from_manifest_full(
             &cwd,
             scope,
@@ -679,6 +704,53 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             Err(e) => {
                 eprintln!("fno-agents loop run: {e}");
                 return Ok(1);
+            }
+        }
+    }
+
+    if king_wake && !king_wake_successor {
+        if let Some(queue) = king_queue.as_ref() {
+            if let Ok(content) = std::fs::read_to_string(queue.manifest_path()) {
+                if let Some(manifest) = crate::king_termination::parse_king_manifest(&content) {
+                    let resumed = match try_resume_codex_goal_on_wake(
+                        king_wake,
+                        king_wake_successor,
+                        manifest.harness.as_deref(),
+                        || crate::reign_goal::resume(&manifest, &cwd),
+                    ) {
+                        Ok(resumed) => resumed,
+                        Err(error) => {
+                            eprintln!(
+                                "fno-agents loop run: Codex goal wake resume refused: {error}"
+                            );
+                            return Ok(1);
+                        }
+                    };
+                    if let Some(receipt) = resumed {
+                        let mut body = serde_json::json!({
+                            "session_id": manifest.harness_session_id.unwrap_or_default(),
+                            "scope": manifest.scope,
+                            "resumed": true,
+                            "successor": false,
+                            "provider_receipt": receipt,
+                        });
+                        if let Some(reason) = king_wake_reason.as_deref() {
+                            body["reason"] = serde_json::json!(reason);
+                        }
+                        if let Some(address) = king_wake_address.as_deref() {
+                            body["address"] = serde_json::json!(address);
+                        }
+                        let project_events = crate::paths::events_path(&cwd);
+                        let global_events = crate::loopcheck::default_global_events_path();
+                        crate::loopcheck::emit_to_both(
+                            &project_events,
+                            &global_events,
+                            "king_goal_resumed",
+                            body,
+                        );
+                        return Ok(0);
+                    }
+                }
             }
         }
     }
@@ -742,7 +814,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
-             skills/king-for-a-day, and encode each ruling in the graph before \
+             skills/reign, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \
              implement nodes yourself, dispatch and rule.{wake_clause}{detail_clause}"
         )
@@ -954,7 +1026,48 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_path_for_driver, king_wake_clause, king_wake_detail_clause};
+    use super::{
+        cancel_path_for_driver, king_wake_clause, king_wake_detail_clause,
+        try_resume_codex_goal_on_wake,
+    };
+
+    #[test]
+    fn only_an_admitted_non_successor_codex_wake_resumes_without_dispatch() {
+        let mut called = false;
+        let absent = try_resume_codex_goal_on_wake(false, false, Some("codex"), || {
+            called = true;
+            Ok(serde_json::json!({"status": "active"}))
+        })
+        .unwrap();
+        assert!(absent.is_none());
+        assert!(!called, "no admitted wake means no provider action");
+
+        let resumed = try_resume_codex_goal_on_wake(true, false, Some("codex"), || {
+            Ok(serde_json::json!({"status": "active"}))
+        })
+        .unwrap();
+        assert_eq!(resumed.unwrap()["status"], "active");
+        assert!(
+            try_resume_codex_goal_on_wake(true, true, Some("codex"), || {
+                Ok(serde_json::json!({"status": "active"}))
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            try_resume_codex_goal_on_wake(true, false, Some("claude"), || {
+                Ok(serde_json::json!({"status": "active"}))
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            try_resume_codex_goal_on_wake(true, false, Some("codex"), || {
+                Err("unreadable goal".to_string())
+            }),
+            Err(error) if error == "unreadable goal"
+        ));
+    }
     use std::path::{Path, PathBuf};
 
     #[test]

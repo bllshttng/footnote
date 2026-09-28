@@ -501,10 +501,127 @@ pub fn resolve_session_harness_from_table(
     None
 }
 
+/// True when COMMAND is Claude Code pool machinery rather than a session:
+/// the daemon's spare pool (`claude bg-spare ...`), its pty host
+/// (`claude bg-pty-host ...`), or the daemon itself (`.../claude daemon
+/// run ...`). Matched on an argv TOKEN, never a path segment: a real
+/// session's argv is `.../versions/<v> --resume <path>/<session-id>.jsonl
+/// --name <name>` and carries none of them. Measured argv shapes,
+/// 2026-09-17; deny-list posture, so adding a shape costs a measurement
+/// (sibling: `_SHARED_HOST_HARNESSES` in `session_pid.py`).
+fn is_claude_pool_machinery(command: &str) -> bool {
+    let argv: Vec<&str> = command.split_whitespace().collect();
+    if argv.is_empty() {
+        return false;
+    }
+    let after_bin = &argv[1..];
+    // `daemon` counts only as the argument directly after the claude binary;
+    // `--bg-spare` also appears in the pty host's argv tail.
+    (argv[0].to_lowercase().contains("claude") && after_bin.first() == Some(&"daemon"))
+        || after_bin
+            .iter()
+            .any(|a| *a == "--bg-spare" || *a == "--bg-pty-host")
+}
+
+/// The nearest harness ancestor's `(pid, harness)` walking UP from
+/// `start_pid` over `table`: the same walk as
+/// [`resolve_session_harness_from_table`], answering WHICH PROCESS, with one
+/// refusal the harness walk must not have. At the first harness match, a row
+/// that is Claude Code pool machinery returns `None` rather than continuing:
+/// the next `claude` ancestor is the daemon, pool machinery too, and it
+/// outlives every session it serves, so a pid answered there proves nothing
+/// about the session and pins a claim to machinery that never dies. The
+/// harness walk keeps matching the spare (it proves the harness is claude,
+/// which is true and still useful); only this walk answers identity.
+pub fn session_identity_from_table(
+    table: &BTreeMap<u32, ProcRow>,
+    start_pid: u32,
+) -> Option<(u32, &'static str)> {
+    let mut pid = start_pid;
+    let mut depth = 0;
+    while depth < MAX_ANCESTRY_DEPTH {
+        let row = table.get(&pid)?;
+        let command = row.command.as_str();
+        if let Some(harness) = harness_name_of_command(command) {
+            if is_claude_pool_machinery(command) {
+                return None;
+            }
+            return Some((row.pid, harness));
+        }
+        let ppid = row.ppid;
+        if ppid == 0 || ppid == pid {
+            return None;
+        }
+        pid = ppid;
+        depth += 1;
+    }
+    None
+}
+
+/// Ambient session identity `(durable pid, harness)`: the launcher-stamped
+/// proof pair leads with the rules `session_pid.py`'s docstrings state
+/// (`FNO_SESSION_PID` live answers the pid; a known `FNO_SESSION_HARNESS`
+/// beside a live pid answers the harness), otherwise the census walk decides.
+/// The pid half comes from the REFUSING walk
+/// ([`session_identity_from_table`]) and the harness half from the plain
+/// walk, so a thread worker under a `claude bg-spare` degrades to
+/// `(None, Some("claude"))`: no pid to pin a claim to, harness identity
+/// intact. `(None, None)` degrades exactly as before - the caller records no
+/// pid and the claim lives by its TTL.
+pub fn session_identity_ambient(start_pid: u32) -> (Option<u32>, Option<&'static str>) {
+    let env_pid = if stamp_pid_is_live() {
+        std::env::var("FNO_SESSION_PID")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    } else {
+        None
+    };
+    let stamp_harness = stamp_pair_harness();
+    // One census table serves whichever halves the stamps leave undecided:
+    // this runs on the renew path inside the per-claim recovery mutex, where
+    // the old subprocess needed a wall-clock bound.
+    let table = ancestry_table();
+    let harness = match env_pid.filter(|_| stamp_harness.is_some()) {
+        Some(_) => stamp_harness,
+        None => resolve_session_harness_from_table(&table, start_pid),
+    };
+    let pid = match env_pid {
+        Some(pid) => Some(pid),
+        None => session_identity_from_table(&table, start_pid).map(|(pid, _)| pid),
+    };
+    (pid, harness)
+}
+
 /// The census table as a pid -> row map, for the walks.
 pub fn ancestry_table() -> BTreeMap<u32, ProcRow> {
+    #[cfg(test)]
+    {
+        if let Some(table) = TEST_ANCESTRY_TABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return table;
+        }
+    }
     let (rows, _unreadable) = census::process_table();
     rows.into_iter().map(|r| (r.pid, r)).collect()
+}
+
+/// Test-only census override, so the renew tests can walk a SYNTHETIC
+/// ancestry (a bg-spare chain) instead of the host's. Claimed under
+/// `test_env_lock` by every writer and reader.
+#[cfg(test)]
+static TEST_ANCESTRY_TABLE: std::sync::Mutex<Option<BTreeMap<u32, ProcRow>>> =
+    std::sync::Mutex::new(None);
+
+/// Install (or clear with `None`) the test census. Callers hold
+/// `crate::claims::test_env_lock()`.
+#[cfg(test)]
+pub(crate) fn set_test_ancestry_table(table: Option<BTreeMap<u32, ProcRow>>) {
+    *TEST_ANCESTRY_TABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = table;
 }
 
 /// Ambient wrapper: the launcher-stamped proof pair
@@ -513,24 +630,8 @@ pub fn ancestry_table() -> BTreeMap<u32, ProcRow> {
 /// harness ancestor is found (a plain shell), so "unproven" and "no ancestor"
 /// are the same answer.
 pub fn resolve_session_harness_ambient() -> Option<&'static str> {
-    let stamp = std::env::var("FNO_SESSION_HARNESS").unwrap_or_default();
-    let stamp = stamp.trim().to_lowercase();
-    if [
-        "claude",
-        "codex",
-        "gemini",
-        "opencode",
-        "agy",
-        "cursor-agent",
-    ]
-    .contains(&stamp.as_str())
-    {
-        let pid_raw = std::env::var("FNO_SESSION_PID").unwrap_or_default();
-        if let Ok(pid) = pid_raw.trim().parse::<i64>() {
-            if pid > 0 && stamp_pid_is_live() {
-                return harness_static(&stamp);
-            }
-        }
+    if let Some(harness) = stamp_pair_harness() {
+        return Some(harness);
     }
     let table = ancestry_table();
     let ppid: u32 = unsafe { libc::getppid() } as u32;
@@ -543,8 +644,29 @@ fn stamp_pid_is_live() -> bool {
     let pid_raw = std::env::var("FNO_SESSION_PID").unwrap_or_default();
     match pid_raw.trim().parse::<u32>() {
         Ok(0) | Err(_) => false,
-        Ok(pid) => unsafe { libc::kill(pid as libc::pid_t, 0) == 0 },
+        Ok(pid) => match unsafe { libc::kill(pid as libc::pid_t, 0) } {
+            0 => true,
+            // EPERM proves the pid exists (another uid's process) - the
+            // same semantics psutil's pid_exists gives the retired python
+            // walk, which honored a cross-uid stamped pid.
+            -1 => std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+            _ => false,
+        },
     }
+}
+
+/// The harness half of a VALID launcher stamp pair: `FNO_SESSION_HARNESS`
+/// names a known harness and `FNO_SESSION_PID` is a positive, live pid. A
+/// stale or forged pair fails closed to the walk's own answer.
+fn stamp_pair_harness() -> Option<&'static str> {
+    let stamp = std::env::var("FNO_SESSION_HARNESS")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    if !stamp_pid_is_live() {
+        return None;
+    }
+    harness_static(&stamp)
 }
 
 /// Static helper so the stamp arm returns a `&'static str` tied to the table
@@ -569,7 +691,7 @@ fn harness_static(stamp: &str) -> Option<&'static str> {
 /// same property); `None` covers both "not carried" and "unreadable" because
 /// neither changes a caller decision.
 #[cfg(target_os = "macos")]
-fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
+pub(crate) fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
     if unsafe {
@@ -635,7 +757,7 @@ fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
+pub(crate) fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
     let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let prefix = format!("{marker}=");
     for entry in raw.split(|b| *b == 0) {
@@ -1011,7 +1133,7 @@ fn ambient_cwd() -> String {
 /// capture until the door enforces (schema v33 rollout).
 pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Result<(), String> {
     // Explicit dispatch context outranks ambient capture: a daemon
-    // producer (mission drain, blueprinter) exports FNO_SPAWN_ORIGIN +
+    // producer (the mission drain) exports FNO_SPAWN_ORIGIN +
     // FNO_SPAWN_OWNER naming its arm and the responsible mission/crown, and
     // those ride the request verbatim. A malformed carrier is a producer bug
     // and refuses by name instead of falling back silently.
@@ -1283,5 +1405,165 @@ mod tests {
             SpawnWork::new("w", "seed", "/repo"),
         );
         assert!(validate(&req).is_ok());
+    }
+
+    fn proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
+        ProcRow {
+            pid,
+            ppid,
+            state: 'S',
+            elapsed_s: 1,
+            cpu_pct: 0.0,
+            rss_kb: 0,
+            command: command.to_string(),
+        }
+    }
+
+    fn table_of(rows: &[ProcRow]) -> BTreeMap<u32, ProcRow> {
+        rows.iter().map(|r| (r.pid, r.clone())).collect()
+    }
+
+    // The three measured pool shapes (2026-09-17 `ps -eo pid,ppid,command`).
+    const BG_SPARE: &str =
+        "claude bg-spare --bg-spare /tmp/cc-daemon-501/608d3bdb/spare/6cd18353.claim.sock";
+    const BG_PTY_HOST: &str = "claude bg-pty-host --bg-pty-host /tmp/cc-daemon-501/608d3bdb/spare/1ec0c02a.pty.sock 200 50 -- --bg-spare /tmp/cc-daemon-501";
+    const DAEMON: &str =
+        "/Users/bb16/.local/bin/claude daemon run --origin transient --spawned-by {}";
+    const REAL_SESSION: &str =
+        "/Users/bb16/.local/share/claude/versions/2.1.0 --resume /tmp/s/abc123.jsonl --name w";
+
+    #[test]
+    fn pool_machinery_matches_the_measured_shapes_only() {
+        assert!(is_claude_pool_machinery(BG_SPARE));
+        assert!(is_claude_pool_machinery(BG_PTY_HOST));
+        assert!(is_claude_pool_machinery(DAEMON));
+        // A real session carries none of the tokens...
+        assert!(!is_claude_pool_machinery(REAL_SESSION));
+        // ...and `daemon` counts only after the claude binary.
+        assert!(!is_claude_pool_machinery(
+            "fno daemon run --origin transient"
+        ));
+        assert!(!is_claude_pool_machinery(""));
+    }
+
+    #[test]
+    fn session_identity_names_the_real_session_process() {
+        let table = table_of(&[
+            proc_row(100, 99, "bash /init.sh"),
+            proc_row(99, 90, REAL_SESSION),
+        ]);
+        assert_eq!(
+            session_identity_from_table(&table, 100),
+            Some((99, "claude"))
+        );
+    }
+
+    #[test]
+    fn session_identity_refuses_a_spare_ancestor() {
+        // A thread worker's tool shells hang off a pooled bg-spare: the walk
+        // must refuse, not continue to the daemon (pool machinery too) and
+        // not pin the claim to machinery that outlives every session.
+        let table = table_of(&[
+            proc_row(100, 90, "bash -c fno agents claim acquire"),
+            proc_row(90, 80, BG_SPARE),
+            proc_row(80, 1, DAEMON),
+        ]);
+        assert_eq!(session_identity_from_table(&table, 100), None);
+    }
+
+    #[test]
+    fn session_identity_refuses_pty_host_and_bare_daemon_ancestors() {
+        let table = table_of(&[proc_row(100, 70, BG_PTY_HOST)]);
+        assert_eq!(session_identity_from_table(&table, 100), None);
+        let table = table_of(&[proc_row(100, 80, DAEMON)]);
+        assert_eq!(session_identity_from_table(&table, 100), None);
+    }
+
+    #[test]
+    fn session_identity_degrades_on_a_plain_shell() {
+        // No harness anywhere in the chain (AC5-EDGE): None, byte for byte
+        // the pre-change behavior.
+        let table = table_of(&[proc_row(100, 1, "bash --login")]);
+        assert_eq!(session_identity_from_table(&table, 100), None);
+        // A start pid outside the table degrades the same way.
+        assert_eq!(session_identity_from_table(&table, 404), None);
+    }
+
+    #[test]
+    fn ambient_stamp_pair_answers_both_halves() {
+        // The moved Python stamp rules: a valid pair leads; a dead stamped
+        // pid or an unknown harness name fails closed to the walk. The census
+        // override is a spare chain, so ONLY a valid stamp can answer.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_pid = std::env::var_os("FNO_SESSION_PID");
+        let saved_harness = std::env::var_os("FNO_SESSION_HARNESS");
+        let saved_table = TEST_ANCESTRY_TABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        *TEST_ANCESTRY_TABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(table_of(&[
+            proc_row(100, 90, "bash -c fno agents claim acquire"),
+            proc_row(90, 80, BG_SPARE),
+        ]));
+        let me = std::process::id();
+        std::env::set_var("FNO_SESSION_PID", me.to_string());
+        std::env::set_var("FNO_SESSION_HARNESS", "claude");
+        assert_eq!(
+            session_identity_ambient(100),
+            (Some(me), Some("claude")),
+            "the valid pair answers both halves without a walk"
+        );
+        // A dead stamped pid: the pair is ignored, the walk refuses -> None.
+        let corpse = {
+            let mut candidate = 4_194_300u32;
+            while unsafe { libc::kill(candidate as libc::pid_t, 0) } == 0 {
+                candidate += 1;
+            }
+            candidate
+        };
+        std::env::set_var("FNO_SESSION_PID", corpse.to_string());
+        assert_eq!(
+            session_identity_ambient(100),
+            (None, Some("claude")),
+            "the harness walk behind the spare still proves claude"
+        );
+        // An unknown harness name invalidates the pair the same way.
+        std::env::set_var("FNO_SESSION_PID", me.to_string());
+        std::env::set_var("FNO_SESSION_HARNESS", "not-a-harness");
+        assert_eq!(
+            session_identity_ambient(100),
+            (Some(me), Some("claude")),
+            "pid stamp stands alone; harness falls to the walk, not the forgery"
+        );
+        match saved_pid {
+            Some(v) => std::env::set_var("FNO_SESSION_PID", v),
+            None => std::env::remove_var("FNO_SESSION_PID"),
+        }
+        match saved_harness {
+            Some(v) => std::env::set_var("FNO_SESSION_HARNESS", v),
+            None => std::env::remove_var("FNO_SESSION_HARNESS"),
+        }
+        *TEST_ANCESTRY_TABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved_table;
+    }
+
+    #[test]
+    fn harness_walk_still_proves_claude_behind_a_spare() {
+        // The refusal is the IDENTITY walk's alone. The harness answer stays
+        // truthful behind a spare, or thread-worker identity resolution
+        // (self_identity, spawn gates) breaks.
+        let table = table_of(&[
+            proc_row(100, 90, "bash -c fno agents claim acquire"),
+            proc_row(90, 80, BG_SPARE),
+        ]);
+        assert_eq!(
+            resolve_session_harness_from_table(&table, 100),
+            Some("claude")
+        );
     }
 }

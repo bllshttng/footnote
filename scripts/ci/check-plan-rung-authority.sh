@@ -14,17 +14,16 @@
 # invisible in review - the whole defect class started as one reasonable-looking
 # `grep '^status:'`.
 #
-# THE RUST SIDE HAS NO PARSER, AND THAT IS THE INVARIANT.
-# The design that produced this check assumed `loopcheck.rs` parsed plan
-# frontmatter status and specified a fixture-corpus parity harness against it.
-# Reading the source says otherwise: loopcheck.rs and loop_target.rs parse
-# `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
-# finalize.rs shells out to `fno do plan validate`/`stamp`. The registered Rust
-# plan readers consume activation-specific keys, never `status:`.
+# THE RUST SIDE HAS NO READINESS CLASSIFIER, AND THAT IS THE INVARIANT.
+# loopcheck.rs and loop_target.rs parse `.fno/target-state.md` (a DIFFERENT
+# vocabulary - COMPLETE|BLOCKED|ABORTED). The registered Rust plan readers
+# consume activation-specific keys, never `status:`. The one Rust code that
+# does touch `status:` is the plan-doc WRITER (crates/fno-agents/src/plan_doc/):
+# it stamps and projects the status line from the graph, and never answers
+# "is this plan ready?". It is registered apart from the readers below.
 #
-# So there is nothing on the far side to pin, and a parity harness would freeze
-# a contract with one participant. What can actually regress is someone ADDING
-# a Rust plan-status reader, so that is what this guards.
+# What can actually regress is someone ADDING a Rust plan-status reader that
+# classifies readiness, so that is what this guards.
 #
 # Pure text extraction: no build, no Rust binary, no Python import.
 set -uo pipefail
@@ -378,17 +377,34 @@ fi
 echo "--- Rust: no plan-status reader ---"
 # blueprint_judge.rs grades plan prose against five product questions;
 # it never classifies `status:` frontmatter.
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/blueprint_judge.rs
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/backlog/create_cli.rs
+crates/fno-agents/src/backlog/session_cli.rs
+crates/fno-agents/src/backlog/update_cli.rs
+crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs
 crates/fno-agents/src/merge_hold.rs
 crates/fno-agents/src/surface_check.rs"
+# create_cli.rs reads only the plan frontmatter `status` scalar and hands it
+# to the shared rung table (graph_store::supplied_plan_rung) for the wave
+# append's plan-rung map; it classifies nothing itself, so the shelling rule
+# does not apply to it.
+# update_cli.rs reads only the plan frontmatter `size` (the doc->graph
+# linked-size flow on a plan relink); it never extracts a plan status, so
+# the shelling rule does not apply to it.
+# session_cli.rs reads only the plan frontmatter `claims:`/`node:` names
+# (the blueprint-session plan-claims join); it never extracts a plan
+# status, so the shelling rule does not apply to it.
 # merge_hold.rs reads only the dispatch_hold block (the hold the merge gate
 # refuses on); it never extracts a plan status, so the shelling rule does not
 # apply to it.
 # surface_check.rs reads only the surface: block (shape + the cross-language
 # walk); it never extracts a plan status, so the shelling rule does not
 # apply to it.
+# The plan-doc writer writes the status line the graph decides (stamp,
+# graduate, projection). It reads status only to keep its writes forward-only,
+# so it is exempt from both scans; readiness stays with `fno do plan rung`.
+RUST_PLAN_DOC_WRITER_DIR="crates/fno-agents/src/plan_doc/"
 
 # The spelling detector below catches ordinary plan readers; the semantic
 # fallback (`rust_reads_frontmatter_status`, defined with the self-test
@@ -401,7 +417,8 @@ actual=$(
             echo "$source"
         fi
     done <<EOF
-$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | LC_ALL=C sort || true)
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' \
+    | grep -vF "$RUST_PLAN_DOC_WRITER_DIR" | LC_ALL=C sort || true)
 EOF
 )
 if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
@@ -431,6 +448,53 @@ while IFS= read -r reader; do
         matches="$(
             printf '%s\n' "$matches" \
                 | grep -vE '^[0-9]+:[[:space:]]*\.args\(\["status",[[:space:]]*"--porcelain"\]\)[;]?[[:space:]]*$' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/merge_hold.rs" ]; then
+        # merge_hold's #[cfg(test)] fixtures seed graph ROWS whose JSON
+        # carries a "status" field (graph vocabulary, not plan frontmatter);
+        # the reader itself never touches a plan document.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '^[0-9]+:[[:space:]]*"status":[[:space:]]*"ready",$' \
+                | grep -vE '"(type|slug|title|parent|priority|plan_path|cwd|id)":' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/create_cli.rs" ]; then
+        # create_cli's "status" literals are GRAPH-row reads (the dedup warn
+        # line names the candidate's row status); its only plan read is the
+        # raw `status:` scalar handed to graph_store::supplied_plan_rung,
+        # which classifies it against the one rung table.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '\.get\("status"\)' \
+                | grep -vE '"status":[[:space:]]*"idea",' \
+                | grep -vE '"status"\.into\(\)' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/update_cli.rs" ]; then
+        # update_cli's "status" literals are GRAPH-row reads (post-write
+        # receipts and the lock-wedge check on the node row), never plan
+        # frontmatter; its only plan read is the frontmatter `size` via the
+        # plan_doc codec, which the plan-doc writer exemption already covers.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '\.get\("status"\)|row\.get\("status"\)' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/session_cli.rs" ]; then
+        # session_cli's "status" literals are GRAPH-row reads (the reap-open
+        # open-phase check) and the verbs' own JSON receipt vocabulary
+        # (joined/opened/closed/skipped/ended), never plan frontmatter; its
+        # only plan read is the frontmatter `claims:`/`node:` name walk.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '\.get\("status"\)' \
+                | grep -vE '"status": (status,|if ended_existing|"(joined|opened|closed|skipped)")' \
                 || true
         )"
     fi

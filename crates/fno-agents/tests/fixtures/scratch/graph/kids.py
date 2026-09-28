@@ -1,6 +1,7 @@
-import json, os
-g = json.load(open(os.path.expanduser("~/.fno/graph.json")))
-nodes = g["entries"]
+from fno.graph.store import read_graph_strict
+from fno.paths import graph_json
+
+nodes = read_graph_strict(graph_json())
 byid = {n["id"]: n for n in nodes}
 epic = byid["NODEID"]
 kids = epic.get("children") or []

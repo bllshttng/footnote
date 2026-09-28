@@ -445,40 +445,6 @@ def test_hook_logs_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert result.name == "hook-logs"
 
 
-def test_plans_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: plans_dir() returns project-relative .fno/plans/ resolved absolute."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.paths import plans_dir
-
-    # Pass explicit project_root so test doesn't depend on git
-    result = plans_dir(project_root=tmp_path)
-    assert isinstance(result, Path)
-    assert result.is_absolute()
-    assert "plans" in result.parts
-
-
-def test_plans_dir_honors_project_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-FIX2: plans_dir(project_root=bar) must use bar, not CWD."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    # Set FNO_REPO_ROOT to a different location so CWD fallback would differ
-    project_bar = tmp_path / "bar"
-    project_bar.mkdir()
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path / "foo"))
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=project_bar)
-    # Anchored to project_bar's space, NOT under tmp_path/foo (the CWD fallback)
-    from fno.paths import space_dir
-
-    assert result == space_dir(project_bar) / "plans", (
-        f"Expected {space_dir(project_bar) / 'plans'}, got {result}"
-    )
-
-
 def test_inbox_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-HP: inbox_dir() returns project-relative .fno/inbox/ resolved absolute."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
@@ -673,29 +639,6 @@ def test_vault_in_state_dir_with_obsidian_disabled_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_project_in_plans_dir_uses_root_basename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-EDGE: {project} in plans_dir uses project_root.name (no redundant git call).
-
-    Previously this raised ValueError for non-git dirs. The fix uses root.name
-    directly since resolve_repo_root() already ran git rev-parse; the git
-    re-run was redundant. Non-git dirs now resolve to the directory basename.
-    """
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
-    )
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-
-    from fno.paths import plans_dir
-
-    # Resolves to <tmp_path>/.fno/plans/<tmp_path.name>
-    result = plans_dir(project_root=tmp_path)
-    assert result == (tmp_path / ".fno" / "plans" / tmp_path.name).resolve()
-
-
 # ---------------------------------------------------------------------------
 # AC1-EDGE: Unknown {foo} variable rejected at resolve time
 # ---------------------------------------------------------------------------
@@ -722,21 +665,22 @@ def test_unknown_template_variable_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_graph_json_override(
+def test_graph_json_uses_state_dir_even_if_the_removed_override_is_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1-HP: paths.graph_json explicit value overrides state_dir derivation."""
+    """The retired paths.graph_json key cannot move the store anchor."""
+    custom_dir = str(tmp_path / "state")
     custom_json = str(tmp_path / "custom" / "g.json")
     _set_settings(
         monkeypatch,
         tmp_path,
-        f"schema_version: 1\nconfig:\n  paths:\n    graph_json: '{custom_json}'\n",
+        f"schema_version: 1\nconfig:\n  state_dir: '{custom_dir}'\n  paths:\n    graph_json: '{custom_json}'\n",
     )
 
     from fno.paths import graph_json
 
     result = graph_json()
-    assert result == Path(custom_json).resolve()
+    assert result == Path(custom_dir).resolve() / "graph.json"
 
 
 def test_explicit_briefs_dir_override(
@@ -759,27 +703,6 @@ def test_explicit_briefs_dir_override(
 # ---------------------------------------------------------------------------
 # AC1-HP: {vault} resolves when obsidian.enabled: true
 # ---------------------------------------------------------------------------
-
-
-def test_vault_template_resolves_when_obsidian_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-HP: {vault} in plans_dir resolves correctly when obsidian.enabled: true."""
-    vault_dir = str(tmp_path / "my-vault")
-    # Use {vault} (single braces) in YAML - not Python f-string interpolation
-    # The f-string uses {{ }} to produce literal braces in the resulting string
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        f"schema_version: 1\nconfig:\n  plans_dir: '{{vault}}/plans'\n"
-        f"  obsidian:\n    enabled: true\n    vault: '{vault_dir}'\n",
-    )
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=tmp_path)
-    assert str(result).startswith(vault_dir)
-    assert "plans" in str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1150,24 +1073,6 @@ def test_two_worktrees_same_remote_share_one_folder(
     assert str(ra).endswith("internal/footnote/observer-reports")
 
 
-def test_no_remote_falls_back_to_basename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Scenario 3: no origin remote falls back to basename without crashing."""
-    checkout = tmp_path / "scratch"
-    _git_init_with_remote(checkout, None)  # no remote
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
-    )
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=checkout)
-    assert result.name == "scratch"
-
-
 def test_traversal_project_id_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1223,21 +1128,138 @@ def test_unset_project_id_warns_once_per_process(
     assert "config.project.id" in err
 
 
-def test_project_template_uses_remote_slug_in_non_vault_path(
+# ---------------------------------------------------------------------------
+# x-fc25: FNO_STATE_DIR - the pinned carrier for the state root
+# ---------------------------------------------------------------------------
+
+
+def test_state_dir_honors_fno_state_dir_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Blast radius: {project} in a plain config.paths.* value (no vault) also
-    resolves to the stable remote slug, not the checkout basename."""
-    checkout = tmp_path / "athens"
-    _git_init_with_remote(checkout, "https://github.com/org/footnote.git")
+    """The env carrier moves the state root ahead of the config default.
+
+    seal_state_root pins this var around a forwarded HOME, so a worker on a
+    non-claude oauth_dir account resolves the same graph.json its parent did.
+    """
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import graph_json, state_dir
+
+    assert state_dir() == (tmp_path / "pinned").resolve()
+    assert graph_json() == (tmp_path / "pinned").resolve() / "graph.json"
+
+
+def test_state_dir_empty_carrier_falls_back_to_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty value counts as unset, matching the FNO_AGENTS_HOME idiom."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", "")
+
+    from fno.paths import state_dir
+
+    assert state_dir().name == ".fno"
+
+
+def test_locks_dir_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """locks_dir honors the carrier: it is config-free, so both stamp and
+    append writers still agree under it without loading settings."""
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import locks_dir
+
+    assert locks_dir() == (tmp_path / "pinned").resolve() / "locks"
+
+
+def test_locks_dir_stays_home_anchored_without_the_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No carrier means the deliberate $HOME anchor, unchanged."""
+    monkeypatch.delenv("FNO_STATE_DIR", raising=False)
+
+    from fno.paths import locks_dir
+
+    assert locks_dir() == Path.home() / ".fno" / "locks"
+
+
+def test_ledger_json_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sealed worker's ledger follows the pinned root, never the raw
+    relative-config fallback that would strand it under the moved HOME."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import ledger_json
+
+    assert ledger_json() == (tmp_path / "pinned").resolve() / "ledger.json"
+
+
+def test_migrate_from_checkout_refuses_the_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC5-EDGE: the state root is not a checkout journal. A session whose
+    cwd was $HOME outside a checkout once moved the GLOBAL journal into a fake
+    space behind a MOVED-TO pointer at the top level of the state root; the
+    refusal keeps the pointer and the fake-space move from ever recurring."""
+    state = tmp_path / ".fno"
+    state.mkdir()
+    old = state / "events.jsonl"
+    old.write_text("global rows\n")
+    new = tmp_path / "spaces" / "x" / "events.jsonl"
+    monkeypatch.setenv("FNO_STATE_DIR", str(state))
+
+    from fno.paths import migrate_from_checkout
+
+    assert migrate_from_checkout(old, new) is False
+    assert old.exists()
+    assert not (state / "MOVED-TO").exists()
+
+
+def test_agents_registry_path_follows_declared_agents_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-HP: with FNO_AGENTS_HOME declared, a bare write_registry lands in
+    the declared home, never the config state_dir (the 2026-09-27 probe
+    overwrote the live registry through exactly this gap)."""
+    from fno.agents.registry import AgentEntry, write_registry
+
     _set_settings(
         monkeypatch,
         tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
+        f"schema_version: 1\nconfig:\n  state_dir: '{tmp_path / '.fno'}'\n",
     )
+    declared = tmp_path / "other" / "agents"
+    declared.mkdir(parents=True)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(declared))
 
-    from fno.paths import plans_dir
+    entry = AgentEntry(
+        name="leader",
+        cwd="/tmp/x",
+        log_path="/tmp/x/log",
+        harness="claude",
+        harness_session_id="aaaaaaaa-0000-0000-0000-111111111111",
+    )
+    write_registry([entry])
 
-    result = plans_dir(project_root=checkout)
-    assert result.name == "footnote"
-    assert "athens" not in result.name
+    assert (declared / "registry.json").is_file()
+    assert not (tmp_path / ".fno" / "agents" / "registry.json").exists()
+
+
+def test_agents_registry_path_stays_state_dir_without_declared_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-EDGE: FNO_AGENTS_HOME unset keeps the config state_dir path."""
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        f"schema_version: 1\nconfig:\n  state_dir: '{tmp_path / '.fno'}'\n",
+    )
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
+
+    from fno.paths import agents_registry_path
+
+    assert agents_registry_path() == tmp_path / ".fno" / "agents" / "registry.json"

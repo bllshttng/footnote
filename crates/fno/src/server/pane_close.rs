@@ -1,34 +1,48 @@
-//! What happens when one pane closes : the close cascade, the
-//! portal stand-in swap, and the loss notice a vanishing portal owes the
-//! operator who was reading it.
+//! What happens when one pane closes: the close cascade, the parked
+//! screen a dead viewer's portal keeps showing, and the loss notice a
+//! vanishing portal owes the operator who was reading it.
 
 use super::*;
 
+/// Why a pane is closing. The split: a portal outlives its viewer, so a
+/// seat whose VIEWER died keeps its place and parks on the no-signal
+/// screen, while an operator close closes the pane like any pane's. The
+/// close path is told apart by cause, never by the free-text reason
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseCause {
+    /// The pane's child exited on its own: the PTY exit arm, the reap
+    /// backstop, or a session retire. A live viewer seat always gets the
+    /// parked screen.
+    ViewerDied,
+    /// An operator gesture: prefix+x, `fno mux pane kill`, the row menu's
+    /// Close portal. Never mints a screen, so N deliberate closes can
+    /// never leave N shells holding N tabs open.
+    Operator,
+}
+
 impl Core {
-    /// Close one pane: kill+reap its PTY, remove it from the tree (collapse +
-    /// focus re-anchor inside `tree::close`), cascade empty tab -> squad ->
-    /// session (Locked 8). Idempotent: an unknown pane (double-close race,
-    /// AC4-ERR) is a no-op.
-    ///
-    /// A portal seat is the one exception, and only when it is alone
-    /// in its tab AND is the LAST open portal: a viewer whose child died must
-    /// not delete the only window onto the fleet. An idle shell takes the leaf
-    /// (`tree::replace_leaf`, the repoint mechanic) and the entry names the
-    /// shell as a stand-in seat, so the next reach lands in the SAME tab. A
-    /// spawn failure falls through to today's behavior: losing the tab is bad,
-    /// wedging a tab around a dead pane is worse. A plain pane keeps today's
-    /// semantics exactly (AC8-FR) - the arm is gated on a recorded seat id.
-    ///
-    /// With another portal open, "the only window" is false, so the
-    /// swap does not fire and the closing portal simply goes away with its
-    /// pane. Either way the entry is dropped unless a stand-in took the seat.
+    /// Close one pane whose child exited on its own: the death path. A live
+    /// viewer seat always swaps to the parked screen (the portal outlives
+    /// its viewer: the window stays, the channel goes quiet), and a spawn
+    /// failure falls through to the plain close with its loss notice.
+    pub(super) fn close_viewer_died(&mut self, pid: u64, reason: &str) -> Flow {
+        self.close_pane_for(pid, reason, CloseCause::ViewerDied)
+    }
+
+    /// Close one pane by operator gesture: the pane goes away like any
+    /// pane's, no screen is minted, and a vanishing portal's loss notice
+    /// still names what the operator was reading.
+    pub(super) fn close_pane_reasoned(&mut self, pid: u64, reason: &str) -> Flow {
+        self.close_pane_for(pid, reason, CloseCause::Operator)
+    }
+
+    /// [`Core::close_pane_reasoned`] with the default reason.
     pub(super) fn close_pane(&mut self, pid: u64) -> Flow {
         self.close_pane_reasoned(pid, "pane closed")
     }
 
-    /// [`Core::close_pane`] with the reason the pane is dying, which a
-    /// vanishing portal's loss notice carries.
-    pub(super) fn close_pane_reasoned(&mut self, pid: u64, reason: &str) -> Flow {
+    fn close_pane_for(&mut self, pid: u64, reason: &str, cause: CloseCause) -> Flow {
         let Some((sid, ti)) = self.session.find_pane(pid) else {
             // Unknown to the tree; still reap a stray registry entry so a
             // half-created pane can never leak a child process.
@@ -48,33 +62,15 @@ impl Core {
             // has to stay closable by hand, so only a real viewer (argv
             // provenance) triggers the replacement.
             && self.panes.get(&pid).is_some_and(|e| e.cmd.is_some());
-        // The stand-in exists because "a viewer whose child died must
-        // not delete the only window onto the fleet". With another portal open
-        // that premise is false, so only the LAST portal keeps its seat alive.
-        // Without this, closing four portals leaves four idle stand-in shells
-        // each holding a tab open.
-        //
-        // LIVE seats, not `portals.len()`. An entry whose pane closed by some
-        // other path stays in the map on purpose - the reach reads its tab id
-        // to land a replacement viewer lands back where the operator had it,
-        // the stale-slot behavior the single slot always had. Counting entries
-        // would let one of those dead rows disarm the swap for a real portal.
-        // The dying pane is still in `panes` here (the reap is last), so it
-        // counts itself: `<= 1` means it is the only live one.
-        let live_portals = self
-            .portals
-            .values()
-            .filter(|portal| self.panes.contains_key(&portal.seat))
-            .count();
-        let last_portal = live_portals <= 1;
-        let lone = seat
-            && last_portal
-            && self.session.squad(sid).is_some_and(|sq| {
-                sq.tabs
-                    .get(ti)
-                    .is_some_and(|t| tree::leaves(&t.root).len() == 1)
-            });
-        if lone {
+        // The stand-in exists because a viewer whose child died must not
+        // delete a window onto the fleet - ANY window, not only the last
+        // one. Every live viewer seat keeps its place on the death path;
+        // `tree::replace_leaf` works in a tab of any leaf count. The
+        // operator path skips the swap: a deliberate close must leave the
+        // tab closable, not swapped for a shell the operator never asked
+        // for.
+        let keep_seat = seat && cause == CloseCause::ViewerDied;
+        if keep_seat {
             let (rows, cols) = self
                 .panes
                 .get(&pid)
@@ -85,33 +81,43 @@ impl Core {
                 .squad(sid)
                 .map(|s| s.canonical_cwd().to_string())
                 .unwrap_or_default();
-            if let Ok(shell_pid) = self.spawn_pane(rows, cols, &cwd) {
+            // The channel stays parked: the portal keeps its index and
+            // leaf and shows the no-signal screen. No interactive shell is
+            // minted, so a dead viewer can never multiply tabs.
+            let channel = self
+                .portals
+                .get(&seat_portal.expect("seat implies a portal"))
+                .map(|portal| portal.row_key.clone())
+                .unwrap_or_default();
+            if let Ok(screen_pid) = self.spawn_parked_screen(&channel, rows, cols, &cwd) {
                 let tab = &mut self.session.squad_mut(sid).expect("live squad").tabs[ti];
-                if tree::replace_leaf(tab, pid, shell_pid) {
-                    // Spawn-first paid off: swap the seat to the stand-in and
-                    // reap the dead viewer last, the repoint arm's ordering.
+                if tree::replace_leaf(tab, pid, screen_pid) {
+                    // Spawn-first paid off: swap the seat to the parked
+                    // screen and reap the dead viewer last, the repoint
+                    // arm's ordering.
                     if let Some(portal) = seat_portal.and_then(|idx| self.portals.get_mut(&idx)) {
-                        portal.seat = shell_pid;
+                        portal.seat = screen_pid;
                     }
                     self.reap_pane(pid);
                     self.push_layout(true);
+                    if let Some(idx) = seat_portal {
+                        let line = format!("portal {idx}: no signal - {channel} ended");
+                        self.write_restore_message(screen_pid, &line);
+                        self.notice_all(line);
+                    }
                     return Flow::Continue;
                 }
-                // The tab closed under the swap: undo the shell and fall
-                // through to today's path.
-                self.reap_pane(shell_pid);
+                // The tab closed under the swap: undo the screen and fall
+                // through to the plain close below.
+                self.reap_pane(screen_pid);
             }
         }
-        // No stand-in took the seat. The entry is deliberately LEFT
-        // naming the now-dead pane, exactly as closing the single dedicated
-        // pane always did: the reach treats a recorded pane the tree no longer
-        // knows as absent, and reads its remembered tab id so a replacement
-        // viewer lands back where the operator had it. Liveness is computed
-        // from `panes` above, so a stale row can never be mistaken for an open
-        // portal.
-        // A portal vanishing under a live operator destroys the
-        // evidence they were reading, so the loss is broadcast, never silent.
-        // The swap above keeps the view, so it does not reach this.
+        // No screen took the seat. The portal is GONE: an operator close
+        // removes the entry, and a death whose parked screen failed to
+        // spawn loses it too - a portal lives until the operator closes
+        // it, and every survivor keeps a live screen on its entry. The
+        // reach still reads a remembered tab for one generation, but the
+        // map no longer carries a stale row.
         if seat {
             let idx = seat_portal.expect("seat implies a portal");
             if let Some(portal) = self.portals.get(&idx) {
@@ -120,6 +126,7 @@ impl Core {
                     portal.row_key
                 ));
             }
+            self.portals.remove(&idx);
         }
         self.reap_pane(pid);
         let ident = self.squad_identity(sid);
@@ -160,6 +167,52 @@ impl Core {
             }
             _ => self.close_pane_reanchor(tid, sid),
         }
+    }
+
+    /// The `Command::ClosePane` body: close the pane the operator's view
+    /// focuses, de-recruiting any worker membership it carried. Shared with
+    /// `close_portal`, which validates the seat first.
+    pub(super) fn close_by_operator(&mut self, pid: u64) -> Flow {
+        // Capture membership BEFORE the reap clears it, reconcile AFTER
+        // the close settles (so squad-survival is known) - user close
+        // de-recruits (AC3-EDGE).
+        let ctx = self.member_ctx(pid);
+        let worker_ctx = self.worker_member_context(pid);
+        let flow = self.close_pane_reasoned(pid, "closed by operator");
+        self.reconcile_member_close(ctx, false);
+        if let Some(worker_ctx) = worker_ctx {
+            self.reconcile_worker_member_close(&worker_ctx, false);
+        }
+        flow
+    }
+
+    /// Close ONLY the portal seat `seat`: the viewer pane, never the row it
+    /// shows. The thread keeps running and can be shown again anywhere.
+    /// Fail-closed: a pane that is no live portal seat, or the session's
+    /// last pane (its close would end the session), gets a notice and
+    /// nothing else.
+    pub(super) fn close_portal(&mut self, client_id: u64, seat: u64) -> Flow {
+        // Liveness in the find: a stale entry still NAMES a closed seat,
+        // and a close that lands on nothing must refuse, not no-op.
+        let seat_portal = self
+            .portals
+            .iter()
+            .find(|(_, portal)| portal.seat == seat && self.panes.contains_key(&portal.seat))
+            .map(|(idx, _)| *idx);
+        let Some(idx) = seat_portal else {
+            self.notice(client_id, format!("pane {seat} is not a portal seat"));
+            return Flow::Continue;
+        };
+        if self.panes.len() <= 1 {
+            self.notice(
+                client_id,
+                format!(
+                    "portal {idx} is the session's only pane; closing it would end the session"
+                ),
+            );
+            return Flow::Continue;
+        }
+        self.close_by_operator(seat)
     }
 
     /// Shared re-anchor tail of `close_pane`'s surviving-session arms.

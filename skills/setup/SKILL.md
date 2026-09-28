@@ -57,6 +57,8 @@ Parse the JSON. Before asking, read each field's current value from the target f
 
 Today the `always` set is small. It covers Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. The plan is the whole scalar question set. The only questions outside it are the two named exceptions below - the Step 2b review gate and the Step 3 workspace topology map.
 
+Question pages need no setup: the attention arm writes one page per open question to the vault's questions folder whenever it beats. See [attention-items](../../docs/architecture/attention-items.md).
+
 ## Step 2: Write each answer through `fno config set`
 
 Write the GLOBAL scope by default; pass `--local` for `/setup local`:
@@ -149,17 +151,19 @@ IT spawns (`config.mux.shell_integration: mux-panes`, on by default), so blocks
 "just work" in mux panes with zero config and WITHOUT touching the user's rc.
 
 Blocks in the user's OTHER terminals (iTerm, Terminal.app, a non-mux tab) need
-the markers too. Offer to add ONE eval line to their shell rc - never silently,
-always reversible:
+the markers too, and the same eval line registers shell completion for the
+native `fno` command tree (tab completion falls back to the shell default for
+the roots that still forward to Python). Offer to add ONE eval line to their
+shell rc - never silently, always reversible:
 
 ```bash
 # Detect their shell, then OFFER (ask [y/N], default no):
-#   "Add OSC 133 block markers to your global <zsh|bash> rc so blocks work in
-#    every terminal, not just mux panes? This appends one commented line to
-#    ~/.zshrc (or ~/.bashrc). [y/N]"
+#   "Add OSC 133 block markers and fno shell completion to your global <zsh|bash>
+#    rc so blocks and completion work in every terminal, not just mux panes?
+#    This appends one commented line to ~/.zshrc (or ~/.bashrc). [y/N]"
 # On y ONLY, append (idempotent - skip if _FNO_OSC133 already present):
 grep -q _FNO_OSC133 ~/.zshrc 2>/dev/null || {
-  printf '\n# fno OSC 133 block markers (remove this line + the next to undo)\n' >> ~/.zshrc
+  printf '\n# fno OSC 133 block markers + shell completion (remove this line + the next to undo)\n' >> ~/.zshrc
   echo 'eval "$(fno mux shell-init zsh)"' >> ~/.zshrc
 }
 ```
@@ -193,6 +197,16 @@ wizard ever surfaces a key that is not a real model leaf.
 If RTK is detected (e.g. `~/code/dotfiles/bin/rtk-claude-hook.sh`), note that it
 is already wired and do NOT run `rtk init -g` (it would double-wire). This is
 informational only; it is not a `config.toml` key.
+
+## Companions (code index)
+
+When the repo has a code index, a blueprint asks it before it searches. footnote ships no indexer and never installs one. From the repo root, run `bash "${SKILL_DIR}/scripts/lib/code-index-detect.sh"`. It prints one line per index it finds: the name, the roles, `ready` or `unavailable:<reason>`, and the manifest path.
+
+- A `ready` line: tell the user a blueprint will ask that index. Read the `refresh` line in its manifest and name it as the command that keeps the index current. Do not run it.
+- An `unavailable` line: the index exists, but its CLI is not on PATH. Name the reason. A blueprint records the index as unavailable and continues.
+- No line: tell the user a blueprint works without an index. Name codegraph for code and graphify for docs as examples they can install. For a provider of their own, link [code-index-providers.md](../../docs/code-index-providers.md).
+
+This is informational only. It writes no `config.toml` key.
 
 ## Known Limitations and Deferred Work
 

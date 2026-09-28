@@ -206,6 +206,7 @@ AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     # The substrate stamp is identity, not routing: it says where THIS session
     # runs. A child that inherits it reports its parent's substrate for life.
     FNO_AGENT_SUBSTRATE,
+    "FNO_NODE_REASON",
 )
 
 

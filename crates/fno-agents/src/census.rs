@@ -25,6 +25,7 @@ const TAG_REPLY: u8 = 5; // both keepers
 /// One row of the process table: the columns `ps -Ao
 /// pid,ppid,state,etime,%cpu,rss,command` reports, read without exec'ing
 /// `ps` (setuid on macOS, so a sandboxed caller's seatbelt refuses it).
+#[derive(Debug, Clone)]
 pub struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
@@ -33,6 +34,122 @@ pub struct ProcRow {
     pub cpu_pct: f64,
     pub rss_kb: u64,
     pub command: String,
+}
+
+/// The shared Codex app-server's census row: health and installed-version
+/// readiness are DIFFERENT axes, so the row carries both. A healthy daemon
+/// running a version older than the installed CLI reads healthy + stale,
+/// never healthy alone and never no row.
+fn codex_app_server_rows() -> Vec<Value> {
+    let readiness = crate::codex_daemon_readiness::codex_daemon_readiness();
+    let verdict = match readiness.verdict {
+        crate::codex_daemon_readiness::VersionVerdict::Current => "current",
+        crate::codex_daemon_readiness::VersionVerdict::Stale => "stale",
+        crate::codex_daemon_readiness::VersionVerdict::Ahead => "ahead",
+        crate::codex_daemon_readiness::VersionVerdict::Unknown => "unknown",
+    };
+    let health = if readiness.healthy { "healthy" } else { "down" };
+    let evidence = format!(
+        "installed {}, live {}, {}, home {}",
+        readiness
+            .installed_version
+            .as_deref()
+            .unwrap_or("unreadable"),
+        readiness.live_version.as_deref().unwrap_or("unreadable"),
+        health,
+        readiness.codex_home,
+    );
+    // No exe: the readiness reader knows the pid, never the binary path, and
+    // the exe-position field must not carry a directory and read like one.
+    let mut row = row(
+        "codex-app-server",
+        readiness.pid,
+        Some("codex-app-server".to_string()),
+        None,
+        readiness.start_token.map(|t| t as f64),
+        verdict,
+        evidence.as_str(),
+    );
+    row["installed_version"] = json!(readiness.installed_version);
+    row["live_version"] = json!(readiness.live_version);
+    row["codex_home"] = json!(readiness.codex_home);
+    vec![row]
+}
+
+#[cfg(test)]
+pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
+    ProcRow {
+        pid,
+        ppid,
+        state: 'S',
+        elapsed_s: 1,
+        cpu_pct: 0.0,
+        rss_kb: 0,
+        command: command.to_string(),
+    }
+}
+
+/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
+/// `kill(pid, 0)` keeps succeeding while it holds no fds and serves nothing.
+/// On macOS the kernel record is the sysctl `KERN_PROC_PID` read (the
+/// `proc_pidinfo` BSD-status read answers a zero write for a zombie, so it
+/// can never fire; measured 2026-09-18); on Linux the state letter after
+/// the last `)` of `/proc/<pid>/stat`. An unreadable pid reads not-zombie:
+/// this helper never invents a death.
+#[cfg(target_os = "macos")]
+pub fn pid_is_zombie(pid: u32) -> bool {
+    use std::mem;
+    // libc does not export `kinfo_proc` on Apple targets, so the read pins
+    // the one field this decision needs: `extern_proc` prefix (p_un 16, two
+    // pointers 16, p_flag 4) puts `p_stat` at byte 36 of the 648-byte
+    // record. The ABI is stable on all 64-bit Darwin.
+    #[repr(C, align(8))]
+    struct KinfoProcScratch {
+        head: KinfoProcHead,
+        tail: [u8; 768],
+    }
+    #[repr(C)]
+    struct KinfoProcHead {
+        p_un: [u8; 16],
+        p_vmspace: u64,
+        p_sigacts: u64,
+        p_flag: libc::c_int,
+        p_stat: u8,
+    }
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+    let mut info: KinfoProcScratch = unsafe { mem::zeroed() };
+    let mut size = mem::size_of::<KinfoProcScratch>();
+    // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
+    // in this frame and are read only during the call.
+    let done = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            &mut info as *mut _ as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    done == 0 && info.head.p_stat == libc::SZOMB as u8
+}
+
+#[cfg(target_os = "linux")]
+pub fn pid_is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_is_zombie(_pid: u32) -> bool {
+    false
 }
 
 /// The process table plus the count of pids whose row could not be read.
@@ -88,7 +205,10 @@ fn process_table_libproc() -> (Vec<ProcRow>, usize) {
             unreadable += 1;
             continue;
         }
-        let zombie = bsd.pbi_status == 5; // SZOMB
+        // Zombies never reach this line: their proc_pidinfo read is a zero
+        // write and was counted unreadable above, so the sysctl-based
+        // pid_is_zombie would be a dead second read per pid here.
+        let zombie = bsd.pbi_status == libc::SZOMB;
         let mut rss_kb = 0u64;
         let mut usage_sum = 0i64;
         let mut state = if zombie { 'Z' } else { 'S' };
@@ -171,6 +291,31 @@ fn process_table_libproc() -> (Vec<ProcRow>, usize) {
         });
     }
     (rows, unreadable)
+}
+
+/// The live argv of one pid, for the caller outside the census that needs
+/// it: a pane-to-thread conversion carries the running writer's own pins
+/// into the relaunch rather than re-deriving them from a default.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_argv(pid: u32) -> Option<Vec<String>> {
+    argv_of(pid)
+}
+
+/// The `ps` leg. It splits on whitespace, so an argument that CONTAINS a
+/// space comes back as two. Every flag the conversion carries takes a
+/// space-free value, and the caller drops what it does not recognise.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn process_argv(pid: u32) -> Option<Vec<String>> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    (!argv.is_empty()).then_some(argv)
 }
 
 /// The live argv of `pid` from `KERN_PROCARGS2`, `None` when unreadable.
@@ -265,8 +410,7 @@ fn epoch_now() -> u64 {
 
 /// The `ps` leg for platforms where `ps` is not setuid: exec and parse the
 /// same columns the native read returns.
-#[cfg(not(target_os = "macos"))]
-fn process_table_ps() -> (Vec<ProcRow>, usize) {
+pub(crate) fn process_table_ps() -> (Vec<ProcRow>, usize) {
     let Ok(out) = std::process::Command::new("ps")
         .args(["-Ao", "pid,ppid,state,etime,%cpu,rss,command"])
         .output()
@@ -283,11 +427,10 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
 }
 
 /// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Compiled
-/// for the Linux leg and under test everywhere: the test runs on every
-/// host, while a macOS non-test build has no caller and deny-warnings
-/// turns the dead code into a failure.
-#[cfg(any(not(target_os = "macos"), test))]
-fn parse_ps_row(line: &str) -> Option<ProcRow> {
+/// only where it has a caller: the Linux leg and its tests, both of which
+/// are `not(target_os = "macos")`. A macOS test build otherwise compiles
+/// it with no caller and deny-warnings turns the dead code into a failure.
+pub(crate) fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
     // aligned column reads as a parse failure.
@@ -330,6 +473,17 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+/// One line per process is this table's whole contract, and an argv may hold
+/// a newline that third-party launchers write. Escape the two characters that
+/// break a line, the way `ps` itself does, so the reader sees the bytes a real
+/// `ps` would have handed it.
+fn escape_row_command(command: &str) -> std::borrow::Cow<'_, str> {
+    if !command.contains(['\n', '\r']) {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    std::borrow::Cow::Owned(command.replace('\n', "\\012").replace('\r', "\\015"))
+}
+
 /// The table as the `ps -Ao pid,ppid,state,etime,%cpu,rss,command` text the
 /// Python footprint reader already parses.
 pub fn ps_text(rows: &[ProcRow]) -> String {
@@ -343,7 +497,7 @@ pub fn ps_text(rows: &[ProcRow]) -> String {
             format_elapsed(row.elapsed_s),
             row.cpu_pct,
             row.rss_kb,
-            row.command
+            escape_row_command(&row.command)
         ));
     }
     out
@@ -410,6 +564,10 @@ fn fate(component: &str) -> (&'static str, &'static str) {
         "daemon" => ("restarts", "workers and panes"),
         "store-keeper" => ("cycles; the next read respawns it", "the graph on disk"),
         "mux-server" => ("kept; only `--mux` replaces it", "its panes"),
+        "codex-app-server" => (
+            "safe upgrade only through the session-preserving transaction",
+            "threads survive the daemon swap",
+        ),
         _ => ("kept", "its pane; current only when that pane ends"),
     }
 }
@@ -633,7 +791,7 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             .get("session")
             .and_then(Value::as_str)
             .unwrap_or("unnamed");
-        let panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
+        let _panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
         let pid = r.get("pid").and_then(Value::as_u64).map(|p| p as u32);
         let (verdict, evidence) = match pid {
             Some(pid) => {
@@ -657,16 +815,50 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             verdict,
             evidence,
         );
-        row["on_restart"] = json!(if panes > 0 {
-            format!("kept; only `--mux` replaces it, ending {panes} shell(s)")
-        } else {
-            "kept; auto-restarts (pane-less)".to_string()
-        });
-        row["survives"] = json!(if panes > 0 {
-            format!("{panes} panes")
-        } else {
-            "no panes".to_string()
-        });
+        // The kept/unkept split: kept panes survive the server (their keeper
+        // re-adopts them); unkept ones end with it. The wording names both
+        // counts so an operator sees exactly who a restart would cost.
+        let mut kept = 0u64;
+        let mut unkept = 0u64;
+        if let Ok(pane_out) = std::process::Command::new(&fno)
+            .args(["mux", "pane", "ls", "--session", session, "--json"])
+            .output()
+        {
+            if let Ok(keeper_out) = std::process::Command::new(&fno)
+                .args(["mux", "pane", "keeper", "list", "--json"])
+                .output()
+            {
+                let keeper_rows: Vec<Value> =
+                    serde_json::from_slice(&keeper_out.stdout).unwrap_or_default();
+                let live_keepers: Vec<u64> = keeper_rows
+                    .iter()
+                    .filter(|k| k.get("session").and_then(Value::as_str) == Some(session))
+                    .filter(|k| k.get("stale").is_none())
+                    .filter_map(|k| k.get("child_pid").and_then(Value::as_u64))
+                    .collect();
+                if let Ok(pane_rows) = serde_json::from_slice::<Vec<Value>>(&pane_out.stdout) {
+                    for pane in &pane_rows {
+                        let child = pane.get("child_pid").and_then(Value::as_u64);
+                        if child.is_some_and(|c| live_keepers.contains(&c)) {
+                            kept += 1;
+                        } else {
+                            unkept += 1;
+                        }
+                    }
+                }
+            }
+        }
+        row["on_restart"] = json!(format!(
+            "ending {unkept} unkept shell(s); keeps {kept} kept pane(s)"
+        ));
+        row["survives"] = json!(format!(
+            "{kept} kept pane(s){}; {unkept} unkept",
+            if kept + unkept == 0 {
+                " (no panes)"
+            } else {
+                ""
+            }
+        ));
         out.push(row);
     }
     out
@@ -701,7 +893,52 @@ pub async fn census() -> Vec<Value> {
     let mut rows = vec![daemon_row().await];
     rows.extend(keeper_rows_from(&table));
     rows.extend(mux_rows(&table));
+    rows.extend(codex_app_server_rows());
     rows
+}
+
+/// Run the daemon-free census subcommand.  The process walk stays in Rust so
+/// Python callers and the machine sample share one table implementation.
+pub async fn run_verb(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg == "--tree-rss") {
+        let Some(index) = args.iter().position(|arg| arg == "--tree-rss") else {
+            unreachable!()
+        };
+        let Some(raw) = args.get(index + 1) else {
+            eprintln!("fno-agents census: --tree-rss needs a pid list");
+            return 2;
+        };
+        let mut pids = Vec::new();
+        for token in raw.split(',').filter(|token| !token.is_empty()) {
+            match token.parse::<u32>() {
+                Ok(pid) => pids.push(pid),
+                Err(_) => {
+                    eprintln!("fno-agents census: invalid pid {token}");
+                    return 2;
+                }
+            }
+        }
+        let (rows, _) = process_table_ps();
+        println!(
+            "{}",
+            json!({"rss_mb": crate::session_cost::tree_rss(&rows, &pids)})
+        );
+        return 0;
+    }
+    if args.iter().any(|arg| arg == "--ps") {
+        let (rows, unreadable) = process_table();
+        println!(
+            "{}",
+            json!({"ps": ps_text(&rows), "unreadable": unreadable})
+        );
+        return 0;
+    }
+    let rows = census().await;
+    println!(
+        "{}",
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+    );
+    0
 }
 
 /// Walk the keeper rows synchronously (tests, and callers already holding no
@@ -778,7 +1015,50 @@ fn shutdown_reply(sock: &Path) -> Option<Value> {
 
 #[cfg(test)]
 mod process_table_tests {
-    use super::{process_table, ps_text};
+    use super::{pid_is_zombie, process_table, ps_text};
+
+    /// A spinner child killed and reaped on drop. The guard exists because a
+    /// panic between spawn and a manual kill skips the kill, and the orphaned
+    /// `/bin/sh` then spins a core for hours.
+    struct Reaped(std::process::Child);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_spinner() -> Reaped {
+        Reaped(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("while :; do :; done")
+                .spawn()
+                .expect("spawn the spinner child"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_after_spawn_still_reaps_the_spinner() {
+        let pid_cell = std::sync::atomic::AtomicU32::new(0u32);
+        let panicked = std::panic::catch_unwind(|| {
+            let child = spawn_spinner();
+            pid_cell.store(child.0.id(), std::sync::atomic::Ordering::SeqCst);
+            panic!("an assertion after the spawn fails");
+        });
+        assert!(panicked.is_err(), "the closure panics");
+        let pid = pid_cell.load(std::sync::atomic::Ordering::SeqCst);
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // Fallback reap so the red run itself leaks nothing.
+        if alive {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+        }
+        assert!(!alive, "spinner pid {pid} outlived the panic");
+    }
 
     #[test]
     fn process_table_reads_its_own_row() {
@@ -807,24 +1087,20 @@ mod process_table_tests {
         // The CPU reading is a lifetime average, so the bar needs a process
         // whose lifetime IS the spin: a young busy-loop child. Read `ps %cpu`
         // for the same pid as the ground truth the table must agree with.
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("while :; do :; done")
-            .spawn()
-            .expect("spawn the spinner child");
+        let child = spawn_spinner();
+        let pid = child.0.id();
         std::thread::sleep(std::time::Duration::from_millis(2500));
         let (table, _unreadable) = process_table();
         let row = table
             .iter()
-            .find(|row| row.pid == child.id())
+            .find(|row| row.pid == pid)
             .expect("the spinning child reads a row");
         let ps_row = std::process::Command::new("ps")
-            .args(["-o", "%cpu=", "-p", &child.id().to_string()])
+            .args(["-o", "%cpu=", "-p", &pid.to_string()])
             .output()
             .ok()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
-        child.kill().ok();
-        child.wait().ok();
+        drop(child);
 
         assert!(
             row.cpu_pct >= 15.0,
@@ -842,7 +1118,11 @@ mod process_table_tests {
         );
     }
 
+    // The parser it pins compiles only beside its Linux caller.
+    #[cfg(not(target_os = "macos"))]
     #[test]
+    // The Linux leg under test: parse_ps_row is not compiled on macOS
+    // (deny-warnings kills the dead code there), so neither does its test.
     #[cfg(not(target_os = "macos"))]
     fn ps_leg_parses_right_aligned_columns() {
         let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
@@ -875,6 +1155,36 @@ mod process_table_tests {
     }
 
     #[test]
+    fn ps_text_escapes_a_newline_argv_to_one_line_per_row() {
+        let rows = vec![
+            super::ProcRow {
+                pid: 101,
+                ppid: 1,
+                state: 'R',
+                elapsed_s: 60,
+                cpu_pct: 0.0,
+                rss_kb: 1024,
+                command: "tr -d \"\nmore\"\r".into(),
+            },
+            super::ProcRow {
+                pid: 102,
+                ppid: 1,
+                state: 'S',
+                elapsed_s: 60,
+                cpu_pct: 0.0,
+                rss_kb: 1024,
+                command: "clean argv".into(),
+            },
+        ];
+        let text = ps_text(&rows);
+        assert_eq!(text.lines().count(), 3, "header plus one line per row");
+        assert!(
+            text.contains("101 1 R 01:00 0.0 1024 tr -d \"\\012more\"\\015"),
+            "newline and CR carry as the four characters \\012 and \\015: {text}"
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn argv_copy_agrees_with_the_fno_crate_reader() {
         // The argv reader here is a verbatim copy of fno::pane_argv's (the
@@ -885,5 +1195,28 @@ mod process_table_tests {
         let theirs = fno::pane_argv::process_argv(std::process::id())
             .expect("fno crate reads the same argv");
         assert_eq!(mine, theirs);
+    }
+
+    #[test]
+    fn pid_is_zombie_reads_an_unreaped_exit_as_zombie_and_a_live_pid_as_not() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !pid_is_zombie(pid) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            pid_is_zombie(pid),
+            "an exited, unwaited child reads as zombie"
+        );
+        assert!(
+            !pid_is_zombie(std::process::id()),
+            "a live pid is not zombie"
+        );
+        child.wait().unwrap();
     }
 }

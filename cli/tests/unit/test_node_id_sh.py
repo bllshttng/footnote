@@ -31,7 +31,10 @@ def _kind(arg: str) -> str:
 
 @pytest.mark.parametrize(
     "arg",
-    ["ab-55ba9adb", "x-69ad", "fno-abcd", "f-1234", "abcdefgh-12345678"],
+    [
+        "ab-55ba9adb", "x-69ad", "xd863", "fno-abcd", "f-1234", "abcdefgh-12345678",
+        "xb299", "x6a95", "ab12345678",
+    ],
 )
 def test_classifies_fno(arg):
     assert _kind(arg) == "fno"
@@ -50,8 +53,10 @@ def test_classifies_none(arg):
 @pytest.mark.parametrize(
     "arg",
     [
-        "ab-55ba9adb", "x-69ad", "fno-abcd", "f-1234", "abcdefgh-12345678",
+        "ab-55ba9adb", "x-69ad", "xd863", "fno-abcd", "f-1234", "abcdefgh-12345678",
+        "xb299", "x6a95", "x123", "ab12345678",
         "ENG-441", "owner/repo#123", "fix the login", "plan.md", "ab-12", "not-an-id",
+        "xg863",
     ],
 )
 def test_shell_matches_python_authority(arg):

@@ -266,12 +266,17 @@ class ConsolidationEntry(BaseModel):
         # reader can check, which is the one thing this block exists to give.
         # Imported HERE, not at module scope: `fno.graph` costs 126ms of this
         # module's 219ms import, and every plan read would pay it for a key
-        # most plans carry once.
+        # most plans carry once. A legacy literal (a prefix with no separator
+        # once minted bare "<prefix><hex>" ids) also references: this is a
+        # binding check on a candidate the graph holds, not prose extraction,
+        # so the all-hex git-hash shape stays the one thing refused.
         from fno.graph._constants import is_wellformed_node_id
 
-        if not is_wellformed_node_id(v):
-            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-aaaa)")
-        return v
+        if is_wellformed_node_id(v):
+            return v
+        if re.fullmatch(r"(?i)(?![0-9a-f]+$)[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}", v):
+            return v
+        raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-aaaa)")
 
 
 class DecisionAcknowledgment(BaseModel):
@@ -390,7 +395,7 @@ class PlanFrontmatter(BaseModel):
     blocks_everything: bool = False
     difficulty: str | None = None
     # Who hands out the plan's remaining waves: `manual` waits for a person or
-    # a /king-for-a-day session to run `fno backlog join` (default), or `auto`
+    # a king session to run `fno backlog join` (default), or `auto`
     # fires join at target init. Opt-in - `manual` changes nothing, so every
     # plan written before the key keeps its behavior. Named for the verb it
     # gates: `orchestration` already does four unrelated jobs in this repo, so
@@ -440,6 +445,12 @@ class PlanFrontmatter(BaseModel):
     dispatch_hold: DispatchHoldBlock | None = None
     company_work: CompanyWorkRefs | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_node_from_claims(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("claims") and not data.get("node"):
+            data["node"] = data["claims"]
+        return data
     @field_validator("created", mode="before")
     @classmethod
     def _created_must_be_dateable(cls, v: Any) -> Any:

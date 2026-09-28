@@ -263,6 +263,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3d. An unowned session section (x-e6c3): a king's "## HANDOFF (session)"
+# heading inside correct fno:session markers used to be deleted whole by the
+# refresh, because the writer re-emits only the four labels it knows. The
+# writer now re-emits every marked section it does not regenerate, verbatim,
+# exactly once per fire.
+# ---------------------------------------------------------------------------
+HANDOFF_DOC="$TMP/handoff-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+python3 - "$HANDOFF_DOC" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+block = "\n## HANDOFF (session)\n<!-- fno:session -->\nSENTINEL_HANDOFF_13 the next king must read: merge x before y.\n<!-- /fno:session -->\n"
+marker = "\n## User notes (you write here; the machine only ever reads this)\n"
+assert marker in s, "user notes heading not found"
+open(p, "w").write(s.replace(marker, block + marker, 1))
+PY
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+HANDOFF_COUNT="$(grep -c "SENTINEL_HANDOFF_13" "$HANDOFF_DOC")"
+if [[ "$HANDOFF_COUNT" == "1" ]] && grep -q "^## HANDOFF (session)" "$HANDOFF_DOC"; then
+  pass "unowned HANDOFF (session) section survives the refresh exactly once"
+else
+  fail "unowned session section lost or duplicated: count=$HANDOFF_COUNT"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+if [[ "$(grep -c "SENTINEL_HANDOFF_13" "$HANDOFF_DOC")" == "1" ]] \
+  && grep -q "## Merge order and why (session)" "$HANDOFF_DOC" && grep -q "refreshed" "$HANDOFF_DOC"; then
+  pass "HANDOFF section survives the re-fire once; known sections still refresh"
+else
+  fail "re-fire duplicated or dropped the HANDOFF section"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PR section omitted when gh is absent (degrade, never a failed hook).
 # ---------------------------------------------------------------------------
 rm -f "$DOC"
@@ -656,6 +689,92 @@ if [[ "$PLACE_RC" == "0" ]] \
   pass "placeholder-only doc re-fires without a false refusal"
 else
   fail "placeholder doc refused or mis-shaped: rc=$PLACE_RC"
+fi
+
+# ---------------------------------------------------------------------------
+# 15. AC5-HP: a leaked FNO_AGENTS_RUNTIME=python pin must not blind
+# the crown read. The fake `fno` refuses `agents registry-json` ONLY when the
+# pin is set (the real Rust client's refusal shape) and answers with the
+# crowned row otherwise; the hook strips the pin before the read, so the
+# crowned scope-keyed doc still lands. Run with the pin exported.
+# ---------------------------------------------------------------------------
+PIN_BIN="$(mktemp -d -t canon-fake-fno-pin-XXXXXX)"
+PIN_DOC_OUT="$TMP/handoffs/pinned-crown-rolling.md"
+cat > "$PIN_BIN/fno" <<FAKE
+#!/usr/bin/env bash
+case "\$*" in
+  *"agents registry-json"*)
+    if [ -n "\${FNO_AGENTS_RUNTIME:-}" ]; then
+      exit 127
+    fi
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"}]'
+    ;;
+  *"backlog epic status x-9e1e-fixture"*)
+    echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
+    ;;
+  *"config paths handoff"*)
+    echo "$PIN_DOC_OUT"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$PIN_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN" "$KILL_BIN" "$GATE_BIN" "$PIN_BIN"' EXIT
+
+PIN_ERR="$TMP/pin-err.txt"
+printf '{"trigger":"manual"}' \
+  | env PATH="$PIN_BIN:$PATH" FNO_AGENTS_RUNTIME=python CLAUDE_CODE_SESSION_ID="$SID" \
+    bash "$HOOK" >"$TMP/pin-out.txt" 2>"$PIN_ERR" || true
+if [[ -f "$PIN_DOC_OUT" ]] && grep -q "level 2 over x-9e1e-fixture" "$PIN_DOC_OUT" \
+  && grep -q "## King: nodes under purview (auto)" "$PIN_DOC_OUT"; then
+  pass "pinned env: the crown read survives the strip and the scope-keyed doc lands (AC5-HP)"
+else
+  fail "pinned env: crown read stayed blind or doc is not the scope-keyed one"
+fi
+if grep -q "registry-json exited" "$PIN_ERR"; then
+  fail "pinned env: a failing-read stderr line fired even though the strip healed the read"
+else
+  pass "pinned env: healed read stays quiet on stderr"
+fi
+
+# ---------------------------------------------------------------------------
+# 16. AC6-ERR: a genuinely failing registry read is reported, never
+# read as "uncrowned". The fake refuses unconditionally; the hook must print
+# one stderr line naming the exit code and the doc's crown line must read
+# `unknown (registry-json exit 127)`, never `none`.
+# ---------------------------------------------------------------------------
+FAIL_BIN="$(mktemp -d -t canon-fake-fno-fail-XXXXXX)"
+cat > "$FAIL_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    exit 127
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$FAIL_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN" "$KILL_BIN" "$GATE_BIN" "$PIN_BIN" "$FAIL_BIN"' EXIT
+
+FAIL_DOC="$TMP/unknown-crown-canon.md"
+FAIL_ERR="$TMP/fail-err.txt"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$FAIL_DOC" \
+  | env PATH="$FAIL_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" \
+    bash "$HOOK" >/dev/null 2>"$FAIL_ERR" || true
+if grep -q "registry-json exited 127" "$FAIL_ERR"; then
+  pass "failed read: one stderr line names the hook and the exit code (AC6-ERR)"
+else
+  fail "failed read: no stderr line naming the exit code"
+fi
+if grep -q "crown: unknown (registry-json exit 127)" "$FAIL_DOC" \
+  && ! grep -q "crown: none" "$FAIL_DOC"; then
+  pass "failed read: crown line reads unknown, never none"
+else
+  fail "failed read: crown line wrong (expected unknown, got none or missing)"
 fi
 
 echo

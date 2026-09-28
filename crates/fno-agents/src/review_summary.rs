@@ -10,10 +10,11 @@
 
 use clap::Parser as _;
 use serde_json::Value;
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 /// One selected `review_attestation` row, reduced to the fields the line needs.
+#[derive(Clone)]
 struct AttestationRow {
     head_sha: String,
     verdict: String,
@@ -42,8 +43,12 @@ fn sha_matches(a: &str, b: &str) -> bool {
     n >= 7 && a.get(..n) == b.get(..n)
 }
 
-fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
-    let mut rows = Vec::new();
+/// One pass over the journal, rows grouped by branch. `evidence` answers per
+/// item for a whole corpus, and a per-item `select_rows` re-parse of the full
+/// text is O(items x journal) - minutes on a measured 62MB journal - so the
+/// classification reads one index instead.
+fn index_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
+    let mut map: BTreeMap<String, Vec<AttestationRow>> = BTreeMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -52,9 +57,6 @@ fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
             continue;
         }
         let row_branch = val.pointer("/data/branch").and_then(|v| v.as_str());
-        if row_branch != Some(branch) {
-            continue;
-        }
         let head_sha = val
             .pointer("/data/head_sha")
             .and_then(|v| v.as_str())
@@ -77,14 +79,25 @@ fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
             .pointer("/data/findings_nonblocking")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        rows.push(AttestationRow {
-            head_sha,
-            verdict,
-            review_round,
-            findings: blocking + nonblocking,
-        });
+        if let Some(branch) = row_branch {
+            map.entry(branch.to_string())
+                .or_default()
+                .push(AttestationRow {
+                    head_sha,
+                    verdict,
+                    review_round,
+                    findings: blocking + nonblocking,
+                });
+        }
     }
-    rows
+    map
+}
+
+fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
+    index_rows(events_text)
+        .get(branch)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The display line for a branch/head pair, or `None` when the ledger does
@@ -111,21 +124,119 @@ pub fn summary_line(events_text: &str, branch: &str, head: &str) -> Option<Strin
     ))
 }
 
+/// The evidence read: classify each observer item by what the journal proves
+/// about its review. A clean review and a missing-evidence state never share
+/// a label again: `clean` is a journal row with zero findings (the review ran
+/// and found nothing); every `no_*` state is missing evidence, never a
+/// verified clean. Items come back in input order.
+pub fn evidence(events_text: &str, items: &[Value]) -> Value {
+    let index = index_rows(events_text);
+    let mut out = Vec::with_capacity(items.len());
+    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    for item in items {
+        let node_val = item.get("node").cloned().unwrap_or(Value::Null);
+        let pr_val = item.get("pr_number").cloned().unwrap_or(Value::Null);
+        let node = node_val.as_str();
+        let pr = pr_val.as_u64();
+        let (state, precision): (&str, Value) = match (node, pr) {
+            (None, _) => ("no_node", Value::Null),
+            (Some(_), None) => ("no_pr", Value::Null),
+            (Some(node), Some(_)) => {
+                let rows = index
+                    .get(&format!("feature/{node}"))
+                    .cloned()
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    ("no_attestation", Value::Null)
+                } else if rows.iter().all(|r| r.findings == 0) {
+                    ("clean", Value::Null)
+                } else {
+                    let latest_is_pass = rows.last().map(|r| r.verdict == "pass").unwrap_or(false);
+                    (
+                        "scored",
+                        if latest_is_pass {
+                            serde_json::json!("pass")
+                        } else {
+                            serde_json::json!("fail")
+                        },
+                    )
+                }
+            }
+        };
+        *counts.entry(state).or_insert(0) += 1;
+        out.push(serde_json::json!({
+            "node": node_val,
+            "pr_number": pr_val,
+            "state": state,
+            "finding_precision": precision,
+        }));
+    }
+    let n = |s: &str| counts.get(s).copied().unwrap_or(0);
+    let missing = n("no_node") + n("no_pr") + n("no_attestation");
+    serde_json::json!({
+        "items": out,
+        "counts": counts,
+        "evidence_line": format!(
+            "evidence: scored={} clean={} missing={} (no_node={} no_pr={} no_attestation={})",
+            n("scored"), n("clean"), missing, n("no_node"), n("no_pr"), n("no_attestation")
+        ),
+    })
+}
+
+/// The evidence mode's one round-trip: stdin text in (None = stdin read
+/// failed), one JSON object out, `(output, exit_code)`. Unlike the display
+/// line, a failure here is NOT deliberate silence - a silent evidence read is
+/// the zero-coverage readout this verb exists to fix - so a non-array stdin or
+/// an unreadable ledger prints `{"error": ...}` and exits 2.
+fn evidence_response(events_path: &Path, stdin_text: Option<&str>) -> (String, i32) {
+    let Some(text) = stdin_text else {
+        return (error_json("stdin unreadable"), 2);
+    };
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(text) else {
+        return (error_json("stdin is not a JSON array"), 2);
+    };
+    // SQL authority: the store's committed rows are the ledger, the same read
+    // the display line makes. Unreadable = error, never a silent empty ledger.
+    let events_text = match crate::loopcheck::event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(e) => return (error_json(&format!("events ledger unreadable: {e}")), 2),
+    };
+    (evidence(&events_text, &items).to_string(), 0)
+}
+
+fn error_json(reason: &str) -> String {
+    serde_json::json!({ "error": reason }).to_string()
+}
+
 /// `fno-agents review-summary` entry: prints the line or nothing, exit 0
-/// either way. A missing or unreadable events file is an EMPTY ledger, not
-/// an error - the PR opens without the section and the gate still reads the
-/// ledger at merge time. A parse failure is the same deliberate silence: the
-/// caller converts the refusal into "no claim", never a usage error.
+/// either way, when branch+head name a head to display. A parse failure is
+/// deliberate silence (print nothing, exit 0). `--evidence` replaces that
+/// contract with the one-round-trip read: see `evidence_response`.
 pub fn run_review_summary(args: &[String]) -> i32 {
     let Ok(parsed) = crate::cli_args::ReviewSummaryArgs::try_parse_from(args) else {
         return 0;
     };
-    let events_path = parsed.events.unwrap_or_else(default_events_path);
-    let Ok(events_text) = std::fs::read_to_string(events_path) else {
-        return 0;
+    let events_path = parsed.events.clone().unwrap_or_else(default_events_path);
+    if parsed.evidence {
+        let mut input = String::new();
+        let read_ok = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).is_ok();
+        let (out, code) = evidence_response(
+            &events_path,
+            if read_ok { Some(input.as_str()) } else { None },
+        );
+        println!("{out}");
+        return code;
+    }
+    // SQL authority: the store's committed rows are the ledger; a missing or
+    // unreadable store is the same deliberate silence a missing file was.
+    let events_text = match crate::loopcheck::event_lines(&events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return 0,
     };
-    if let Some(line) = summary_line(&events_text, &parsed.branch, &parsed.head) {
-        println!("{line}");
+    if let (Some(branch), Some(head)) = (&parsed.branch, &parsed.head) {
+        if let Some(line) = summary_line(&events_text, branch, head) {
+            println!("{line}");
+        }
     }
     0
 }
@@ -231,5 +342,72 @@ mod tests {
             default_events_path(),
             crate::scratch::fno_state_root().join("events.jsonl")
         );
+    }
+
+    #[test]
+    fn evidence_splits_clean_from_missing() {
+        let events = format!(
+            "{}\n{}\n",
+            attestation("feature/x-1", "aaa1111", "pass", Some(1), 2),
+            attestation("feature/x-2", "bbb2222", "pass", Some(1), 0),
+        );
+        let items: Vec<Value> = serde_json::from_str(
+            r#"[{"node":"x-1","pr_number":1},{"node":"x-2","pr_number":2},{"node":"x-3","pr_number":3},{"node":null,"pr_number":null},{"node":"x-4","pr_number":null}]"#,
+        )
+        .expect("items parse");
+        let out = evidence(&events, &items);
+        let states: Vec<&str> = out["items"]
+            .as_array()
+            .expect("items is an array")
+            .iter()
+            .map(|i| i["state"].as_str().expect("state is a string"))
+            .collect();
+        assert_eq!(
+            states,
+            ["scored", "clean", "no_attestation", "no_node", "no_pr"]
+        );
+        assert_eq!(
+            out["evidence_line"],
+            "evidence: scored=1 clean=1 missing=3 (no_node=1 no_pr=1 no_attestation=1)"
+        );
+        assert_eq!(out["items"][0]["finding_precision"], "pass");
+        assert_eq!(out["items"][1]["finding_precision"], Value::Null);
+    }
+
+    #[test]
+    fn evidence_scores_against_the_latest_verdict() {
+        let events = format!(
+            "{}\n{}\n",
+            attestation("feature/x", "aaa1111", "pass", Some(1), 0),
+            attestation("feature/x", "bbb2222", "fail", Some(2), 1),
+        );
+        let items: Vec<Value> =
+            serde_json::from_str(r#"[{"node":"x","pr_number":1}]"#).expect("parse");
+        let out = evidence(&events, &items);
+        assert_eq!(out["items"][0]["state"], "scored");
+        // Precision follows the LATEST row; the earlier pass is history.
+        assert_eq!(out["items"][0]["finding_precision"], "fail");
+    }
+
+    #[test]
+    fn evidence_mode_refuses_non_array_stdin_with_exit_2() {
+        let (out, code) = evidence_response(
+            Path::new("/nonexistent/fno-evidence-test/events.jsonl"),
+            Some("not json"),
+        );
+        assert_eq!(code, 2);
+        assert!(out.contains("\"error\""));
+        // Never prints a state for any item.
+        assert!(!out.contains("\"state\""));
+    }
+
+    #[test]
+    fn evidence_mode_refuses_an_unreadable_ledger() {
+        let (out, code) = evidence_response(
+            Path::new("/nonexistent/fno-evidence-test/events.jsonl"),
+            Some("[]"),
+        );
+        assert_eq!(code, 2);
+        assert!(out.contains("\"error\""));
     }
 }

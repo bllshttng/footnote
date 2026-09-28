@@ -85,6 +85,24 @@ def test_home_is_pinned_into_the_sandbox(tmp_path):
     assert out["USERPROFILE"] == out["HOME"]
 
 
+def test_cargo_build_dir_is_pinned_into_the_sandbox(tmp_path):
+    """AC15: the pin is env-independent, whatever the parent carries.
+
+    The tracked .cargo/config.toml resolves an unpinned run into the REAL
+    ~/.cargo/build, which grew ~30 GiB/day of test orphans; the pin must land
+    under the sandbox home for both a poisoned and a clean parent.
+    """
+    poisoned = neutralise(
+        {"HOME": "/home/dev", "CARGO_BUILD_BUILD_DIR": "/elsewhere/{workspace-path-hash}"},
+        tmp_path,
+    )
+    clean = neutralise({"HOME": "/home/dev"}, tmp_path)
+    for out in (poisoned, clean):
+        assert out["CARGO_BUILD_BUILD_DIR"] == (
+            f"{tmp_path / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
+        )
+
+
 def test_repo_root_is_scrubbed_but_not_repinned(tmp_path):
     """Specimen 3's channel, and the honest limit of an env-level cure.
 

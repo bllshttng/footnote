@@ -325,16 +325,6 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
     """
     from fno.graph.store import commit_rows_via_store
 
-    if not graph_path.exists():
-        # The likeliest cause is a worktree whose `.fno/` symlink was never
-        # healed by setup-worktree.sh, so say it rather than skipping in silence.
-        print(
-            f"cost._update_graph_node: no graph at {graph_path}; "
-            "cost not attributed",
-            file=sys.stderr,
-        )
-        return False
-
     found = False
 
     def mutator(entries):

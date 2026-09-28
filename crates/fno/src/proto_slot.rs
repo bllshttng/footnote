@@ -24,6 +24,16 @@ pub enum LayoutBinding {
 pub struct PortalSlot {
     pub index: u8,
     pub row: String,
+    /// The row's harness at capture; `None` pre-v69 and for a row whose
+    /// harness never resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// The row's FULL harness session id at capture - the fill guard: a key
+    /// that later resolves to a DIFFERENT session id names a different
+    /// thread, and the fill refuses rather than show it under the old label.
+    /// `None` pre-v69: such a slot fills as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// A named slot + its binding (v44). A `Vec`, not a map: TOML cannot
@@ -41,4 +51,12 @@ pub struct LayoutSlot {
     /// needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal: Option<PortalSlot>,
+    /// (v69) The leaf's birth pane id at capture. The restart join for a
+    /// plain shell (or a portal's re-adopted viewer): pane ids are globally
+    /// monotonic and the keeper re-adopts at the birth id, so restore can
+    /// bind the adopted pane into THIS leaf instead of minting a shell and
+    /// losing the layout. `None` pre-v69; an unreconciled adoption (fresh
+    /// id) never joins by id and lands in its own tab with today's notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<u64>,
 }

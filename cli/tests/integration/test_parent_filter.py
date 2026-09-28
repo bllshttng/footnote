@@ -4,6 +4,7 @@
 candidates to the transitive children of an epic so a walk can drain one
 epic's subtree. Mirrors the existing --roadmap-id filter.
 """
+from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
@@ -17,7 +18,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -31,32 +32,71 @@ def tmp_graph(tmp_path, monkeypatch):
     return g
 
 
-def _add(title, **opts) -> str:
+def _add(tmp_graph, title, **opts) -> str:
+    # The create verb is native; drive the binary over the same store the
+    # fixture seeded, the way _set_parent below does.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     args = ["backlog", "add", title, "--difficulty", "medium"]
     for k, v in opts.items():
         args += [f"--{k}", str(v)]
-    r = runner.invoke(app, args, catch_exceptions=False)
-    assert r.exit_code == 0, r.output
-    # raw_decode tolerates trailing stderr (the filing-time dedup receipt
-    # CliRunner mixes into r.output when the new node resembles an existing one).
-    return json.JSONDecoder().raw_decode(r.output)[0]["id"]
-
-
-def _set_parent(child_id, parent_id):
-    r = runner.invoke(
-        app, ["backlog", "update", child_id, "--parent", parent_id],
-        catch_exceptions=False,
+    proc = _sp.run(
+        [str(binary), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
     )
-    assert r.exit_code == 0, r.output
+    assert proc.returncode == 0, proc.stderr
+    return json.JSONDecoder().raw_decode(proc.stdout)[0]["id"]
+
+
+def _set_parent(tmp_graph, child_id, parent_id):
+    # The update leaf answers natively; the --parent mutation drives the dev
+    # binary over the same store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", child_id, "--parent", parent_id],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def _epic_with_children(tmp_graph):
-    epic = _add("Epic")
-    c1 = _add("Child one")
-    c2 = _add("Child two")
-    loose = _add("Loose node")
-    _set_parent(c1, epic)
-    _set_parent(c2, epic)
+    epic = _add(tmp_graph, "Epic")
+    c1 = _add(tmp_graph, "Child one")
+    c2 = _add(tmp_graph, "Child two")
+    loose = _add(tmp_graph, "Loose node")
+    _set_parent(tmp_graph, c1, epic)
+    _set_parent(tmp_graph, c2, epic)
     return epic, c1, c2, loose
 
 
@@ -115,11 +155,11 @@ def test_ac2_edge_parent_with_no_children_emits_message(tmp_graph):
 
 def test_parent_combines_with_priority_order(tmp_graph):
     """Within an epic, higher-priority children come first."""
-    epic = _add("Epic")
-    lo = _add("low child", priority="p3")
-    hi = _add("high child", priority="p1")
-    _set_parent(lo, epic)
-    _set_parent(hi, epic)
+    epic = _add(tmp_graph, "Epic")
+    lo = _add(tmp_graph, "low child", priority="p3")
+    hi = _add(tmp_graph, "high child", priority="p1")
+    _set_parent(tmp_graph, lo, epic)
+    _set_parent(tmp_graph, hi, epic)
     r = runner.invoke(
         app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
         catch_exceptions=False,

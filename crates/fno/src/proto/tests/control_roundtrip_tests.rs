@@ -44,6 +44,7 @@ fn proto_v4_control_verbs_roundtrip() {
             bytes: b"hello\r".to_vec(),
             guarded: true,
             expected_identity: None,
+            hold_pass: true,
         },
         ControlVerb::PaneWait {
             pane: 5,
@@ -52,7 +53,10 @@ fn proto_v4_control_verbs_roundtrip() {
             timeout_ms: 5000,
             command_done: true,
         },
-        ControlVerb::PaneKill { pane: 5 },
+        ControlVerb::PaneKill {
+            pane: 5,
+            hand_off_to: None,
+        },
         ControlVerb::RetireSession {
             harness: "codex".into(),
             session_id: "01a03a85-1111-7222-8333-444455556666".into(),
@@ -93,6 +97,7 @@ fn proto_v4_control_replies_roundtrip() {
                 predecessor_session_ids: Vec::new(),
                 forked_from_session_id: None,
                 name: None,
+                portal: None,
             }],
         },
         ServerMsg::PaneText {

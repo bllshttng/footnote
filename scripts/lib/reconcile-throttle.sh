@@ -52,6 +52,21 @@ _reconcile_mtime() {
     printf '%s\n' "$m"
 }
 
+# _reconcile_repo_space_safe <dir>
+#
+# True when <dir>/.fno is a real checkout's .fno, NOT the state root itself
+# (law d-8ddaba56): a session whose cwd was $HOME outside git resolves the
+# repo root to $HOME, and the repo-space writes below would land dot-stamps
+# at the top level of the state root. Both sides physical (pwd -P) so a
+# symlinked HOME cannot false-pass; an unresolvable side refuses (fail
+# closed, skip the write).
+_reconcile_repo_space_safe() {
+    local repo_fno="" state_fno=""
+    repo_fno=$(cd "$1/.fno" 2>/dev/null && pwd -P 2>/dev/null) || repo_fno=""
+    state_fno=$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P 2>/dev/null) || state_fno=""
+    [[ -n "$repo_fno" && -n "$state_fno" && "$repo_fno" != "$state_fno" ]]
+}
+
 # reconcile_maybe_fire <repo_root>
 #
 # Launches a backgrounded, detached `fno backlog reconcile --json` (mutate
@@ -60,6 +75,8 @@ _reconcile_mtime() {
 # hook to render on a later session. Always returns 0.
 reconcile_maybe_fire() {
     local repo_root="${1:-$PWD}"
+    # HOME-as-repo guard: the state root is not a checkout; never stamp it.
+    _reconcile_repo_space_safe "$repo_root" || return 0
     # Only reconcile an already-initialized project; never create .fno in a virgin dir.
     [[ -d "$repo_root/.fno" ]] || return 0
     local footnote_dir="$repo_root/.fno"
@@ -118,6 +135,36 @@ reconcile_maybe_fire() {
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
         "$2" agents prove-it-verdicts --route >/dev/null 2>&1 || true
+        # Orphan-plan binder, best-effort like every co-fired verb: a plan
+        # whose `claims:` bind write never landed keeps its node unplanned
+        # forever, so retry the bind inside the same window. The result
+        # publishes whenever the binary produced JSON, exit code aside: exit 1
+        # is the bind_failed verdict, and that verdict is exactly what the
+        # SessionStart hook surfaces.
+        obin="$(command -v fno-agents 2>/dev/null || true)"
+        if [[ -z "$obin" ]]; then obin="${FNO_AGENTS_BIN:-}"; fi
+        if [[ -z "$obin" ]]; then
+            fself="$(command -v -- "$2" 2>/dev/null || true)"
+            if [[ -z "$fself" ]] && [[ -x "$2" ]]; then fself="$2"; fi
+            if [[ -n "$fself" ]]; then
+                cand="$(dirname "$fself")/fno-agents"
+                if [[ -x "$cand" ]]; then obin="$cand"; fi
+            fi
+        fi
+        # The binder does not resolve state_dir, so run it only for the default
+        # state root. The graph_json path override has been retired.
+        state_root="$("$2" config get state_dir 2>/dev/null || true)"
+        state_root="${state_root%/}"
+        odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
+        default_state_root="${HOME:-}/.fno"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" \
+            && ( "$state_root" == "~/.fno" || "$state_root" == "$default_state_root" ) ]]; then
+            "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
+                > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null || true
+            [[ -s "$1/.fno/.orphan-plans-result.json.tmp" ]] \
+                && mv -f "$1/.fno/.orphan-plans-result.json.tmp" \
+                    "$1/.fno/.orphan-plans-result.json" 2>/dev/null || true
+        fi
     ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 

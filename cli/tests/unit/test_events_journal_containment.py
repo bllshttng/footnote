@@ -61,16 +61,9 @@ def pinned(tmp_path: Path, monkeypatch) -> dict[str, Path]:
 
 
 def _rows(journal: Path, event_type: str) -> list[dict]:
-    if not journal.exists():
-        return []
-    out = []
-    for line in journal.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("type") == event_type:
-            out.append(row)
-    return out
+    from tests._event_rows import event_rows
+
+    return [row for row in event_rows(journal) if row.get("type") == event_type]
 
 
 def test_escalation_lands_in_the_scratch_journal_not_the_checkout(pinned, runner) -> None:
@@ -132,7 +125,7 @@ def test_ask_writes_under_its_own_root_never_the_shared_pin(pinned, runner) -> N
     from fno.outstanding.cli import outstanding_app
     from fno.paths import project_log
 
-    result = runner.invoke(outstanding_app, ["ask", "which auth?"])
+    result = runner.invoke(outstanding_app, ["ask", "which auth?", "--ask", "finish the lane"])
     assert result.exit_code == 0, result.output
 
     space_journal = project_log("events.jsonl", project_root=pinned["root"])

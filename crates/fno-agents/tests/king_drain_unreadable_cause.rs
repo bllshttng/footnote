@@ -50,24 +50,27 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// quiet board, resolving epic scope, fast board subprocesses, and a
 /// `--read-timeout-ms` small enough that a hanging drain dies inside it.
 /// The env guards must outlive the fire, so the caller drops them.
-fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 5], Vec<String>) {
+fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 6], Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let graph = home.join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        r#"{"entries":[{"id":"x-epic","type":"epic","priority":"p1","status":"done"}]}"#,
+        &[serde_json::json!({
+            "id": "x-epic", "slug": "x-epic", "title": "epic", "type": "epic",
+            "priority": "p1", "status": "done", "completed_at": "2026-08-18T00:00:00Z"
+        })],
     )
     .unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph.to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            home.to_string_lossy()
         ),
     )
     .unwrap();
@@ -96,6 +99,7 @@ fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 5], Vec<String>) {
         set_env("FNO_CONFIG", &config),
         set_env("FNO_AGENTS_HOME", dir.path().join("agents")),
         set_env("FNO_CLAIMS_ROOT", dir.path().join("claims")),
+        set_env("FNO_PY", bin.join("fno-py")),
         set_env("PATH", path),
     ];
 
