@@ -567,7 +567,6 @@ def run_king_wake(
             pool.shutdown(wait=False)
 
     def _setup_bounded(step, fn, *args):
-        # A setup read under the slice's discipline: floor check then wait bound.
         left = seconds_left_fn() if seconds_left_fn is not None else None
         if left is not None and left < _KING_STEP_FLOOR_S:
             return None, True
@@ -593,6 +592,7 @@ def run_king_wake(
         summary["budget_spent"] = True
         return summary
 
+
     outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
     targets, note = outcome or ([], "court read did not complete in its slice bound")
     summary: dict[str, Any] = {
@@ -604,10 +604,10 @@ def run_king_wake(
         "evaluated": 0,
         "note": note,
     }
-    _step("answers")
     # One question-journal read per tick, shared by every scope like `entries`.
     try:
-        answered_records: list = answered_fn()
+        answered, _answers_cut = _setup_bounded("answers", answered_fn)
+        answered_records: list = answered or []
     except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
         answered_records = []
 
@@ -663,8 +663,6 @@ def run_king_wake(
                 _step("graph")
                 entries, cut = _bounded(entries_fn, wait_s=_wait_cap(left))
                 if cut:
-                    # Degrade, never stop: `[]` skips the board lane without
-                    # re-entering this read; mail and answer triggers still fire.
                     entries = []
                     _note("graph read timed out; board triggers wait for the next tick")
             # One compile feeds both lanes; None rows (empty or uncompilable

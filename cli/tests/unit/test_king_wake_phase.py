@@ -1854,8 +1854,8 @@ def test_a_working_holder_seeds_a_first_observation_and_pays_no_read(tmp_path):
 def test_the_pass_stops_under_its_floor_and_names_what_it_evaluated(tmp_path):
     # AC2: under 15s left, stop BEFORE the next truth read, so the alarm
     # never cuts a pass mid-crown and discards the crowns it already woke.
-    # The bounded court read consumes the first clock reading.
-    budget = [100.0, 100.0, 100.0, 14.0]
+    # The bounded court and answers reads consume the first two clock readings.
+    budget = [100.0, 100.0, 100.0, 100.0, 14.0]
 
     def seconds():
         return budget.pop(0) if budget else 0.0
@@ -1878,8 +1878,8 @@ def test_a_stopped_pass_rotates_its_starting_crown_per_debounce_window(tmp_path)
     # debounce window, so a fleet that always overruns still wakes everyone
     # in turn.
     def seconds():
-        # The bounded court read consumes the first clock reading.
-        budget = [100.0, 100.0, 14.0]
+        # The bounded court and answers reads consume the first two clock readings.
+        budget = [100.0, 100.0, 100.0, 14.0]
         return lambda: budget.pop(0) if budget else 0.0
 
     _rec1, s1, _p1 = _run_crowns(
@@ -2235,9 +2235,9 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
         blocked.wait(timeout=60)
         return []
 
-    # Clock cadence: the bounded court read, the quiet crown's pre-graph
-    # check, then the loud crown's pre-truth check stops the pass.
-    seconds_values = iter([44.0, 44.0, 14.0])
+    # Clock cadence: the bounded court and answers reads, the quiet crown's
+    # pre-graph check, then the loud crown's pre-truth check stops the pass.
+    seconds_values = iter([44.0, 44.0, 44.0, 14.0])
     seconds = lambda: next(seconds_values, 14.0)  # noqa: E731
     try:
         summary = run_king_wake(
