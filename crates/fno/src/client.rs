@@ -1258,7 +1258,7 @@ struct View {
     /// `None` before the first one lands. `build_sideline_menu` reads this
     /// directly rather than waiting on a fresh probe, so the menu always
     /// opens instantly (Locked Decision 4).
-    update_outcome: Option<UpdateOutcome>,
+    update_outcome: Option<UpdateProbe>,
     /// An update-readiness probe is wanted; the run loop spawns it
     /// at loop top and clears this. Set once after the first server frame
     /// lands, and again every time the sideline menu opens, so a menu opened
@@ -1270,6 +1270,10 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
+    /// A queued update verb (restart or release upgrade) and its
+    /// one-in-flight bound, mirroring the sweep pair.
+    update_verb_want: Option<UpdateVerb>,
+    update_verb_inflight: bool,
     /// The open new-agent popup, or the RETAINED draft after Esc
     /// (hidden but alive). Both live through `launcher_closed`.
     launcher: Option<agent_launcher::Launcher>,
@@ -1286,10 +1290,6 @@ struct View {
     /// A catalog probe is wanted/in flight (the update-probe discipline).
     catalog_want: bool,
     catalog_inflight: bool,
-    /// A queued `fno agents restart` and its one-in-flight bound,
-    /// mirroring the sweep pair.
-    restart_agents_want: bool,
-    restart_inflight: bool,
     /// A sweep verb is in flight; one at a time, so a second tap queues
     /// nothing and is told so.
     sweep_inflight: bool,
@@ -1902,6 +1902,8 @@ pub(crate) enum AuxAction {
     /// `--mux`, never `--force`: the modal named what survives, and the tap
     /// is the confirmation.
     RestartAgents,
+    /// Queue the channel's release upgrade (`uv tool upgrade fno`).
+    UpgradeRelease(release_check::Channel),
     /// Probe `mux workspace prune --dry-run` once and open the centered
     /// sweep-threads choice modal from its counts. Every scope of the prune
     /// lives behind this one entry.
@@ -1958,6 +1960,7 @@ mod backlog_style;
 mod config_set;
 mod node_detail;
 mod overlay_paint;
+mod release_check;
 mod settings_modal;
 mod update_menu;
 
@@ -1983,8 +1986,7 @@ use input_folds::{
 
 use mail_input::peek_input_keys;
 use update_menu::{
-    build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb,
-    UpdateOutcome,
+    build_sideline_menu, build_update_modal, probe_update, run_update_verb, UpdateProbe, UpdateVerb,
 };
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
@@ -2206,8 +2208,8 @@ impl View {
             update_probe_want: false,
             update_probe_inflight: false,
             sweep_action: None,
-            restart_agents_want: false,
-            restart_inflight: false,
+            update_verb_want: None,
+            update_verb_inflight: false,
             sweep_inflight: false,
             launcher: None,
             launcher_closed: None,
@@ -8389,16 +8391,16 @@ async fn attach_and_run(
     // The update-readiness probe runs off the UI loop and reports back
     // here. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateProbe>();
 
     // The harness-catalog probe for the new-agent popup, same
     // last-outcome-wins shape as the update probe.
     let (catalog_tx, mut catalog_rx) =
         tokio::sync::mpsc::unbounded_channel::<agent_launcher::CatalogOutcome>();
 
-    // The queued `fno agents restart` runs off the UI loop and
-    // reports back its verdict line. One at a time (the View's inflight
-    // flag); the notice is the receipt.
+    // The queued update verb (restart or release upgrade) runs off the UI loop
+    // and reports its verdict here. The View's inflight flag bounds it to one
+    // at a time; the notice is the receipt.
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // The resource meter's sampler reports its one-line reading here, same
@@ -8576,8 +8578,18 @@ async fn attach_and_run(
             view.update_probe_inflight = true;
             let tx = update_tx.clone();
             tokio::spawn(async move {
-                let outcome = probe_update_readiness().await;
+                let outcome = probe_update().await;
                 let _ = tx.send(outcome);
+            });
+        }
+        // Kick a wanted update verb off the UI loop, at most one in flight.
+        if let (false, Some(verb)) = (view.update_verb_inflight, view.update_verb_want) {
+            view.update_verb_want = None;
+            view.update_verb_inflight = true;
+            let tx = restart_tx.clone();
+            tokio::spawn(async move {
+                let verdict = run_update_verb(verb).await;
+                let _ = tx.send(verdict);
             });
         }
         // Kick a wanted harness-catalog probe, same one-in-flight
@@ -8589,17 +8601,6 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let outcome = agent_launcher::load_catalog().await;
                 let _ = tx.send(outcome);
-            });
-        }
-        // Kick a wanted agents restart off the UI loop, at most
-        // one in flight.
-        if view.restart_agents_want && !view.restart_inflight {
-            view.restart_agents_want = false;
-            view.restart_inflight = true;
-            let tx = restart_tx.clone();
-            tokio::spawn(async move {
-                let verdict = run_restart_verb().await;
-                let _ = tx.send(verdict);
             });
         }
         // Kick a wanted sweep verb off the UI loop, at most one in flight.
@@ -9220,10 +9221,7 @@ async fn attach_and_run(
                 }
             }
             Some(verdict) = restart_rx.recv() => {
-                // The restart verdict line lands as a notice: the
-                // last stdout line the verb printed, whatever it said.
-                view.restart_inflight = false;
-                view.set_notice(verdict);
+                view.land_update_verdict(verdict);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11623,14 +11621,15 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
-        AuxAction::RestartAgents => {
-            // change 7: the modal named every effect; the tap is the
-            // confirmation. Close the popup, queue the verb off the UI loop.
+        AuxAction::RestartAgents | AuxAction::UpgradeRelease(_) => {
+            // The modal named every effect; the tap is the confirmation.
             view.aux = None;
-            if view.restart_inflight {
-                view.set_notice("a restart is already running".into());
+            if view.update_verb_inflight || view.update_verb_want.is_some() {
+                view.set_notice("an update action is already running".into());
+            } else if let AuxAction::UpgradeRelease(c) = action {
+                view.update_verb_want = Some(UpdateVerb::Upgrade(c));
             } else {
-                view.restart_agents_want = true;
+                view.update_verb_want = Some(UpdateVerb::RestartAgents);
             }
         }
         AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
