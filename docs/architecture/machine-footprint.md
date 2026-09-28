@@ -74,3 +74,21 @@ The `machine` object is computed on every spawn's own footprint reading and ride
 Measured on 2026-09-18 on the fleet box: the admission read a 5.3 percent fleet share with `gap: null` and answered `admit`. The same payload's machine band read 3.873 of 12.00 cores, 32.3 percent of its 90 percent band, and answered `calm`. On a machine foreign work has saturated, the band answers `hot` and still gates nothing.
 
 When the load backstop was deleted, the run weighed both costs of a gating band. Gating holds the whole fleet for a browser. Not gating leaves an operator whose box is melting with one number that never moves. Whether the band gates is open with the superuser. This page records the behavior as it ships. No line here claims a ruling that has not landed.
+
+## Reader cost over a window
+
+The top-consumers list above is fleet-scoped and reads a percent-CPU snapshot: a decaying average that cannot settle cause. When the machine reads saturated, the deciding question is different. What did each reader class actually spend over a window, and did the load move with it?
+
+Use fno-agents intel --readers <secs> for that question. It integrates CPU-seconds per process class over an on-demand window of 10 to 3600 seconds (1 to 9 runs a smoke window). It samples the process table plus getloadavg every --every-ms (default 1000, floor 250). One JSON reader_cost_bucket line prints as each 10-second bucket closes, then one reader_cost_summary line. It runs on demand and never as a watcher: a watcher adds the cost being measured.
+
+The summary carries machine_cpu_s, fno_cpu_s, fno_share, build_cpu_s, the load range, and per-class cpu_s, births, max_concurrent and mean_life_s. It also carries the observer's own cpu spend, an unreadable count, sampled_births, and a missed_cpu_bound_s ceiling for lives shorter than one interval. The ceiling is births times interval at one core per birth.
+
+The verdict rule applied to the summary:
+- CAUSE: fno_share at 0.15 or above, and r_load_fno at 0.5 or above, and r_load_fno above r_load_build, with edge not none. The 15 percent line matters because a freeze can return no more than the fno share.
+- STACKING, independent of the above: any single fno class with max_concurrent of 3 or more. That shape is one process per verb per caller.
+- PRESENCE: neither of the above. The reading is a cost observation, not a conviction.
+- UNDECIDED: edge none. Repeat at the next machine_watch notice and decide nothing.
+
+The thresholds are planning choices, not measured law. Argue with them by re-running the probe, not by editing this page.
+
+Measured over a 1800 second window on 2026-09-27. Load moved 203, down to 87, back to 392. Edge reads both, 1647 samples. The fold read 13246.4 machine CPU-seconds, busy fraction 0.613. The fno classes spent 5184.5 CPU-seconds, a 0.391 share. Build spent 1915.4. Correlations: r_load_fno -0.291, r_load_build 0.508. Verdict: STACKING, not CAUSE. The readers hold four tenths of the used CPU while the load tracks the build class, not the readers. A reader freeze cannot settle a loaded machine. The stacked fno classes: do pr at 17 concurrent, authorized-merge at 10, agents truth at 7, doctor event at 3, fno-agents-worker at 4. Only agents truth had a cut branch. The single-flight freshness default moved from 10 seconds to one liveness cadence (60 seconds), so callers inside a cadence join the answering child. The do pr and authorized-merge births are per-session CI watcher pairs. Session work: recorded here and left alone.
