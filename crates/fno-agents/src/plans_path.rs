@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, TimeZone};
+use chrono::{TimeZone, Utc};
 
 use crate::agents_config::config_lookup;
 use crate::paths::{canonical_repo_root, space_slug, worktree_repo_root};
@@ -95,8 +95,7 @@ pub struct LocalTimestamp(i64);
 
 impl LocalTimestamp {
     pub fn from_epoch(secs: i64) -> Option<Self> {
-        Local
-            .timestamp_opt(secs, 0)
+        Utc.timestamp_opt(secs, 0)
             .single()
             .map(|_| LocalTimestamp(secs))
     }
@@ -105,10 +104,14 @@ impl LocalTimestamp {
         LocalTimestamp(chrono::Utc::now().timestamp())
     }
 
-    fn datetime(self) -> chrono::DateTime<Local> {
-        Local.timestamp_opt(self.0, 0).single().unwrap_or_else(|| {
+    fn datetime(self) -> chrono::DateTime<Utc> {
+        // The created_at date renders in UTC: the deleted Python leg rendered
+        // the stored timestamp's own zone, and a local-time render would mint
+        // a different filename for the same node per timezone (breaking the
+        // same-path-on-every-run contract the decompose tests pin).
+        Utc.timestamp_opt(self.0, 0).single().unwrap_or_else(|| {
             // from_epoch only constructs valid instants, so this never fires.
-            Local.timestamp_opt(0, 0).single().expect("epoch is valid")
+            Utc.timestamp_opt(0, 0).single().expect("epoch is valid")
         })
     }
 }
@@ -687,8 +690,12 @@ pub fn run_plan_path(args: &[String]) -> i32 {
 
 fn anchor_of(args: &[String]) -> PathBuf {
     match args.first() {
-        Some(p) if Path::new(p).is_dir() => PathBuf::from(p),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        // The anchor is a logical project root: a child epic's repo may not
+        // exist on this machine, and the plans chain must still route under
+        // ITS space rather than the caller's. Only an absent positional
+        // falls back to the process cwd.
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
 }
 

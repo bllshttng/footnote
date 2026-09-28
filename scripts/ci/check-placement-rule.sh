@@ -145,6 +145,11 @@
 #      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
 #      arms) names its subject on purpose. Comparison only; it writes
 #      nothing there.
+#      plans_path.rs resolves the plansDirectory chain by READING Claude
+#      Code's own `<root>/.claude/settings.local.json` then settings.json
+#      - the same tier Python fno.paths reads - and its tests build fake
+#      project roots under tmp. It constructs a read path only; footnote
+#      stores nothing there.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -263,6 +268,7 @@ cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
 crates/fno-agents/src/claude_vault.rs
 crates/fno-agents/src/capability_leaves.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/slot_cutover.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
