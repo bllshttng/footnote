@@ -129,9 +129,12 @@ def _door_done(tmp_path, entry, *args, pr_states=None, fail_stderr="", log=False
         stubbin = write_pr_stub(root, pr_states, fail_stderr=fail_stderr)
         if log:
             gh = stubbin / "gh"
-            body = gh.read_text(encoding="utf-8")
+            lines = gh.read_text(encoding="utf-8").split("\n")
+            # The log line rides AFTER the shebang: a script whose first line
+            # is not a shebang is not directly executable.
+            log_line = "printf '%s\\n' \"$@\" >> " + json.dumps(str(root / "gh.log"))
             gh.write_text(
-                'printf "%s\\n" "$@" >> ' + json.dumps(str(root / "gh.log")) + "\n" + body,
+                lines[0] + "\n" + log_line + "\n" + "\n".join(lines[1:]),
                 encoding="utf-8",
             )
         prepend = str(stubbin)
