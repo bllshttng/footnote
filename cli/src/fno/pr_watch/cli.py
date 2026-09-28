@@ -60,11 +60,6 @@ def _resolve_fno_binary() -> str:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Module-level adapter callables (extracted for testability)
-# ---------------------------------------------------------------------------
-
-
 def _emit_event(
     event_type: str, data: dict[str, Any], *, events_path: Optional[Path] = None
 ) -> bool:

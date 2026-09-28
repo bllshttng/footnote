@@ -222,12 +222,3 @@ def mark_control_pending(name: str) -> None:
         p.touch()
     except OSError:
         pass
-
-
-def clear_control_pending(names) -> None:
-    """Clear the flags for ``names``; absent is success."""
-    for name in names:
-        try:
-            control_pending_flag(name).unlink()
-        except OSError:
-            pass
