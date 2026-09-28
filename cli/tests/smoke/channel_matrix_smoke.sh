@@ -16,6 +16,8 @@
 set -uo pipefail
 
 ROW="${1:?usage: channel_matrix_smoke.sh <row-id>}"
+# macOS legs of a row share the row's body; the workflow suffixes their ids.
+ROW_KEY="${ROW%-macos}"
 
 fail=0
 pass() { printf 'PASS[%s] %s\n' "$1" "$2"; }
@@ -81,13 +83,21 @@ print(sorted(data["releases"], key=key)[-1])
 
 # --- shared smoke ------------------------------------------------------------
 shared_smoke() {
-  # $1 = directory holding the installed fno / fno-agents binaries.
-  local bin_dir="$1"
-  export PATH="$bin_dir:$PATH"
-  if [ ! -x "$bin_dir/fno" ]; then
-    miss "install" "no fno binary at $bin_dir/fno"
+  # $@ = candidate directories holding the installed fno / fno-agents binaries;
+  # the first one carrying an fno binary wins (channels disagree about where
+  # the tool bin lands, and a macOS pip --user fallback lands elsewhere still).
+  local bin_dir="" d
+  for d in "$@"; do
+    if [ -x "$d/fno" ]; then
+      bin_dir="$d"
+      break
+    fi
+  done
+  if [ -z "$bin_dir" ]; then
+    miss "install" "no fno binary in any of: $*"
     return 1
   fi
+  export PATH="$bin_dir:$PATH"
 
   run_capture "$bin_dir/fno" --version
   if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qE 'fno[[:space:]]+[0-9]+\.[0-9]+'; then
@@ -265,7 +275,12 @@ row_claude_plugin_session() {
   mv "$tree/.claude-plugin/plugin.json.new" "$tree/.claude-plugin/plugin.json"
   export CLAUDE_PLUGIN_DATA="$BASE/plugin-data"
   bash "$tree/hooks/context-run.sh" claude-session-start >/dev/null 2>&1
-  score_plugin_session "$CLAUDE_PLUGIN_DATA/postinstall.log" "$HOME/.local/bin"
+  local py_bins="" d
+  for d in "$HOME"/Library/Python/*/bin; do
+    [ -d "$d" ] && py_bins="$py_bins $d"
+  done
+  # shellcheck disable=SC2086
+  score_plugin_session "$CLAUDE_PLUGIN_DATA/postinstall.log" "$HOME/.local/bin" $py_bins
 }
 
 row_codex_plugin_session() {
@@ -289,7 +304,12 @@ row_codex_plugin_session() {
     return 0
   fi
   bash "$(dirname "$installed_hook")/context-run.sh" codex-session-start >/dev/null 2>&1
-  score_plugin_session "$HOME/.local/state/fno/plugin-install/postinstall.log" "$HOME/.local/bin"
+  local py_bins="" d
+  for d in "$HOME"/Library/Python/*/bin; do
+    [ -d "$d" ] && py_bins="$py_bins $d"
+  done
+  # shellcheck disable=SC2086
+  score_plugin_session "$HOME/.local/state/fno/plugin-install/postinstall.log" "$HOME/.local/bin" $py_bins
 }
 
 row_fno_sh_served() {
@@ -432,7 +452,7 @@ row_readme_commands() {
   fi
 }
 
-case "$ROW" in
+case "$ROW_KEY" in
   claude-marketplace)    row_claude_marketplace ;;
   claude-plugin-session) row_claude_plugin_session ;;
   codex-plugin-session)  row_codex_plugin_session ;;
@@ -451,6 +471,7 @@ case "$ROW" in
     exit 3
     ;;
 esac
+unset ROW_KEY
 
 echo "---"
 if [ "$fail" -ne 0 ]; then
