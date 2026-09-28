@@ -109,7 +109,17 @@ def write_pr_stub(root: Path, states: dict[int, str] | None = None, *, fail_stde
     else:
         arms = []
         for n, s in sorted((states or {}).items()):
-            body = json.dumps({"state": s, "html_url": f"https://github.com/o/r/pull/{n}"})
+            # REST reality: a merged PR is state "closed" with merged true,
+            # never a MERGED state. The stub speaks production so the reader's
+            # mapping is what the tests prove.
+            if str(s).upper() == "MERGED":
+                payload = {"state": "closed", "merged": True,
+                           "merged_at": "2026-06-01T10:00:00Z",
+                           "html_url": f"https://github.com/o/r/pull/{n}"}
+            else:
+                payload = {"state": str(s).lower(),
+                           "html_url": f"https://github.com/o/r/pull/{n}"}
+            body = json.dumps(payload)
             arm = '  case "$a" in */pulls/{n}) printf \'{b}\'; exit 0;; esac'
             arms.append(arm.replace("{n}", str(n)).replace("{b}", body))
         script = "\n".join(["#!/bin/sh", 'for a in "$@"; do'] + arms + ["done", "printf '{}'", "exit 0"])
