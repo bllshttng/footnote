@@ -6,7 +6,7 @@
 
 use fno::chrome;
 use fno::popup::{Anchor, Popup, PopupRow};
-use fno::theme::{cell_style, Theme};
+use fno::theme::Theme;
 
 struct Surface {
     name: &'static str,
