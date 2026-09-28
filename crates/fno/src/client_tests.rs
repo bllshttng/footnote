@@ -1,4 +1,3 @@
-use super::compositor::apply_style;
 use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
@@ -7878,7 +7877,7 @@ fn client_apply_style_reverses_selected_cell() {
         ..Cell::default()
     };
     let mut buf = Vec::new();
-    apply_style(&mut buf, &sel).unwrap();
+    super::compositor::apply_style(&mut buf, &sel).unwrap();
     assert!(
         buf.windows(4).any(|w| w == b"\x1b[7m"),
         "reverse SGR emitted"
@@ -7889,7 +7888,7 @@ fn client_apply_style_reverses_selected_cell() {
         ..Cell::default()
     };
     let mut buf2 = Vec::new();
-    apply_style(&mut buf2, &both).unwrap();
+    super::compositor::apply_style(&mut buf2, &both).unwrap();
     assert!(
         !buf2.windows(4).any(|w| w == b"\x1b[7m"),
         "double-inverse cancels"

@@ -338,7 +338,11 @@ pub async fn run(
             }
         }
         rewind(last_rows);
-        last_rows = Some(ART_ROWS as usize + frame.footer as usize);
+        // The cursor ends ON the block's last row: rewind walks back
+        // printed-1 lines, so last_rows counts what draw actually prints
+        // (STAMP_ROWS art rows, plus the footer row when the beat has one),
+        // not ART_ROWS.
+        last_rows = Some(STAMP_ROWS + frame.footer as usize);
         draw(frame, theme);
     }
     // Hold the finished mark briefly so the last beat reads. Plain sleep:
