@@ -378,6 +378,7 @@ echo "--- Rust: no plan-status reader ---"
 # blueprint_judge.rs grades plan prose against five product questions;
 # it never classifies `status:` frontmatter.
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/backlog/create_cli.rs
+crates/fno-agents/src/backlog/promise.rs
 crates/fno-agents/src/backlog/session_cli.rs
 crates/fno-agents/src/backlog/update_cli.rs
 crates/fno-agents/src/blueprint_judge.rs
@@ -392,6 +393,9 @@ crates/fno-agents/src/surface_check.rs"
 # update_cli.rs reads only the plan frontmatter `size` (the doc->graph
 # linked-size flow on a plan relink); it never extracts a plan status, so
 # the shelling rule does not apply to it.
+# promise.rs reads only the plan frontmatter declarations the promise gate
+# is named by (`close_probes`, `expected_url_count`); it never extracts a
+# plan status, so the shelling rule does not apply to it.
 # session_cli.rs reads only the plan frontmatter `claims:`/`node:` names
 # (the blueprint-session plan-claims join); it never extracts a plan
 # status, so the shelling rule does not apply to it.
@@ -495,6 +499,16 @@ while IFS= read -r reader; do
             printf '%s\n' "$matches" \
                 | grep -vE '\.get\("status"\)' \
                 | grep -vE '"status": (status,|if ended_existing|"(joined|opened|closed|skipped)")' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/promise.rs" ]; then
+        # promise's "status" literal is a #[cfg(test)] graph-row fixture
+        # (graph vocabulary, not plan frontmatter); its only plan read is
+        # the close_probes/expected_url_count declaration walk.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '"status":[[:space:]]*"in_progress"' \
                 || true
         )"
     fi

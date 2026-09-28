@@ -80,6 +80,21 @@ def _read_entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
+def _mark_done(g: Path, node_id: str) -> None:
+    """Arrange a done node straight through the store. The close itself is
+    native; this file's subject is what contain does with a done node."""
+    from fno.graph.store import commit_rows_via_store
+
+    def stamp(rows):
+        for e in rows:
+            if e["id"] == node_id:
+                e["status"] = "done"
+                e["completed_at"] = "2026-04-01T00:00:00+00:00"
+        return rows
+
+    commit_rows_via_store(g, stamp)
+
+
 def _by_id(g: Path) -> dict:
     return {e["id"]: e for e in _read_entries(g)}
 
@@ -162,7 +177,7 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     # done either way and contain must still refuse. The completion note
     # satisfies the close-evidence rule; the force keeps the child gate.
     _native_update(tmp_graph, owner, "--completion-note", "setup: done owner")
-    _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
+    _mark_done(tmp_graph, owner)
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is done" in r.output
@@ -255,7 +270,7 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     kid = kids[0]
     _native_update(tmp_graph, kid, "--completion-note", "setup: done target")
-    _invoke("backlog", "done", kid)
+    _mark_done(tmp_graph, kid)
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"
     rows[kid]["pr_number"] = 4243

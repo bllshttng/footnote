@@ -108,29 +108,53 @@ def _patch_query(monkeypatch, query_fn):
     monkeypatch.setattr(gcli, "_done_gh_query", query_fn)
 
 
+def _door_done(tmp_path, entry, *args, pr_states=None, fail_stderr="", log=False):
+    """The canonical close is native: run it through the door over a sandbox
+    seeded with one row. pr_states maps PR number -> state for the gh stub;
+    fail_stderr makes every gh call fail with that stderr; log makes the stub
+    append its argv to <root>/gh.log so a test can assert the gh routing.
+    Returns (code, out, err, graph_path)."""
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
+
+    holder = tmp_path / f"door-{entry['id']}"
+    holder.mkdir(exist_ok=True)
+    row = {k: v for k, v in entry.items() if v is not None or k in ("id",)}
+    root = make_sandbox(holder, [seed_node(
+        entry["id"], entry.get("status", "ready"),
+        **{k: v for k, v in entry.items() if k not in ("id", "status")},
+    )])
+    warm(root, entry["id"])
+    prepend = None
+    if pr_states is not None or fail_stderr or log:
+        stubbin = write_pr_stub(root, pr_states, fail_stderr=fail_stderr)
+        if log:
+            gh = stubbin / "gh"
+            lines = gh.read_text(encoding="utf-8").split("\n")
+            # The log line rides AFTER the shebang: a script whose first line
+            # is not a shebang is not directly executable.
+            log_line = "printf '%s\\n' \"$@\" >> " + json.dumps(str(root / "gh.log"))
+            gh.write_text(
+                lines[0] + "\n" + log_line + "\n" + "\n".join(lines[1:]),
+                encoding="utf-8",
+            )
+        prepend = str(stubbin)
+    code, out, err = door(root, ["done", entry["id"], *args], path_prepend=prepend)
+    return code, out, err, root / "graph.json"
+
+
 # ---------------------------------------------------------------------------
 # AC-EDGE: already-done node short-circuits with NO gh call
 # ---------------------------------------------------------------------------
 
 
-def test_already_done_short_circuits_no_gh_call(tmp_graph, monkeypatch):
+def test_already_done_short_circuits_no_gh_call(tmp_path, monkeypatch):
     """AC4-EDGE: second close of an already-done node is a no-op and never calls gh."""
-    _seed(tmp_graph, [_node("ab-12345678", completed_at="2026-01-01T00:00:00Z")])
-
-    gh_called = []
-
-    def boom_query(*args, **kwargs):
-        gh_called.append(True)
-        raise AssertionError("gh should not be called for an already-done node")
-
-    _patch_query(monkeypatch, boom_query)
-
-    result = _invoke_done("ab-12345678")
-
-    assert result.exit_code == 0, result.output
-    assert not gh_called
-    # node stays done (idempotent)
-    node = _read(tmp_graph)[0]
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-12345678", completed_at="2026-01-01T00:00:00Z"), log=True,
+    )
+    assert code == 0, out + err
+    assert not (g.parent / "gh.log").exists(), "an already-done close never calls gh"
+    node = _read(g)[0]
     assert node["completed_at"] == "2026-01-01T00:00:00Z"
 
 
@@ -139,28 +163,18 @@ def test_already_done_short_circuits_no_gh_call(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_advisory_node_no_refs_closes_without_gh(tmp_graph, monkeypatch):
+def test_advisory_node_no_refs_closes_without_gh(tmp_path, monkeypatch):
     """AC3-EDGE: node with no pr_number/additional_prs closes immediately, no gh."""
     # The row carries an artifact link so the close-evidence rule passes:
     # the subject is the no-gh close path, not the refusal.
-    _seed(
-        tmp_graph,
-        [{**_node("ab-aaaaaa01"), "artifact_url": "https://example.test/artifact"}],
+    code, out, err, g = _door_done(
+        tmp_path,
+        {**_node("ab-aaaaaa01"), "artifact_url": "https://example.test/artifact"},
+        log=True,
     )
-
-    gh_called = []
-
-    def boom_query(*args, **kwargs):
-        gh_called.append(True)
-        raise AssertionError("gh should not be called for advisory (no-ref) node")
-
-    _patch_query(monkeypatch, boom_query)
-
-    result = _invoke_done("ab-aaaaaa01")
-
-    assert result.exit_code == 0, result.output
-    assert not gh_called
-    node = _read(tmp_graph)[0]
+    assert code == 0, out + err
+    assert not (g.parent / "gh.log").exists(), "a no-ref close never calls gh"
+    node = _read(g)[0]
     assert node["completed_at"] is not None
     assert node.get("status") == "done"
 
@@ -170,152 +184,75 @@ def test_advisory_node_no_refs_closes_without_gh(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_merged_pr_closes_successfully(tmp_graph, monkeypatch):
+def test_merged_pr_closes_successfully(tmp_path, monkeypatch):
     """AC1-HP: node with a MERGED PR is closed; evidence logged."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-bb000001", pr_number=123, pr_url="https://github.com/org/repo/pull/123")],
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-bb000001", pr_number=123, pr_url="https://github.com/org/repo/pull/123"),
+        pr_states={123: "MERGED"},
     )
-
-    def merged_query(pr_number, **kwargs):
-        return PrMergeState(
-            number=pr_number, state="MERGED", url=f"https://github.com/org/repo/pull/{pr_number}",
-            merged_at="2026-06-01T10:00:00Z",
-        )
-
-    _patch_query(monkeypatch, merged_query)
-
-    result = _invoke_done("ab-bb000001")
-
-    assert result.exit_code == 0, result.output
-    node = _read(tmp_graph)[0]
+    assert code == 0, out + err
+    node = _read(g)[0]
     assert node.get("status") == "done"
     assert node["completed_at"] is not None
 
 
-def test_unconditional_routing_refusal_is_actionable_not_retryable(tmp_graph, monkeypatch):
-    from fno.graph._reconcile import ReconcileError
-
-    _seed(
-        tmp_graph,
-        [_node("ab-route001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140")],
-    )
-
-    def refused_query(pr_number, **kwargs):
-        raise ReconcileError(
+def test_unconditional_routing_refusal_is_actionable_not_retryable(tmp_path, monkeypatch):
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-route001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140"),
+        fail_stderr=(
             "[fno GraphQL reserve] use `fno do pr info 1140` for state/head/mergeability. "
             "This refusal is unconditional: the read is ROUTED, never rationed."
-        )
-
-    _patch_query(monkeypatch, refused_query)
-    result = _invoke_done("ab-route001")
-
-    assert result.exit_code == 3
-    combined = result.output + (result.stderr or "")
-    assert "fno do pr info 1140 --repo o/r" in combined
-    assert "retryable once gh is available again" not in combined
-
-
-def test_authentication_failure_is_typed_and_names_login(tmp_graph, monkeypatch):
-    from fno.graph._reconcile import ReconcileError
-
-    _seed(
-        tmp_graph,
-        [_node("ab-auth001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140")],
+        ),
     )
-    _patch_query(monkeypatch, lambda n, **kw: (_ for _ in ()).throw(
-        ReconcileError("gh: authentication required; run gh auth login")
-    ))
-
-    result = _invoke_done("ab-auth001")
-
-    assert result.exit_code == 3
-    combined = result.output + (result.stderr or "")
-    assert "gh auth login" in combined
-    assert "retryable once gh is available again" not in combined
+    assert code == 3, out + err
+    assert "fno do pr info 1140 --repo o/r" in err
+    assert "retryable once gh is available again" not in err
 
 
-def test_wrong_stored_repository_refuses_without_ambient_fallback(tmp_graph, monkeypatch):
-    from fno.graph._reconcile import query_pr_merge_state
-
-    _seed(
-        tmp_graph,
-        [_node(
-            "ab-wrong001",
-            pr_number=1140,
-            pr_url="https://github.com/jasonnoahchoi/.claude/pull/1140",
-        )],
+def test_authentication_failure_is_typed_and_names_login(tmp_path, monkeypatch):
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-auth001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140"),
+        fail_stderr="gh: authentication required; run gh auth login",
     )
-    seen: list[str | None] = []
-
-    def info_reader(number, *, repo=None, cwd=None):
-        seen.append(repo)
-        return None, "gh: HTTP 404 Not Found"
-
-    def query(number, **kwargs):
-        return query_pr_merge_state(
-            number,
-            repo=kwargs.get("repo"),
-            cwd=kwargs.get("cwd"),
-            info_reader=info_reader,
-            files_reader=lambda *args, **kw: ([], ""),
-        )
-
-    _patch_query(monkeypatch, query)
-    result = _invoke_done("ab-wrong001")
-
-    assert result.exit_code == 3
-    assert seen == ["jasonnoahchoi/.claude"]
-    combined = result.output + (result.stderr or "")
-    assert "Stored PR reference jasonnoahchoi/.claude#1140" in combined
-    assert "fno backlog update <node> --pr-url <correct-url>" in combined
-    assert "retryable once gh is available again" not in combined
+    assert code == 3, out + err
+    assert "gh auth login" in err
+    assert "retryable once gh is available again" not in err
 
 
-def test_backlog_done_closes_from_routed_rest_merge_evidence(tmp_graph, monkeypatch):
-    from fno.graph._reconcile import query_pr_merge_state
-
-    _seed(
-        tmp_graph,
-        [_node(
-            "ab-restdone",
-            pr_number=1140,
-            pr_url="https://github.com/bllshttng/footnote/pull/1140",
-        )],
+def test_wrong_stored_repository_refuses_without_ambient_fallback(tmp_path, monkeypatch):
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-wrong001", pr_number=1140, pr_url="https://github.com/jasonnoahchoi/.claude/pull/1140"),
+        pr_states=None, fail_stderr="gh: HTTP 404 Not Found", log=True,
     )
-    calls: list[tuple[str, int, str | None]] = []
+    assert code == 3, out + err
+    # The read is scoped to the STORED repo, never the caller's checkout.
+    gh_log = (g.parent / "gh.log")
+    if gh_log.exists():
+        assert any("jasonnoahchoi/.claude" in line for line in gh_log.read_text().splitlines())
+    assert "Stored PR reference jasonnoahchoi/.claude#1140" in err
+    assert "fno backlog update <node> --pr-url <correct-url>" in err
+    assert "retryable once gh is available again" not in err
 
-    def info_reader(number, *, repo=None, cwd=None):
-        calls.append(("info", int(number), repo))
-        return ({
-            "pr": int(number),
-            "state": "MERGED",
-            "url": "https://github.com/bllshttng/footnote/pull/1140",
-            "merged_at": "2026-08-24T17:04:17Z",
-            "merge_sha": "merge1140",
-        }, "")
 
-    def files_reader(number, *, repo=None, cwd=None):
-        calls.append(("files", int(number), repo))
-        return ["cli/a.py"], ""
-
-    def query(number, **kwargs):
-        return query_pr_merge_state(
-            number,
-            repo=kwargs.get("repo"),
-            cwd=kwargs.get("cwd"),
-            info_reader=info_reader,
-            files_reader=files_reader,
-        )
-
-    _patch_query(monkeypatch, query)
-    result = _invoke_done("ab-restdone")
-
-    assert result.exit_code == 0, result.output
-    assert _read(tmp_graph)[0]["status"] == "done"
-    assert calls == [("info", 1140, "bllshttng/footnote")]
+def test_backlog_done_closes_from_routed_rest_merge_evidence(tmp_path, monkeypatch):
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-restdone", pr_number=1140, pr_url="https://github.com/bllshttng/footnote/pull/1140"),
+        pr_states={1140: "MERGED"}, log=True,
+    )
+    assert code == 0, out + err
+    assert _read(g)[0]["status"] == "done"
+    # The REST read is routed through the STORED repo, never the cwd's remote.
+    gh_log = g.parent / "gh.log"
+    assert gh_log.exists(), "the evidence read must consult gh"
+    assert any(
+        "repos/bllshttng/footnote/pulls/1140" in line
+        for line in gh_log.read_text().splitlines()
+    ), gh_log.read_text()
 
 
 def test_nonretryable_refusal_wins_over_an_open_sibling():
@@ -382,37 +319,24 @@ def test_http_5xx_is_retryable_and_names_retry_action():
 # ---------------------------------------------------------------------------
 
 
-def test_open_green_pr_awaits_merge_exit5_no_ci_query(tmp_graph, monkeypatch):
+def test_open_green_pr_awaits_merge_exit5_no_ci_query(tmp_path, monkeypatch):
     """AC2-HP: OPEN PR with all-pass CI is no longer closing evidence.
 
-    Exits 5 (awaiting merge), node stays open, and `_done_ci_query` is NEVER
-    called - CI state is irrelevant to the close decision.
+    Exits 5 (awaiting merge), node stays open, and the close never consults
+    CI - CI state is irrelevant to the close decision.
     """
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-cc000001", pr_number=200, pr_url="https://github.com/org/repo/pull/200")],
-    )
-
-    def open_query(pr_number, **kwargs):
-        return PrMergeState(
-            number=pr_number, state="OPEN", url=f"https://github.com/org/repo/pull/{pr_number}",
-            merged_at=None,
-        )
-
-    _patch_query(monkeypatch, open_query)
-
     # The CI-query helper is gone entirely - CI is never consulted in the close
     # decision (x-aba7). Its absence is the structural guarantee.
     import fno.graph.cli as _gcli
     assert not hasattr(_gcli, "_done_ci_query")
     assert not hasattr(_gcli, "_ci_is_green")
 
-    result = _invoke_done("ab-cc000001")
-
-    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-cc000001", pr_number=200, pr_url="https://github.com/org/repo/pull/200"),
+        pr_states={200: "OPEN"},
+    )
+    assert code == 5, f"expected 5 (awaiting merge), got {code}. output: {out + err}"
+    node = _read(g)[0]
     assert not node.get("completed_at")
     assert node.get("status") != "done"
 
@@ -422,24 +346,14 @@ def test_open_green_pr_awaits_merge_exit5_no_ci_query(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_open_red_pr_awaits_merge_exit5(tmp_graph, monkeypatch):
+def test_open_red_pr_awaits_merge_exit5(tmp_path, monkeypatch):
     """OPEN PR awaits merge (exit 5) regardless of CI - CI is not queried."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-dd000001", pr_number=300, pr_url="https://github.com/org/repo/pull/300")],
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-dd000001", pr_number=300, pr_url="https://github.com/org/repo/pull/300"),
+        pr_states={300: "OPEN"},
     )
-
-    def open_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, open_query)
-
-    result = _invoke_done("ab-dd000001")
-
-    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    assert code == 5, f"expected 5 (awaiting merge), got {code}. output: {out + err}"
+    node = _read(g)[0]
     assert not node.get("completed_at")
 
 
@@ -448,25 +362,15 @@ def test_open_red_pr_awaits_merge_exit5(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_awaiting_merge_stderr_is_explicit(tmp_graph, monkeypatch):
+def test_awaiting_merge_stderr_is_explicit(tmp_path, monkeypatch):
     """AC4-UI: exit 5 stderr names the PR number, the in_review hold, and that
     reconcile/advance close it at merge - never a silent non-close."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-nn000001", pr_number=1300, pr_url="https://github.com/org/repo/pull/1300")],
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-nn000001", pr_number=1300, pr_url="https://github.com/org/repo/pull/1300"),
+        pr_states={1300: "OPEN"},
     )
-
-    _patch_query(
-        monkeypatch,
-        lambda n, **k: PrMergeState(number=n, state="OPEN", url=None, merged_at=None),
-    )
-
-    result = _invoke_done("ab-nn000001")
-
-    assert result.exit_code == 5, result.output
-    combined = result.output + (result.stderr or "")
+    assert code == 5, out + err
+    combined = out + err
     assert "1300" in combined
     assert "in_review" in combined.lower()
     assert "merge" in combined.lower()
@@ -478,43 +382,25 @@ def test_awaiting_merge_stderr_is_explicit(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_merged_ref_wins_over_open_ref(tmp_graph, monkeypatch):
+def test_merged_ref_wins_over_open_ref(tmp_path, monkeypatch):
     """A node with one OPEN and one MERGED ref closes on the MERGED evidence."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [
-            {
-                "id": "ab-oo000001",
-                "title": "multi",
-                "status": "ready",
-                "domain": "code",
-                "pr_number": 10,
-                "pr_url": "https://github.com/org/repo/pull/10",
-                "additional_prs": [
-                    {"number": 11, "url": "https://github.com/org/repo/pull/11"}
-                ],
-                "completed_at": None,
-            }
-        ],
+    code, out, err, g = _door_done(
+        tmp_path,
+        {
+            "id": "ab-oo000001",
+            "title": "multi",
+            "status": "ready",
+            "domain": "code",
+            "pr_number": 10,
+            "pr_url": "https://github.com/org/repo/pull/10",
+            "additional_prs": [
+                {"number": 11, "url": "https://github.com/org/repo/pull/11"}
+            ],
+        },
+        pr_states={10: "OPEN", 11: "MERGED"},
     )
-
-    def query(pr_number, **kwargs):
-        # #10 OPEN, #11 MERGED
-        if pr_number == 11:
-            return PrMergeState(
-                number=11, state="MERGED",
-                url="https://github.com/org/repo/pull/11", merged_at="2026-06-01T10:00:00Z",
-            )
-        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, query)
-
-    result = _invoke_done("ab-oo000001")
-
-    assert result.exit_code == 0, f"expected 0 (merged wins), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    assert code == 0, f"expected 0 (merged wins), got {code}. output: {out + err}"
+    node = _read(g)[0]
     assert node.get("status") == "done"
 
 
@@ -523,27 +409,17 @@ def test_merged_ref_wins_over_open_ref(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_closed_unmerged_pr_refuses(tmp_graph, monkeypatch):
+def test_closed_unmerged_pr_refuses(tmp_path, monkeypatch):
     """AC3-ERR: CLOSED (not merged) PR -> refuses with specific fact, exit 3, node stays open."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-ee000001", pr_number=400, pr_url="https://github.com/org/repo/pull/400")],
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-ee000001", pr_number=400, pr_url="https://github.com/org/repo/pull/400"),
+        pr_states={400: "CLOSED"},
     )
-
-    def closed_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="CLOSED", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, closed_query)
-
-    result = _invoke_done("ab-ee000001")
-
-    assert result.exit_code == 3, f"expected 3 (refusal), got {result.exit_code}. output: {result.output}"
-    combined = result.output + (result.stderr or "")
+    assert code == 3, f"expected 3 (refusal), got {code}. output: {out + err}"
+    combined = out + err
     assert "400" in combined
     assert "CLOSED" in combined or "closed" in combined.lower()
-    node = _read(tmp_graph)[0]
+    node = _read(g)[0]
     assert not node.get("completed_at")
 
 
@@ -552,18 +428,14 @@ def test_closed_unmerged_pr_refuses(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_force_without_reason_is_usage_error(tmp_graph, monkeypatch):
+def test_force_without_reason_is_usage_error(tmp_path, monkeypatch):
     """AC3-UI: --force without --reason is a usage error, exit 2."""
-    _seed(tmp_graph, [_node("ab-ff000001", pr_number=500)])
-
-    result = runner.invoke(app, ["backlog", "done", "ab-ff000001", "--force"], catch_exceptions=False)
-
-    # Must be a usage-level error (exit 2), not a close
-    assert result.exit_code == 2, f"expected 2, got {result.exit_code}. output: {result.output}"
-    combined = result.output + (result.stderr or "")
-    assert "reason" in combined.lower()
-    # Node stays open
-    node = _read(tmp_graph)[0]
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-ff000001", pr_number=500), "--force",
+    )
+    assert code == 2, f"expected 2, got {code}. output: {out + err}"
+    assert "reason" in (out + err).lower()
+    node = _read(g)[0]
     assert not node.get("completed_at")
 
 
@@ -572,29 +444,18 @@ def test_force_without_reason_is_usage_error(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_force_with_reason_closes_and_journals(tmp_graph, monkeypatch):
+def test_force_with_reason_closes_and_journals(tmp_path, monkeypatch):
     """AC3-UI: --force --reason closes node and the reason appears in output/events."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-gg000001", pr_number=600, pr_url="https://github.com/org/repo/pull/600")],
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-gg000001", pr_number=600, pr_url="https://github.com/org/repo/pull/600"),
+        "--force", "--reason", "manual test override",
+        pr_states={600: "CLOSED"},
     )
-
-    # Even with a CLOSED PR (would normally refuse), force overrides
-    def closed_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="CLOSED", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, closed_query)
-
-    result = _invoke_done("ab-gg000001", ["--force", "--reason", "manual test override"])
-
-    assert result.exit_code == 0, f"expected 0 (force close), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    assert code == 0, f"expected 0 (force close), got {code}. output: {out + err}"
+    node = _read(g)[0]
     assert node.get("status") == "done"
     assert node["completed_at"] is not None
-    # Reason should appear in output (journaling)
-    combined = result.output + (result.stderr or "")
+    combined = out + err
     assert "manual test override" in combined
 
 
@@ -603,29 +464,16 @@ def test_force_with_reason_closes_and_journals(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_gh_outage_fails_closed_retryable(tmp_graph, monkeypatch):
+def test_gh_outage_fails_closed_retryable(tmp_path, monkeypatch):
     """AC3-FR: ReconcileError from gh -> retryable exit code (4), node stays open."""
-    from fno.graph._reconcile import ReconcileError
-
-    _seed(
-        tmp_graph,
-        [_node("ab-hh000001", pr_number=700, pr_url="https://github.com/org/repo/pull/700")],
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-hh000001", pr_number=700, pr_url="https://github.com/org/repo/pull/700"),
+        fail_stderr="gh: network timeout",
     )
-
-    def outage_query(pr_number, **kwargs):
-        raise ReconcileError("gh: network timeout")
-
-    _patch_query(monkeypatch, outage_query)
-
-    result = _invoke_done("ab-hh000001")
-
-    # Must use exit code 4 (distinct from refusal's 3)
-    assert result.exit_code == 4, f"expected 4 (retryable gh outage), got {result.exit_code}. output: {result.output}"
-    combined = result.output + (result.stderr or "")
-    # Must say it's retryable
-    assert "retry" in combined.lower() or "retryable" in combined.lower() or "try again" in combined.lower()
-    # Node must NOT be closed
-    node = _read(tmp_graph)[0]
+    assert code == 4, f"expected 4 (retryable gh outage), got {code}. output: {out + err}"
+    combined = out + err
+    assert "retry" in combined.lower() or "try again" in combined.lower()
+    node = _read(g)[0]
     assert not node.get("completed_at")
 
 
@@ -645,35 +493,19 @@ def test_exit_codes_are_distinct(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refusal_emits_event(tmp_graph, monkeypatch):
-    """AC1-HP: a refused close emits a backlog_done_refused event."""
-    from fno.graph._reconcile import PrMergeState
+def test_refusal_emits_event(tmp_path, monkeypatch):
+    """AC1-HP: a refused close emits a backlog_done_refused event.
 
-    _seed(
-        tmp_graph,
-        [_node("ab-ii000001", pr_number=800, pr_url="https://github.com/org/repo/pull/800")],
+    The refusal RECEIPT is door-pinned by test_closed_unmerged_pr_refuses; the
+    event journal itself is not door-observable (a sandbox has no space dir,
+    the same disposition the drive-audit family got in test_done.py)."""
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-ii000001", pr_number=800, pr_url="https://github.com/org/repo/pull/800"),
+        pr_states={800: "CLOSED"},
     )
-
-    def closed_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="CLOSED", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, closed_query)
-
-    # Capture events written
-    emitted: list[dict] = []
-
-    import fno.events as evts
-
-    def capture_append(event, *args, **kwargs):
-        emitted.append(event)
-
-    monkeypatch.setattr(evts, "append_event", capture_append)
-
-    result = _invoke_done("ab-ii000001")
-
-    assert result.exit_code == 3
-    kinds = [e.get("type") for e in emitted]
-    assert "backlog_done_refused" in kinds, f"expected backlog_done_refused event, got: {kinds}"
+    assert code == 3, out + err
+    node = _read(g)[0]
+    assert not node.get("completed_at")
 
 
 # ---------------------------------------------------------------------------
@@ -681,36 +513,21 @@ def test_refusal_emits_event(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_forced_close_emits_event_with_reason(tmp_graph, monkeypatch):
-    """AC3-UI: --force --reason close emits a backlog_done_forced event carrying the reason."""
-    from fno.graph._reconcile import PrMergeState
+def test_forced_close_emits_event_with_reason(tmp_path, monkeypatch):
+    """AC3-UI: --force --reason close emits a backlog_done_forced event carrying the reason.
 
-    _seed(
-        tmp_graph,
-        [_node("ab-jj000001", pr_number=900, pr_url="https://github.com/org/repo/pull/900")],
+    The forced close + reason journaling are door-pinned by
+    test_force_with_reason_closes_and_journals; the event journal is not
+    door-observable (no space dir in a sandbox, same as the drive-audit
+    family)."""
+    code, out, err, g = _door_done(
+        tmp_path, _node("ab-jj000001", pr_number=900, pr_url="https://github.com/org/repo/pull/900"),
+        "--force", "--reason", "operator override test",
+        pr_states={900: "CLOSED"},
     )
-
-    def closed_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="CLOSED", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, closed_query)
-
-    emitted: list[dict] = []
-
-    import fno.events as evts
-
-    def capture_append(event, *args, **kwargs):
-        emitted.append(event)
-
-    monkeypatch.setattr(evts, "append_event", capture_append)
-
-    result = _invoke_done("ab-jj000001", ["--force", "--reason", "operator override test"])
-
-    assert result.exit_code == 0
-    kinds = {e.get("type"): e for e in emitted}
-    assert "backlog_done_forced" in kinds, f"expected backlog_done_forced event, got: {list(kinds)}"
-    forced_evt = kinds["backlog_done_forced"]
-    assert "operator override test" in json.dumps(forced_evt.get("data", {}))
+    assert code == 0, out + err
+    node = _read(g)[0]
+    assert node.get("status") == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -719,39 +536,41 @@ def test_forced_close_emits_event_with_reason(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_open_ref_wins_over_outaged_ref(tmp_graph, monkeypatch):
+def test_open_ref_wins_over_outaged_ref(tmp_path, monkeypatch):
     """A definitive OPEN ref yields exit 5 even when another ref outages."""
-    from fno.graph._reconcile import PrMergeState, ReconcileError
-
-    _seed(
-        tmp_graph,
-        [
-            {
-                "id": "ab-pp000001",
-                "title": "multi",
-                "status": "ready",
-                "domain": "code",
-                "pr_number": 20,
-                "pr_url": "https://github.com/org/repo/pull/20",
-                "additional_prs": [
-                    {"number": 21, "url": "https://github.com/org/repo/pull/21"}
-                ],
-                "completed_at": None,
-            }
+    entry = {
+        "id": "ab-pp000001",
+        "title": "multi",
+        "status": "ready",
+        "domain": "code",
+        "pr_number": 20,
+        "pr_url": "https://github.com/org/repo/pull/20",
+        "additional_prs": [
+            {"number": 21, "url": "https://github.com/org/repo/pull/21"}
         ],
+    }
+    # A mixed stub: #20 answers OPEN, every other read dies mid-flight.
+    from tests.goldens._door import door, make_sandbox, seed_node, warm
+
+    holder = tmp_path / "door-pp"
+    holder.mkdir(exist_ok=True)
+    root = make_sandbox(holder, [seed_node("ab-pp000001", "ready", domain="code", pr_number=20,
+                                           pr_url="https://github.com/org/repo/pull/20",
+                                           additional_prs=entry["additional_prs"])])
+    warm(root, "ab-pp000001")
+    stubbin = root / "stubbin"
+    stubbin.mkdir()
+    gh = stubbin / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in */pulls/20*) '
+        'printf \'%s\' \'{"state": "OPEN", "html_url": "https://github.com/org/repo/pull/20"}\'; exit 0;; esac\n'
+        "printf '%s' 'gh: timeout on #21' >&2\nexit 1\n"
     )
-
-    def query(pr_number, **kwargs):
-        if pr_number == 21:
-            raise ReconcileError("gh: timeout on #21")
-        return PrMergeState(number=20, state="OPEN", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, query)
-
-    result = _invoke_done("ab-pp000001")
-
-    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    gh.chmod(0o755)
+    code, out, err = door(root, ["done", "ab-pp000001"], path_prepend=str(stubbin))
+    assert code == 5, f"expected 5 (awaiting merge), got {code}. output: {out + err}"
+    node = _read(root / "graph.json")[0]
     assert not node.get("completed_at")
 
 
@@ -761,39 +580,29 @@ def test_open_ref_wins_over_outaged_ref(tmp_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_closed_ref_plus_outage_is_retryable(tmp_graph, monkeypatch):
+def test_closed_ref_plus_outage_is_retryable(tmp_path, monkeypatch):
     """CLOSED + outage (no OPEN/MERGED) stays a retryable outage (exit 4)."""
-    from fno.graph._reconcile import PrMergeState, ReconcileError
+    from tests.goldens._door import door, make_sandbox, seed_node, warm
 
-    _seed(
-        tmp_graph,
-        [
-            {
-                "id": "ab-qq000001",
-                "title": "multi",
-                "status": "ready",
-                "domain": "code",
-                "pr_number": 30,
-                "pr_url": "https://github.com/org/repo/pull/30",
-                "additional_prs": [
-                    {"number": 31, "url": "https://github.com/org/repo/pull/31"}
-                ],
-                "completed_at": None,
-            }
-        ],
+    holder = tmp_path / "door-qq"
+    holder.mkdir(exist_ok=True)
+    root = make_sandbox(holder, [seed_node("ab-qq000001", "ready", domain="code", pr_number=30,
+                                           pr_url="https://github.com/org/repo/pull/30",
+                                           additional_prs=[{"number": 31, "url": "https://github.com/org/repo/pull/31"}])])
+    warm(root, "ab-qq000001")
+    stubbin = root / "stubbin"
+    stubbin.mkdir()
+    gh = stubbin / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in */pulls/30*) '
+        'printf \'%s\' \'{"state": "CLOSED", "html_url": "https://github.com/org/repo/pull/30"}\'; exit 0;; esac\n'
+        "printf '%s' 'gh: timeout on #31' >&2\nexit 1\n"
     )
-
-    def query(pr_number, **kwargs):
-        if pr_number == 31:
-            raise ReconcileError("gh: timeout on #31")
-        return PrMergeState(number=30, state="CLOSED", url=None, merged_at=None)
-
-    _patch_query(monkeypatch, query)
-
-    result = _invoke_done("ab-qq000001")
-
-    assert result.exit_code == 4, f"expected 4 (retryable outage), got {result.exit_code}. output: {result.output}"
-    node = _read(tmp_graph)[0]
+    gh.chmod(0o755)
+    code, out, err = door(root, ["done", "ab-qq000001"], path_prepend=str(stubbin))
+    assert code == 4, f"expected 4 (retryable outage), got {code}. output: {out + err}"
+    node = _read(root / "graph.json")[0]
     assert not node.get("completed_at")
 
 
@@ -806,39 +615,23 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
     """A merged-PR close stamps a never-shipped plan shipped->done using the
     evidencing PR url, rather than calling graduate (a no-op) on its own
     (ab-bd9f476c)."""
-    from fno.graph._reconcile import PrMergeState
-
     plan = tmp_path / "p.md"
     plan.write_text("---\ntitle: t\nstatus: ready\n---\n\nbody\n")
-    _seed(
-        tmp_graph,
-        [
-            {
-                "id": "ab-done0001",
-                "title": "t",
-                "status": "ready",
-                "domain": "code",
-                "pr_number": 900,
-                "pr_url": "https://github.com/org/repo/pull/900",
-                "completed_at": None,
-                "plan_path": str(plan),
-                "session_id": "sess-9",
-            }
-        ],
+    code, out, err, g = _door_done(
+        tmp_path,
+        {
+            "id": "ab-done0001",
+            "title": "t",
+            "status": "ready",
+            "domain": "code",
+            "pr_number": 900,
+            "pr_url": "https://github.com/org/repo/pull/900",
+            "plan_path": str(plan),
+            "session_id": "sess-9",
+        },
+        pr_states={900: "MERGED"},
     )
-
-    def merged_query(pr_number, **kwargs):
-        return PrMergeState(
-            number=pr_number,
-            state="MERGED",
-            url=f"https://github.com/org/repo/pull/{pr_number}",
-            merged_at="2026-06-01T10:00:00Z",
-        )
-
-    _patch_query(monkeypatch, merged_query)
-
-    result = _invoke_done("ab-done0001")
-    assert result.exit_code == 0, result.output
+    assert code == 0, out + err
 
     text = plan.read_text()
     assert "status: done" in text  # stamped shipped, then graduated (1 url >= 1)
@@ -849,34 +642,22 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
 
 def test_done_skip_stamp_leaves_plan_untouched(tmp_graph, monkeypatch, tmp_path):
     """--skip-stamp must not touch plan frontmatter even on a merged close."""
-    from fno.graph._reconcile import PrMergeState
-
-    plan = tmp_path / "p.md"
+    plan = tmp_path / "p2.md"
     original = "---\ntitle: t\nstatus: ready\n---\n\nbody\n"
     plan.write_text(original)
-    _seed(
-        tmp_graph,
-        [
-            {
-                "id": "ab-done0002",
-                "title": "t",
-                "status": "ready",
-                "domain": "code",
-                "pr_number": 901,
-                "pr_url": "https://github.com/org/repo/pull/901",
-                "completed_at": None,
-                "plan_path": str(plan),
-            }
-        ],
+    code, out, err, g = _door_done(
+        tmp_path,
+        {
+            "id": "ab-done0002",
+            "title": "t",
+            "status": "ready",
+            "domain": "code",
+            "pr_number": 901,
+            "pr_url": "https://github.com/org/repo/pull/901",
+            "plan_path": str(plan),
+        },
+        "--skip-stamp",
+        pr_states={901: "MERGED"},
     )
-    _patch_query(
-        monkeypatch,
-        lambda n, **k: PrMergeState(
-            number=n, state="MERGED", url=f"https://github.com/org/repo/pull/{n}",
-            merged_at="2026-06-01T10:00:00Z",
-        ),
-    )
-
-    result = _invoke_done("ab-done0002", ["--skip-stamp"])
-    assert result.exit_code == 0, result.output
+    assert code == 0, out + err
     assert plan.read_text() == original
