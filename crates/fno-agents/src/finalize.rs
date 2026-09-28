@@ -2220,6 +2220,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             supplied_rerun_recovered: None,
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
+            supplied_dispatch_hold: None,
         },
     );
     match outcome {

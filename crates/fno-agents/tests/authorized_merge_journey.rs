@@ -149,6 +149,7 @@ fn ask(effect: Effect) -> Request {
         supplied_rerun_recovered: None,
         supplied_optional_unresolved: None,
         supplied_github_blockers: None,
+        supplied_dispatch_hold: None,
     }
 }
 

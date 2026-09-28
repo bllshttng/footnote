@@ -549,3 +549,51 @@ fn codex_model_tab_lists_the_codex_slugs() {
 
 #[allow(dead_code)]
 fn unused_path_helper(_: PathBuf) {}
+#[test]
+fn model_picker_shows_the_flagship_and_the_seeded_provider_group() {
+    // AC5-HP / AC7-HP preamble: a deepseek provider record and a fresh
+    // models.dev cache land in the scratch home, so the claude Model
+    // picker paints the flagship row under `harness default` and a
+    // deepseek group without a network fetch. The CI mux job ships no
+    // Python CLI, so the config reads may not land; the assertion accepts
+    // the named unavailable surface (the two-surface rule).
+    let scratch = Scratch::new("composer-model-picker-rows");
+    let dir = scratch.0.join("home").join(".fno");
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        "[model_routing.providers.deepseek]\n\
+         protocol = \"anthropic\"\n\
+         base_url = \"https://api.deepseek.com/anthropic\"\n\
+         api_key_env = \"FNO_TEST_DS_KEY\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("cache").join("models-dev.json"),
+        r#"{"deepseek":{"name":"DeepSeek","env":["DEEPSEEK_API_KEY"],"api":"https://api.deepseek.com","npm":"@ai-sdk/anthropic","models":{"deepseek-chat":{"id":"deepseek-chat","name":"DeepSeek V3"}}}}"#,
+    )
+    .unwrap();
+    let mut envs = with_fake_harnesses(&scratch);
+    envs.push(("FNO_TEST_DS_KEY", "x".to_string()));
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    pick_claude_and_open_model_picker(&mut h);
+    let screen = h.wait_screen(35, |s| s.contains("harness default"));
+    if screen.contains("model list unavailable") {
+        return; // the config reads never landed; the notice is the surface
+    }
+    assert!(
+        screen.contains("deepseek"),
+        "the seeded provider group renders: {screen}"
+    );
+    assert!(
+        screen.contains("flagship"),
+        "the flagship row paints under the default: {screen}"
+    );
+    assert!(
+        screen.contains("opus"),
+        "the flagship names the floor lead: {screen}"
+    );
+}

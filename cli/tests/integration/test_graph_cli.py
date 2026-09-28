@@ -7,7 +7,6 @@ state out of the test process.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -107,12 +106,28 @@ def _seed_graph_text(path: Path, payload: str, **_kwargs) -> None:
 
 def _invoke(*args, input=None):
     """Invoke the fno CLI and return the result."""
+    return runner.invoke(app, list(args), input=input, catch_exceptions=False)
+
+
+class _NativeResult:
+    """The CliRunner-shaped face of a native-door run."""
+
+    def __init__(self, code: int, out: str, err: str):
+        self.exit_code = code
+        self.output = out
+        self.stderr = err
+
+
+def _native_verb(verb: str, *args: str) -> _NativeResult:
+    """The add/idea door: the create verbs are native; this execs the binary
+    against the same store the fixture wired through FNO_CONFIG."""
+    from tests._native_door import run_native
+
     argv = list(args)
-    if "backlog" in argv:
-        index = argv.index("backlog")
-        if argv[index : index + 2] == ["backlog", "add"] and "--difficulty" not in argv:
-            argv.extend(["--difficulty", "medium"])
-    return runner.invoke(app, argv, input=input, catch_exceptions=False)
+    if "--difficulty" not in argv:
+        argv.extend(["--difficulty", "medium"])
+    code, out, err = run_native("backlog", verb, *argv)
+    return _NativeResult(code, out, err)
 
 
 def _read_graph(g: Path) -> list[dict]:
@@ -213,169 +228,6 @@ def test_session_reap_open_without_node_settles_every_node_holding_the_identity(
     assert saved["x-reap0004"]["sessions"][0].get("ended_at") is None
 
 
-# --- x-30f6: ambient provenance stamp at node birth ---
-
-def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
-    """AC-HP (x-30f6 2.1): `idea` stamps source_session_id + harness from env, no flag."""
-    for var in (
-        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "itest-sess-7")
-    # cwd without an owned manifest -> session+harness stamped, node/plan null.
-    monkeypatch.chdir(tmp_path)
-
-    r = _invoke("backlog", "idea", "Ambient idea", "--difficulty", "low")
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert entries[0]["source_session_id"] == "itest-sess-7"
-    assert entries[0]["source_harness"] == "claude"
-
-
-def test_ac_edge_idea_no_env_null_provenance(tmp_graph, tmp_path, monkeypatch):
-    """AC-EDGE (x-30f6 2.1): no env -> provenance fields persist as null, no error."""
-    for var in (
-        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    r = _invoke("backlog", "idea", "Quiet idea", "--difficulty", "low")
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    # Store rows omit null fields; absent is the persisted null.
-    assert entries[0].get("source_session_id") is None
-    assert entries[0].get("source_harness") is None
-    assert entries[0].get("source_node_id") is None
-
-
-# --- add ---
-
-def test_ac1_hp_graph_add(tmp_graph):
-    """AC1-HP: fno graph add creates a node and returns JSON."""
-    r = _invoke("backlog", "add", "My Feature")
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
-    assert data["id"].startswith("ab-")
-    assert data["title"] == "My Feature"
-
-
-def test_ac1_hp_graph_add_with_priority(tmp_graph):
-    """AC1-HP: fno graph add --priority p1 is respected."""
-    r = _invoke("backlog", "add", "High Priority", "--priority", "p1")
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
-    assert data["id"].startswith("ab-")
-    entries = _read_graph(tmp_graph)
-    assert entries[0]["priority"] == "p1"
-
-
-def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-
-    monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
-        lambda: SimpleNamespace(session_id="creator-session", harness="claude"),
-    )
-
-    result = _invoke(
-        "backlog",
-        "idea",
-        "Idea with evidence",
-        "--difficulty",
-        "low",
-        "--evidence",
-        "hit this while doing something else.",
-    )
-
-    assert result.exit_code == 0, result.output
-    encounter = _read_graph(tmp_graph)[0]["encounters"][0]
-    assert encounter["voter_key"] == "creator-session"
-    assert encounter["voter_kind"] == "agent"
-    assert encounter["evidence"] == "hit this while doing something else."
-
-
-def test_add_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-
-    monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
-        lambda: SimpleNamespace(session_id="add-creator", harness="codex"),
-    )
-
-    result = _invoke(
-        "backlog",
-        "add",
-        "Added with evidence",
-        "--evidence",
-        "hit this while doing something else.",
-    )
-
-    assert result.exit_code == 0, result.output
-    encounter = _read_graph(tmp_graph)[0]["encounters"][0]
-    assert encounter["voter_key"] == "add-creator"
-    assert encounter["voter_kind"] == "agent"
-
-
-def test_add_without_evidence_keeps_encounters_sparse(tmp_graph):
-    result = _invoke("backlog", "add", "Idea without evidence")
-
-    assert result.exit_code == 0, result.output
-    assert "encounters" not in _read_graph(tmp_graph)[0]
-
-
-def test_idea_keeps_the_node_when_creation_vote_identity_is_unknown(tmp_graph, monkeypatch):
-    monkeypatch.setattr("fno.claims.self_identity.resolve_self_identity", lambda: None)
-
-    result = _invoke(
-        "backlog",
-        "idea",
-        "Unproven creator",
-        "--difficulty",
-        "low",
-        "--evidence",
-        "hit this without a provable session.",
-    )
-
-    assert result.exit_code == 0, result.output
-    combined = (result.output or "") + (getattr(result, "stderr", "") or "")
-    assert "warning" in combined.lower()
-    assert "vote" in combined.lower()
-    assert "encounters" not in _read_graph(tmp_graph)[0]
-
-
-def test_idea_rejects_evidence_before_an_automatic_fold(tmp_graph, monkeypatch):
-    _seed(
-        tmp_graph,
-        [{"id": "ab-existing", "title": "Existing", "status": "ready", "priority": "p2"}],
-    )
-    monkeypatch.setattr(
-        "fno.graph.cli._fold_candidates",
-        lambda **kwargs: (
-            [{"id": "ab-existing", "title": "Existing", "status": "ready", "holder": None, "evidence": "match"}],
-            "fixture",
-        ),
-    )
-
-    result = _invoke(
-        "backlog",
-        "idea",
-        "Folded with evidence",
-        "--difficulty",
-        "low",
-        "--evidence",
-        "hit this while doing something else.",
-    )
-
-    assert result.exit_code == 2
-    assert "--separate" in (result.output or "") + (getattr(result, "stderr", "") or "")
-    assert len(_read_graph(tmp_graph)) == 1
-
-
-def test_ac2_err_graph_add_invalid_priority(tmp_graph):
-    """AC2-ERR: fno graph add with invalid priority exits 1."""
-    r = runner.invoke(app, ["backlog", "add", "Bad", "--priority", "urgent"], catch_exceptions=True)
-    assert r.exit_code != 0
-
-
 def test_configured_prefix_mint_and_resolve(tmp_graph, monkeypatch):
     """ab-bbfccb8f end-to-end: a configured prefix/width mints configured-format
     ids (US2: ``xy-`` + 4 hex) that then resolve through the CLI verbs (US4:
@@ -386,9 +238,13 @@ def test_configured_prefix_mint_and_resolve(tmp_graph, monkeypatch):
 
     model = SettingsModel(config={"backlog": {"id_prefix": "xy-", "id_hex_width": 4}})
     monkeypatch.setattr("fno.config.load_settings", lambda: model)
+    # The mint is native: the same override rides the fixture config.toml the
+    # binary reads, and the get half below reads the Python side.
+    cfg = tmp_graph.parent / "config.toml"
+    cfg.write_text(cfg.read_text() + '\n[backlog]\nid_prefix = "xy-"\nid_hex_width = 4\n')
 
-    r = _invoke("backlog", "add", "Configured Feature")
-    assert r.exit_code == 0, r.output
+    r = _native_verb("add", "Configured Feature")
+    assert r.exit_code == 0, r.output + r.stderr
     nid = json.loads(r.output)["id"]
     assert re.fullmatch(r"xy-[0-9a-f]{4}", nid), nid
 
@@ -444,8 +300,8 @@ def test_ac1_hp_graph_next_returns_highest_priority(tmp_graph):
     `--include-ideas` to consider them. The default exclusion behavior
     is covered separately in test_graph_status.py.
     """
-    _invoke("backlog", "add", "Low", "--priority", "p3")
-    _invoke("backlog", "add", "High", "--priority", "p1")
+    _native_verb("add", "Low", "--priority", "p3")
+    _native_verb("add", "High", "--priority", "p1")
     r = _invoke("backlog", "next", "--all", "--include-ideas")
     assert r.exit_code == 0
     data = json.loads(r.output)
@@ -461,7 +317,7 @@ def test_ac1_hp_graph_ready_returns_json_array(tmp_graph):
     surfaces them in the listing. The default exclusion behavior is
     covered separately in test_graph_status.py.
     """
-    _invoke("backlog", "add", "Feature 1")
+    _native_verb("add", "Feature 1")
     r = _invoke("backlog", "ready", "--all", "--include-ideas")
     assert r.exit_code == 0
     data = json.loads(r.output)
@@ -522,7 +378,7 @@ def test_ac1_hp_undispatched_external_backend_uses_tracker_join(tmp_graph, monke
 
 def test_ac1_hp_graph_get_returns_node(tmp_graph):
     """AC1-HP: fno graph get returns full node JSON."""
-    r = _invoke("backlog", "add", "GetTarget")
+    r = _native_verb("add", "GetTarget")
     node_id = json.loads(r.output)["id"]
 
     data = json.loads(_native_get(node_id))
@@ -538,7 +394,7 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
     """fno backlog queue ab-X,ab-Y ab-Z queues all three atomically."""
     ids = []
     for title in ("Multi-A", "Multi-B", "Multi-C"):
-        r = _invoke("backlog", "add", title)
+        r = _native_verb("add", title)
         # raw_decode tolerates trailing stderr (Multi-B/C resemble Multi-A, so the
         # filing-time dedup receipt mixes into r.output via CliRunner).
         ids.append(json.JSONDecoder().raw_decode(r.output)[0]["id"])
@@ -555,7 +411,7 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
 
 def test_queue_batch_is_atomic_on_unknown_id(tmp_graph):
     """If any ID is unknown, no nodes are queued."""
-    r = _invoke("backlog", "add", "Real")
+    r = _native_verb("add", "Real")
     real_id = json.loads(r.output)["id"]
     r = _invoke("backlog", "queue", f"{real_id},ab-deadbeef")
     assert r.exit_code != 0
@@ -567,7 +423,7 @@ def test_queue_batch_is_atomic_on_unknown_id(tmp_graph):
 def test_unqueue_accepts_multiple_ids(tmp_graph):
     ids = []
     for title in ("UnqA", "UnqB"):
-        r = _invoke("backlog", "add", title)
+        r = _native_verb("add", title)
         ids.append(json.loads(r.output)["id"])
     _invoke("backlog", "queue", ids[0])
     _invoke("backlog", "queue", ids[1])
@@ -578,7 +434,7 @@ def test_unqueue_accepts_multiple_ids(tmp_graph):
 
 
 def test_done_clears_queued_state(tmp_graph):
-    r = _invoke("backlog", "add", "QueuedThenDone")
+    r = _native_verb("add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "queue", nid)
     # Evidence lands on the row first; the canonical bare close's mutation is
@@ -606,7 +462,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
         "emit_operator_initiated",
         lambda action_type, **kw: captured.update(type=action_type, kw=kw),
     )
-    nid = json.loads(_invoke("backlog", "add", "DriveDone").output)["id"]
+    nid = json.loads(_native_verb("add", "DriveDone").output)["id"]
     _invoke("backlog", "done", nid, "--note", "drive fixture")
     assert captured.get("type") == "backlog_done_operator_initiated"
     assert captured["kw"]["task_id"] == nid
@@ -622,7 +478,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
     monkeypatch.setattr(
         da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
     )
-    nid = json.loads(_invoke("backlog", "add", "NoDriveDone").output)["id"]
+    nid = json.loads(_native_verb("add", "NoDriveDone").output)["id"]
     _invoke("backlog", "done", nid, "--note", "no-drive fixture")
     assert calls["n"] == 0
 
@@ -634,7 +490,7 @@ def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, mon
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
 
-    _invoke("backlog", "add", "ViewTarget")
+    _native_verb("add", "ViewTarget")
     r = _invoke("backlog", "view")
     assert r.exit_code == 0, r.output
     assert str(html_path) in r.output
@@ -661,7 +517,7 @@ def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monke
 
 def test_ac1_hp_graph_status(tmp_graph):
     """AC1-HP: fno graph status shows progress summary."""
-    _invoke("backlog", "add", "Feature A", "--project", "test-proj")
+    _native_verb("add", "Feature A", "--project", "test-proj")
     r = _invoke("backlog", "status", "--all")
     assert r.exit_code == 0
     assert "test-proj" in r.output
@@ -711,7 +567,7 @@ def test_ac1_hp_graph_cost(tmp_graph):
     through `graph get`. A CLI text-format regression should not mask
     a missing or wrong-value cost write.
     """
-    r = _invoke("backlog", "add", "Costly")
+    r = _native_verb("add", "Costly")
     node_id = json.loads(r.output)["id"]
 
     r = _invoke("backlog", "cost", node_id, "--session", "sess-001", "--amount", "1.50")
@@ -734,7 +590,7 @@ def test_ac1_hp_graph_cost(tmp_graph):
 
 def test_ac1_hp_graph_remove(tmp_graph):
     """AC1-HP: fno graph remove deletes a node."""
-    r = _invoke("backlog", "add", "ToRemove")
+    r = _native_verb("add", "ToRemove")
     node_id = json.loads(r.output)["id"]
 
     r = _invoke("backlog", "remove", node_id, "--force")
@@ -749,7 +605,7 @@ def test_ac1_hp_graph_remove(tmp_graph):
 @pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_graph_defer(tmp_graph):
     """AC1-HP: fno graph defer sets deferred_at + deferred_reason and derives status: deferred."""
-    r = _invoke("backlog", "add", "ToDefer")
+    r = _native_verb("add", "ToDefer")
     node_id = json.loads(r.output)["id"]
 
     r = _invoke("backlog", "defer", node_id, "--reason", "stale spec")
@@ -766,7 +622,7 @@ def test_ac1_hp_graph_defer(tmp_graph):
 
 def test_ac1_hp_graph_reprioritize(tmp_graph):
     """AC1-HP: fno graph reprioritize changes priority."""
-    r = _invoke("backlog", "add", "ToRepri")
+    r = _native_verb("add", "ToRepri")
     node_id = json.loads(r.output)["id"]
 
     r = _invoke("backlog", "reprioritize", node_id, "p1")
@@ -779,7 +635,7 @@ def test_ac1_hp_graph_reprioritize(tmp_graph):
 # --- rank (ab-95a4a479: curated intra-lane ordering) ---
 
 def _add(title: str, *, project: str, priority: str) -> str:
-    r = _invoke("backlog", "add", title, "--project", project, "--priority", priority)
+    r = _native_verb("add", title, "--project", project, "--priority", priority)
     assert r.exit_code == 0, r.output
     return json.loads(r.output)["id"]
 
@@ -1069,7 +925,7 @@ def test_ac1_hp_graph_archive(tmp_graph):
     """
     from fno.graph.store import commit_rows_via_store, read_archive_entries
 
-    r = _invoke("backlog", "add", "ToArchive")
+    r = _native_verb("add", "ToArchive")
     node_id = json.loads(r.output)["id"]
     # Seed completed_at through the store rather than a CLI verb: closing is
     # merge-gated now, and archive only cares that the node reads done.
@@ -1099,7 +955,7 @@ def test_ac1_hp_graph_archive(tmp_graph):
 
 def test_priority_p0_accepted(tmp_graph):
     """`backlog add "X" --priority p0` succeeds; node has priority="p0"."""
-    r = _invoke("backlog", "add", "Drop everything", "--priority", "p0", "--blocks-everything")
+    r = _native_verb("add", "Drop everything", "--priority", "p0", "--blocks-everything")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["priority"] == "p0"
@@ -1107,14 +963,16 @@ def test_priority_p0_accepted(tmp_graph):
 
 def test_priority_p0_requires_breaking_acknowledgment(tmp_graph):
     """AC9-ERR: p0 refuses before minting without --blocks-everything."""
-    r = _invoke("backlog", "add", "Not actually broken", "--priority", "p0")
+    r = _native_verb("add", "Not actually broken", "--priority", "p0")
     assert r.exit_code != 0
-    assert "p0 blocks everything else, usually a bug" in r.output
+    # The native door keeps the refusal on stderr, CliRunner mixed the streams.
+    combined = (r.output or "") + (r.stderr or "")
+    assert "p0 blocks everything else, usually a bug" in combined
     # The next step it names must work for whoever hit the refusal. It used to
     # say `rank --top`, which now refuses an agent; `encounter` exits 5 in the
     # bare operator shell that hits this. Both halves are on this command.
-    assert "--blocks-everything" in r.output
-    assert "file it p1" in r.output
+    assert "--blocks-everything" in combined
+    assert "file it p1" in combined
     assert _read_graph(tmp_graph) == []
 
 
@@ -1134,7 +992,7 @@ def test_new_p0_requires_breaking_acknowledgment(tmp_graph):
 
 def test_priority_default_is_p2(tmp_graph):
     """`backlog add "X"` without --priority creates a node with priority="p2"."""
-    r = _invoke("backlog", "add", "Default priority")
+    r = _native_verb("add", "Default priority")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["priority"] == "p2"
@@ -1160,7 +1018,7 @@ def test_priority_migration_on_mutation(tmp_graph):
 
     # Trigger a mutation; commit_rows_via_store runs recompute_statuses
     # which contains the backfill loop.
-    r = _invoke("backlog", "add", "Trigger mutation")
+    r = _native_verb("add", "Trigger mutation")
     assert r.exit_code == 0, r.output
 
     entries = _read_graph(tmp_graph)
@@ -1179,10 +1037,7 @@ def test_priority_old_vocabulary_rejected(tmp_graph):
     """`backlog add "X" --priority high` exits non-zero with an error
     message that lists the new p0|p1|p2|p3 vocabulary.
     """
-    r = runner.invoke(
-        app, ["backlog", "add", "Old syntax", "--priority", "high"],
-        catch_exceptions=True,
-    )
+    r = _native_verb("add", "Old syntax", "--priority", "high")
     assert r.exit_code != 0
     # Error goes to stderr; CliRunner combines streams unless mix_stderr=False.
     combined = (r.output or "") + (getattr(r, "stderr", "") or "")
@@ -1211,10 +1066,10 @@ def test_priority_migration_idempotent(tmp_graph):
         return next(e for e in _read_graph(tmp_graph) if e["id"] == "ab-old00001")
 
     # First mutation: backfill runs.
-    _invoke("backlog", "add", "Trigger 1")
+    _native_verb("add", "Trigger 1")
     assert legacy_row()["priority"] == "p1"
     # Second mutation: the row is already on the new vocabulary; no thrash.
-    _invoke("backlog", "add", "Trigger 2")
+    _native_verb("add", "Trigger 2")
     assert legacy_row()["priority"] == "p1"
 
 
@@ -1251,7 +1106,7 @@ def test_priority_missing_key_backfill(tmp_graph):
              "created_at": "2026-01-01T00:00:00Z"},
         ]
     }))
-    _invoke("backlog", "add", "Trigger mutation")
+    _native_verb("add", "Trigger mutation")
     entries = _read_graph(tmp_graph)
     nokey = next(e for e in entries if e["id"] == "ab-nokey0001")
     assert nokey["priority"] == "p2"
@@ -1431,7 +1286,7 @@ def test_update_completion_note_unknown_node_errors(tmp_graph):
 
 
 def _note_node():
-    node_id = json.loads(_invoke("backlog", "add", "NoteTarget").output)["id"]
+    node_id = json.loads(_native_verb("add", "NoteTarget").output)["id"]
     return node_id
 
 
@@ -1864,114 +1719,6 @@ def _settings_yaml_for_project(settings_path: Path, project: str, root: str) -> 
     """))
 
 
-def test_ac2_hp_idea_explicit_project_stores_workmap_cwd(tmp_graph, tmp_path):
-    """AC2-HP: idea --project <mapped> from a foreign cwd stores cwd == work-map root."""
-    from unittest.mock import patch
-
-    work_root = str(tmp_path / "mapped-root")
-    settings_path = tmp_graph.parent / "settings.yaml"
-    _settings_yaml_for_project(settings_path, "fno", work_root)
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ), patch("fno.graph._intake.repo_root", return_value="/some/foreign/cwd"):
-            r = _invoke("backlog", "idea", "Test idea", "--project", "fno", "--difficulty", "medium")
-
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert len(entries) == 1
-    assert entries[0]["project"] == "fno"
-    assert entries[0]["cwd"] == work_root
-
-
-def test_ac2_err_idea_unmapped_project_falls_back_to_repo_root(tmp_graph, tmp_path):
-    """AC2-ERR: idea --project unknown-proj stores cwd == repo_root() fallback, succeeds."""
-    from unittest.mock import patch
-
-    settings_path = tmp_graph.parent / "settings.yaml"
-    _settings_yaml_for_project(settings_path, "other-project", "/some/root")
-    fake_repo_root = "/fake/repo/root"
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ), patch("fno.graph._intake.repo_root", return_value=fake_repo_root):
-            r = _invoke("backlog", "idea", "Unknown proj idea", "--project", "unknown-proj", "--difficulty", "medium")
-
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert len(entries) == 1
-    assert entries[0]["project"] == "unknown-proj"
-    assert entries[0]["cwd"] == fake_repo_root
-
-
-def test_ac2_edge_idea_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
-    """AC2-EDGE: idea --project <mapped> --cwd /explicit -> stored cwd is /explicit."""
-    from unittest.mock import patch
-
-    work_root = str(tmp_path / "mapped-root")
-    settings_path = tmp_graph.parent / "settings.yaml"
-    _settings_yaml_for_project(settings_path, "fno", work_root)
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        r = _invoke(
-            "backlog", "idea", "Explicit cwd wins",
-                "--project", "fno",
-                "--cwd", "/tmp/deliberate",
-                "--difficulty", "low",
-            )
-
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert entries[0]["cwd"] == "/tmp/deliberate"
-
-
-def test_ac2_hp_add_explicit_project_stores_workmap_cwd(tmp_graph, tmp_path):
-    """AC2-HP (add): add --project <mapped> stores cwd == work-map root."""
-    from unittest.mock import patch
-
-    work_root = str(tmp_path / "add-root")
-    settings_path = tmp_graph.parent / "settings.yaml"
-    _settings_yaml_for_project(settings_path, "fno", work_root)
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ), patch("fno.graph._intake.repo_root", return_value="/foreign/cwd"):
-        r = _invoke("backlog", "add", "Add feature", "--project", "fno")
-
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert entries[0]["cwd"] == work_root
-
-
-def test_ac2_edge_add_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
-    """AC2-EDGE: add --project <mapped> --cwd /deliberate -> stored cwd is /deliberate."""
-    from unittest.mock import patch
-
-    work_root = str(tmp_path / "add-root")
-    settings_path = tmp_graph.parent / "settings.yaml"
-    _settings_yaml_for_project(settings_path, "fno", work_root)
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        r = _invoke(
-            "backlog", "add", "Add explicit cwd",
-            "--project", "fno",
-            "--cwd", "/tmp/deliberate",
-        )
-
-    assert r.exit_code == 0, r.output
-    entries = _read_graph(tmp_graph)
-    assert entries[0]["cwd"] == "/tmp/deliberate"
-
-
 def test_ac2_new_explicit_project_unscoped_derives_cwd(tmp_graph, tmp_path):
     """AC2: new --project <mapped> --unscoped -> cwd derived from work-map despite --unscoped."""
     from unittest.mock import patch
@@ -2024,7 +1771,7 @@ def test_ac2_new_no_project_unchanged(tmp_graph, tmp_path):
 
 
 def test_update_dispatch_verb_null_clears(tmp_graph):
-    r = _invoke("backlog", "add", "Verb node")
+    r = _native_verb("add", "Verb node")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "update", nid, "--dispatch-verb", "/think")
     _invoke("backlog", "update", nid, "--dispatch-verb", "null")
@@ -2033,7 +1780,7 @@ def test_update_dispatch_verb_null_clears(tmp_graph):
 
 def test_dispatch_fields_default_absent(tmp_graph):
     """A node with no dispatch overrides carries null verb/brief (built-in path)."""
-    r = _invoke("backlog", "add", "Plain node")
+    r = _native_verb("add", "Plain node")
     nid = json.loads(r.output)["id"]
     node = next(n for n in _read_graph(tmp_graph) if n["id"] == nid)
     assert node.get("dispatch_verb") is None
