@@ -182,28 +182,6 @@ def test_discover_refuses_all_match_fixture(tmp_graph: Path, monkeypatch: pytest
     assert "failed instrument" in result.output.lower()
 
 
-def test_idea_fold_includes_fts_only_lane(tmp_graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed(tmp_graph, [_node("x-fts", title="Vocabulary match", status="ready")])
-    monkeypatch.setattr(
-        discovery,
-        "candidates",
-        lambda *args, **kwargs: discovery.CandidateResults(
-            [discovery.Candidate("x-fts", 0.12, frozenset({"fts"}), "vocabulary match")]
-        ),
-    )
-    monkeypatch.setattr(
-        "fno.graph.relatedness.filing_candidates",
-        lambda entries, sidecar: (entries, "fixture"),
-    )
-
-    result = runner.invoke(cli, ["idea", "Vocabulary filing", "--difficulty", "low", "--json"])
-
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.stdout)
-    assert receipt["candidates"][0]["lanes"] == ["fts"]
-    assert "fts-only" in receipt["candidates"][0]["evidence"]
-
-
 def test_candidates_floor_passthrough_keeps_caller_floors(
     tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

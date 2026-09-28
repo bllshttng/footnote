@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 
 
 runner = CliRunner()
@@ -49,10 +50,12 @@ def test_backlog_builder_accepts_explicit_none():
 
 
 def test_backlog_add_requires_difficulty_noninteractive(tmp_graph):
-    result = runner.invoke(app, ["backlog", "add", "missing difficulty"])
+    result = run_native_create(
+        tmp_graph, "add", "missing difficulty", auto_difficulty=False
+    )
 
     assert result.exit_code == 2
-    assert "non-interactive filing requires --difficulty" in result.output
+    assert "non-interactive filing requires --difficulty" in (result.output + result.stderr)
     assert read_graph_strict(tmp_graph) == []
 
 

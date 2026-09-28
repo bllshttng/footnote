@@ -72,8 +72,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         "an encounter is a thing that happened and cannot be edited or withdrawn",
     ),
     # -- existence transitions --
-    Pair("backlog", "add", "remove"),
-    Pair("backlog", "idea", "remove"),
     Pair("backlog", "new", "remove"),
     Pair("backlog", "intake", "remove"),
     # -- self-inverse: the same verb reverses itself --
@@ -107,12 +105,12 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
 # accept that it lands in the derived non-transition set.
 KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
-        "add", "advance", "album", "annotate", "archive",
+        "advance", "album", "annotate", "archive",
         "bases", "backfill-deferred-kind", "batch", "board", "capture", "carveout",
         "collisions", "contain", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
         "demand", "dispatch-lanes", "discover", "done", "encounter", "epic", "get", "groom",
-        "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
+        "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "ready", "reconcile", "reconcile-findings", "requeue", "retro",

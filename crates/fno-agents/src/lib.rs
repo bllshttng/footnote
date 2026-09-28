@@ -213,6 +213,7 @@ pub mod lane_heal;
 pub mod launch_workdir;
 pub mod law_match;
 mod lifecycle_child;
+pub mod list_row;
 pub mod live_store_fence;
 pub mod liveness_sweep;
 pub mod logs;
