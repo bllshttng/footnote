@@ -62,8 +62,8 @@ cli/tests/agents/test_rust_verb_parity.py::test_trace_parity::marker.requires_ru
 cli/tests/agents/test_sandbox_probe.py::test_live_codex_sandbox_tracks_the_network_setting::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_sandbox_probe.py::test_live_ref_lock_without_the_grant_is_blocked::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_spawn_lost_verb.py::test_a_real_shell_mangling_is_refused::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_spawn_pane.py::test_codex_autonomous_pane_journey_completes_without_operator_input::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_spawn_pane.py::test_late_codex_identity_composes_across_every_peer_surface::pytest.skip  # on main before this ratchet
+cli/tests/agents/test_pane_journeys.py::test_codex_autonomous_pane_journey_completes_without_operator_input::pytest.skip  # on main before this ratchet
+cli/tests/agents/test_pane_journeys.py::test_late_codex_identity_composes_across_every_peer_surface::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_spawn_permission_mode.py::rust_door::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_spawn_permission_mode.py::test_spawn_sh_forwards_permission_mode::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_store_fallback.py::test_real_unreadable_directory_refuses_partial_store_answer::pytest.skip  # on main before this ratchet
