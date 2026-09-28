@@ -30,9 +30,9 @@ import typer
 
 try:
     from fno import paths as _paths
-    _CACHE_FILE = _paths.state_dir() / "source-path"
+    _CACHE_FILE = _paths.state_dir() / "install" / "source-path"
 except Exception:
-    _CACHE_FILE = Path.home() / ".fno" / "source-path"
+    _CACHE_FILE = Path.home() / ".fno" / "install" / "source-path"
 
 # Records the source git rev that the *current* install was built from, so
 # `fno doctor` can detect installed-vs-source skew. Sibling of

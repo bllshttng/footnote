@@ -365,6 +365,7 @@ pub mod spawn_payload;
 pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
+pub mod state_layout;
 pub mod state_path;
 pub mod state_root_drift;
 pub mod store_exec;
