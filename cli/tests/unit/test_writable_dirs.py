@@ -84,6 +84,7 @@ def test_granted_root_is_an_ancestor_of_the_live_registry_path(tmp_path, monkeyp
     from fno import paths
 
     target = paths.agents_registry_path().parent.resolve()
+    target.mkdir(parents=True, exist_ok=True)
     granted = [Path(d).resolve() for d in worker_writable_dirs(tmp_path)]
 
     assert any(target == root or target.is_relative_to(root) for root in granted)

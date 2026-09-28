@@ -3670,6 +3670,8 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    # Paint and restore the terminal palette while a footnote theme is active.
+    paint_background: bool = True
     restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
     # Which projects the backlog board renders. The graph is ONE
     # store tagged by project, so an unscoped board shows every project's
