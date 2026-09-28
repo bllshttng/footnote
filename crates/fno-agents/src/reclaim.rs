@@ -489,6 +489,17 @@ fn claude_config_tmp_lane(apply: bool) -> Lane {
     lane
 }
 
+/// The state-layout lane: the daemon's migration retry. Plain kinds move,
+/// merge, park or delete-locks per [`crate::state_layout::migrate`]; sqlite
+/// rows read pending until the backup-API protocol lands (change 4.1) and
+/// mux rows wait for their server. Dry runs only report.
+fn state_layout_lane(home: &AgentsHome, apply: bool) -> Lane {
+    let receipt = crate::state_layout::migrate(&reclaim_state_root(home), apply);
+    let mut lane = Lane::new("state_layout", Vec::new());
+    lane.note = receipt.summary();
+    lane
+}
+
 /// The state-root drift lane: a READING, never a sweeper. It reports the
 /// top-level entries the inventory doc does not name and removes nothing;
 /// anything with a deleter has it named in the doc's own rows. Gate and
@@ -668,6 +679,7 @@ fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_
     drop(codex_lock);
     lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     lanes.push(claude_config_tmp_lane(apply));
+    lanes.push(state_layout_lane(home, apply));
     lanes.push(state_root_drift_lane(home));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {

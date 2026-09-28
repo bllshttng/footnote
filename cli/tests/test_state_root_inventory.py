@@ -28,7 +28,8 @@ def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch)
     seed_graph(root / "graph.json", '{"entries": []}\n')
     for pattern in top_level_patterns(DOC):
         path = root / pattern
-        if pattern == "backups":
+        if pattern in {"backups", "install", "heal"}:
+            # Folders the doc documents; materialize them as directories.
             path.mkdir(exist_ok=True)
         elif pattern in {"graph.json", "graph.db", "graph.db-wal", "graph.db-shm"}:
             # SQLite creates and owns the db trio; graph.json is the retired
