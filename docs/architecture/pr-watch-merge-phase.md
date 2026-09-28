@@ -1,14 +1,14 @@
 # The pr-watch merge phase and the heal deferral
 
 The watcher's tick is a sequence of alarm-capped phases. Two of them carry
-autonomy: the sweep (discover, decide, dispatch) and, after it, the merge
-phase that drains durable-grant merges the sweep queued.
+autonomy: the merge phase, which drains durable-grant merges from Rust's
+grant store, and the sweep (discover, decide, dispatch) that runs after it.
 
 ## Why the merge is its own phase
 
 A durable-grant merge attempt measured ~120s. The 150s sweep slice did not fit both call and scan. The alarm cut the tick before receipt, so retry state did not persist and the same PR led later ticks. Before the outage, completed ticks scanned 13-23 PRs. During it, they scanned 1-2. The tick verdict was `dead` with `cut: ['sweep']`.
 
-The split: the merge phase runs last and asks the `authorized-merge` verb's `grant-queue` op for durable grants. It uses the tick's remaining time, so a cut sweep leaves the queue intact. The sweep resolves no grants, and its `merge_scan` receipt names only `scanned`. At its end the merge phase stamps `pr_watch_merge` in the grammar `merge sweep=<cut|ok> candidates=<n> granted=<g> executed=<e> held=<h> failed=<f> skipped=<s> budget=<b> read_ms=<r>`. Each queue row is counted once: `granted == executed + held + failed + skipped + budget`. `read_ms` is the queue read's cost. The row names whether merge ran after a cut or a completed sweep.
+The split: the merge phase runs before the sweep and asks the `authorized-merge` verb's `grant-queue` op for durable grants. It reads the grant store, never the sweep's result, so it runs on the fresh wall; the old last position inherited the seconds a fleet-loaded sweep left after saturating its cap, and the drain then spent 38s reading the queue and executed nothing. The read is bounded at 120s (3x that measured worst) instead of slice-derived, so one hung read cannot hold the wall ahead of the sweep. The sweep resolves no grants, and its `merge_scan` receipt names only `scanned`. At its end the merge phase stamps `pr_watch_merge` in the grammar `merge kw=<cut|ok> candidates=<n> granted=<g> executed=<e> held=<h> failed=<f> skipped=<s> budget=<b> read_ms=<r>`. Each queue row is counted once: `granted == executed + held + failed + skipped + budget`. `read_ms` is the queue read's cost. The `kw=` verdict names whether the king_wake phase ahead of merge was cut.
 
 The queue itself is Rust's (`crates/fno-agents/src/merge_grant.rs`). It drops `superseded` and `done` nodes next to `merge_status` merged or closed. It reads each checkout's repo root and live config once per call, whatever the candidate count. It rotates its head by the tick index the phase passes in the payload (`rotate = int(time.time() // interval_seconds)`). A slow held head cannot starve the tail: every grant is reached within n ticks.
 
