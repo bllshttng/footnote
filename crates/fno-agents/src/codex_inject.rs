@@ -1396,6 +1396,25 @@ fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, Stri
 }
 
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    deliver(thread_id, text, None).await
+}
+
+/// A bounded pane's seed turn: the spawner holds the cwd the TUI launched
+/// with, so the widening runs without a `thread/read` round trip and lands on
+/// the TUI's first turn, which no fno turn/start would otherwise reach.
+pub async fn deliver_seed_via_codex_daemon(
+    thread_id: &str,
+    text: &str,
+    cwd: &Path,
+) -> Result<(), ReviewStartError> {
+    deliver(thread_id, text, Some(cwd)).await
+}
+
+async fn deliver(
+    thread_id: &str,
+    text: &str,
+    cwd_hint: Option<&Path>,
+) -> Result<(), ReviewStartError> {
     match codex_native_command_refusal(text).map_err(|error| {
         ReviewStartError::Server(format!("native-command policy unreadable: {error}"))
     })? {
@@ -1403,7 +1422,7 @@ pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(),
         None => {}
     }
     let sock = codex_app_server_socket_path();
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text, cwd_hint)).await {
         Ok(r) => r,
         Err(_) => Err(ReviewStartError::Reason("io-error")),
     }
@@ -1875,7 +1894,12 @@ async fn recorded_posture_is_full_access(thread_id: &str) -> bool {
 /// does not grow. A registry row recording full access re-asserts it instead:
 /// the turn carries `{"type":"dangerFullAccess"}` and the probe is skipped,
 /// so an out-of-band narrowing is healed by the next delivered turn.
-async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+async fn inject(
+    sock: &Path,
+    thread_id: &str,
+    text: &str,
+    cwd_hint: Option<&Path>,
+) -> Result<(), ReviewStartError> {
     let reassert = recorded_posture_is_full_access(thread_id).await;
     let (mut sink, mut stream) = connect_app_server(sock)
         .await
@@ -1885,16 +1909,22 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewSt
     if reassert {
         policy = Some(json!({"type": "dangerFullAccess"}));
     } else {
-        let cwd = match round_trip(
-            &mut sink,
-            &mut stream,
-            THREAD_READ_ID,
-            thread_read_request_json(THREAD_READ_ID, thread_id),
-        )
-        .await
-        {
-            Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
-            Err(_) => String::new(),
+        // A seed turn brings the spawner's own cwd: a fresh no-turn thread is
+        // where thread/read is least certain, and the spawner knows the cwd
+        // it launched the TUI with.
+        let cwd = match cwd_hint {
+            Some(hint) => hint.to_string_lossy().into_owned(),
+            None => match round_trip(
+                &mut sink,
+                &mut stream,
+                THREAD_READ_ID,
+                thread_read_request_json(THREAD_READ_ID, thread_id),
+            )
+            .await
+            {
+                Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
+                Err(_) => String::new(),
+            },
         };
         if !cwd.is_empty() {
             let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
@@ -2655,7 +2685,7 @@ mod tests {
             Err(ReviewStartError::Reason("no-daemon"))
         );
         assert_eq!(
-            inject(&socket, "t", "hi").await,
+            inject(&socket, "t", "hi", None).await,
             Err(ReviewStartError::Reason("no-daemon"))
         );
         assert_eq!(discover(&socket).await, Err("no-daemon"));
@@ -3086,6 +3116,66 @@ mod tests {
         let result = deliver_via_codex_daemon("thread-t", "hello").await;
         assert!(result.is_ok());
         let turn = daemon.first_params("turn/start").expect("turn ran");
+        assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// The seed path: the spawner's cwd hint replaces the `thread/read` round
+    /// trip, and the widened turn/start still carries the env dirs on top of
+    /// the posture's own roots.
+    #[tokio::test]
+    async fn seed_delivery_carries_the_roots_and_skips_thread_read() {
+        let _guard = crate::path_test_guard();
+        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-a:/tmp/fno-t14-b");
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
+                "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t14-own"]
+            })),
+        );
+        let result =
+            deliver_seed_via_codex_daemon("thread-t", "hello SEED", Path::new("/tmp/fno-t14-cwd"))
+                .await;
+        assert!(result.is_ok(), "seed delivery must succeed: {result:?}");
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
+        let turn = daemon
+            .first_params("turn/start")
+            .expect("seed turn/start must have run");
+        let roots: Vec<String> = turn["sandboxPolicy"]["writableRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            roots.contains(&"/tmp/fno-t14-own".to_string()),
+            "the posture's own roots ride: {roots:?}"
+        );
+        assert!(
+            roots.contains(&"/tmp/fno-t14-a".to_string())
+                && roots.contains(&"/tmp/fno-t14-b".to_string()),
+            "the state dirs ride: {roots:?}"
+        );
+        assert!(
+            daemon.received().iter().all(|frame| frame
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                != Some("thread/read")),
+            "a cwd hint must skip the thread/read round trip"
+        );
+    }
+
+    /// A seed to a `dangerFullAccess` thread goes out policy-less: the seed
+    /// lane, like the mail lane, never narrows a thread.
+    #[tokio::test]
+    async fn seed_delivery_sends_no_policy_for_a_danger_full_access_posture() {
+        let _guard = crate::path_test_guard();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick()
+                .with_thread_sandbox(json!({"type": "dangerFullAccess"})),
+        );
+        let result =
+            deliver_seed_via_codex_daemon("thread-t", "hello", Path::new("/tmp/fno-t14-cwd")).await;
+        assert!(result.is_ok());
+        let turn = daemon.first_params("turn/start").expect("seed ran");
         assert!(turn.get("sandboxPolicy").is_none());
     }
 

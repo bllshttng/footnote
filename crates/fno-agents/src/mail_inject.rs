@@ -205,6 +205,10 @@ pub struct MailInjectArgs {
     /// `--pane <session>:<pane_id>`: the pane-lane address (which mux server
     /// hosts the recipient and which pane id to type into).
     pub pane: Option<String>,
+    /// `--seed <cwd>`: the spawn's first turn for a bounded codex pane. Codex
+    /// only, and not mail: a `--remote` TUI refuses `--add-dir`, so the seed
+    /// cannot ride argv; it rides the widened turn/start delivery instead.
+    pub seed_cwd: Option<String>,
 }
 
 /// Resolution miss: no roster entry for the session, or a roster entry with no
@@ -252,6 +256,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut lane_heal = false;
     let mut no_rebind = false;
     let mut pane: Option<String> = None;
+    let mut seed_cwd: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -307,6 +312,13 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 pane = Some(
                     it.next()
                         .ok_or((2, "mail-inject: --pane needs session:pane-id".to_string()))?
+                        .to_string(),
+                );
+            }
+            "--seed" => {
+                seed_cwd = Some(
+                    it.next()
+                        .ok_or((2, "mail-inject: --seed needs a value".to_string()))?
                         .to_string(),
                 );
             }
@@ -384,6 +396,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         harness_row: harness_flag,
         ack_verb_risk,
         pane,
+        seed_cwd,
     })
 }
 
@@ -1932,6 +1945,23 @@ fn grok_root() -> std::path::PathBuf {
     crate::grok_store::grok_sessions_root()
 }
 
+/// The `--seed` mode body: refusal, render, delivery, outcome. Split from
+/// [`run_mail_inject`] so the guards-skipped property (a seed is not mail) is
+/// testable without a stdin seam.
+async fn run_seed_mode(args: &MailInjectArgs, text: &str, cwd: &str) -> i32 {
+    if args.harness != MailInjectHarness::Codex {
+        eprintln!("mail-inject: --seed is codex-only (a bounded codex pane's first turn)");
+        return 2;
+    }
+    let text = crate::provider::render_verb_seed(text, "codex");
+    match crate::codex_inject::deliver_seed_via_codex_daemon(&args.session, &text, Path::new(cwd))
+        .await
+    {
+        Ok(()) => emit(true, "delivered"),
+        Err(reason) => emit(false, &reason.to_string()),
+    }
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -2005,6 +2035,17 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     if let Err(e) = std::io::stdin().read_to_string(&mut text) {
         eprintln!("mail-inject: reading stdin: {e}");
         return emit(false, "io-error");
+    }
+
+    // `--seed`: a bounded codex pane's first turn, not mail (the flag mode
+    // `--lane-heal` set the shape of, law d-fe66560a). The guards below protect
+    // a live session from relayed chatter; a spawn seed is the spawner's own
+    // task, usually multi-line, and the spawn receipt records it. So this
+    // branch skips the body cap, the single-line guard, the verb-risk guard,
+    // the forged-envelope check and the raw-inject audit. Split into
+    // `run_seed_mode` so the guards-skipped property is testable without stdin.
+    if let Some(cwd) = args.seed_cwd.as_deref() {
+        return run_seed_mode(&args, text.as_str(), cwd).await;
     }
 
     // Brevity cap on UNWRAPPED bodies only (body_cap_decision). `fno agents mail send
@@ -2230,6 +2271,64 @@ mod tests {
         assert_eq!(c.origin.as_deref(), Some("scheduler"));
         let d = parse_args(&argv(&["--session", "s1", "--self-send"])).unwrap();
         assert!(d.self_send);
+    }
+
+    #[test]
+    fn parse_args_takes_a_seed_cwd() {
+        let a = parse_args(&argv(&[
+            "--session",
+            "t1",
+            "--harness",
+            "codex",
+            "--seed",
+            "/tmp/w",
+        ]))
+        .unwrap();
+        assert_eq!(a.seed_cwd.as_deref(), Some("/tmp/w"));
+        assert!(
+            parse_args(&argv(&["--session", "t1", "--seed"]))
+                .err()
+                .map(|(code, _)| code)
+                == Some(2),
+            "a valueless --seed is a usage error, exit 2"
+        );
+    }
+
+    /// The seed mode is codex-only: the widened turn/start delivery is the
+    /// codex daemon's, and no other harness has a thread to widen.
+    #[tokio::test]
+    async fn seed_mode_refuses_a_non_codex_harness() {
+        let args = parse_args(&argv(&["--session", "t1", "--seed", "/tmp/w"])).unwrap();
+        assert_eq!(run_seed_mode(&args, "hello", "/tmp/w").await, 2);
+    }
+
+    /// A multi-line seed over the mail body cap reaches delivery untouched:
+    /// the seed mode is not mail, so the cap and the single-line guard the
+    /// mail path applies after the stdin read never consult it.
+    #[tokio::test]
+    async fn seed_mode_delivers_a_multi_line_body_over_the_mail_cap() {
+        let _guard = crate::path_test_guard();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(serde_json::json!({
+                "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t14-own"]
+            })),
+        );
+        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-c");
+        let args = parse_args(&argv(&[
+            "--session",
+            "thread-t",
+            "--harness",
+            "codex",
+            "--seed",
+            "/tmp/w",
+        ]))
+        .unwrap();
+        let seed = format!("line one\n\n<block>\n{}\n</block>\n", "x".repeat(6000));
+        assert_eq!(run_seed_mode(&args, &seed, "/tmp/w").await, 0);
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
+        let turn = daemon.first_params("turn/start").expect("seed ran");
+        let delivered_text = turn["input"][0]["text"].as_str().unwrap();
+        assert!(delivered_text.starts_with("line one"));
     }
 
     #[test]
