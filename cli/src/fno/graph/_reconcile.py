@@ -578,10 +578,9 @@ def bind_pr_rows(
 
     Callers may run this against a copy for a dry-run or inside
     ``locked_mutate_graph`` for persistence. Validation completes before any
-    row changes, so malformed, unknown, or cross-repository claims cannot
+    row changes, so unknown or cross-repository claims cannot
     leave a partial binding behind.
     """
-    from fno.graph._constants import is_wellformed_node_id
     from fno.graph._intake import _find_node
 
     if not claimed_ids:
@@ -590,10 +589,6 @@ def bind_pr_rows(
     our_repo = repo or repo_slug_from_url(pr_url)
     nodes: dict[str, dict] = {}
     for nid in claimed_ids:
-        if not is_wellformed_node_id(nid):
-            return PrRowBindResult(
-                outcome="refused", claimed_ids=claimed_ids, refusal=f"malformed claim: {nid!r}"
-            )
         node = _find_node(entries, nid)
         if node is None:
             return PrRowBindResult(

@@ -122,9 +122,12 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     # shapes that cannot (spaced free text, a single word) proceed. A 4-8
     # char all-hex word (cafe, dead) collides with bare-hex and refuses too -
     # the fail-closed direction this branch exists for.
+    # Legacy rows can also compact the project prefix and hex suffix.
     _HOLD_CHECK_REQUIRED=0
     [[ -n "${TARGET_PLAN_PATH:-}" ]] && _HOLD_CHECK_REQUIRED=1
     [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9_-]*-[0-9a-fA-F]{4,8}$ ]] \
+      && _HOLD_CHECK_REQUIRED=1
+    [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9]{0,7}[0-9a-fA-F]{4,8}$ ]] \
       && _HOLD_CHECK_REQUIRED=1
     [[ "${TARGET_INPUT:-}" =~ ^[0-9a-fA-F]{4,8}$ ]] \
       && _HOLD_CHECK_REQUIRED=1
@@ -955,7 +958,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # exempt; the one-liner would abort init on every host without fno.
   if command -v fno >/dev/null 2>&1; then
   for _tok in $INITIAL_INPUT; do
-    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] || continue
+    # Older graph rows may place the project prefix directly before the hex
+    # suffix; the strict lookup below still proves the token is an exact node.
+    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}(-[0-9a-f]{4,8}|[0-9a-f]{4,8})$ ]] || continue
     case " $_GUARD_MATCHES " in
       *" $_tok "*) continue ;;  # already counted this distinct id
     esac
