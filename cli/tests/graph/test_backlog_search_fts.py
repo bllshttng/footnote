@@ -13,12 +13,7 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
-from typer.testing import CliRunner
-
 from fno.graph import fts
-from fno.graph.cli import cli
-
-runner = CliRunner()
 
 FULL = {
     "type": "feature",
@@ -46,21 +41,13 @@ def _seed(graph, *rows) -> None:
 
 @pytest.fixture()
 def tmp_graph(tmp_path, monkeypatch):
-    """A temp machine with a real keeper. Skips where no worker binary."""
-    from fno.graph.store import _worker_binary
-
+    """Isolated state root for direct and native graph search reads."""
     graph = tmp_path / "graph.json"
     _seed(
         graph,
         _row("x-aaaa", title="resume handle provenance join", description="the ledger stores session uuids"),
         _row("x-bbbb", title="unrelated work item"),
     )
-    # two seams: the verbs mutate via _graph_path; `find`'s display reader
-    # resolves through paths.graph_json (both documented test redirects)
-    from fno.graph import cli as graph_cli
-
-    monkeypatch.setattr(graph_cli, "_graph_path", lambda: graph)
-    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     return graph
 
 
@@ -76,9 +63,8 @@ def test_query_syntax_is_neutralized_end_to_end(tmp_graph):
     assert fts.search('"unbalanced quote AND (', tmp_graph) == []
 
 
-def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path, monkeypatch):
-    """`find --fts` is the native binary's now: it has no FTS cache, so the
-    flag rides the documented substring degrade, warning on stderr."""
+def test_find_fts_uses_native_index_when_available(tmp_graph, tmp_path, monkeypatch):
+    """`find --fts` orders results through the native FTS5 index when present."""
     import os as _os
     import subprocess as _sp
 
@@ -97,5 +83,5 @@ def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path,
         env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     assert proc.returncode == 0, proc.stderr
-    assert "warning: fts unavailable" in proc.stderr
+    assert "warning: fts unavailable" not in proc.stderr
     assert [e["id"] for e in json.loads(proc.stdout)] == ["x-aaaa"]
