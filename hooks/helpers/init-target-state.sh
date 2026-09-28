@@ -125,7 +125,10 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     # Legacy rows can also compact the project prefix and hex suffix.
     _HOLD_CHECK_REQUIRED=0
     [[ -n "${TARGET_PLAN_PATH:-}" ]] && _HOLD_CHECK_REQUIRED=1
-    [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9_-]*-[0-9a-fA-F]{4,8}$ ]] \
+    # The dash is optional (prefix "x" minted dash-less literals before the
+    # mint normalized); a shape that might name a node refuses when the hold
+    # gate cannot check it - fail-closed, like the bare-hex word below.
+    [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9_-]*-?[0-9a-fA-F]{4,8}$ ]] \
       && _HOLD_CHECK_REQUIRED=1
     [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9]{0,7}[0-9a-fA-F]{4,8}$ ]] \
       && _HOLD_CHECK_REQUIRED=1
