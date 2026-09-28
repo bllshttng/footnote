@@ -27,6 +27,13 @@ jobs:
     name: binary ${{ matrix.target.name }}
     runs-on: ${{ matrix.target.runs-on }}
     timeout-minutes: 45
+    env:
+      # Windows cannot exec the POSIX rustc-wrapper .cargo/config.toml points
+      # at (os error 193, "%1 is not a valid Win32 application"); an empty
+      # RUSTC_WRAPPER overrides the config. Harmless on the other legs: on CI
+      # the wrapper is a fail-open no-op (no admission binary, no sccache,
+      # and its own logging skips when CI is set).
+      RUSTC_WRAPPER: ""
     # Windows is built but not released this phase; let its failure not fail
     # the job, so a caller's publish leg still runs on the released tarballs.
     continue-on-error: ${{ matrix.target.name == 'windows-x64' }}
@@ -87,10 +94,14 @@ jobs:
         run: |
           ext=""
           [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
+          # tar's -C is cumulative: a second relative -C resolves from inside
+          # the first, so the fno leg chdir'd into
+          # crates/fno-agents/target/.../crates/fno/target/... and failed to
+          # open. Anchor both dirs at the workspace.
           tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
-            -C "crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
+            -C "$PWD/crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
               "fno-agents${ext}" "fno-agents-daemon${ext}" "fno-agents-worker${ext}" \
-            -C "crates/fno/target/${{ matrix.target.rust-target }}/release" "fno${ext}"
+            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno${ext}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

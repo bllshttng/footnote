@@ -51,6 +51,7 @@ COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 # and the Rust verb-baseline ratchet reads the same row.
 NATIVE_SERVED_LEAVES = {
     "backlog rank",
+    "backlog reopen",
     "backlog session add",
     "backlog session backfill",
     "backlog session close",

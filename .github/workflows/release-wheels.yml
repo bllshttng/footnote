@@ -28,6 +28,13 @@ jobs:
     name: wheel ${{ matrix.target.name }}
     runs-on: ${{ matrix.target.runs-on }}
     timeout-minutes: 45
+    env:
+      # Windows cannot exec the POSIX rustc-wrapper .cargo/config.toml points
+      # at (os error 193, "%1 is not a valid Win32 application"); an empty
+      # RUSTC_WRAPPER overrides the config. Harmless on the other legs: on CI
+      # the wrapper is a fail-open no-op (no admission binary, no sccache,
+      # and its own logging skips when CI is set).
+      RUSTC_WRAPPER: ""
     # Windows is built but not released this phase (release: false). Let its
     # failure not fail the job, so a caller's publish leg still runs on the
     # released macos/linux wheels.

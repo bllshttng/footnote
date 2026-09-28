@@ -89,6 +89,36 @@ def write_gh_stub(tmp_path: Path, body: str = "[]\n") -> str:
     return str(stub_bin)
 
 
+def write_pr_stub(root: Path, states: dict[int, str] | None = None, *, fail_stderr: str = "") -> Path:
+    """A PATH dir whose `gh` answers per-PR JSON (or fails), so the gate reads
+    stay hermetic. states: {41: "OPEN"} -> {"state": ..., "html_url": ...}.
+    Returns the dir to prepend to PATH (door's path_prepend)."""
+    stubbin = root / "stubbin"
+    stubbin.mkdir(exist_ok=True)
+    if fail_stderr:
+        # A failing gh answers nothing: every call fails, which is the shape
+        # both the outage and the routing refusal tests need.
+        escaped = fail_stderr.replace("'", "'\\''")
+        script = "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s' '{escaped}' >&2",
+                "exit 1",
+            ]
+        )
+    else:
+        arms = []
+        for n, s in sorted((states or {}).items()):
+            body = json.dumps({"state": s, "html_url": f"https://github.com/o/r/pull/{n}"})
+            arm = '  case "$a" in */pulls/{n}) printf \'{b}\'; exit 0;; esac'
+            arms.append(arm.replace("{n}", str(n)).replace("{b}", body))
+        script = "\n".join(["#!/bin/sh", 'for a in "$@"; do'] + arms + ["done", "printf '{}'", "exit 0"])
+    stub = stubbin / "gh"
+    stub.write_text(script)
+    stub.chmod(0o755)
+    return stubbin
+
+
 def graph_rows(root: Path) -> list[dict]:
     from fno.graph.api import wire_rows
 
