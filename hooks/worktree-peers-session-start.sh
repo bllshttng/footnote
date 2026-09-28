@@ -171,7 +171,16 @@ if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
   fi
   mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
 fi
-_CACHE_FILE="$_STRANDED_DIR/.worktree-stranded-cache.json"
+# State-root tidiness: in the ambient branch _STRANDED_DIR IS the state
+# root, so the cache and stamp land under state/. The hermetic branches
+# keep their flat layout; tests pin it.
+if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
+  _STRANDED_BASE="$_STRANDED_DIR"
+else
+  _STRANDED_BASE="$_STRANDED_DIR/state"
+fi
+mkdir -p "$_STRANDED_BASE" 2>/dev/null || true
+_CACHE_FILE="$_STRANDED_BASE/.worktree-stranded-cache.json"
 # A dedicated stamp, not the cache file's own mtime: the window must be
 # claimed (stamp touched) BEFORE the background sweep launches, the same
 # up-front-claim pattern reconcile-throttle.sh uses, so a second SessionStart
@@ -179,7 +188,7 @@ _CACHE_FILE="$_STRANDED_DIR/.worktree-stranded-cache.json"
 # also kicking its own ~100s sweep. Touching the CACHE FILE itself to claim
 # would truncate the stale-but-valid JSON a concurrent session's read (lines
 # below) might be mid-parse of.
-_STAMP_FILE="$_STRANDED_DIR/.worktree-stranded-refresh-stamp"
+_STAMP_FILE="$_STRANDED_BASE/.worktree-stranded-refresh-stamp"
 # _reconcile_mtime, not a third hand-rolled `stat -f || stat -c`: GNU `stat -f`
 # means --file-system, not a format flag, so it SUCCEEDS on Linux and prints
 # garbage instead of failing - the `||` fallback to `stat -c %Y` never fires,

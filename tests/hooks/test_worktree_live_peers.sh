@@ -363,7 +363,8 @@ cat > "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh"
-cat > "$MISSING_THROTTLE_ROOT/.fno/.worktree-stranded-cache.json" <<'EOF'
+mkdir -p "$MISSING_THROTTLE_ROOT/.fno/state"
+cat > "$MISSING_THROTTLE_ROOT/.fno/state/.worktree-stranded-cache.json" <<'EOF'
 {"rows":[{"class":"UNKNOWN","node":"x-test","path":"/tmp/test-worktree"}]}
 EOF
 cat > "$MISSING_THROTTLE_BIN/fno" <<'EOF'
