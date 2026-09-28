@@ -132,6 +132,9 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "TASK_DO_TTL_HOURS",
     "POST_MERGE_NONINTERACTIVE",
     "MCP_CHANNEL_INBOUND_POKE",
+    # User display preference: a CI test must not inherit the developer's
+    # reduced-motion setting and accidentally exercise a different splash path.
+    "REDUCED_MOTION",
     # CI transport state, never developer intent: the push-event sha the
     # hook-tombstones base resolver falls back to. A test wanting a base
     # revision passes --base; inheriting the runner's push context would
