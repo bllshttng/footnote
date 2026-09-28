@@ -373,6 +373,20 @@ fn agents_history_node_resolution_joins_graph_and_ledger_and_keeps_ledger_only_r
 }
 
 #[test]
+fn agents_history_resolves_dashless_node_ids_in_either_spelling() {
+    for (stored, query) in [("x3344", "x-3344"), ("x-3344", "x3344")] {
+        let mut sources = empty_sources();
+        sources.graph = Ok(vec![json!({
+            "id": stored,
+            "title": "Node title",
+            "sessions": [{"session_id": SID, "phase": "do"}]
+        })]);
+
+        assert_eq!(resolve(query, &sources).sessions, vec![SID.to_string()]);
+    }
+}
+
+#[test]
 fn agents_history_corrupt_session_elements_do_not_hide_valid_siblings() {
     let mut sources = empty_sources();
     sources.graph = Ok(vec![json!({

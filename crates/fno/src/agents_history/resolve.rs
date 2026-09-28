@@ -34,11 +34,12 @@ pub(super) fn resolve(arg: &str, sources: &Sources) -> Resolved {
                 }
             }
         }
-    } else if let Some(node_id) = parse_node(handle) {
+    } else if let Some(node_id) = parse_node(handle).filter(|id| node_reference_exists(id, sources))
+    {
         if let Ok(graph) = &sources.graph {
             for node in graph
                 .iter()
-                .filter(|node| node_id_of(node).is_some_and(|id| eq(id, &node_id)))
+                .filter(|node| node_id_of(node).is_some_and(|id| node_id_matches(id, &node_id)))
             {
                 add_graph_sessions(&mut found, node);
             }
@@ -207,20 +208,62 @@ fn graph_session_rows(node: &Value) -> Vec<&Value> {
 }
 
 fn parse_node(value: &str) -> Option<String> {
-    let mut parts = value.split('-');
-    let prefix = parts.next()?;
-    let suffix = parts.next()?;
-    if parts.next().is_some()
-        || prefix.is_empty()
-        || prefix.len() > 8
-        || !prefix.chars().all(|c| c.is_ascii_alphanumeric())
-        || !prefix.as_bytes()[0].is_ascii_alphabetic()
-        || !(4..=8).contains(&suffix.len())
-        || !suffix.chars().all(|c| c.is_ascii_hexdigit())
+    let value = value.trim();
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
         return None;
     }
-    Some(value.to_ascii_lowercase())
+    let normalized = value.to_ascii_lowercase();
+    let wellformed = if let Some((prefix, suffix)) = normalized.split_once('-') {
+        !suffix.contains('-') && wellformed_node_parts(prefix, suffix)
+    } else {
+        (1..normalized.len())
+            .any(|split| wellformed_node_parts(&normalized[..split], &normalized[split..]))
+    };
+    wellformed.then_some(normalized)
+}
+
+fn wellformed_node_parts(prefix: &str, suffix: &str) -> bool {
+    !prefix.is_empty()
+        && prefix.len() <= 8
+        && prefix.as_bytes()[0].is_ascii_lowercase()
+        && prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && (4..=8).contains(&suffix.len())
+        && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn node_id_matches(stored: &str, query: &str) -> bool {
+    if eq(stored, query) {
+        return true;
+    }
+    let (Some(stored), Some(query)) = (parse_node(stored), parse_node(query)) else {
+        return false;
+    };
+    if stored.contains('-') == query.contains('-') {
+        return false;
+    }
+    stored.replace('-', "") == query.replace('-', "")
+}
+
+fn node_reference_exists(query: &str, sources: &Sources) -> bool {
+    sources.graph.as_ref().ok().is_some_and(|rows| {
+        rows.iter()
+            .any(|row| node_id_of(row).is_some_and(|id| node_id_matches(id, query)))
+    }) || sources
+        .ledger
+        .as_ref()
+        .ok()
+        .is_some_and(|rows| rows.iter().any(|row| entry_node_matches(row, query)))
+        || sources
+            .receipts
+            .as_ref()
+            .ok()
+            .is_some_and(|rows| rows.iter().any(|row| receipt_node_matches(row, query)))
 }
 
 pub(super) fn parse_pr(value: &str) -> Option<u64> {
@@ -283,13 +326,13 @@ fn normalize_slug(slug: &str) -> String {
 fn entry_node_matches(entry: &Value, id: &str) -> bool {
     ["graph_node_id", "node"]
         .iter()
-        .any(|key| str_at(entry, key).is_some_and(|v| eq(v, id)))
+        .any(|key| str_at(entry, key).is_some_and(|v| node_id_matches(v, id)))
 }
 
 fn receipt_node_matches(receipt: &Receipt, id: &str) -> bool {
     ["graph_node_id", "node"]
         .iter()
-        .any(|key| str_at(&receipt.value["ledger"], key).is_some_and(|v| eq(v, id)))
+        .any(|key| str_at(&receipt.value["ledger"], key).is_some_and(|v| node_id_matches(v, id)))
 }
 
 pub(super) fn node_id_of(node: &Value) -> Option<&str> {
