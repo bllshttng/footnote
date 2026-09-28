@@ -93,9 +93,10 @@ verb_in_help() {
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
 # the advertised menu instead. `find` retired from the python surface; the
-# store serves it natively.
+# store serves it natively. `add` went native the same way (the create door
+# moved to the store), so the python help no longer lists it.
 out=$(run_fno backlog --help 2>&1)
-for verb in done next get view note defer triage; do
+for verb in done next get triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else

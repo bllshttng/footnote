@@ -52,6 +52,21 @@ _reconcile_mtime() {
     printf '%s\n' "$m"
 }
 
+# _reconcile_repo_space_safe <dir>
+#
+# True when <dir>/.fno is a real checkout's .fno, NOT the state root itself
+# (law d-8ddaba56): a session whose cwd was $HOME outside git resolves the
+# repo root to $HOME, and the repo-space writes below would land dot-stamps
+# at the top level of the state root. Both sides physical (pwd -P) so a
+# symlinked HOME cannot false-pass; an unresolvable side refuses (fail
+# closed, skip the write).
+_reconcile_repo_space_safe() {
+    local repo_fno="" state_fno=""
+    repo_fno=$(cd "$1/.fno" 2>/dev/null && pwd -P 2>/dev/null) || repo_fno=""
+    state_fno=$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P 2>/dev/null) || state_fno=""
+    [[ -n "$repo_fno" && -n "$state_fno" && "$repo_fno" != "$state_fno" ]]
+}
+
 # reconcile_maybe_fire <repo_root>
 #
 # Launches a backgrounded, detached `fno backlog reconcile --json` (mutate
@@ -60,6 +75,8 @@ _reconcile_mtime() {
 # hook to render on a later session. Always returns 0.
 reconcile_maybe_fire() {
     local repo_root="${1:-$PWD}"
+    # HOME-as-repo guard: the state root is not a checkout; never stamp it.
+    _reconcile_repo_space_safe "$repo_root" || return 0
     # Only reconcile an already-initialized project; never create .fno in a virgin dir.
     [[ -d "$repo_root/.fno" ]] || return 0
     local footnote_dir="$repo_root/.fno"

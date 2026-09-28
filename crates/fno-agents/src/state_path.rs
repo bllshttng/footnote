@@ -24,15 +24,20 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs|plan-dir|plan-path>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs|plan-dir|plan-path|migrate>");
         return 2;
     };
     // `plans-dirs` is not a single-path accessor: it answers with one dir per
     // REGISTERED project (see plans_dirs.rs), so it dispatches before the
     // name-to-path table. `plan-dir`/`plan-path` are the plans-chain port
     // (plans_path.rs): the Python verb and the probe both resolve through it.
+    // `migrate` is the state-root migration: same pre-table dispatch, since
+    // it answers a receipt, not a path (state_layout.rs).
     if name == "plans-dirs" {
         return crate::plans_dirs::run(&args[1..]);
+    }
+    if name == "migrate" {
+        return crate::state_layout::run_migrate_cli(&args[1..]);
     }
     if name == "plan-dir" {
         return crate::plans_path::run_plan_dir(&args[1..]);
