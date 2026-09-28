@@ -541,7 +541,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 })?;
                 every = n.max(250);
             }
-            "--json" => json = true,
+            a if crate::json_output::is_flag(a) => json = true,
             _ => {}
         }
         i += 1;
