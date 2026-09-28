@@ -282,8 +282,10 @@ def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> N
         producer
         for producer in _declaration_groups()["codex-session-start"]["producers"]
     ]
+    # Anchored on "/": the group now also carries frontdoor-nudge-session-start.sh,
+    # whose name ends in session-start.sh without being the combined carrier.
     assert sum(
-        producer["argv"][0].endswith("session-start.sh") for producer in codex_startup
+        producer["argv"][0].endswith("/session-start.sh") for producer in codex_startup
     ) == 1
     # The carrier owns the predicate; the Codex wrapper delegates to the carrier
     # and must not call the helper itself (one observation path, not two).

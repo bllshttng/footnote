@@ -30,7 +30,8 @@
       "harness": "codex",
       "event": "SessionStart",
       "producers": [
-        {"id": "session-start-combined", "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"]}
+        {"id": "session-start-combined", "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"]},
+        {"id": "frontdoor-nudge-session-start", "argv": ["${PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"]}
       ]
     },
     "codex-whoami": {
