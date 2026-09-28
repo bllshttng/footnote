@@ -1309,6 +1309,7 @@ fn apply_mutators(
                         pid_provenance: None,
                         root: None,
                         events_dir: None,
+                        identity: None,
                     },
                 ) {
                     crate::claims::AcquireOutcome::Acquired(_) => {}
