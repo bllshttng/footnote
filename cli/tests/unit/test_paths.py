@@ -1263,4 +1263,3 @@ def test_agents_registry_path_stays_state_dir_without_declared_home(
     from fno.paths import agents_registry_path
 
     assert agents_registry_path() == tmp_path / ".fno" / "agents" / "registry.json"
-origin/main
