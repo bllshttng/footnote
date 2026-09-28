@@ -51,13 +51,19 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Resolve the `fno` command: prefer an installed binary, fall back to
-# `python -m fno.cli` against the in-repo venv. Both spell the same
-# surface; the alias behavior is independent of invocation shape.
+# Resolve the `fno` command: prefer the in-repo venv (the TREE's surface,
+# which the menu assertions below pin), fall back to an installed binary,
+# then to a bare python3. An installed fno can lag the tree by whole verb
+# generations, and a menu test against it would pin a surface this checkout
+# no longer ships.
 resolve_fno() {
     local venv_py="$REPO_ROOT/cli/.venv/bin/python"
     if [[ -x "$venv_py" ]]; then
         echo "$venv_py -m fno.cli"
+        return
+    fi
+    if command -v fno >/dev/null 2>&1; then
+        echo "fno"
         return
     fi
     echo "python3 -m fno.cli"
