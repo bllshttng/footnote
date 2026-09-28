@@ -2070,7 +2070,7 @@ async fn probe_project_facts(
 /// Open a picker on a precomputed anchor. The catalog and backlog ride as
 /// borrows so the key folder (holding `view.launcher.as_mut`) can reach
 /// them through their own, disjoint fields.
-fn open_picker_at(
+pub(crate) fn open_picker_at(
     l: &mut Launcher,
     catalog: &Option<CatalogOutcome>,
     backlog: &[crate::proto::BacklogCard],

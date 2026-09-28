@@ -678,20 +678,24 @@ fn a_click_on_the_picker_esc_chip_closes_the_picker() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     type_message(&mut v, "keep me");
+    // Drop the Project picker directly: the opener's key choreography is the
+    // chip-click test's subject, not this one's.
+    {
+        let l = v.launcher.as_mut().unwrap();
+        let opened = super::agent_launcher::open_picker_at(
+            l,
+            &v.launcher_catalog,
+            &v.backlog,
+            Some((4, 6)),
+            Focus::Project,
+        );
+        assert!(opened, "the Project picker opened");
+    }
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Shift-Tab walks back to the Project chip; Enter drops its picker.
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
-    });
-    rt.block_on(async {
-        super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock)
-            .await
-            .unwrap();
-    });
     let l = v.launcher.as_ref().unwrap();
-    let picker = l.picker.as_ref().expect("Enter opened the picker");
+    let picker = l.picker.as_ref().expect("the picker is open");
     let r = picker.popup.render((v.term.0, v.term.1));
     // The chip's click span on the framed title border.
     let (hit_row, hit_col) = r

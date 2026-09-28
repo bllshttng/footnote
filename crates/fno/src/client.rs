@@ -5680,24 +5680,24 @@ impl View {
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
         // Body width: the chrome minimum or the wider input floor, capped to
-        // the viewport so a narrow terminal still fits the frame, minus pad.
+        // the viewport so a narrow terminal still fits the frame.
         let viewport_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS);
-        let body_w = chrome
-            .min_inner_w()
-            .max(40)
-            .min(viewport_w)
-            .saturating_sub(2)
-            .max(1);
+        let body_w = chrome.min_inner_w().max(40).min(viewport_w).max(1);
+        // The framer paints the two pad cells inside `body_w` and sizes the
+        // frame to the widest line, so the line arrives pre-padded to `body_w`
+        // and the text capacity is that width minus the pad.
+        let capacity = body_w.saturating_sub(2).max(1);
         let text = format!("{name}_");
-        let text = if text.chars().count() > body_w {
-            let keep = body_w.saturating_sub(1);
+        let text = if text.chars().count() > capacity {
+            let keep = capacity.saturating_sub(1);
             let drop = text.chars().count() - keep;
             let kept: String = text.chars().skip(drop).collect();
             format!("…{kept}")
         } else {
             text
         };
-        layout_lines_overlay(origin, dims, &chrome, &[text], None, OverlayAnchor::Center)
+        let line = format!("{text:<body_w$}");
+        layout_lines_overlay(origin, dims, &chrome, &[line], None, OverlayAnchor::Center)
     }
 
     fn draw_name_modal(

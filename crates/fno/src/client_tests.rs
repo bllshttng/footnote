@@ -882,15 +882,17 @@ fn draw_lines_overlay_centers_within_viewport() {
         .find(|&c| cells[(origin_r + 1) * cols + c].c == 'a')
         .expect("body row 'a' was drawn");
     assert_eq!(cells[(origin_r + 1) * cols + a_col].c, 'a');
+    // The one-rule body: even under terminal the body rides the ground, not
+    // the inverse block (flags 0 = the terminal's own pair).
     assert_eq!(
         cells[(origin_r + 1) * cols + a_col].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "body cells stay inverse under terminal"
+        0,
+        "body cells ride the ground under terminal"
     );
     assert_eq!(cells[(origin_r + 2) * cols + a_col].c, 'c');
-    // The top border corner sits one row up and two cols left of the body
-    // (border, then the body's side pad).
-    assert_eq!(cells[origin_r * cols + (a_col - 2)].c, '╭');
+    // The top border corner sits one row up and three cols left of the body
+    // (border, then the body's two side pad cells).
+    assert_eq!(cells[origin_r * cols + (a_col - 3)].c, '╭');
     // Nothing painted at the old hardcoded top-left corner.
     assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
 }
@@ -15360,13 +15362,18 @@ fn a_long_name_scrolls_so_the_cursor_stays_visible() {
             .join("\n")
     };
     let shot = screen(&cells);
+    // The contract is the CURSOR: the tail cell before the right border is
+    // the `_` the operator is typing at, whatever the sideline's width this
+    // minute. (The exact window width rides the clock-stamped chrome, so a
+    // literal tail substring flakes across runs.)
+    let body_line = shot
+        .lines()
+        .find(|l| l.contains('…'))
+        .expect("the scroll has to be visible as a scroll");
+    let inner = body_line.trim_matches(|c| c == '│' || c == ' ');
     assert!(
-        shot.contains("name_"),
+        inner.ends_with('_'),
         "the cursor and the tail of what was typed must be visible: {shot}"
-    );
-    assert!(
-        shot.contains('…'),
-        "and the scroll has to be visible as a scroll: {shot}"
     );
     // A name that fits is untouched: no ellipsis, target still named.
     let mut cells = vec![Cell::default(); rows * cols];
@@ -15789,54 +15796,42 @@ fn ux_shot_rename_prompt_is_legible() {
         vec![named_meta(1, "footnote", &["main", "review"], 0)],
         vec![],
     );
-    // The stripe-not-block geometry under test is the terminal theme's (a
-    // named theme's modal body IS an inverse block by design).
+    // The ground-body rule is tested on the terminal theme: even where the
+    // reader's scheme owns every colour, the prompt rides the ground plainly
+    // rather than inverting it.
     view.theme = crate::theme::Theme::from_name("terminal").0;
     view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
     let (frame, row) = modal_at(&view);
     let cols = frame.cols as usize;
-    // The modal is the contiguous inverse run through the centre column.
-    // Scoped rather than "every inverse cell on the row": the sideline's
-    // focused-row band and the divider accents are inverse too, and they
-    // are different rules with different styles (one of them BOLD), so a
-    // bare flag test would judge them against the modal's contract.
-    // Anchor the span walk on a column the modal certainly owns - the cursor
-    // it just drew. The block is centered on the CONTENT viewport, which the
-    // sideline offsets, so the frame's own middle column can sit outside it.
-    let modal_cols =
-        |f: &Frame, row: usize, at: usize| -> Option<std::ops::RangeInclusive<usize>> {
-            let inv = |c: usize| f.cells[row * cols + c].flags & cell_flags::INVERSE != 0;
-            if !inv(at) {
-                return None;
-            }
-            let lo = (0..=at).rev().take_while(|&c| inv(c)).last().unwrap_or(at);
-            let hi = (at..cols).take_while(|&c| inv(c)).last().unwrap_or(at);
-            Some(lo..=hi)
-        };
+    // Anchor on a column the modal certainly owns - the cursor it just drew.
+    // The block is centered on the CONTENT viewport, which the sideline
+    // offsets, so the frame's own middle column can sit outside it.
     let cursor_col = (0..cols)
         .find(|&c| frame.cells[row * cols + c].c == '_')
-        .unwrap_or(cols / 2);
-    let span = modal_cols(&frame, row, cursor_col).expect("the prompt row painted nothing");
-    let prompt: Vec<&Cell> = span.clone().map(|c| &frame.cells[row * cols + c]).collect();
+        .expect("the prompt row painted nothing");
+    let prompt: Vec<&Cell> = ((cursor_col - 13)..=cursor_col)
+        .filter(|&c| frame.cells[row * cols + c].c != ' ')
+        .map(|c| &frame.cells[row * cols + c])
+        .collect();
+    assert!(!prompt.is_empty(), "the prompt cells vanished");
     for cell in &prompt {
         assert_eq!(
             cell.flags & cell_flags::BOLD,
             0,
-            "bold on top of the inversion makes the pair the reader's \
+            "bold on the plain pair makes the weight the reader's \
                  terminal settings decide"
         );
-        // While the modal inherits, this holds by construction (see
-        // `inverting_the_default_pair_costs_a_scheme_nothing`), so it can
-        // only fail if someone stops inheriting - which is exactly the
-        // regression it exists to catch, and did catch when Indexed(0) on
-        // Indexed(15) was tried. Not a legibility measurement.
-        //
+        assert_eq!(
+            cell.flags & cell_flags::INVERSE,
+            0,
+            "the body rides the ground; the inverse block is gone"
+        );
         // The bar is the THEME'S OWN body text, not an absolute ratio. An
         // absolute floor asks the modal to beat the scheme its reader chose
         // (Solarized Light is 4.1:1 by design), and the only way to meet it
-        // is to override their colours - which is exactly what failed here:
-        // Indexed(0) on Indexed(15) measured 21:1 against an idealised
-        // palette and 4.6:1 in the Macchiato the reporter actually runs.
+        // is to override their colours. The Default pair IS the scheme's
+        // body text, so this holds by construction unless someone paints a
+        // hard colour over it - the regression this exists to catch.
         for theme in frame_html::THEMES {
             let (ratio, body) = (
                 frame_html::contrast_ratio(cell, theme),
@@ -15851,15 +15846,38 @@ fn ux_shot_rename_prompt_is_legible() {
             );
         }
     }
-    // The block, not a text-hugging stripe: the frame's own rows above and
-    // below the body.
-    for r in [row - 1, row + 1] {
-        assert!(
-            span.clone()
-                .any(|c| frame.cells[r * cols + c].flags & cell_flags::INVERSE != 0),
-            "row {r} carries no margin, so the prompt is a stripe not a block"
-        );
-    }
+    // The block, not a text-hugging stripe: frame border rows sit within a
+    // couple of rows of the body (a footer may ride between). The column
+    // window dodges the esc chip, whose letters can sit exactly above the
+    // cursor.
+    let border_near = |r0: usize, dir: isize| -> bool {
+        for d in 1..=3usize {
+            let r = (r0 as isize + dir * d as isize) as usize;
+            if r >= frame.rows as usize {
+                continue;
+            }
+            for dc in -2isize..=2isize {
+                let c = cursor_col as isize + dc;
+                if c >= 0 && (c as usize) < cols {
+                    let ch = frame.cells[r * cols + c as usize].c;
+                    if matches!(ch, '─' | '╭' | '╰') {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+    assert!(
+        border_near(row, -1),
+        "no frame margin above the body beside the cursor column: {}",
+        frame_text(&frame)
+    );
+    assert!(
+        border_near(row, 1),
+        "no frame margin below the body beside the cursor column: {}",
+        frame_text(&frame)
+    );
     // The hint has to be as readable as the prompt it qualifies; it is the
     // half the operator called out. Since x-b465 the target is the chrome
     // title and the hint is the footer, so both live in the block on rows of
@@ -15885,12 +15903,25 @@ fn ux_shot_rename_prompt_is_legible() {
     );
     sib.create = Some("growth".into());
     let (sib_frame, sib_row) = modal_at(&sib);
-    let sib_col = (0..cols)
-        .find(|&c| sib_frame.cells[sib_row * cols + c].c == '_')
-        .unwrap_or(cols / 2);
+    let sib_cols = sib_frame.cols as usize;
+    let sib_cursor = (0..sib_cols)
+        .find(|&c| sib_frame.cells[sib_row * sib_cols + c].c == '_')
+        .expect("the sibling prompt painted its cursor");
+    // Shares the treatment: a frame row sits within a couple of rows of the
+    // sibling's body (the same windowed scan the first prompt got, since the
+    // esc chip or a title letter can sit exactly above the cursor).
+    let sib_framed = (1..=3usize).any(|d| {
+        let r = sib_row.saturating_sub(d);
+        (0..sib_cols).any(|c| matches!(sib_frame.cells[r * sib_cols + c].c, '─' | '╭' | '╰'))
+    }) && (1..=3usize).any(|d| {
+        let r = sib_row + d;
+        r < sib_frame.rows as usize
+            && (0..sib_cols).any(|c| matches!(sib_frame.cells[r * sib_cols + c].c, '─' | '╰'))
+    });
     assert!(
-        modal_cols(&sib_frame, sib_row, sib_col).is_some(),
-        "the new-workspace prompt does not share the modal treatment"
+        sib_framed,
+        "the new-workspace prompt does not share the modal treatment: {}",
+        frame_text(&sib_frame)
     );
     write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
 }
