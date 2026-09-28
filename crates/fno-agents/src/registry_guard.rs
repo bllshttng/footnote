@@ -22,7 +22,7 @@
 //! test's writes legal.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::state::RegistryEntry;
 use crate::AgentStatus;
@@ -126,6 +126,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn inputs(target: &Path, before: usize, after: usize) -> GuardInputs<'_> {
         GuardInputs {
