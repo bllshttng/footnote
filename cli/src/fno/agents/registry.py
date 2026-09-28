@@ -1329,7 +1329,9 @@ class RegistryWriteRefused(RuntimeError):
 
 
 def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:
-    sh = paths.agents_registry_path().resolve()
+    # Protect the process-global Rust registry, independent of project config.
+    # The flock interop caller uses bare Python, so this lookup must stay config-free.
+    sh = (paths.agents_home_dir() / "registry.json").resolve()
     if sh != target.resolve() or sh.is_relative_to(Path(tempfile.gettempdir()).resolve()):
         return  # another target is the caller's own store; a sandboxed HOME has no real registry
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":
