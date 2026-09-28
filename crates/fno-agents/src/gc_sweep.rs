@@ -1824,20 +1824,21 @@ pub(crate) fn run_with_release(
         }
     }
 
+    let mut manifest_crowns = crate::loop_reign::ManifestCrownCache::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() {
+        if e.crown_level.is_some() || manifest_crowns.holds(e) {
             summary.kept_crowned.push(id);
             continue;
         }
         // The origin gate runs BEFORE the graph read so a row fno never
         // spawned is named by its own gate whatever the graph's state - the
-        // policy's own order (gc_decide checks origin first), not shadowed by
-        // kept_graph_unreadable. One exit: a proven corpse has no session
+        // policy's order (gc_decide checks origin first), not kept_graph_unreadable.
+        // One exit: a proven corpse has no session
         // left to own it, so it falls through to the normal pipeline and is
         // judged like any other row. The roster leg waits for a row quiet
         // past the grace, so the subprocess read never fires for a row that
