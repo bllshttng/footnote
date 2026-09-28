@@ -62,6 +62,13 @@ fn read_flat(path: &std::path::Path) -> Value {
     parsed
 }
 
+/// The parsed config candidates, first-priority order. The birth hook reads
+/// nested config flags through this walk (autonomy master switch,
+/// think_spawn gate and caps).
+pub(crate) fn config_candidates() -> Vec<Value> {
+    candidates().iter().map(|p| read_flat(p)).collect()
+}
+
 /// The configured node-id prefix, or the legacy `ab-`. The first candidate
 /// carrying a non-empty `backlog.id_prefix` wins.
 pub fn node_id_prefix() -> String {
@@ -133,6 +140,21 @@ pub fn project_root(project: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The configured node-id hex width, or the legacy 8. Fail-open like the
+/// prefix: an absent key resolves to 8.
+pub fn node_id_hex_width() -> usize {
+    for path in candidates() {
+        let n = read_flat(&path)
+            .get("backlog")
+            .and_then(|b| b.get("id_hex_width"))
+            .and_then(Value::as_u64);
+        if let Some(n) = n {
+            return n as usize;
+        }
+    }
+    8
 }
 
 /// The state directory the porcelain reads serve from: `FNO_STATE_DIR` when

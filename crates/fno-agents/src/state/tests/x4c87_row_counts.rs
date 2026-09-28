@@ -2,6 +2,51 @@
 //! (file budget shrink). Parent helpers resolve through the glob.
 use super::*;
 
+#[test]
+fn registry_update_uses_python_shared_lock() {
+    let dir = tmpdir("python-shared-lock");
+    let path = dir.join("agents/registry.json");
+    let python_lock_path = path.parent().unwrap().join("locks").join("_registry.lock");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        update_registry(&writer_path, |_registry| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("Rust registry update entered its locked closure");
+    assert!(
+        python_lock_path.parent().unwrap().is_dir(),
+        "Rust update creates the Python lock directory for a fresh registry"
+    );
+
+    let python_lock_probe = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&python_lock_path)
+        .unwrap();
+    let python_lock_is_held = matches!(
+        python_lock_probe.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    );
+    drop(python_lock_probe);
+
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    assert!(
+        python_lock_is_held,
+        "Rust update must hold the same sidecar as Python update_registry"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
 // ------------------------------------------------------------------
 // x-4c87: the raw-versus-decoded row count invariant. The live outage's
 // sanitized shape: real worker rows at the CURRENT schema, one carrying a

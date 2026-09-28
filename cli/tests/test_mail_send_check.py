@@ -31,6 +31,8 @@ import sys
 from functools import cache
 from pathlib import Path
 
+import pytest
+
 REPO_CLI = Path(__file__).resolve().parents[1]
 
 
@@ -112,10 +114,11 @@ def _self_env() -> dict[str, str]:
     return {marker: SELF_SID}
 
 
-def _gate_path() -> dict[str, str]:
-    """PATH carrying THIS checkout's ``fno-agents`` build, for tests that
-    exercise the Rust hold gate. An installed tree finds the gate through the
-    wheel's bundled binary and needs none of this."""
+def _gate_path() -> dict[str, str] | None:
+    """PATH carrying THIS checkout's ``fno-agents`` build, or None when the
+    checkout has no build. None matters: without the gate binary the bus-only
+    check fails closed to DND, which turns the held-leg into a false pass and
+    the expired-leg into a false fail, so the caller skips instead."""
     repo = REPO_CLI.parent
     for dev_dir in (
         repo / "crates" / "fno-agents" / "target" / "release",
@@ -123,7 +126,7 @@ def _gate_path() -> dict[str, str]:
     ):
         if (dev_dir / "fno-agents").is_file():
             return {"PATH": f"{dev_dir}:/usr/bin:/bin"}
-    return {}
+    return None
 
 
 def test_self_on_unguarded_mux_lane_is_injectable(tmp_path):
@@ -150,6 +153,9 @@ def test_a_live_self_hold_does_not_block_the_own_raw_lane(tmp_path):
     still reads injectable here -- the refusal the old wall-hold test asserted
     belonged to a peer, not to the session that armed the hold.
     """
+    gate = _gate_path()
+    if gate is None:
+        pytest.skip("no checkout fno-agents build; the own-send pass is the Rust gate's")
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID, mux=MUX,
                                     delivery_policy="bus-only")])
     hold_dir = tmp_path / ".fno" / "mail-hold"
@@ -163,13 +169,16 @@ def test_a_live_self_hold_does_not_block_the_own_raw_lane(tmp_path):
     )
 
     out, code = _run(["/compact", "--to-self", "--raw", "--check"],
-                     {**_self_env(), **_gate_path()}, tmp_path)
+                     {**_self_env(), **gate}, tmp_path)
     assert code == 0, out
     assert out.startswith("injectable: mux-pane"), out
 
 
 def test_a_held_peer_lane_restores_after_the_wall_hold_expires(tmp_path):
     """A live wall hold blocks a peer's raw send; expiry restores the lane."""
+    gate = _gate_path()
+    if gate is None:
+        pytest.skip("no checkout fno-agents build; the hold clock is the Rust gate's")
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID),
                                _row(name="peer", harness_session_id="sid-peer", mux=MUX,
                                     delivery_policy="bus-only")])
@@ -184,7 +193,7 @@ def test_a_held_peer_lane_restores_after_the_wall_hold_expires(tmp_path):
     )
 
     out, code = _run(["peer", "/code-review", "--raw", "--check"],
-                     {**_self_env(), **_gate_path()}, tmp_path)
+                     {**_self_env(), **gate}, tmp_path)
     assert code == 1, out
     assert "bus-only" in out, out
 
@@ -196,7 +205,7 @@ def test_a_held_peer_lane_restores_after_the_wall_hold_expires(tmp_path):
         })
     )
     out, code = _run(["peer", "/code-review", "--raw", "--check"],
-                     {**_self_env(), **_gate_path()}, tmp_path)
+                     {**_self_env(), **gate}, tmp_path)
     assert code == 0, out
     assert out.startswith("injectable: mux-pane"), out
 

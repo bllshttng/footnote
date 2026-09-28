@@ -246,6 +246,16 @@ pub(crate) enum PickerAction {
     InsertNode(String),
     /// Set the placement.
     Place(Placement),
+    /// The Model list's `more` row: rebuild the picker over the harness's
+    /// full catalog tail, Esc stepping back to the main list.
+    OpenMore,
+    /// A NoKey or Unreachable more-row: never picks. Rebuilds the picker as
+    /// the connect steps (NoKey) or the protocol gap (Unreachable); Esc
+    /// steps back to the more list.
+    ShowSteps {
+        title: String,
+        lines: Vec<String>,
+    },
 }
 
 /// The open choice popover: the shared `Popup` widget anchored at the chip,
@@ -263,6 +273,18 @@ pub(crate) struct Picker {
     pub field: Focus,
     pub anchor: Anchor,
     pub filter: String,
+    /// Which Model row set is showing; Esc walks the ladder back.
+    pub mode: PickerMode,
+}
+
+/// Which Model row set an open picker shows: the main list, the harness's
+/// `more` catalog tail, or the connect-steps sheet a more row opened. Esc
+/// steps back down: Steps -> More -> Main -> close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PickerMode {
+    Main,
+    More,
+    Steps { title: String },
 }
 
 /// Where the launched session goes. Thread placements are VIEW choices, not
@@ -766,6 +788,43 @@ async fn submit(
         l.phase = Phase::Refused { request_id, reason };
         return Ok(());
     }
+    // The launch check: a provider-pinned pick whose key does not resolve
+    // (env var, then api_key_file) refuses pre-wire naming the env var.
+    // The draft stays intact; rows with no key_env are not checked, and
+    // the spawn door stays the final gate.
+    if !l.draft.provider.is_empty() {
+        let needle = l
+            .draft
+            .model_row
+            .clone()
+            .unwrap_or_else(|| l.draft.model.clone());
+        if let Some(CatalogOutcome::Ok(rows, _)) = &view.launcher_catalog {
+            let row = rows.iter().find(|r| r.name == selected).and_then(|h| {
+                h.models.iter().chain(h.more.iter()).find(|m| {
+                    m.name == needle && m.provider.as_deref() == Some(l.draft.provider.as_str())
+                })
+            });
+            if let Some(row) = row {
+                if let Some(key_env) = row.key_env.as_deref().filter(|k| !k.is_empty()) {
+                    if !crate::provider_key::key_present(key_env, row.key_file.as_deref()) {
+                        let checked = row
+                            .key_file
+                            .as_deref()
+                            .map(|f| format!(" (checked the env and {f})"))
+                            .unwrap_or_default();
+                        let provider = l.draft.provider.clone();
+                        l.phase = Phase::Refused {
+                            request_id,
+                            reason: format!(
+                                "{provider}: {key_env} is not set{checked}; nothing launched"
+                            ),
+                        };
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
     let mut request = l.draft.request(request_id);
     request.extra_flags = extra_flags;
     if (request.provider.is_some() || !request.extra_flags.is_empty())
@@ -1118,17 +1177,24 @@ pub(crate) async fn launcher_keys(
         if view.launcher.as_ref().is_some_and(|l| l.picker.is_some()) {
             let portal = next_free_portal(view);
             // Field-disjoint snapshot for the commit path (it may clear
-            // unoffered pins against the catalog).
+            // unoffered pins against the catalog, and a step-down rebuilds
+            // rows from both sources).
             let catalog = view.launcher_catalog.clone();
+            let backlog = view.backlog.clone();
             if let Some(l) = view.launcher.as_mut() {
                 let Some(mut picker) = l.picker.take() else {
                     unreachable!("checked Some above");
                 };
                 match key {
                     LKey::Esc | LKey::Tab | LKey::BackTab => {
-                        // Esc closes the picker; the dock keeps the draft.
-                        // Tab hands the keyboard back to the dock, which
-                        // then moves focus normally.
+                        // Esc steps a drilled Model picker back down its
+                        // ladder (More -> Main) and closes from the main
+                        // list; the dock keeps the draft either way. Tab
+                        // hands the keyboard back to the dock, which then
+                        // moves focus normally.
+                        if matches!(key, LKey::Esc) && picker.mode != PickerMode::Main {
+                            picker_step_down(l, &catalog, &backlog, picker);
+                        }
                     }
                     LKey::Left | LKey::Right if picker.field == Focus::Model => {
                         // In the model list the arrows cycle the current
@@ -1158,7 +1224,8 @@ pub(crate) async fn launcher_keys(
                             .selected()
                             .and_then(|(ri, _)| picker.actions.get(ri).cloned().flatten());
                         if let Some(action) = action {
-                            apply_picker_action(l, &catalog, action, portal, picker.field);
+                            let anchor = picker.anchor;
+                            commit_picker_action(l, &catalog, action, portal, picker.field, anchor);
                         }
                         // A disabled or header row: the picker stays open.
                     }
@@ -1450,6 +1517,34 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
 /// `[harness.<name>]` tables; there is no UI-only list to drift.
 pub(crate) const CAPABILITY_TOML: &str = include_str!("../harness_capabilities.toml");
 
+/// The capability table's first model slug per harness: the flagship the
+/// Model picker lists right under `harness default`. The table is
+/// compile-time, so the map computes once; a parse failure empties it and
+/// the picker simply shows no flagship row.
+fn flagship_slug(harness: &str) -> Option<String> {
+    static FLAGSHIPS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    let map = FLAGSHIPS.get_or_init(|| {
+        toml::from_str::<toml::Value>(CAPABILITY_TOML)
+            .ok()
+            .and_then(|parsed| parsed.get("harness").and_then(|h| h.as_table()).cloned())
+            .map(|table| {
+                table
+                    .into_iter()
+                    .filter_map(|(name, caps)| {
+                        let first = caps
+                            .get("models")
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.iter().find_map(|x| x.as_str().map(str::to_string)));
+                        first.map(|first| (name, first))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    map.get(harness).cloned()
+}
+
 /// The next free portal index in the active layout, smallest first. A
 /// thread placement opens its new portal here; a stale read costs one
 /// refusal the door renders verbatim, never a wrong lane.
@@ -1691,6 +1786,7 @@ fn open_picker_at(
         field,
         anchor: Anchor::At { row, col },
         filter: String::new(),
+        mode: PickerMode::Main,
     });
     true
 }
@@ -1720,7 +1816,7 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
 /// draw-time refresh in [`draw_overlay`] (which does not), so a catalog
 /// read landing mid-picker updates the open list live, the same way the
 /// old tab bodies re-derived their rows every render.
-fn filtered_popup(
+pub(crate) fn filtered_popup(
     field: Focus,
     all_rows: &[PopupRow],
     all_actions: &[Option<PickerAction>],
@@ -1797,10 +1893,13 @@ fn title_for(field: Focus) -> String {
 fn refresh_stale_picker(view: &mut View) {
     let fresh = view.launcher.as_ref().and_then(|l| {
         let pk = l.picker.as_ref()?;
-        if pk.field == Focus::Message {
+        if pk.field == Focus::Message || matches!(pk.mode, PickerMode::Steps { .. }) {
             return None;
         }
-        let (rows, actions) = picker_rows(l, pk.field, &view.launcher_catalog, &view.backlog);
+        let (rows, actions) = match pk.mode {
+            PickerMode::More => more_rows(l, &view.launcher_catalog),
+            _ => picker_rows(l, pk.field, &view.launcher_catalog, &view.backlog),
+        };
         (rows != pk.all_rows).then_some((pk.field, rows, actions))
     });
     let Some((field, rows, actions)) = fresh else {
@@ -1936,10 +2035,8 @@ pub(crate) fn picker_rows(
         },
         Focus::Model => match catalog {
             Some(CatalogOutcome::Ok(rows_found, models_err)) => {
-                let models = rows_found
-                    .iter()
-                    .find(|row| row.name == harness)
-                    .map(|row| &row.models);
+                let harness_row = rows_found.iter().find(|row| row.name == harness);
+                let models = harness_row.map(|row| &row.models);
                 let recent: Vec<&RecentModelChoice> = l
                     .recent_models
                     .iter()
@@ -1991,6 +2088,35 @@ pub(crate) fn picker_rows(
                     true,
                     Some(PickerAction::ClearModel),
                 );
+                // The flagship: the capability table's first model still on
+                // the harness's list, one row under the default and not
+                // repeated in its group.
+                let flagship = flagship_slug(&harness).and_then(|slug| {
+                    models.and_then(|ms| {
+                        ms.iter()
+                            .find(|m| m.provider.is_none() && m.model == slug)
+                            .cloned()
+                    })
+                });
+                if let Some(m) = &flagship {
+                    let check =
+                        Some(&m.name) == l.draft.model_row.as_ref() && !l.draft.model.is_empty();
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        if check { "\u{2713}" } else { "\u{25cf}" },
+                        &m.name,
+                        "flagship",
+                        true,
+                        Some(PickerAction::PickRow {
+                            harness: harness.clone(),
+                            name: m.name.clone(),
+                            model: m.model.clone(),
+                            route: m.route.clone(),
+                            provider: m.provider.clone(),
+                        }),
+                    );
+                }
                 // A failed read names itself right under the default, so
                 // the notice stays above the fold whatever the model list
                 // fills in below.
@@ -2022,14 +2148,7 @@ pub(crate) fn picker_rows(
                     // leads and the harness-own floor sorts last, so the
                     // configured rows stay above the fold on a short
                     // terminal.
-                    let mut groups: Vec<(String, Vec<&ModelChoice>)> = Vec::new();
-                    for m in models.iter() {
-                        let key = m.provider.clone().unwrap_or_else(|| harness.clone());
-                        match groups.iter_mut().find(|(k, _)| *k == key) {
-                            Some((_, list)) => list.push(m),
-                            None => groups.push((key, vec![m])),
-                        }
-                    }
+                    let mut groups = group_by_provider(models, &harness);
                     groups.sort_by(|a, b| {
                         let harness_own = |g: &(String, Vec<&ModelChoice>)| g.0 == harness;
                         harness_own(a)
@@ -2040,19 +2159,22 @@ pub(crate) fn picker_rows(
                         rows.push(PopupRow::Header(key.clone()));
                         actions.push(None);
                         for m in list.iter() {
+                            // The flagship lives right under the default row;
+                            // its floor entry never repeats in the harness-own
+                            // group.
+                            if flagship
+                                .as_ref()
+                                .is_some_and(|f| m.provider.is_none() && m.model == f.model)
+                            {
+                                continue;
+                            }
                             let check = Some(&m.name) == l.draft.model_row.as_ref()
                                 && !l.draft.model.is_empty();
-                            let hint = if m.route.is_empty() && m.model != m.name {
-                                m.model.clone()
-                            } else if m.route == m.model {
-                                String::new()
-                            } else {
-                                m.route.clone()
-                            };
+                            let hint = model_hint(m);
                             push_entry(
                                 &mut rows,
                                 &mut actions,
-                                if check { "\u{2713}" } else { "\u{2022}" },
+                                if check { "\u{2713}" } else { "\u{25cf}" },
                                 &m.name,
                                 &hint,
                                 matches!(m.state, ModelState::Ready),
@@ -2068,6 +2190,27 @@ pub(crate) fn picker_rows(
                             );
                         }
                     }
+                }
+                // The more row: the harness's full catalog tail, searchable
+                // by typing. A catalog read failure disables it with the
+                // reason; an empty tail disables it with the count.
+                if let Some(hr) = harness_row {
+                    let (enabled, hint) = match &hr.catalog_error {
+                        Some(reason) => (false, reason.clone()),
+                        None => (
+                            !hr.more.is_empty(),
+                            format!("{} models, type to search", hr.more.len()),
+                        ),
+                    };
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        "more\u{2026}",
+                        &hint,
+                        enabled,
+                        enabled.then_some(PickerAction::OpenMore),
+                    );
                 }
             }
             None => push_entry(
@@ -2275,6 +2418,172 @@ pub(crate) fn picker_rows(
     (rows, actions)
 }
 
+/// Group model rows by provider under one key: the provider, or the
+/// harness itself for rows with no provider. Insertion order kept.
+fn group_by_provider<'a>(
+    models: &'a [ModelChoice],
+    harness: &str,
+) -> Vec<(String, Vec<&'a ModelChoice>)> {
+    let mut groups: Vec<(String, Vec<&'a ModelChoice>)> = Vec::new();
+    for m in models {
+        let key = m.provider.clone().unwrap_or_else(|| harness.to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push(m),
+            None => groups.push((key, vec![m])),
+        }
+    }
+    groups
+}
+
+/// One Model row's hint: the launch id when it differs from the label and
+/// no route spells it, else the route; empty when the route restates it.
+fn model_hint(m: &ModelChoice) -> String {
+    if m.route.is_empty() && m.model != m.name {
+        m.model.clone()
+    } else if m.route == m.model {
+        String::new()
+    } else {
+        m.route.clone()
+    }
+}
+
+/// The more list's rows: the harness's catalog tail (`HarnessChoice.more`),
+/// grouped by provider. Every row is enabled so the cursor lands on it.
+pub(crate) fn more_rows(
+    l: &Launcher,
+    catalog: &Option<CatalogOutcome>,
+) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<Option<PickerAction>> = Vec::new();
+    let Some(CatalogOutcome::Ok(rows_found, _)) = catalog else {
+        return (rows, actions);
+    };
+    let harness = l.draft.harness();
+    let Some(row) = rows_found.iter().find(|row| row.name == harness) else {
+        return (rows, actions);
+    };
+    let groups = group_by_provider(&row.more, &harness);
+    for (key, list) in &groups {
+        rows.push(PopupRow::Header(key.clone()));
+        actions.push(None);
+        for m in list.iter() {
+            let check = Some(&m.name) == l.draft.model_row.as_ref()
+                && !l.draft.model.is_empty()
+                && m.provider.as_deref() == Some(l.draft.provider.as_str());
+            let (glyph, hint, action) = match &m.state {
+                ModelState::Ready => (
+                    if check { "\u{2713}" } else { "\u{25cf}" },
+                    model_hint(m),
+                    Some(PickerAction::PickRow {
+                        harness: harness.clone(),
+                        name: m.name.clone(),
+                        model: m.model.clone(),
+                        route: m.route.clone(),
+                        provider: m.provider.clone(),
+                    }),
+                ),
+                ModelState::NoKey { key_env, steps } => (
+                    "\u{25cb}",
+                    key_env.clone(),
+                    Some(PickerAction::ShowSteps {
+                        title: format!("connect {key}"),
+                        lines: steps.clone(),
+                    }),
+                ),
+                ModelState::Unreachable { reason } => (
+                    "\u{2013}",
+                    reason.clone(),
+                    Some(PickerAction::ShowSteps {
+                        title: format!("{key} on {harness}"),
+                        lines: vec![reason.clone()],
+                    }),
+                ),
+            };
+            push_entry(&mut rows, &mut actions, glyph, &m.name, &hint, true, action);
+        }
+    }
+    (rows, actions)
+}
+
+/// The drill helpers: the Model picker's deeper views over the same anchor.
+/// OpenMore rebuilds the picker over the catalog tail; Esc steps back down
+/// the ladder. Each rebuild clears the filter and resets the selection.
+pub(crate) fn open_more(l: &mut Launcher, catalog: &Option<CatalogOutcome>, anchor: Anchor) {
+    let (all_rows, all_actions) = more_rows(l, catalog);
+    let (popup, actions) = filtered_popup(Focus::Model, &all_rows, &all_actions, "", anchor);
+    l.picker = Some(Picker {
+        popup,
+        actions,
+        all_rows,
+        all_actions,
+        field: Focus::Model,
+        anchor,
+        filter: String::new(),
+        mode: PickerMode::More,
+    });
+}
+
+/// A NoKey or Unreachable more-row's Enter: the picker becomes the steps
+/// sheet, one header plus one disabled row per line, footer `esc back`.
+pub(crate) fn show_steps(l: &mut Launcher, title: String, lines: Vec<String>, anchor: Anchor) {
+    let mut all_rows = vec![PopupRow::Header(title.clone())];
+    let mut all_actions: Vec<Option<PickerAction>> = vec![None];
+    for line in &lines {
+        push_entry(
+            &mut all_rows,
+            &mut all_actions,
+            "\u{2022}",
+            line,
+            "",
+            false,
+            None,
+        );
+    }
+    let (mut popup, actions) = filtered_popup(Focus::Model, &all_rows, &all_actions, "", anchor);
+    popup = popup.footer("esc back");
+    l.picker = Some(Picker {
+        popup,
+        actions,
+        all_rows,
+        all_actions,
+        field: Focus::Model,
+        anchor,
+        filter: String::new(),
+        mode: PickerMode::Steps { title },
+    });
+}
+
+/// Esc in a drilled view: More -> Main, the list the view came from, at
+/// the same anchor.
+pub(crate) fn picker_step_down(
+    l: &mut Launcher,
+    catalog: &Option<CatalogOutcome>,
+    backlog: &[crate::proto::BacklogCard],
+    mut picker: Picker,
+) {
+    let mode = match picker.mode {
+        PickerMode::More => PickerMode::Main,
+        PickerMode::Main => {
+            l.picker = Some(picker);
+            return;
+        }
+        PickerMode::Steps { .. } => PickerMode::More,
+    };
+    let (all_rows, all_actions) = match mode {
+        PickerMode::More => more_rows(l, catalog),
+        _ => picker_rows(l, picker.field, catalog, backlog),
+    };
+    let (popup, actions) = filtered_popup(picker.field, &all_rows, &all_actions, "", picker.anchor);
+    picker.mode = mode;
+    picker.all_rows = all_rows;
+    picker.all_actions = all_actions;
+    picker.popup = popup;
+    picker.popup.sel = 0;
+    picker.actions = actions;
+    picker.filter.clear();
+    l.picker = Some(picker);
+}
+
 /// Commit a picked row. `portal` was resolved before the picker borrow; a
 /// stale index costs one verbatim door refusal, never a wrong lane. `field`
 /// is the picker's axis, so a commit lands on the axis it was picked from
@@ -2401,6 +2710,28 @@ pub(crate) fn apply_picker_action(
             // in the editor's place.
             l.focus = Focus::ExtraFlags;
         }
+        // Drilled back into by commit_picker_action; a direct commit here
+        // (a stale row action) just closes the picker, the draft intact.
+        PickerAction::OpenMore => {}
+        PickerAction::ShowSteps { .. } => {}
+    }
+}
+
+/// Commit a picked row, drilling first: OpenMore rebuilds the picker over
+/// the catalog tail at the same anchor; every other action commits through
+/// apply_picker_action.
+fn commit_picker_action(
+    l: &mut Launcher,
+    catalog: &Option<CatalogOutcome>,
+    action: PickerAction,
+    portal: u8,
+    field: Focus,
+    anchor: Anchor,
+) {
+    match action {
+        PickerAction::OpenMore => open_more(l, catalog, anchor),
+        PickerAction::ShowSteps { title, lines } => show_steps(l, title, lines, anchor),
+        action => apply_picker_action(l, catalog, action, portal, field),
     }
 }
 
@@ -3078,9 +3409,10 @@ pub(crate) async fn launcher_mouse(
                         .and_then(|(row, _)| picker.actions.get(*row))
                         .cloned()
                         .flatten();
+                    let anchor = picker.anchor;
                     l.picker = Some(picker);
                     if let Some(action) = action {
-                        apply_picker_action(l, &catalog, action, portal, field);
+                        commit_picker_action(l, &catalog, action, portal, field, anchor);
                     }
                 }
                 _ => {
