@@ -126,35 +126,27 @@ pub enum Outcome {
         /// and reporting it as one made every worktree-first merge read
         /// partial.
         cleanup_failure: Option<String>,
+        /// Named on the receipt when a head-scoped operator grant cleared the
+        /// per-run no-merge layer (`merge_grant::HeadGrant::Granted` was the
+        /// only door through `authority_refusal`).
+        merge_grant: Option<String>,
     },
     Armed {
         head: String,
+        merge_grant: Option<String>,
     },
     /// The decision cleared and the caller asked to stop there. Nothing ran.
-    Authorized {
-        head: String,
-    },
+    Authorized { head: String },
     /// Retryable. The same command later can succeed.
-    Held {
-        reason: String,
-    },
+    Held { reason: String },
     /// Needs an operator action. Retrying changes nothing.
-    Refused {
-        reason: String,
-    },
+    Refused { reason: String },
     /// The head moved between validation and the effect.
-    HeadChanged {
-        expected: String,
-        actual: String,
-    },
+    HeadChanged { expected: String, actual: String },
     /// An instrument could not answer. Never a verdict.
-    Unknown {
-        reason: String,
-    },
+    Unknown { reason: String },
     /// The effect ran and failed.
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 impl Outcome {
@@ -175,7 +167,7 @@ impl Outcome {
     pub fn detail(&self) -> String {
         match self {
             Outcome::Merged { head, .. } => head.clone(),
-            Outcome::Armed { head } | Outcome::Authorized { head } => head.clone(),
+            Outcome::Armed { head, .. } | Outcome::Authorized { head } => head.clone(),
             Outcome::Held { reason }
             | Outcome::Refused { reason }
             | Outcome::Unknown { reason }
@@ -198,6 +190,7 @@ impl Outcome {
                 head,
                 note,
                 cleanup_failure,
+                merge_grant,
             } => {
                 out["head"] = json!(head);
                 if let Some(note) = note {
@@ -206,8 +199,19 @@ impl Outcome {
                 if let Some(cleanup_failure) = cleanup_failure {
                     out["cleanup_failure"] = json!(cleanup_failure);
                 }
+                if let Some(g) = merge_grant {
+                    out["merge_grant"] = json!(g);
+                }
             }
-            Outcome::Armed { head } | Outcome::Authorized { head } => out["head"] = json!(head),
+            Outcome::Armed { head, merge_grant } => {
+                out["head"] = json!(head);
+                if let Some(g) = merge_grant {
+                    out["merge_grant"] = json!(g);
+                }
+            }
+            Outcome::Authorized { head } => {
+                out["head"] = json!(head);
+            }
             Outcome::HeadChanged { expected, actual } => {
                 out["expected_head"] = json!(expected);
                 out["actual_head"] = json!(actual);
@@ -397,6 +401,9 @@ pub struct Authorized {
     pub facts: PrFacts,
     pub head: String,
     pub strategy: String,
+    /// Named when a head-scoped operator grant cleared the per-run no-merge
+    /// layer of `authority_refusal`. Reaches the effect receipt verbatim.
+    pub merge_grant: Option<String>,
 }
 
 /// The whole authorization. Order matters: the refusals that need an operator
@@ -418,6 +425,10 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                     facts,
                     head,
                     strategy: probes.strategy(cwd),
+                    // Preview never runs an effect, so a receipt grant note
+                    // would name nothing; the merge receipt is the one that
+                    // must carry it.
+                    merge_grant: None,
                 })
             }
             PreviewVerdict::Blocked(blockers) => Err(Outcome::Held {
@@ -443,8 +454,8 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         });
     }
 
-    if let Some(refusal) = authority_refusal(probes, cwd, request) {
-        return Err(Outcome::Refused { reason: refusal });
+    if let Some((_, reason)) = authority_refusal(probes, cwd, request, &facts) {
+        return Err(Outcome::Refused { reason });
     }
 
     // The graph must see the PR. An unbound PR is Refused (retrying without
@@ -696,10 +707,19 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     }
 
     let strategy = probes.strategy(cwd);
+    // Reaching here with `approved == Some(false)` means the only door through
+    // `authority_refusal` was a Granted head grant, so the receipt names it.
+    let merge_grant = (request.approved == Some(false)).then(|| {
+        format!(
+            "operator head grant {}",
+            facts.head_sha.chars().take(8).collect::<String>()
+        )
+    });
     Ok(Authorized {
         facts,
         head,
         strategy,
+        merge_grant,
     })
 }
 
@@ -736,24 +756,14 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         )]);
     }
 
-    // (2) authority: per-run refusal, live config, posture floor. The codes
-    // re-derive authority_refusal's fold order, read-only.
-    if let Some(reason) = authority_refusal(probes, cwd, request) {
-        let code = if request.approved == Some(false) {
-            "per_run_no_merge"
-        } else {
-            let env_grant = request.approved == Some(true)
-                && request.auto_merge_source.as_deref() == Some("env-target-auto-merge");
-            if !env_grant && !probes.auto_merge_enabled(cwd) {
-                "auto_merge_disabled"
-            } else {
-                "posture_floor"
-            }
-        };
+    // (2) authority: per-run refusal, live config, posture floor. The code
+    // comes from authority_refusal itself, so a preview can never label a
+    // blocker differently from the merge verb on the same head.
+    if let Some((code, reason)) = authority_refusal(probes, cwd, request, facts) {
         blockers.push(match code {
-            "per_run_no_merge" => Blocker::refused("per_run_no_merge", reason),
             "auto_merge_disabled" => Blocker::refused("auto_merge_disabled", reason),
-            _ => Blocker::refused("posture_floor", reason),
+            "posture_floor" => Blocker::refused("posture_floor", reason),
+            _ => Blocker::refused("per_run_no_merge", reason),
         });
     }
 
@@ -1036,7 +1046,20 @@ fn repo_root(cwd: &Path) -> PathBuf {
     canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf())
 }
 
-fn authority_refusal<P: Probes>(probes: &P, cwd: &Path, request: &Request) -> Option<String> {
+/// The authority fold, in the order init folds it. A per-run refusal outranks
+/// every grant - EXCEPT the head-scoped operator grant, the one sanctioned
+/// remedy for a per-run no-merge, recorded out-of-band by a person at a
+/// terminal through `fno backlog decide --authority operator` and never by a
+/// session (`decide/__init__.py:297` refuses operator authority from agent
+/// sessions). The grant clears only the per-run layer; the live-config and
+/// posture-floor arms still run, and a push to a new head invalidates the
+/// grant by subject construction.
+fn authority_refusal<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    request: &Request,
+    facts: &PrFacts,
+) -> Option<(&'static str, String)> {
     let source = request
         .auto_merge_source
         .as_deref()
@@ -1044,22 +1067,70 @@ fn authority_refusal<P: Probes>(probes: &P, cwd: &Path, request: &Request) -> Op
         .filter(|s| !s.is_empty())
         .unwrap_or("unknown (pre-provenance manifest)");
     if request.approved == Some(false) {
-        return Some(format!(
-            "per-run no-merge (manifest auto_merge_approved is not true; auto_merge_source: \
-             {source}); sanctioned override: an out-of-band merge by the operator, or re-arm \
-             the run's dispatch (attended and without --no-merge)"
-        ));
+        let slug = crate::finalize::slug_from_git_remote(&repo_root(cwd)).unwrap_or_default();
+        let subject =
+            crate::merge_grant::head_grant_subject(&slug, facts.number as i64, &facts.head_sha);
+        let args: Vec<String> = [
+            "backlog",
+            "decisions",
+            subject.as_str(),
+            "--lane",
+            "law",
+            "--state",
+            "live",
+            "--json",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let stdout = probes
+            .fno_shell(cwd, &args)
+            .ok()
+            .and_then(|(code, out, _)| (code == Some(0)).then_some(out));
+        match crate::merge_grant::head_grant_status(stdout.as_deref()) {
+            crate::merge_grant::HeadGrant::Granted => {}
+            other => {
+                let (state_word, detail) = match &other {
+                    crate::merge_grant::HeadGrant::Absent => (
+                        "absent",
+                        "no operator row records a grant at this head".to_string(),
+                    ),
+                    crate::merge_grant::HeadGrant::Conflict => (
+                        "conflicting",
+                        "operator rows at this head disagree or carry no decision".to_string(),
+                    ),
+                    crate::merge_grant::HeadGrant::Unreadable(d) => ("unreadable", d.clone()),
+                    crate::merge_grant::HeadGrant::Granted => unreachable!("matched above"),
+                };
+                return Some((
+                    "per_run_no_merge",
+                    format!(
+                        "per-run no-merge (manifest auto_merge_approved is not true; \
+                         auto_merge_source: {source}); the operator head grant reads \
+                         {state_word} ({detail}); sanctioned override: {}",
+                        crate::merge_grant::attended_grant_command(
+                            &slug,
+                            facts.number as i64,
+                            &facts.head_sha
+                        )
+                    ),
+                ));
+            }
+        }
     }
     let env_grant = request.approved == Some(true) && source == "env-target-auto-merge";
     if !env_grant && !probes.auto_merge_enabled(cwd) {
-        return Some(
+        return Some((
+            "auto_merge_disabled",
             "auto_merge disabled (live config resolves auto_merge.enabled=false); sanctioned \
              override (operator levers): `fno config set auto_merge.enabled true`, or start the \
              run with TARGET_AUTO_MERGE=1 from the operator's shell"
                 .to_string(),
-        );
+        ));
     }
-    probes.posture_floor_block(cwd)
+    probes
+        .posture_floor_block(cwd)
+        .map(|reason| ("posture_floor", reason))
 }
 
 /// Decide, then run the effect unless the caller asked to stop at the decision.
@@ -1109,6 +1180,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
             // without spending a request.
             Effect::Arm => Outcome::Armed {
                 head: authorized.head.clone(),
+                merge_grant: authorized.merge_grant.clone(),
             },
             // Merging now would race the queue that already owns this PR.
             Effect::Merge => Outcome::Held {
@@ -1143,11 +1215,13 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
         return match request.effect {
             Effect::Arm => Outcome::Armed {
                 head: authorized.head.clone(),
+                merge_grant: authorized.merge_grant.clone(),
             },
             Effect::Merge => Outcome::Merged {
                 head: authorized.head.clone(),
                 note: None,
                 cleanup_failure: None,
+                merge_grant: authorized.merge_grant.clone(),
             },
             Effect::Preview => Outcome::Unknown {
                 reason: "preview never runs an effect".to_string(),
@@ -1167,6 +1241,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
                 request.effect.word(),
                 first_line(&output)
             )),
+            merge_grant: authorized.merge_grant.clone(),
         },
         Ok(after) if after.head_sha != authorized.head => Outcome::HeadChanged {
             expected: authorized.head.clone(),
@@ -1195,6 +1270,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
                         head: authorized.head.clone(),
                         note: Some("merged server-side (worktree fallback)".to_string()),
                         cleanup_failure: None,
+                        merge_grant: authorized.merge_grant.clone(),
                     };
                 }
             }
@@ -2340,6 +2416,13 @@ mod tests {
         coverage_exit: Option<i32>,
         /// The plan-fidelity gate's verdict for a test-armable refusal.
         plan_fidelity_refused: bool,
+        /// The `fno backlog decisions` exit and stdout the head-grant read
+        /// gets. `None` exit reads 0; `None` stdout reads empty (malformed).
+        decisions_exit: Option<i32>,
+        decisions_stdout: Option<Vec<u8>>,
+        /// Every fno-shell argv, so a test can assert the subject the grant
+        /// read asked for.
+        fno_calls: RefCell<Vec<Vec<String>>>,
         covered_head: Option<String>,
         enabled: bool,
         floor: Option<String>,
@@ -2503,6 +2586,16 @@ mod tests {
             _cwd: &Path,
             args: &[String],
         ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+            self.fno_calls.borrow_mut().push(args.to_vec());
+            // The head-grant ask: `backlog decisions <subject> --lane law
+            // --state live --json`.
+            if args.len() >= 2 && args[0] == "backlog" && args[1] == "decisions" {
+                return Ok((
+                    self.decisions_exit.or(Some(0)),
+                    self.decisions_stdout.clone().unwrap_or_default(),
+                    Vec::new(),
+                ));
+            }
             let covered = if self.plan_fidelity_refused {
                 br#"{"refused": true, "reason": "test"}"#.to_vec()
             } else {
@@ -2541,6 +2634,187 @@ mod tests {
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
             supplied_dispatch_hold: None,
+        }
+    }
+
+    fn granted_decisions() -> Vec<u8> {
+        br#"{"decisions":[{"authority_source":"operator","decision":"merge authorized for this head"}]}"#
+            .to_vec()
+    }
+
+    // ── the head-scoped operator merge grant ──────────────────────────────
+
+    #[test]
+    fn a_head_grant_clears_the_per_run_no_merge_and_the_receipt_names_it() {
+        // AC2-HP.
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_stdout: Some(granted_decisions()),
+            ..clean()
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "merged", "{}", outcome.detail());
+        let receipt = outcome.to_json();
+        assert_eq!(
+            receipt["merge_grant"],
+            json!("operator head grant abc123"),
+            "{}",
+            receipt
+        );
+    }
+
+    #[test]
+    fn the_grant_read_is_scoped_to_this_pr_and_head() {
+        // AC2-EDGE: the subject carries the PR's current head, so a grant
+        // recorded for an earlier head can never answer this read. The test
+        // cwd is not a git repo, so the slug leg is empty.
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_stdout: Some(granted_decisions()),
+            ..clean()
+        };
+        let _ = run(&fake, &req);
+        let calls = fake.fno_calls.borrow();
+        let decisions = calls
+            .iter()
+            .find(|args| args.len() >= 2 && args[0] == "backlog" && args[1] == "decisions")
+            .expect("the grant read ran");
+        assert_eq!(decisions[2], "merge-grant:#7@abc123");
+        assert_eq!(decisions[3], "--lane");
+        assert_eq!(decisions[7], "--json");
+    }
+
+    #[test]
+    fn an_absent_grant_refuses_and_names_only_the_attended_command() {
+        // AC2-ERR: absence refuses, the remedy is the one sanctioned grant
+        // command, and the out-of-band escape is gone from the refusal.
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        req.auto_merge_source = Some("flag-no-merge".to_string());
+        let fake = Fake {
+            decisions_stdout: Some(br#"{"decisions":[]}"#.to_vec()),
+            ..clean()
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "refused");
+        let detail = outcome.detail();
+        assert!(detail.contains("absent"), "{detail}");
+        assert!(detail.contains("flag-no-merge"), "{detail}");
+        assert!(detail.contains("'merge-grant:#7@abc123'"), "{detail}");
+        assert!(
+            detail.contains("'merge authorized for this head'"),
+            "{detail}"
+        );
+        assert!(detail.ends_with("--authority operator"), "{detail}");
+        assert!(!detail.contains("out-of-band"), "{detail}");
+        assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_conflicting_grant_refuses_and_names_conflicting() {
+        // AC2-ERR: disagreeing operator rows never grant.
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_stdout: Some(
+                br#"{"decisions":[{"authority_source":"operator","decision":"merge authorized for this head"},{"authority_source":"operator","decision":"hold"}]}"#
+                    .to_vec(),
+            ),
+            ..clean()
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "refused");
+        assert!(
+            outcome.detail().contains("conflicting"),
+            "{}",
+            outcome.detail()
+        );
+    }
+
+    #[test]
+    fn a_dead_decisions_read_is_unreadable_never_a_grant() {
+        // AC2-ERR: nonzero exit fails closed as unreadable.
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_exit: Some(1),
+            ..clean()
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "refused");
+        assert!(
+            outcome.detail().contains("unreadable"),
+            "{}",
+            outcome.detail()
+        );
+    }
+
+    #[test]
+    fn a_malformed_decisions_payload_is_unreadable_never_a_grant() {
+        let mut req = request(Effect::Merge);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_stdout: Some(br#"{"error":"damaged"}"#.to_vec()),
+            ..clean()
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "refused");
+        assert!(
+            outcome.detail().contains("unreadable"),
+            "{}",
+            outcome.detail()
+        );
+    }
+
+    #[test]
+    fn a_preview_no_merge_reports_the_per_run_code_the_owner_returned() {
+        // AC3-HP: the preview's blocker code comes from authority_refusal
+        // itself, not a re-derived guess.
+        let mut req = request(Effect::Preview);
+        req.approved = Some(false);
+        let fake = Fake {
+            decisions_stdout: Some(br#"{"decisions":[]}"#.to_vec()),
+            ..clean()
+        };
+        let facts = fake.pr_facts(Path::new("/tmp"), Some(7)).unwrap();
+        match preview_walk(&fake, &req, &facts) {
+            PreviewVerdict::Blocked(blockers) => {
+                let blocker = blockers
+                    .iter()
+                    .find(|b| b.code == "per_run_no_merge")
+                    .expect("per_run_no_merge blocker");
+                assert!(blocker.detail.contains("absent"), "{}", blocker.detail);
+            }
+            _ => panic!("expected a blocked preview"),
+        }
+    }
+
+    #[test]
+    fn a_granted_no_merge_preview_under_a_dead_switch_reads_auto_merge_disabled() {
+        // AC3-ERR: the grant supersedes only the per-run layer; the live
+        // config still refuses, and under its own code.
+        let mut req = request(Effect::Preview);
+        req.approved = Some(false);
+        let fake = Fake {
+            enabled: false,
+            decisions_stdout: Some(granted_decisions()),
+            ..clean()
+        };
+        let facts = fake.pr_facts(Path::new("/tmp"), Some(7)).unwrap();
+        match preview_walk(&fake, &req, &facts) {
+            PreviewVerdict::Blocked(blockers) => {
+                assert!(
+                    blockers.iter().any(|b| b.code == "auto_merge_disabled"),
+                    "{blockers:?}"
+                );
+                assert!(
+                    !blockers.iter().any(|b| b.code == "per_run_no_merge"),
+                    "{blockers:?}"
+                );
+            }
+            _ => panic!("expected a blocked preview"),
         }
     }
 
@@ -3294,7 +3568,8 @@ mod tests {
         assert_eq!(
             outcome,
             Outcome::Armed {
-                head: "abc123".to_string()
+                head: "abc123".to_string(),
+                merge_grant: None,
             }
         );
         let calls = fake.gh_calls.borrow();
@@ -3314,6 +3589,7 @@ mod tests {
                 head: "abc123".to_string(),
                 note: None,
                 cleanup_failure: None,
+                merge_grant: None,
             }
         );
         let calls = fake.gh_calls.borrow();
@@ -3428,6 +3704,7 @@ mod tests {
             facts: open_facts(),
             head: "abc123".to_string(),
             strategy: "squash".to_string(),
+            merge_grant: None,
         };
         let outcome = effect(&fake, &request(Effect::Merge), &authorized);
         assert_eq!(outcome.word(), "merged");
@@ -3462,6 +3739,7 @@ mod tests {
             facts: open_facts(),
             head: "abc123".to_string(),
             strategy: "merge".to_string(),
+            merge_grant: None,
         };
         let outcome = effect(&fake, &request(Effect::Merge), &authorized);
         assert_eq!(
@@ -3470,6 +3748,7 @@ mod tests {
                 head: "abc123".to_string(),
                 note: Some("merged server-side (worktree fallback)".to_string()),
                 cleanup_failure: None,
+                merge_grant: None,
             }
         );
     }
@@ -3637,6 +3916,7 @@ mod tests {
             facts: open_facts(),
             head: "abc123".to_string(),
             strategy: "squash".to_string(),
+            merge_grant: None,
         };
         // run_gh answers the same failure for both calls, so the recovery here
         // is the argv, not the outcome: the retry must carry sha=<pinned head>.
@@ -3668,6 +3948,7 @@ mod tests {
             facts: open_facts(),
             head: "abc123".to_string(),
             strategy: "squash".to_string(),
+            merge_grant: None,
         };
         let _ = effect(&fake, &request(Effect::Arm), &authorized);
         assert_eq!(fake.gh_calls.borrow().len(), 1);
@@ -3685,6 +3966,7 @@ mod tests {
             facts: open_facts(),
             head: "abc123".to_string(),
             strategy: "squash".to_string(),
+            merge_grant: None,
         };
         assert_eq!(
             effect(&fake, &request(Effect::Merge), &authorized).word(),
