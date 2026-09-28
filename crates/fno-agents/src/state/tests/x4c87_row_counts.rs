@@ -7,7 +7,6 @@ fn registry_update_uses_python_shared_lock() {
     let dir = tmpdir("python-shared-lock");
     let path = dir.join("agents/registry.json");
     let python_lock_path = path.parent().unwrap().join("locks").join("_registry.lock");
-    std::fs::create_dir_all(python_lock_path.parent().unwrap()).unwrap();
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -22,6 +21,10 @@ fn registry_update_uses_python_shared_lock() {
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("Rust registry update entered its locked closure");
+    assert!(
+        python_lock_path.parent().unwrap().is_dir(),
+        "Rust update creates the Python lock directory for a fresh registry"
+    );
 
     let python_lock_probe = std::fs::OpenOptions::new()
         .create(true)

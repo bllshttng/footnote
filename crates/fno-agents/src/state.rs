@@ -2323,7 +2323,11 @@ where
     // Lock on a stable sidecar so the rename of the data file never invalidates
     // the lock fd (renaming the locked file out from under a held flock is the
     // classic footgun; locking the sidecar sidesteps it entirely).
-    let lock = acquire_exclusive(&registry_lock_path(path))?;
+    let lock_path = registry_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = acquire_exclusive(&lock_path)?;
     let mut registry = read_existing_registry(path)?;
     // The half of read-forward that protects the file. The read above drops
     // fields this binary does not know, so writing those rows back would erase
