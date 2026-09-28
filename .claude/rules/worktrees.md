@@ -32,13 +32,20 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:
 
 - **DIRTY** - done-and-merged tree goes whatever status; live cwd inside holds (law d-cfcf5a8e).
-- **done-node** - merged sweep prunes a finished clean 30m+ tree; branch kept.
+- **done-node** - merged sweep prunes a finished clean 30m+ tree, branch kept. `worktree.prune_done` judges its uncommitted tracked changes (below).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH.
 - **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
-- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
+- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual. The daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
+
+**`worktree.prune_done`** judges a done tree's uncommitted tracked changes:
+
+- **`balanced`** (default) - the diff is work nobody named: a modified-tracked tree keeps (`kept (dirty)`). Untracked files are salvaged by the caller.
+- **`aggressive`** - the done-node receipt carries `prune_done=aggressive`. The salvage pass writes the tracked diff (staged and unstaged) to `refs/fno/salvage/<node>`. The tree then prunes past the 30m grace with no live session. Untracked salvage runs under both.
+
+Both keep the branch and still block on conflicts, unborn trees, unreadable probes, live claims, a live cwd, and the grace window. A malformed value degrades to `balanced`.
 
 Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 
