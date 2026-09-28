@@ -236,3 +236,4 @@ cli/tests/test_mail_send_check.py::test_a_live_self_hold_does_not_block_the_own_
 cli/tests/unit/test_mail_hold_parity.py::test_the_gate_receipt_reads_one_clock_across_both_addresses::pytest.skip  # native hold gate: the receipt wording is the Rust gate's; no dev build means no gate to answer
 cli/tests/unit/test_mail_hold_parity.py::test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses::pytest.skip  # native hold gate: the wall-clock wording is the Rust gate receipt; no binary means no receipt to assert
 cli/tests/unit/test_strand.py::_seed_idea::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/goldens/_door.py::door::pytest.skip  # native door: the golden receipts drive the fno-agents binary; without a dev build there is no door to pin
