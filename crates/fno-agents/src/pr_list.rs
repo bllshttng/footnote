@@ -361,7 +361,7 @@ mod tests {
                     "body": "Just a fix.",
                 },
                 {
-                    "number": 10, "state": "open", "merged_at": null, "title": "ambiguous",
+                    "number": 110, "state": "open", "merged_at": null, "title": "ambiguous",
                     "head": {"ref": "feature/x-aaaa-x-bbbb"}, "html_url": "https://github.com/o/r/pull/110",
                     "body": "text",
                 },
