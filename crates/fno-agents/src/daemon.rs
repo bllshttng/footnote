@@ -1427,6 +1427,18 @@ fn flock_self_test(home: &AgentsHome) -> Result<(), DaemonError> {
 /// exit. The race-loser path returns `Ok(())` after logging, so the client that
 /// lazy-forked it simply connects to the winner.
 pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
+    // State-root migration (law d-8ddaba56): move the layout-table entries
+    // into their subfolders BEFORE the daemon opens a store. Best effort:
+    // a refusal retries on the next reclaim pass (the state_layout lane),
+    // so a busy store only ever reads pending, never lost.
+    let migrate_receipt =
+        crate::state_layout::migrate(&crate::reclaim::reclaim_state_root(&home), true);
+    if migrate_receipt.refused_count() > 0 {
+        eprintln!(
+            "fno-agents-daemon: state-root migration: {}",
+            migrate_receipt.summary()
+        );
+    }
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
 
     // Startup row-count assertion (AC5), BEFORE the socket is bound: a
