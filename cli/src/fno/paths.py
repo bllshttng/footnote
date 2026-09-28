@@ -368,10 +368,7 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
         return False
-    # The state root is not a checkout journal (law d-8ddaba56): a session
-    # whose cwd was $HOME outside git resolved <repo>/.fno to the state root,
-    # and moving its global journal stranded it in a fake space behind a
-    # MOVED-TO pointer at the top level of the state root.
+    # The state root is not a checkout journal (law d-8ddaba56).
     if old.parent.resolve() == state_dir().resolve():
         return False
     try:
