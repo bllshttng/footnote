@@ -5939,7 +5939,8 @@ def _done_via_seam(task_id: str, *, skip_stamp: bool, force: bool, reason: Optio
     "done",
     epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
     "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
-    "whose PR merged outside the gate (hidden).",
+    "whose PR merged outside the gate (hidden). Correction is reopen, a verb "
+    "the native binary serves after the python leg retired.",
 )
 def cmd_done(
     task_id: Optional[str] = typer.Argument(
@@ -6460,7 +6461,8 @@ def cmd_reconcile_findings(
     hidden=True,
     epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses a close "
     "this made. It refuses on a merged PR, which is what closed the node here, so "
-    "an intentional correction of an auto-close needs --force.",
+    "an intentional correction of an auto-close needs --force. Correction is "
+    "reopen, a verb the native binary serves after the python leg retired.",
 )
 def cmd_reconcile(
     dry_run: bool = typer.Option(

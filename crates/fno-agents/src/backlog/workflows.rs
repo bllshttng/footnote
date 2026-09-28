@@ -347,6 +347,7 @@ fn apply_completion_fields(node: &mut Value, merge_status: bool) {
         obj.insert(key.into(), Value::Null);
     }
     obj.remove("deferred_kind");
+    obj.insert("status".into(), Value::String("done".into()));
     obj.insert(
         "completed_at".into(),
         Value::String(graph_store::now_isoformat()),
@@ -821,12 +822,21 @@ fn close_node(tail: &[String], args: &DoneArgs, task_id: &str) -> i32 {
                 Value::Array(rollup.cost_sessions.clone()),
             );
         }
-        let sid = env_session.clone().or_else(|| rollup.session_id.clone());
+        let existing = obj
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let sid = existing
+            .clone()
+            .or_else(|| env_session.clone())
+            .or_else(|| rollup.session_id.clone());
         if let Some(sid) = sid {
-            if obj.get("session_id").and_then(Value::as_str).is_none() {
+            if existing.is_none() {
                 obj.insert("session_id".into(), Value::String(sid.clone()));
-                session_after.replace(Some(sid));
             }
+            // The plan stamp records the row's session first (the python
+            // twin stamped the node's own session, not the caller's).
+            session_after.replace(Some(sid));
         }
         if let Some(points) = &rollup.points {
             if obj.get("points").map(Value::is_null).unwrap_or(true) {
