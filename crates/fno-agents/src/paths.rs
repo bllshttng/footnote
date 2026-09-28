@@ -7,6 +7,7 @@
 //! ```text
 //! <home>/
 //!   registry.json            registry (schema v4)
+//!   registry-snapshots/      rolling pre-write copies kept by update_registry
 //!   events.jsonl             operator-facing audit log
 //!   route-settings/          --settings floors the spawn arms write (0600,
 //!                            content-addressed; read by claude, not by us)
@@ -207,6 +208,16 @@ impl AgentsHome {
     /// Construct rooted at an explicit directory (tests).
     pub fn at(root: impl Into<PathBuf>) -> Self {
         AgentsHome { root: root.into() }
+    }
+
+    /// The ambient shared root built from an explicit `$HOME` value: the pure
+    /// form of [`Self::ambient_shared_root`], for a caller that already holds
+    /// the home and must not re-read the env (the registry write guard takes
+    /// the home as an argument so its decision stays testable).
+    pub(crate) fn ambient_from(home: &std::ffi::OsStr) -> Self {
+        AgentsHome {
+            root: Path::new(home).join(".fno").join("agents"),
+        }
     }
 
     /// The shared `registry.json` path, resolved for COMPARISON only.

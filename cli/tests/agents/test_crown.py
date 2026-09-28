@@ -604,6 +604,16 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     from fno.harness_identity import AMBIENT_IDENTITY_ENV
     from fno.projects import resolve as proj_resolve
 
+    # The lock-time identity match runs through Rust's crown-identity kind
+    # (the lock-time identity match runs through Rust now), so pin this
+    # checkout's dev build like native_backlog_door
+    # does; the smoke pytest legs skip by design when it has none.
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
     _seed(monkeypatch, tmp_path, [replace(row, cwd=str(tmp_path)) for row in rows])
     for name in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(name, raising=False)
@@ -2229,6 +2239,124 @@ def test_racing_in_place_crowns_leave_exactly_one_live_holder(
     assert sorted(outcomes) == ["crowned", "refused"]
     holders = [row for row in load_registry() if row.crown_scope == "alpha"]
     assert len(holders) == 1
+
+
+def test_in_place_crown_refuses_a_name_rebound_inside_the_lock_window(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """The target resolved before the lock is matched by name AND
+    session under the lock. A row re-registered under the same name with a
+    new session inside the window is not the session that gets crowned."""
+    import fno.agents.registry as registry_mod
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    original = _entry(
+        "worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle"
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [original])
+    # The rebind: the old row is dropped and a new one appended under the
+    # same name while the crown resolves its handle, so the pre-lock read
+    # still reports the dead session. resolve_agent is patched to return
+    # that stale snapshot; the registry write sees only the rebound row.
+    rebound = replace(
+        original, harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    )
+    registry_mod.write_registry([rebound])
+
+    class _StaleResolution:
+        entry = original
+
+    monkeypatch.setattr(
+        registry_mod, "resolve_agent", lambda handle, **kw: _StaleResolution()
+    )
+
+    with pytest.raises(CrownPromotionError, match="disappeared before"):
+        promote_existing_session("worker", ["alpha"])
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (None, None, None), (
+        "a rebound name is never crowned"
+    )
+    assert row.harness_session_id == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def test_in_place_crown_refuses_when_the_identity_check_is_unavailable(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """No crown-identity answer, no crown: the racy name-only match is never
+    the fallback (the lock-time identity match runs through Rust)."""
+    from fno.agents import spawn_overlay_client
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle"
+            )
+        ],
+    )
+
+    def unavailable(*args, **kwargs):
+        raise spawn_overlay_client.SpawnOverlayUnavailable("not built")
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", unavailable)
+
+    with pytest.raises(CrownPromotionError, match="unavailable"):
+        promote_existing_session("worker", ["alpha"])
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (None, None, None)
+
+
+def test_in_place_crown_refuses_a_grantor_row_rebound_inside_the_lock_window(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """The grantor re-asserted under the lock is matched by name AND
+    session too. A grantor name rebound to a row crowned over the same
+    scope cannot bestow what the calling session no longer holds."""
+    import fno.agents.registry as registry_mod
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    grantor = _entry(
+        "lead",
+        harness_session_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        status="idle",
+        crown_level=1,
+        crown_scope="alpha,beta",
+    )
+    worker = _entry(
+        "worker", harness_session_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd", status="idle"
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [grantor, worker])
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+
+    real_update = registry_mod.update_registry
+
+    def _rebind_then_update(fn):
+        # The grantor's row is dropped and re-registered under the same name
+        # with a new session (keeping its crown) between the CLI's caller
+        # read and its stamp write.
+        real_update(
+            lambda rows: [
+                replace(row, harness_session_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+                if row.name == "lead"
+                else row
+                for row in rows
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _rebind_then_update)
+
+    with pytest.raises(CrownPromotionError, match="moved"):
+        promote_existing_session("worker", ["alpha"])
+    row = load_registry()[1]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (None, None, None), (
+        "a rebound grantor's authority never lands"
+    )
 
 
 

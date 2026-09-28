@@ -78,6 +78,37 @@ def test_agent_marker_without_session_identity_refuses_grant(monkeypatch):
     assert grant_error("some-scope", caller) is not None
 
 
+def test_stray_agent_self_refusal_names_the_variable_and_heal(monkeypatch):
+    """AC4-HP: the stray FNO_AGENT_SELF refusal names the variable and the
+    env -u heal, and stops blaming a registry that parsed fine (2026-09-27:
+    the user could not re-crown from a mux pane for this reason)."""
+    monkeypatch.setenv("FNO_AGENT_SELF", "stranded-worker")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
+    )
+
+    caller = calling_agent_row()
+    problem = grant_error("some-scope", caller)
+
+    assert caller is REGISTRY_UNREADABLE
+    assert problem is not None
+    assert "FNO_AGENT_SELF=stranded-worker" in problem
+    assert "env -u FNO_AGENT_SELF" in problem
+    assert "could not be read" not in problem
+
+
+def test_grant_error_without_stray_keeps_the_registry_text(monkeypatch):
+    """AC4-EDGE: no FNO_AGENT_SELF keeps today's refusal and names no heal."""
+    monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+
+    problem = grant_error("some-scope", REGISTRY_UNREADABLE)
+
+    assert problem is not None
+    assert "env -u" not in problem
+    assert "could not be read" in problem
+
+
 def test_known_agent_passes_through_to_crown_check(monkeypatch):
     """A readable registry with a matching row is NOT misread as unreadable:
     the sentinel is reserved for failures, not for found rows."""

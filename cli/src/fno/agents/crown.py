@@ -436,6 +436,22 @@ def grant_error(
     if caller_row is None:
         return None
     if caller_row is REGISTRY_UNREADABLE:
+        # A shell that once hosted a worker keeps its FNO_AGENT_SELF. The
+        # registry is not the problem (2026-09-27: crown refusals blamed a
+        # healthy registry), so name the stray variable and its heal instead.
+        stray = (os.environ.get("FNO_AGENT_SELF") or "").strip()
+        if stray:
+            from fno.agents.self_stamp import resolve_self_identity
+
+            if not resolve_self_identity().session_id:
+                return (
+                    f"cannot verify the grantor's authority: this shell carries "
+                    f"FNO_AGENT_SELF={stray} with no harness session, so it reads "
+                    "as an agent fno cannot resolve, not an attended human. A "
+                    "shell that once hosted a worker keeps that variable. If you "
+                    "are the human at this shell, rerun as: "
+                    "env -u FNO_AGENT_SELF fno agents crown <args>."
+                )
         return (
             "cannot verify the grantor's authority: the agent registry could not "
             "be read, so this session is treated as an agent whose authority is "
@@ -625,6 +641,22 @@ def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
 
 class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
+
+
+def _locked_identity(rows, row) -> Any:
+    """Find the row resolved BEFORE the lock by name AND session; no answer refuses."""
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+    ids = ("harness_session_id", "cc_session_id", "short_id")
+    session = next((getattr(row, f) for f in ids if getattr(row, f)), None)
+    try:
+        answer = spawn_overlay_call({
+            "kind": "crown-identity",
+            "rows": [asdict(row) for row in rows],
+            "expect": {"name": row.name, "harness_session_id": session},
+        })
+    except SpawnOverlayUnavailable as exc:
+        raise CrownPromotionError(f"identity check unavailable ({exc})") from exc
+    return rows[answer["index"]] if answer.get("matched") else None
 
 
 def emit_crown_vacated(
@@ -888,7 +920,7 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
     receipt: dict[str, Any] = {}
 
     def _reclaim(rows: list) -> list:
-        holder = next((row for row in rows if row.name == holder_name), None)
+        holder = _locked_identity(rows, holder_snapshot)
         if holder is None or holder.status in TERMINAL_STATUSES:
             raise CrownPromotionError(
                 f"cannot reclaim {scope!r}: current holder {holder_name!r} "
@@ -1032,11 +1064,12 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     from fno.agents.registry import AgentResolutionError, TERMINAL_STATUSES, resolve_agent, update_registry
     caller = calling_agent_row()
     try:
-        target_name = resolve_agent(handle).entry.name
+        resolved_target = resolve_agent(handle).entry
     except AgentResolutionError as exc:
         raise CrownPromotionError(
             f"{exc}. `fno agents list` shows every handle you can crown."
         ) from exc
+    target_name = resolved_target.name
     denial = grant_error(scope, caller, allow_succession=True)
     widen = _widen_answer(scope, caller, target_name) if caller is not None else {}
     if widen.get("widen") is not True and (denial is not None or (caller is not None and target_name == caller.name)):
@@ -1076,7 +1109,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
-            live_caller = next((row for row in rows if row.name == grantor_name), None)
+            # The grantor re-asserted under the lock by name AND session, the
+            # same pair match the stamp below uses; a rebound grantor name
+            # cannot bestow what the calling session no longer holds.
+            live_caller = _locked_identity(rows, caller)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
                 raise CrownPromotionError(
                     f"refusing to crown {target_name!r}: the grantor's STORED "
@@ -1093,7 +1129,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                     "no longer holds. Re-read your crown with `fno agents court`, "
                     "then retry if it still contains the scope."
                 )
-        target = next((row for row in rows if row.name == target_name), None)
+        target = _locked_identity(rows, resolved_target)
         if target is None:
             raise CrownPromotionError(
                 f"no agent matching {handle!r}; the target disappeared before the "

@@ -1,4 +1,8 @@
 use super::*;
+use crate::loopcheck::plan_fidelity::FIDELITY_TIMEOUT;
+use crate::loopcheck::plan_fidelity::{
+    classify_plan_fidelity, evaluate_plan_fidelity, FidelityGate,
+};
 
 // Hermetic: classify canned JSON without spawning, and exercise missing
 // process handling separately. Mirrors the merge-gate half (tested in

@@ -263,6 +263,14 @@ pub enum StateError {
         current: u32,
         source_root: String,
     },
+    /// The shared-registry write guard refused at the choke point
+    /// (`registry_guard`): a test/probe process aimed at the real shared
+    /// registry, or a closure about to drop most live rows without the
+    /// override. Its own variant rather than `InvariantViolation` so the
+    /// remedy-bearing message stays grep-able as the guard, not as a
+    /// row-shape bug.
+    #[error("registry write guard: {0}")]
+    WriteGuard(String),
     /// The blocking-pool task reading the registry was cancelled by daemon
     /// shutdown before it ran, not by a failure in the read itself.
     #[error("cancelled during shutdown: {0}")]
@@ -2313,6 +2321,71 @@ pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never
 /// interleave. The closure mutates the registry in place.
+/// How old the newest rolling snapshot may get before the next write takes
+/// another one.
+const REGISTRY_SNAPSHOT_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Pure: take a snapshot when none exists, the newest is
+/// REGISTRY_SNAPSHOT_EVERY old, or the file on disk collapsed to a tenth of
+/// the newest (another writer damaged it), so rotate_backups pins the last
+/// good copy.
+fn snapshot_due(newest: Option<(std::time::Duration, u64)>, current_len: u64) -> bool {
+    match newest {
+        None => true,
+        Some((age, newest_len)) => {
+            age >= REGISTRY_SNAPSHOT_EVERY || (newest_len > 0 && current_len <= newest_len / 10)
+        }
+    }
+}
+
+/// `(age, len)` of the newest `registry.json.*` copy in `snapshots`, oldest
+/// excluded: `pre-shrink.` pins sort before the prefix and never match.
+fn newest_snapshot(snapshots: &Path) -> Option<(std::time::Duration, u64)> {
+    let mut best: Option<(std::time::SystemTime, u64)> = None;
+    for entry in std::fs::read_dir(snapshots).ok()? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("registry.json.") {
+            continue;
+        }
+        let meta = entry.metadata().ok()?;
+        let modified = meta.modified().ok()?;
+        if best.as_ref().map_or(true, |(t, _)| modified > *t) {
+            best = Some((modified, meta.len()));
+        }
+    }
+    let (modified, len) = best?;
+    Some((modified.elapsed().ok()?, len))
+}
+
+/// Best effort: copy the bytes this write is about to replace into
+/// `<dir>/registry-snapshots/` and rotate. A failure anywhere never fails the
+/// write: a missing snapshot is the status quo, and the 2026-09-27 overwrite
+/// showed what recovering from a month-old backup costs instead.
+fn snapshot_registry(path: &Path) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let snapshots = dir.join("registry-snapshots");
+    if std::fs::create_dir_all(&snapshots).is_err() {
+        return;
+    }
+    if !snapshot_due(newest_snapshot(&snapshots), bytes.len() as u64) {
+        return;
+    }
+    let stamped = snapshots.join(format!(
+        "registry.json.{}",
+        crate::graph_store::backup_stamp()
+    ));
+    if std::fs::write(&stamped, &bytes).is_err() {
+        return;
+    }
+    let _ = crate::graph_store::rotate_backups(&snapshots, "registry.json.");
+}
+
 pub fn update_registry<F, T>(path: &Path, f: F) -> Result<T, StateError>
 where
     F: FnOnce(&mut Registry) -> T,
@@ -2375,6 +2448,18 @@ where
             entry.exited_at = None;
         }
     }
+    // The shared-registry write guard. Fires only on the real shared
+    // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -
+    // so the refusal names exactly the two shapes that cost the fleet its
+    // rows on 2026-09-27: a test or probe process writing fleet state, and a
+    // closure about to drop most live rows. Python's `write_registry` mirrors
+    // both arms.
+    crate::registry_guard::check_env(
+        path,
+        crate::registry_guard::count_live(&before_entries),
+        crate::registry_guard::count_live(&registry.entries),
+    )
+    .map_err(StateError::WriteGuard)?;
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde
@@ -2411,6 +2496,10 @@ where
     // a pre-host_mode reader would still accept it - defeating the forward-compat
     // bump for every store that predates it (the common case).
     registry.schema_version = REGISTRY_SCHEMA_VERSION;
+    // Rolling snapshot of the bytes this write replaces, under the lock so a
+    // racing writer cannot snapshot a half-read state. Best effort: never
+    // fails the write.
+    snapshot_registry(path);
     write_json_atomic(path, &registry)?;
     // Removal accounting runs AFTER the write persisted: a removal
     // that failed to persist never happened, and announcing it would be a
@@ -2512,10 +2601,14 @@ pub fn rename_agent_displacing(
         source.short_id.clone(),
     );
     let old_name = source.name.clone();
+    let harness_session_id = source.harness_session_id.clone();
     if old_name == new_name {
         return Ok((old_name, new_name.to_string()));
     }
     let resolved_name = old_name.clone();
+    // (from, to, session) of rows displaced off the target label in this
+    // transaction, journaled beside the rename itself on success.
+    let mut displaced: Vec<(String, String, Option<String>)> = Vec::new();
     // The closure's Result IS the transaction verdict: update_registry hands it
     // back as the Ok payload, so an inner Err must propagate - dropping it would
     // report a refused rename as a success.
@@ -2556,7 +2649,18 @@ pub fn rename_agent_displacing(
                 .all(|&i| may_displace(&registry.entries[i], &registry.entries))
             {
                 for &i in &held_elsewhere {
+                    let before = registry.entries[i].name.clone();
                     vacate_label(&mut registry.entries, i, new_name, &resolved_name)?;
+                    // A displaced row whose NAME moved journals it too, or a
+                    // later --from-journal rebuild plans it back onto the
+                    // label this transaction just took from it.
+                    if registry.entries[i].name != before {
+                        displaced.push((
+                            before,
+                            registry.entries[i].name.clone(),
+                            registry.entries[i].harness_session_id.clone(),
+                        ));
+                    }
                 }
             } else {
                 return Err(format!(
@@ -2576,6 +2680,36 @@ pub fn rename_agent_displacing(
     }) {
         Ok(inner) => inner?,
         Err(e) => return Err(e.to_string()),
+    }
+    // Every explicit rename journals itself (the reconcile title rename was
+    // the only agent_renamed emitter before), so `rename --from-journal` can
+    // rebuild labels after a registry loss. The event rides the SUCCESSFUL
+    // write, keyed by the row's full session id (d-e952ed19).
+    if let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let emitter = crate::events::EventEmitter::new(
+            crate::paths::AgentsHome::at(home_dir).events_jsonl(),
+            "daemon",
+        );
+        let _ = emitter.emit(
+            "agent_renamed",
+            &serde_json::json!({
+                "name": new_name,
+                "harness_session_id": harness_session_id,
+                "from": old_name,
+                "to": new_name,
+            }),
+        );
+        for (from, to, session) in &displaced {
+            let _ = emitter.emit(
+                "agent_renamed",
+                &serde_json::json!({
+                    "name": to,
+                    "harness_session_id": session,
+                    "from": from,
+                    "to": to,
+                }),
+            );
+        }
     }
     Ok((old_name, new_name.to_string()))
 }

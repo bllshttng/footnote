@@ -1196,3 +1196,49 @@ def test_ledger_json_honors_fno_state_dir_env(
     from fno.paths import ledger_json
 
     assert ledger_json() == (tmp_path / "pinned").resolve() / "ledger.json"
+
+
+def test_agents_registry_path_follows_declared_agents_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-HP: with FNO_AGENTS_HOME declared, a bare write_registry lands in
+    the declared home, never the config state_dir (the 2026-09-27 probe
+    overwrote the live registry through exactly this gap)."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        f"schema_version: 1\nconfig:\n  state_dir: '{tmp_path / '.fno'}'\n",
+    )
+    declared = tmp_path / "other" / "agents"
+    declared.mkdir(parents=True)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(declared))
+
+    entry = AgentEntry(
+        name="leader",
+        cwd="/tmp/x",
+        log_path="/tmp/x/log",
+        harness="claude",
+        harness_session_id="aaaaaaaa-0000-0000-0000-111111111111",
+    )
+    write_registry([entry])
+
+    assert (declared / "registry.json").is_file()
+    assert not (tmp_path / ".fno" / "agents" / "registry.json").exists()
+
+
+def test_agents_registry_path_stays_state_dir_without_declared_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-EDGE: FNO_AGENTS_HOME unset keeps the config state_dir path."""
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        f"schema_version: 1\nconfig:\n  state_dir: '{tmp_path / '.fno'}'\n",
+    )
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
+
+    from fno.paths import agents_registry_path
+
+    assert agents_registry_path() == tmp_path / ".fno" / "agents" / "registry.json"

@@ -101,6 +101,8 @@ fn proto_agent_launch_roundtrips() {
         node: None,
         message: "line one\nline \"two\" $ ` \u{1f600}".into(),
         extra_flags: vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
+        worktree: true,
+        branch: Some("feature/x".into()),
     };
     let mut buf = std::io::Cursor::new(Vec::new());
     write_msg_sync(&mut buf, &ClientMsg::AgentLaunch(req.clone())).unwrap();

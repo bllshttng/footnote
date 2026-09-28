@@ -499,10 +499,24 @@ fn mint_node_id(existing: &std::collections::BTreeSet<String>) -> Result<String,
     let prefix = super::settings::node_id_prefix();
     let width = super::settings::node_id_hex_width();
     let archive_ids = archived_id_pool();
+    mint_node_id_with_prefix(existing, &archive_ids, &prefix, width)
+}
+
+fn mint_node_id_with_prefix(
+    existing: &std::collections::BTreeSet<String>,
+    archive_ids: &std::collections::BTreeSet<String>,
+    prefix: &str,
+    width: usize,
+) -> Result<String, String> {
+    let prefix = if prefix.ends_with('-') {
+        prefix.to_string()
+    } else {
+        format!("{prefix}-")
+    };
     for _ in 0..64 {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).map_err(|e| format!("mint entropy failed: {e}"))?;
-        let candidate = format!("{}{}", prefix, hex_lower(&bytes)[..width].to_string());
+        let candidate = format!("{prefix}{}", &hex_lower(&bytes)[..width]);
         if !existing.contains(&candidate) && !archive_ids.contains(&candidate) {
             return Ok(candidate);
         }
@@ -1214,6 +1228,21 @@ fn parse_blocker_list_args(values: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_id_prefix_mints_dash_before_hex() {
+        let minted = mint_node_id_with_prefix(
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+            "x",
+            4,
+        )
+        .expect("minted id");
+
+        assert!(minted.starts_with("x-"));
+        assert_eq!(minted.len(), 6);
+        assert!(minted[2..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn parse_reads_long_short_and_repeatable_flags() {

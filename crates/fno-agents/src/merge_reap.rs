@@ -459,7 +459,7 @@ fn run_request(
     let mut kept: Vec<String> = Vec::new();
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
     for entry in joined {
-        if entry.crown_level.is_some() {
+        if entry.crown_level.is_some() || crate::loop_reign::row_holds_manifest_live_crown(&entry) {
             kept.push(format!("{}:kept_crowned", entry.name));
             continue;
         }
