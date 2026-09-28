@@ -195,11 +195,16 @@ pub struct RecoveryReport {
 ///
 /// An empty `short_id` is expected for this lane, so it cannot participate in
 /// the old state-directory recovery path. The full harness session id and cwd
-/// are the only durable inputs accepted for a resume.
+/// are the only durable inputs accepted for a resume. `allow_heal` admits the
+/// healed row shape (codex, no short id, no mux, no host mode) for the STOP
+/// re-attach alone: widening the default would also widen the startup
+/// recovery pass, whose candidates then settle Orphaned on a failed resume -
+/// rows the strict gate never touched.
 fn codex_thread_resume_identity(
     entry: &RegistryEntry,
+    allow_heal: bool,
 ) -> Result<Option<(String, PathBuf)>, String> {
-    if !is_codex_thread_entry(entry) && !rm_teardown::is_codex_thread_heal(entry) {
+    if !is_codex_thread_entry(entry) && !(allow_heal && rm_teardown::is_codex_thread_heal(entry)) {
         return Ok(None);
     }
     let session_id = entry
@@ -286,7 +291,7 @@ fn recover_with_policy(
 
     // Steps 2-5: per registry entry, reconcile its state.json.
     for entry in &registry.entries {
-        match codex_thread_resume_identity(entry) {
+        match codex_thread_resume_identity(entry, false) {
             Ok(Some((_session_id, _cwd))) => {
                 report.recovered_threads.push(entry.name.clone());
                 continue;

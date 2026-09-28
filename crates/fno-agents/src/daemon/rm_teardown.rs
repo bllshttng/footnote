@@ -24,7 +24,7 @@ pub(crate) async fn end_codex_thread_confirmed(
     entry: &RegistryEntry,
 ) -> Result<String, String> {
     if !ctx.codex_threads.lock().await.contains_key(&entry.name) {
-        super::codex_thread_resume::ensure_codex_thread_handle(ctx, entry)
+        super::codex_thread_resume::ensure_codex_thread_handle_for(ctx, entry, true)
             .await
             .map_err(|reason| {
                 format!("thread not hosted here and the re-attach refused: {reason}")

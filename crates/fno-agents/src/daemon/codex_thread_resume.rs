@@ -10,17 +10,32 @@ use super::*;
 /// `handle_stop` marks a stopped thread `Exited`; resurrecting that row on the
 /// next daemon start would silently undo `fno agents stop`.
 pub(super) fn codex_thread_recovery_candidate(entry: &RegistryEntry) -> bool {
-    codex_thread_resume_identity(entry).ok().flatten().is_some() && is_non_terminal(entry.status)
+    codex_thread_resume_identity(entry, false)
+        .ok()
+        .flatten()
+        .is_some()
+        && is_non_terminal(entry.status)
 }
 
 pub(super) async fn ensure_codex_thread_handle(
     ctx: &Ctx,
     entry: &RegistryEntry,
 ) -> Result<CodexThreadHandle, String> {
+    ensure_codex_thread_handle_for(ctx, entry, false).await
+}
+
+/// The stop re-attach's entry: `allow_heal` admits the healed row shape, so a
+/// session rm just removed can re-attach for its teardown. Startup recovery
+/// and every row-backed caller stay strict.
+pub(super) async fn ensure_codex_thread_handle_for(
+    ctx: &Ctx,
+    entry: &RegistryEntry,
+    allow_heal: bool,
+) -> Result<CodexThreadHandle, String> {
     if let Some(handle) = ctx.codex_threads.lock().await.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    let Some((session_id, cwd)) = codex_thread_resume_identity(entry)? else {
+    let Some((session_id, cwd)) = codex_thread_resume_identity(entry, allow_heal)? else {
         return Err(format!("agent '{}' is not a Codex thread", entry.name));
     };
     // A resumed thread with no cwd reads alive yet can never run a turn: the
