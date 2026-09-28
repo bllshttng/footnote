@@ -28,7 +28,7 @@ pub(crate) const FAIL_STATES: [&str; 7] = [
 
 /// Delimiter-bounded node-id candidates of a head ref (pr/closure.branch_node_ids).
 /// Hand-rolled: the pattern needs lookaheads (`(?=$|[/-])`) that the regex
-/// crate does not support.
+/// crate does not support, including the compact legacy `x` form.
 pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
     let b = head_ref.as_bytes();
     let mut ids: Vec<String> = Vec::new();
@@ -721,6 +721,14 @@ mod tests {
         assert_eq!(branch_node_ids("feature/xbbbb"), vec!["xbbbb".to_string()]);
         assert_eq!(branch_node_ids("xbbbb-fix"), vec!["xbbbb".to_string()]);
         assert!(branch_node_ids("main").is_empty());
+    }
+
+    #[test]
+    fn branch_ids_accept_compact_legacy_ids_at_segment_boundaries() {
+        assert_eq!(branch_node_ids("feature/xd863"), vec!["xd863"]);
+        assert_eq!(branch_node_ids("feature/xd863-close"), vec!["xd863"]);
+        assert!(branch_node_ids("feature/xd863g").is_empty());
+        assert!(branch_node_ids("feature/xg863").is_empty());
     }
 
     #[test]

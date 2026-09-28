@@ -11,7 +11,6 @@ depending on the installed `fno` snapshot. Proves:
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -34,6 +33,7 @@ INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 # call with the path in the message.
 
 NODE_ID = "ab-deadbeef"  # matches ^ab-[0-9a-f]{8}$
+LEGACY_NODE_ID = "xd863"  # legacy prefix plus hex, without the separator
 
 MOCK_ABI = """#!/usr/bin/env bash
 # Mock `fno`: log argv + the claims-root env, control claim-acquire exit code.
@@ -73,12 +73,12 @@ exit 0
 """
 
 
-def _sandbox(tmp_path: Path):
+def _sandbox(tmp_path: Path, node_id: str = NODE_ID):
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
     seed_graph(
         home / ".fno" / "graph.json",
-        [{"id": NODE_ID, "title": "t", "status": "idea", "priority": "p2",
+        [{"id": node_id, "title": "t", "status": "idea", "priority": "p2",
           "project": "fno", "plan_path": None}],
     )
     repo = tmp_path / "repo"
@@ -116,7 +116,7 @@ def _sandbox(tmp_path: Path):
     env = os.environ.copy()
     env.update({
         "TARGET_START": "1",
-        "TARGET_INPUT": NODE_ID,
+        "TARGET_INPUT": node_id,
         "TARGET_SIZE": "S",
         "TARGET_SESSION_ID": "worker-session",
         "HOME": str(home),
@@ -151,22 +151,23 @@ def _state(repo: Path) -> str:
     return f.read_text() if f.exists() else ""
 
 
-def test_bare_node_id_acquires_global_ttl_claim(tmp_path):
-    repo, home, log, env = _sandbox(tmp_path)
+@pytest.mark.parametrize("node_id", [NODE_ID, LEGACY_NODE_ID])
+def test_bare_node_id_acquires_global_ttl_claim(tmp_path, node_id):
+    repo, home, log, env = _sandbox(tmp_path, node_id)
     env["TARGET_SESSION_ID"] = "worker-session-a"
     env["MOCK_ABI_ACQUIRE_RC"] = "0"
     r = _run_init(repo, env)
     state = _state(repo)
     assert state, f"no state written: rc={r.returncode} stderr={r.stderr[:600]!r}"
 
-    assert f'target_claim_key: "node:{NODE_ID}"' in state, state
+    assert f'target_claim_key: "node:{node_id}"' in state, state
     assert "target_claim_holder:" in state
     assert 'target_claim_ttl: "2h"' in state
     assert not (repo / ".fno" / ".target-cancelled").exists()
 
     log_text = log.read_text()
     acquire_lines = [ln for ln in log_text.splitlines()
-                     if "claim acquire" in ln and NODE_ID in ln]
+                     if "claim acquire" in ln and node_id in ln]
     assert acquire_lines, log_text
     line = acquire_lines[0]
     assert "--ttl 2h" in line, line
