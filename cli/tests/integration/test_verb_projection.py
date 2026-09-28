@@ -18,6 +18,7 @@ import yaml
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -129,11 +130,9 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
         _epic("x-0a01", "mission"),
         _epic("x-0e02", "epic", parent="x-0a01"),
     ])
-    res = runner.invoke(
-        app, ["backlog", "add", "Third level epic", "--type", "epic", "--parent", "x-0e02", "--difficulty", "medium"]
-    )
+    res = run_native_create(tmp_graph, "add", "Third level epic", "--type", "epic", "--parent", "x-0e02")
     assert res.exit_code != 0
-    assert "cap" in res.output.lower()
+    assert "cap" in (res.output + res.stderr).lower()
     # No new node was appended.
     from fno.graph.store import read_graph_strict
     entries = read_graph_strict(tmp_graph)
@@ -143,9 +142,7 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
 def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
     """A non-epic child under an epic is unaffected by the create-path cap."""
     _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic", parent="x-0a01")])
-    res = runner.invoke(
-        app, ["backlog", "add", "A feature", "--type", "feature", "--parent", "x-0e02", "--difficulty", "medium"]
-    )
+    res = run_native_create(tmp_graph, "add", "A feature", "--type", "feature", "--parent", "x-0e02")
     assert res.exit_code == 0, res.output
 
 
@@ -172,7 +169,7 @@ def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
     """codex P2: creating a child via `add --parent <epic>` repaints the epic."""
     epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
     _seed(tmp_graph, [epic])
-    res = runner.invoke(app, ["backlog", "add", "A child", "--parent", "x-0e0e", "--difficulty", "medium"])
+    res = run_native_create(tmp_graph, "add", "A child", "--parent", "x-0e0e")
     assert res.exit_code == 0, res.output
     _, fe, _ = read_plan_file(e_doc)
     assert fe["children_total"] == "1"
