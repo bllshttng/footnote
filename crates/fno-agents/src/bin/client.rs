@@ -974,8 +974,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // `pr-heal`: classify a red check, apply the mechanical fix; daemon-free.
+    // The list path is an internal operand of the existing binary action;
+    // public callers keep using `fno do pr list` through the Python adapter.
     if matches!(verb, "pr-heal") {
+        if args.get(1).map(String::as_str) == Some("list") {
+            return fno_agents::pr_list::run_pr_list(&args[2..]);
+        }
         return fno_agents::heal::run_heal(&args[1..]);
     }
     if matches!(verb, "pr-push") {
