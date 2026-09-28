@@ -872,6 +872,13 @@ fn build_snapshot(
             "source_hashes": source_hashes,
             "source_manifest": manifest,
             "measurement_complete": errors.is_empty(),
+            // Structured count of the timeout errors, so a reader never has
+            // to parse this producer's error wording to spot a measured
+            // partial snapshot.
+            "measurement_timeouts": errors
+                .iter()
+                .filter(|e| e.contains("timed out after"))
+                .count(),
             "measurement_errors": errors,
         },
     }))
