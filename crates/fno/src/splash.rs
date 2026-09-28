@@ -176,10 +176,12 @@ fn px_cells(px: &[Px]) -> String {
 
 fn footer_segs(version: &str, dim: CtColor) -> Vec<Seg> {
     // The version is the one variable-length part; clamp it so the footer
-    // always fits the art width and can never wrap on a minimum terminal.
-    const FIXED: usize = "footnote".len() + 3 + "fno ".len() + 3 + "idea to shipped PR".len();
-    let budget = (ART_CELLS as usize).saturating_sub(FIXED);
-    let version: String = version.chars().take(budget.max(1)).collect();
+    // stays near the art width. The longer tagline leaves less room, so the
+    // floor keeps a full semver core ("0.10.0") on the tightest fit and only
+    // the widest footers may wrap on a minimum terminal.
+    const FIXED: usize = "footnote".len() + 3 + "fno ".len() + 3 + "say f[no] to mostly done".len();
+    let budget = (ART_CELLS as usize).saturating_sub(FIXED).max(6);
+    let version: String = version.chars().take(budget).collect();
     // Words in the text color, connectors and version in overlay1.
     let parts: [(&str, Option<CtColor>); 6] = [
         ("footnote", None),
@@ -187,7 +189,7 @@ fn footer_segs(version: &str, dim: CtColor) -> Vec<Seg> {
         ("fno ", Some(dim)),
         (&version, Some(dim)),
         (" · ", Some(dim)),
-        ("idea to shipped PR", None),
+        ("say f[no] to mostly done", None),
     ];
     let total: usize = parts.iter().map(|(s, _)| s.chars().count()).sum();
     let lead = (ART_CELLS as usize).saturating_sub(total) / 2;
@@ -498,19 +500,25 @@ mod tests {
                 11
             );
         }
-        // Final: 9 rows, 45 cells each; footer names the product and version.
+        // Final: 9 rows; the 8 art rows are 45 cells. The footer row runs a
+        // couple of cells wider now that the tagline carries the README
+        // wording: 8 + 3 + 4 + version + 3 + 24.
         let fin = visual_rows(FINAL, "9.9.9", dim);
         assert_eq!(fin.len(), ART_ROWS as usize);
-        for row in &fin {
+        for row in fin.iter().take(8) {
             assert_eq!(
                 row.iter().map(|s| s.text.chars().count()).sum::<usize>(),
                 45
             );
         }
+        assert_eq!(
+            fin[8].iter().map(|s| s.text.chars().count()).sum::<usize>(),
+            47
+        );
         let footer: String = fin[8].iter().map(|s| s.text.as_str()).collect();
         assert!(footer.contains("footnote"));
         assert!(footer.contains("fno 9.9.9"));
-        assert!(footer.contains("idea to shipped PR"));
+        assert!(footer.contains("say f[no] to mostly done"));
         assert!(footer.trim_start().starts_with("footnote"));
     }
 
@@ -518,7 +526,9 @@ mod tests {
     fn a_long_version_never_overflows_the_footer_row() {
         let fin = visual_rows(FINAL, "10.100.100-beta.7+x", CtColor::Reset);
         let width: usize = fin[8].iter().map(|s| s.text.chars().count()).sum();
-        assert_eq!(width, ART_CELLS as usize);
+        // The clamp floor keeps six version chars; the fixed parts around it
+        // are 42 cells, so 48 is the widest the footer can ever run.
+        assert_eq!(width, 48);
     }
 
     #[test]
