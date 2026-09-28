@@ -50,6 +50,46 @@ def _resolve_fno_binary() -> str:
     return "fno-py"  # last resort: bare name (launchd may still find it via PATH)
 
 
+# The fleet breaker's check-verb exit band for a merges-scope stop (the same
+# pair the spawn gate documents; constants live Rust-side).
+_FLEET_CHECK_STOPPED = 90
+_FLEET_CHECK_UNAVAILABLE = 91
+
+
+def _merges_freeze_frozen() -> tuple[bool, str]:
+    """The fleet breaker's merges verdict for the merge arm (x-b553 breach 3).
+
+    ``(frozen, why)``: a stop holding merges (exit 90) or an unreadable
+    breaker (exit 91) freezes the phase - fail closed, the same policy the
+    merge primitive applies at its own gate. A missing binary reads clear:
+    nothing here pre-skips, and the primitive's own in-process gate still
+    refuses each merge.
+    """
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        return False, "no fno-agents binary; the per-PR gate owns the freeze"
+    try:
+        proc = subprocess.run(
+            [str(binary), "fleet-incident", "check", "--scope", "merges"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return True, f"incident check failed ({exc}); refusing to merge through it"
+    if proc.returncode == _FLEET_CHECK_STOPPED:
+        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        detail = lines[0].strip() if lines else "fleet incident stop holds merges"
+        return True, detail
+    if proc.returncode == _FLEET_CHECK_UNAVAILABLE:
+        return True, "fleet incident state unreadable; the merge arm fails closed"
+    return False, ""
+
+
 # ---------------------------------------------------------------------------
 # Module-level adapter callables (extracted for testability)
 # ---------------------------------------------------------------------------
@@ -1193,6 +1233,15 @@ def tick() -> None:
             if not tick_enabled:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="disabled",
                                detail=f"{head} pr_watch disabled")
+                return
+            # The freeze gate (x-b553 breach 3): a crown-armed fleet stop
+            # holding merges (or an unreadable breaker, fail closed) skips the
+            # whole phase - the arm never asks a frozen queue to execute. The
+            # per-PR crown holds still refuse inside the merge primitive.
+            frozen, why = _merges_freeze_frozen()
+            if frozen:
+                _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="frozen",
+                               detail=f"{head} {why}")
                 return
             from fno.pr_watch._discover import PrCandidate
             from fno.pr_watch._dispatch import run_execute_queue
