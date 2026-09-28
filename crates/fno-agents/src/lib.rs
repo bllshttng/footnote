@@ -295,6 +295,7 @@ pub mod question_clear;
 pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
+pub mod reader_cost;
 pub mod readiness;
 pub mod real_session;
 pub mod reap_release;
@@ -580,21 +581,18 @@ fn raw_monotonic_nanos() -> u64 {
         .saturating_add(ts.tv_nsec.max(0) as u64)
 }
 
+/// Mach ticks to nanoseconds via the once-read timebase ratio, shared by
+/// the monotonic clock and the reader-cost probe's CPU-time reads (which
+/// are ticks on the same clock). `libc` deprecated its mach timebase
+/// helpers, so the libSystem symbol is declared directly.
 #[cfg(target_os = "macos")]
-fn raw_monotonic_nanos() -> u64 {
-    // mach_continuous_time() counts during sleep; convert mach ticks -> ns via
-    // the timebase ratio (1/1 on current Apple hardware, but we must not assume
-    // it). `libc` deprecated its mach timebase helpers and dropped
-    // mach_continuous_time entirely (it lives in the `mach2` crate now), so we
-    // declare the two libSystem symbols directly to avoid a macOS-only crate
-    // dependency. Both are part of libSystem, linked by default on macOS.
+pub(crate) fn mach_ticks_to_ns(ticks: u64) -> u64 {
     #[repr(C)]
     struct MachTimebaseInfo {
         numer: u32,
         denom: u32,
     }
     extern "C" {
-        fn mach_continuous_time() -> u64;
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
     }
     use std::sync::OnceLock;
@@ -610,10 +608,20 @@ fn raw_monotonic_nanos() -> u64 {
             (info.numer as u64, info.denom as u64)
         }
     });
+    ((ticks as u128 * numer as u128) / denom as u128) as u64
+}
+
+#[cfg(target_os = "macos")]
+fn raw_monotonic_nanos() -> u64 {
+    // mach_continuous_time() counts during sleep. `libc` dropped the symbol
+    // entirely (it lives in the `mach2` crate now), so the libSystem symbol
+    // is declared directly to avoid a macOS-only crate dependency.
+    extern "C" {
+        fn mach_continuous_time() -> u64;
+    }
     // SAFETY: no arguments; returns a monotonic tick count that counts sleep.
     let ticks = unsafe { mach_continuous_time() };
-    // ns = ticks * numer / denom, computed in u128 to avoid overflow.
-    ((ticks as u128 * numer as u128) / denom as u128) as u64
+    mach_ticks_to_ns(ticks)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
