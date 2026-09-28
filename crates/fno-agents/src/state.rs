@@ -1892,17 +1892,16 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 /// complete roster.
 pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), StateError> {
     // Lock the SAME sidecar `update_registry` locks (shared mode here), not the
-    // data file. This is the canonical cross-language lock target: a Python
-    // `fno` writer taking `flock` on `<registry>.lock` and the Rust daemon's
-    // exclusive write-lock then live in one domain, so reader/writer and
-    // cross-language writers actually mutually exclude (US6.12). Locking the
-    // data file directly would (a) not exclude against the sidecar-based
-    // writer and (b) reintroduce the rename-invalidates-fd footgun.
+    // data file. Python `fno` writers use `<agents>/locks/_registry.lock`; Rust
+    // must use that exact path or the two implementations can read and replace
+    // snapshots concurrently. Locking the data file directly would not exclude
+    // either sidecar-based writer and would reintroduce the rename-invalidates-
+    // fd footgun.
     // Acquire the lock FIRST, then decide existence: a `!path.exists()` check
     // before the lock could race a concurrent writer creating registry.json and
     // return a stale empty registry (Codex P2). The open-after-lock below is the
     // authoritative existence check.
-    let lock = acquire_shared(&lock_path(path))?;
+    let lock = acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2324,7 +2323,11 @@ where
     // Lock on a stable sidecar so the rename of the data file never invalidates
     // the lock fd (renaming the locked file out from under a held flock is the
     // classic footgun; locking the sidecar sidesteps it entirely).
-    let lock = acquire_exclusive(&lock_path(path))?;
+    let lock_path = registry_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = acquire_exclusive(&lock_path)?;
     let mut registry = read_existing_registry(path)?;
     // The half of read-forward that protects the file. The read above drops
     // fields this binary does not know, so writing those rows back would erase
@@ -2433,6 +2436,23 @@ pub fn rename_agent(
     new_name: &str,
     node: Option<&str>,
 ) -> Result<(String, String), String> {
+    rename_agent_displacing(path, token, new_name, node, |_, _| false)
+}
+
+/// [`rename_agent`] with label displacement: when the target label is held
+/// only by rows that satisfy `may_displace`, the label and alias move off
+/// those rows inside this SAME transaction instead of refusing. The predicate
+/// receives the row and the transaction's own entries, so its verdict reads
+/// the state under the lock, not a pre-transaction snapshot. The crown
+/// check-in takes a carried label back from a predecessor row that holds no
+/// live crown; every other caller keeps the plain refusal.
+pub fn rename_agent_displacing(
+    path: &Path,
+    token: &str,
+    new_name: &str,
+    node: Option<&str>,
+    may_displace: impl Fn(&RegistryEntry, &[RegistryEntry]) -> bool,
+) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
             "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes"
@@ -2519,12 +2539,30 @@ pub fn rename_agent(
         // "Names another worker" includes a label the worker still ANSWERS to:
         // a prior label held as another row's alias refuses too, or the renamed
         // label would resolve ambiguous (two rows) the moment anyone used it.
-        if registry.entries.iter().enumerate().any(|(i, e)| {
-            i != idx && (e.name == new_name || e.aliases.iter().any(|a| a == new_name))
-        }) {
-            return Err(format!(
-                "registry label {new_name:?} already names another worker"
-            ));
+        // Displaceable holders vacate the label here, in this transaction, so
+        // the label never resolves to two rows at any point.
+        let held_elsewhere: Vec<usize> = registry
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| {
+                *i != idx && (e.name == new_name || e.aliases.iter().any(|a| a == new_name))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !held_elsewhere.is_empty() {
+            if held_elsewhere
+                .iter()
+                .all(|&i| may_displace(&registry.entries[i], &registry.entries))
+            {
+                for &i in &held_elsewhere {
+                    vacate_label(&mut registry.entries, i, new_name, &resolved_name)?;
+                }
+            } else {
+                return Err(format!(
+                    "registry label {new_name:?} already names another worker"
+                ));
+            }
         }
         let target = &mut registry.entries[idx];
         if !target.aliases.iter().any(|a| a == &resolved_name) {
@@ -2540,6 +2578,52 @@ pub fn rename_agent(
         Err(e) => return Err(e.to_string()),
     }
     Ok((old_name, new_name.to_string()))
+}
+
+/// Move `label` off `entries[idx]` inside the caller's transaction: the alias
+/// goes, and a row whose NAME is the label takes a spare one - its first
+/// non-colliding alias, else its short id - so the label answers for one row
+/// again. Refuses rather than leaving the row nameless.
+fn vacate_label(
+    entries: &mut [RegistryEntry],
+    idx: usize,
+    label: &str,
+    reserved: &str,
+) -> Result<(), String> {
+    let taken = |candidate: &str| {
+        candidate == reserved
+            || entries.iter().enumerate().any(|(i, e)| {
+                i != idx && (e.name == candidate || e.aliases.iter().any(|a| a == candidate))
+            })
+    };
+    let row = &entries[idx];
+    let spare = if row.name != label {
+        None
+    } else {
+        Some(
+            row.aliases
+                .iter()
+                .find(|a| a.as_str() != label && is_valid_registry_label(a) && !taken(a))
+                .cloned()
+                .or_else(|| {
+                    let sid = row.short_id.clone();
+                    (!sid.is_empty() && is_valid_registry_label(&sid) && !taken(&sid))
+                        .then_some(sid)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "label {label:?} cannot be vacated: row {} holds no spare name",
+                        row.short_id
+                    )
+                })?,
+        )
+    };
+    let row = &mut entries[idx];
+    if let Some(spare) = spare {
+        row.name = spare;
+    }
+    row.aliases.retain(|a| a != label);
+    Ok(())
 }
 
 /// The label grammar `rename_agent` enforces (1..=64 chars from
@@ -2880,6 +2964,16 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
+}
+
+/// Lock shared with Python's `fno.agents.registry._registry_lock_path`.
+/// Registry readers and writers use this one path across languages; per-file
+/// state records continue to use [`lock_path`].
+fn registry_lock_path(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("locks")
+        .join("_registry.lock")
 }
 
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory

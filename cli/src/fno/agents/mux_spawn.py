@@ -60,6 +60,7 @@ from fno.agents.spawn_defaults import is_verb_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,
+    strip_remote_add_dirs,
     worker_writable_dirs,
 )
 from fno.agents.lock import hold_agent_lock
@@ -1110,6 +1111,7 @@ def build_pane_argv(
             argv += effort_tokens("codex", effort)
         argv += tier3
         argv += pane_passthrough_tokens(passthrough, argv)
+        argv = strip_remote_add_dirs(argv)
         if message:
             # Same fence as the claude arm: clap itself prescribes `--` ("to
             # pass ... as a value, use '-- ...'"), so a leading-flag seed is

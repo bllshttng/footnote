@@ -37,26 +37,136 @@ const UNKNOWN_RESET_HOLD_S: i64 = 5 * 3600;
 /// (mux_spawn._MUX_SUBPROCESS_TIMEOUT_S).
 const PANE_PROBE_BUDGET: Duration = Duration::from_secs(30);
 
-/// The `providers.provider_limits.<provider>.lanes` cap, or `None` when the
-/// provider is uncapped. A config that never named a provider_limits table
-/// falls back to the built-in budget table, exactly as the Python gate's
-/// `gate_settings` fails safe (`config._BUILTIN_PROVIDER_BUDGETS`).
-pub(crate) fn provider_lanes_cap(config_cwd: &Path, provider: &str) -> Option<usize> {
-    let lanes = match agents_config::config_lookup(config_cwd, &["agents", "provider_limits"]) {
-        Some(table) => table
-            .get(provider)
-            .and_then(|budget| budget.get("lanes"))
-            .and_then(|v| v.as_integer()),
-        None => built_in_lanes(provider),
-    };
-    usize::try_from(lanes.unwrap_or(0))
-        .ok()
-        .filter(|lanes| *lanes >= 1)
+/// The coerced per-provider lane caps. The legacy `max_lanes` spelling is
+/// read only when `provider_limits` is absent; malformed input restores the
+/// shared-account default, while an explicit empty table disables all caps.
+pub(crate) fn provider_lane_caps(config_cwd: &Path) -> BTreeMap<String, Option<usize>> {
+    let raw = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
+        .or_else(|| agents_config::config_lookup(config_cwd, &["agents", "max_lanes"]));
+    match raw {
+        Some(raw) => coerce_provider_lane_caps(&raw).unwrap_or_else(built_in_provider_lane_caps),
+        None => built_in_provider_lane_caps(),
+    }
 }
 
-/// The built-in budget table (`config._BUILTIN_PROVIDER_BUDGETS`): zai only.
-fn built_in_lanes(provider: &str) -> Option<i64> {
-    (provider == "zai").then_some(5)
+pub(crate) fn provider_lanes_cap(config_cwd: &Path, provider: &str) -> Option<usize> {
+    provider_lane_caps(config_cwd)
+        .get(provider)
+        .copied()
+        .flatten()
+}
+
+fn built_in_provider_lane_caps() -> BTreeMap<String, Option<usize>> {
+    BTreeMap::from([("zai".to_string(), Some(5))])
+}
+
+fn coerce_provider_lane_caps(raw: &toml::Value) -> Option<BTreeMap<String, Option<usize>>> {
+    let table = raw.as_table()?;
+    let mut caps = BTreeMap::new();
+    for (provider, budget) in table {
+        if !valid_provider_name(provider) {
+            return None;
+        }
+        let lanes = if let Some(value) = budget.as_integer() {
+            Some(positive_lane_cap(value)?)
+        } else if let Some(dimensions) = budget.as_table() {
+            if dimensions
+                .keys()
+                .any(|key| !matches!(key.as_str(), "lanes" | "subagents"))
+            {
+                return None;
+            }
+            let mut lanes = None;
+            for (dimension, value) in dimensions {
+                let value = positive_lane_cap(value.as_integer()?)?;
+                if dimension == "lanes" {
+                    lanes = Some(value);
+                }
+            }
+            lanes
+        } else {
+            return None;
+        };
+        caps.insert(
+            provider.clone(),
+            lanes.or_else(|| (provider == "zai").then_some(5)),
+        );
+    }
+    Some(caps)
+}
+
+fn positive_lane_cap(value: i64) -> Option<usize> {
+    usize::try_from(value).ok().filter(|cap| *cap > 0)
+}
+
+fn valid_provider_name(provider: &str) -> bool {
+    let mut chars = provider.chars();
+    matches!(chars.next(), Some('a'..='z'))
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
+}
+
+/// Read counts from the spawn-gate owner for every capped provider. Schema
+/// refusals and unreadable counts stay explicit so route-slot fails closed.
+pub(crate) fn vendor_lane_readings(config_cwd: &Path, registry_path: Option<&Path>) -> Value {
+    let caps = provider_lane_caps(config_cwd);
+    let mut warnings = Vec::new();
+    let (questions_raw, schema_error) = match registry_path {
+        Some(path) => {
+            let schema_error = check_registry_schema(path, &mut warnings).err().map(|_| {
+                warnings
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "spawn-gate registry schema refused".to_string())
+            });
+            let questions = schema_error
+                .is_none()
+                .then(|| read_questions_journal(path, &mut warnings));
+            (questions, schema_error)
+        }
+        None => (None, Some("fno registry home unavailable".to_string())),
+    };
+    vendor_lane_readings_from_caps(&caps, |provider| {
+        let Some(path) = registry_path else {
+            return Err("fno registry home unavailable".to_string());
+        };
+        if let Some(error) = &schema_error {
+            return Err(error.clone());
+        }
+        provider_live_count_with_questions(
+            path,
+            provider,
+            questions_raw.as_deref().unwrap_or_default(),
+            None,
+            &mut warnings,
+        )
+        .map(|reading| reading.count)
+    })
+}
+
+fn vendor_lane_readings_from_caps(
+    caps: &BTreeMap<String, Option<usize>>,
+    mut read_count: impl FnMut(&str) -> Result<usize, String>,
+) -> Value {
+    let mut vendor_caps = serde_json::Map::new();
+    let mut vendor_counts = serde_json::Map::new();
+    let mut vendor_count_errors = serde_json::Map::new();
+    for (provider, cap) in caps {
+        let Some(cap) = cap else { continue };
+        vendor_caps.insert(provider.clone(), serde_json::json!(cap));
+        match read_count(provider) {
+            Ok(count) => {
+                vendor_counts.insert(provider.clone(), serde_json::json!(count));
+            }
+            Err(error) => {
+                vendor_count_errors.insert(provider.clone(), serde_json::json!(error));
+            }
+        }
+    }
+    serde_json::json!({
+        "vendor_caps": vendor_caps,
+        "vendor_counts": vendor_counts,
+        "vendor_count_errors": vendor_count_errors,
+    })
 }
 
 /// The `agents.provider_limits.<provider>.subagents` ceiling, or `None` when
@@ -2051,6 +2161,13 @@ mod tests {
             "a configured table replaces the builtin"
         );
 
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents.provider_limits]\nzai = 5\n",
+        )
+        .unwrap();
+        assert_eq!(provider_lanes_cap(&dir, "zai"), Some(5));
+
         std::fs::write(fnodir.join("config.toml"), "[agents]\nmax_live = 2\n").unwrap();
         assert_eq!(provider_lanes_cap(&dir, "zai"), Some(5), "builtin fallback");
         assert_eq!(provider_lanes_cap(&dir, "openai"), None);
@@ -2060,6 +2177,101 @@ mod tests {
             None => std::env::remove_var("FNO_CONFIG"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn provider_lane_caps_coerces_the_documented_config_table() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("fno-provider-lane-caps-{}", std::process::id()));
+        let fnodir = dir.join(".fno");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&fnodir).unwrap();
+        let config_path = fnodir.join("config.toml");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", &config_path);
+
+        let expected = |entries: &[(&str, Option<usize>)]| {
+            entries
+                .iter()
+                .map(|(provider, cap)| ((*provider).to_string(), *cap))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let cases = [
+            (
+                "[agents.provider_limits]\nzai = 5\n",
+                expected(&[("zai", Some(5))]),
+            ),
+            (
+                "[agents.provider_limits.zai]\nsubagents = 2\n",
+                expected(&[("zai", Some(5))]),
+            ),
+            (
+                "[agents.provider_limits.openai]\nsubagents = 1\n",
+                expected(&[("openai", None)]),
+            ),
+            (
+                "[agents]\nmax_lanes = { openai = 3 }\n",
+                expected(&[("openai", Some(3))]),
+            ),
+            (
+                "[agents]\nmax_lanes = { openai = 3 }\n[agents.provider_limits]\nzai = 2\n",
+                expected(&[("zai", Some(2))]),
+            ),
+            ("[agents.provider_limits]\n", expected(&[])),
+            ("[agents]\nmax_live = 2\n", expected(&[("zai", Some(5))])),
+        ];
+        for (config, caps) in cases {
+            std::fs::write(&config_path, config).unwrap();
+            assert_eq!(provider_lane_caps(&dir), caps, "config: {config}");
+        }
+
+        for malformed in [
+            "[agents.provider_limits]\nzai = 0\n",
+            "[agents.provider_limits]\nzai = true\n",
+            "[agents.provider_limits]\nzai = 2.5\n",
+            "[agents.provider_limits]\nZai = 3\n",
+            "[agents.provider_limits.zai]\nlanes = 2\nburst = 1\n",
+        ] {
+            std::fs::write(&config_path, malformed).unwrap();
+            assert_eq!(
+                provider_lane_caps(&dir),
+                expected(&[("zai", Some(5))]),
+                "malformed config: {malformed}"
+            );
+        }
+
+        match prior_config {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vendor_lane_readings_include_only_capped_lanes_and_keep_count_errors() {
+        let caps = std::collections::BTreeMap::from([
+            ("zai".to_string(), Some(2)),
+            ("openai".to_string(), None),
+            ("anthropic".to_string(), Some(3)),
+        ]);
+        let readings = vendor_lane_readings_from_caps(&caps, |provider| match provider {
+            "zai" => Ok(2),
+            "anthropic" => Err("registry unreadable".to_string()),
+            _ => unreachable!("uncapped provider must not be counted"),
+        });
+
+        assert_eq!(
+            readings["vendor_caps"],
+            serde_json::json!({"zai": 2, "anthropic": 3})
+        );
+        assert_eq!(readings["vendor_counts"], serde_json::json!({"zai": 2}));
+        assert_eq!(
+            readings["vendor_count_errors"],
+            serde_json::json!({"anthropic": "registry unreadable"})
+        );
     }
 
     /// The subagents ceiling reader: the configured table wins, the built-in

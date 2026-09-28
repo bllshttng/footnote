@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -150,10 +151,9 @@ def _entries(g: Path) -> list[dict]:
 
 def test_idea_operator_request_reads_back(tmp_graph, operator_turn):
     """AC: idea --source-kind operator_request lands a node the field reads operator_request."""
-    result = runner.invoke(
-        app,
-        ["backlog", "idea", "operator asked for a capture path",
-         "--source-kind", "operator_request", "--difficulty", "low"],
+    result = run_native_create(
+        tmp_graph, "idea", "operator asked for a capture path",
+        "--source-kind", "operator_request", "--difficulty", "low",
     )
     assert result.exit_code == 0, result.output
     (node,) = _entries(tmp_graph)
@@ -168,13 +168,12 @@ def test_idea_operator_request_reads_back(tmp_graph, operator_turn):
 
 def test_idea_rejects_unknown_source_kind(tmp_graph):
     """AC: an out-of-vocabulary --source-kind exits non-zero naming the five legal values."""
-    result = runner.invoke(
-        app,
-        ["backlog", "idea", "x", "--source-kind", "nonsense", "--difficulty", "low"],
+    result = run_native_create(
+        tmp_graph, "idea", "x", "--source-kind", "nonsense", "--difficulty", "low",
     )
     assert result.exit_code != 0
     for value in ("organic", "from_inbox", "from_observation", "from_supervisor", "operator_request"):
-        assert value in result.output
+        assert value in (result.output + result.stderr)
 
 
 def test_new_operator_request_via_shared_builder(tmp_graph):
@@ -214,15 +213,14 @@ def test_operator_request_refuses_unreadable_queue(
     monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
     monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(absent))
     monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
-    refused = runner.invoke(
-        app,
-        ["backlog", "idea", "rejected ask", "--source-kind", "operator_request", "--difficulty", "low"],
+    refused = run_native_create(
+        tmp_graph, "idea", "rejected ask", "--source-kind", "operator_request", "--difficulty", "low",
     )
     assert refused.exit_code == 1
-    assert str(absent) in refused.output
+    assert str(absent) in (refused.output + refused.stderr)
     assert _entries(tmp_graph) == []
-    organic = runner.invoke(
-        app, ["backlog", "idea", "organic idea", "--source-kind", "organic", "--difficulty", "low"]
+    organic = run_native_create(
+        tmp_graph, "idea", "organic idea", "--source-kind", "organic", "--difficulty", "low",
     )
     assert organic.exit_code == 0, organic.output
     assert _entries(tmp_graph)[0]["request_origin"] == "unknown"
@@ -237,34 +235,18 @@ def test_operator_request_refuses_empty_queue(
     monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
     monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(empty))
     monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
-    refused = runner.invoke(
-        app,
-        [
-            "backlog", "idea", "rejected ask", "--source-kind", "operator_request",
-            "--difficulty", "low",
-        ],
+    refused = run_native_create(
+        tmp_graph,
+        "idea", "rejected ask", "--source-kind", "operator_request",
+        "--difficulty", "low",
     )
     assert refused.exit_code == 1
-    assert "queue is empty" in refused.output
-    assert "as organic" in refused.output
+    assert "queue is empty" in (refused.output + refused.stderr)
+    assert "as organic" in (refused.output + refused.stderr)
     assert _entries(tmp_graph) == []
 
 
-def test_operator_request_refuses_when_native_binary_is_unavailable(
-    tmp_graph, tmp_path, monkeypatch
-):
-    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
-    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
-    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
-    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tmp_path / "planted-transcript.jsonl"))
-    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
-    refused = runner.invoke(
-        app,
-        ["backlog", "idea", "unverified ask", "--source-kind", "operator_request", "--difficulty", "low"],
-    )
-    assert refused.exit_code == 1
-    assert "could not be verified" in refused.output
-    assert _entries(tmp_graph) == []
+
 
 
 def test_find_filters_by_source_kind(tmp_graph):

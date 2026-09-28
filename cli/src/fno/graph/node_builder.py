@@ -207,7 +207,7 @@ def _build_backlog_node(
     completion_note: Optional[str] = None,
     source_session_id: Optional[str] = None,
 ) -> dict:
-    """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
+    """Build a backlog node dict shared by the Python creation verbs``.
 
     ``out``, when given, receives metadata ABOUT the capture that is not itself
     a node field (currently ``source_node_dropped``). A separate channel rather
