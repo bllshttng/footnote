@@ -1,8 +1,8 @@
-"""Tests for `fno agents` Typer subapp scaffold — TDD Red phase.
+"""Tests for the `fno agents` Typer subapp scaffold.
 
 AC5/AC6 from Task 1.2:
 - `fno agents` Typer subapp wired into main CLI; `fno agents --help` prints usage
-- Empty `ask` / `list` / `ping` stubs exit 0 and print "not implemented yet"
+- Hidden lifecycle commands remain invocable through the compatibility surface.
 """
 from __future__ import annotations
 
@@ -69,27 +69,6 @@ def test_agents_ask_help_is_documented(runner: CliRunner, monkeypatch) -> None:
     stripped = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output).lower()
     assert "--harness" in stripped, stripped[:500]
     assert "--cwd" in stripped, stripped[:500]
-
-
-def test_agents_list_shipped_in_us3(tmp_path: Path, monkeypatch, runner: CliRunner) -> None:
-    """`fno agents list` is no longer a stub — US3 shipped real impl.
-
-    Detailed CLI behavior (filters, JSON shape, exit codes) lives in
-    test_cli_list_logs.py; this test only guards against the stub
-    accidentally being restored.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    # Silence the live-status shellout so the assertion focuses on the
-    # CLI itself, not the provider plumbing.
-    from fno.agents.harnesses import claude as claude_mod
-    monkeypatch.setattr(
-        claude_mod, "claude_agents_json", lambda timeout=3.0: ({}, []),
-    )
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["list"])
-    assert result.exit_code == 0
-    assert "not implemented yet" not in result.output.lower()
 
 
 def test_agents_ping_stub_exits_zero(tmp_path: Path, monkeypatch, runner: CliRunner) -> None:
