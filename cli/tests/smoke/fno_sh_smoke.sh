@@ -73,6 +73,11 @@ mkdir -p "$UV_TOOLS" "$UV_BIN" "$CACHE" "$WORK" "$BASE_TMP/home"
 # path is the launch gate). HOME pristine so nothing resolves back to a real
 # install. cwd is repo-less (AC6-EDGE).
 cd "$WORK" || { echo "FAIL[env] cd to $WORK failed"; exit 1; }
+# The curl|sh channel inherits the caller's SHELL; uv's `tool update-shell`
+# refuses without one ("the current shell could not be determined", rc=2).
+# Pin the shell the real channel always provides, so check 3b exercises the
+# uv profile-edit path instead of accidentally testing the manual fallback.
+export SHELL="${SHELL:-/bin/bash}"
 export UV_TOOL_DIR="$UV_TOOLS" UV_TOOL_BIN_DIR="$UV_BIN" \
        XDG_CACHE_HOME="$CACHE" HOME="$BASE_TMP/home" \
        FNO_INSTALL_WHEEL="$WHEEL"
