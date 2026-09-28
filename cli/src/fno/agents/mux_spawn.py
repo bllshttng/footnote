@@ -1083,7 +1083,10 @@ def build_pane_argv(
             argv += (
                 ["--dangerously-bypass-approvals-and-sandbox"]
                 if yolo
-                else ["--sandbox", "workspace-write"]
+                # The bounded default is the thread lane's own CodexPosture::bounded()
+                # pair, routed through the Rust owner so pane and thread cannot
+                # disagree about what "bounded" means.
+                else permission_pane_tokens("codex", "workspace-write:never")
             )
         if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
             # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
