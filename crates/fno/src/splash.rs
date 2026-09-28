@@ -8,7 +8,7 @@
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::queue;
 use crossterm::style::{Color as CtColor, Print, SetForegroundColor};
 use crossterm::terminal;
@@ -115,6 +115,14 @@ fn stamp_row(width: usize, block_row: usize, brackets: bool) -> Vec<Px> {
         px.push(Px::Solid);
         px.extend(glyph_row(&G_RBRACK, g));
         px.extend(vec![Px::Solid; 2]);
+        // The bracket layout is drawn at 17 px; any other width pads with
+        // KNOCK (never Solid) so a row can never overhang its neighbors -
+        // the bottom-right nub the operator screenshotted.
+        if px.len() > width {
+            px.truncate(width);
+        } else {
+            px.resize(width, Px::Knock);
+        }
         px
     } else {
         // Pads hold the inner 7 px (n + separator + o) centered.
@@ -168,10 +176,12 @@ fn px_cells(px: &[Px]) -> String {
 
 fn footer_segs(version: &str, dim: CtColor) -> Vec<Seg> {
     // The version is the one variable-length part; clamp it so the footer
-    // always fits the art width and can never wrap on a minimum terminal.
-    const FIXED: usize = "footnote".len() + 3 + "fno ".len() + 3 + "idea to shipped PR".len();
-    let budget = (ART_CELLS as usize).saturating_sub(FIXED);
-    let version: String = version.chars().take(budget.max(1)).collect();
+    // stays near the art width. The longer tagline leaves less room, so the
+    // floor keeps a full semver core ("0.10.0") on the tightest fit and only
+    // the widest footers may wrap on a minimum terminal.
+    const FIXED: usize = "footnote".len() + 3 + "fno ".len() + 3 + "say f[no] to mostly done".len();
+    let budget = (ART_CELLS as usize).saturating_sub(FIXED).max(6);
+    let version: String = version.chars().take(budget).collect();
     // Words in the text color, connectors and version in overlay1.
     let parts: [(&str, Option<CtColor>); 6] = [
         ("footnote", None),
@@ -179,7 +189,7 @@ fn footer_segs(version: &str, dim: CtColor) -> Vec<Seg> {
         ("fno ", Some(dim)),
         (&version, Some(dim)),
         (" · ", Some(dim)),
-        ("idea to shipped PR", None),
+        ("say f[no] to mostly done", None),
     ];
     let total: usize = parts.iter().map(|(s, _)| s.chars().count()).sum();
     let lead = (ART_CELLS as usize).saturating_sub(total) / 2;
@@ -216,13 +226,10 @@ fn visual_rows(frame: Frame, version: &str, dim: CtColor) -> Vec<Vec<Seg>> {
     rows
 }
 
-/// Draw origin, centered on the FINAL art so the stamp's left edge never
-/// moves as the stamp widens. `None` when the terminal is too small.
-fn origin_for(cols: u16, rows: u16) -> Option<(u16, u16)> {
-    if cols < ART_CELLS || rows < ART_ROWS {
-        return None;
-    }
-    Some(((cols - ART_CELLS) / 2, (rows - ART_ROWS) / 2))
+/// The inline banner needs the art's width so rows never wrap; height is
+/// free on the normal screen (it scrolls).
+fn art_fits() -> bool {
+    matches!(terminal::size(), Ok((cols, _)) if cols >= ART_CELLS)
 }
 
 fn to_ct(c: Color) -> CtColor {
@@ -234,19 +241,16 @@ fn to_ct(c: Color) -> CtColor {
 }
 
 fn draw(frame: Frame, theme: &Theme) {
-    let Some((origin_col, origin_row)) = terminal::size()
-        .ok()
-        .and_then(|(cols, rows)| origin_for(cols, rows))
-    else {
-        return;
-    };
     let dim = to_ct(theme.dim);
     let mut out = std::io::stdout().lock();
     for (i, segs) in visual_rows(frame, crate::proto::BUILD_VERSION, dim)
         .into_iter()
         .enumerate()
     {
-        let _ = queue!(out, MoveTo(origin_col, origin_row + i as u16));
+        if i > 0 {
+            let _ = queue!(out, Print("\r\n"));
+        }
+        let _ = queue!(out, MoveToColumn(0));
         for s in segs {
             if let Some(fg) = s.fg {
                 let _ = queue!(out, SetForegroundColor(fg));
@@ -255,6 +259,16 @@ fn draw(frame: Frame, theme: &Theme) {
         }
         let _ = queue!(out, SetForegroundColor(CtColor::Reset));
     }
+    let _ = out.flush();
+}
+
+/// Walk the cursor back to the top row of the previously printed block, so
+/// the next frame repaints in place. `None` = first frame, nothing to undo.
+fn rewind(last_rows: Option<usize>) {
+    let Some(n) = last_rows else { return };
+    let mut out = std::io::stdout().lock();
+    let _ = queue!(out, MoveToColumn(0));
+    let _ = queue!(out, MoveUp((n - 1) as u16));
     let _ = out.flush();
 }
 
@@ -274,6 +288,18 @@ fn animated() -> bool {
     )
 }
 
+/// The terminal's block cursor parked after the last written cell reads as
+/// a dark toe past the art. Hide it for the whole animation; this guard
+/// reveals it again on every exit path, skip and early return included.
+struct Reveal;
+impl Drop for Reveal {
+    fn drop(&mut self) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[?25h");
+        let _ = out.flush();
+    }
+}
+
 /// Draw the splash before the first UI paint. `rx` is the raw stdin
 /// channel: any byte skips to the last frame. The chunk that ended the
 /// animation is handed back through `tx` WHOLE, so typed-ahead input and
@@ -284,18 +310,27 @@ pub async fn run(
     tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     theme: &Theme,
 ) {
-    let fits = terminal::size()
-        .ok()
-        .and_then(|(cols, rows)| origin_for(cols, rows))
-        .is_some();
-    if !fits {
-        // Nowhere to draw the art; do not spend the beat sheet on nothing.
+    if !art_fits() {
+        // Nowhere to draw the art without wrapping; do not spend the beat
+        // sheet on nothing.
         return;
     }
+    let mut out = std::io::stdout();
+    // Hide the block cursor for the animation; Reveal undoes it on every
+    // exit path. SIGTERM and the client's own Drop both show it separately.
+    let _reveal = Reveal;
+    let _ = out.write_all(b"\x1b[?25l");
+    // Start on a fresh line below the shell prompt, so the banner paints on
+    // open ground and ends up in scrollback verbatim.
+    let _ = out.write_all(b"\r\n");
+    let _ = out.flush();
     if !animated() {
         draw(FINAL, theme);
+        let _ = out.write_all(b"\r\n");
+        let _ = out.flush();
         return;
     }
+    let mut last_rows: Option<usize> = None;
     let start = Instant::now();
     for (at, frame) in schedule() {
         let wait = Duration::from_secs_f64(at).saturating_sub(start.elapsed());
@@ -303,22 +338,36 @@ pub async fn run(
             match tokio::time::timeout(wait, rx.recv()).await {
                 // A keypress (or stdin closing) skips to the last frame.
                 Ok(Some(chunk)) => {
+                    rewind(last_rows);
                     draw(FINAL, theme);
+                    let _ = out.write_all(b"\r\n");
+                    let _ = out.flush();
                     let _ = tx.send(chunk).await;
                     return;
                 }
                 Ok(None) => {
+                    rewind(last_rows);
                     draw(FINAL, theme);
+                    let _ = out.write_all(b"\r\n");
+                    let _ = out.flush();
                     return;
                 }
                 Err(_elapsed) => {}
             }
         }
+        rewind(last_rows);
+        // The cursor ends ON the block's last row: rewind walks back
+        // printed-1 lines, so last_rows counts what draw actually prints
+        // (STAMP_ROWS art rows, plus the footer row when the beat has one),
+        // not ART_ROWS.
+        last_rows = Some(STAMP_ROWS + frame.footer as usize);
         draw(frame, theme);
     }
     // Hold the finished mark briefly so the last beat reads. Plain sleep:
     // consuming a keystroke here would eat the user's first input.
     tokio::time::sleep(FINAL_HOLD).await;
+    let _ = out.write_all(b"\r\n");
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -451,19 +500,25 @@ mod tests {
                 11
             );
         }
-        // Final: 9 rows, 45 cells each; footer names the product and version.
+        // Final: 9 rows; the 8 art rows are 45 cells. The footer row runs a
+        // couple of cells wider now that the tagline carries the README
+        // wording: 8 + 3 + 4 + version + 3 + 24.
         let fin = visual_rows(FINAL, "9.9.9", dim);
         assert_eq!(fin.len(), ART_ROWS as usize);
-        for row in &fin {
+        for row in fin.iter().take(8) {
             assert_eq!(
                 row.iter().map(|s| s.text.chars().count()).sum::<usize>(),
                 45
             );
         }
+        assert_eq!(
+            fin[8].iter().map(|s| s.text.chars().count()).sum::<usize>(),
+            47
+        );
         let footer: String = fin[8].iter().map(|s| s.text.as_str()).collect();
         assert!(footer.contains("footnote"));
         assert!(footer.contains("fno 9.9.9"));
-        assert!(footer.contains("idea to shipped PR"));
+        assert!(footer.contains("say f[no] to mostly done"));
         assert!(footer.trim_start().starts_with("footnote"));
     }
 
@@ -471,15 +526,9 @@ mod tests {
     fn a_long_version_never_overflows_the_footer_row() {
         let fin = visual_rows(FINAL, "10.100.100-beta.7+x", CtColor::Reset);
         let width: usize = fin[8].iter().map(|s| s.text.chars().count()).sum();
-        assert_eq!(width, ART_CELLS as usize);
-    }
-
-    #[test]
-    fn origin_centers_the_final_art_and_refuses_tiny_terms() {
-        assert_eq!(origin_for(100, 40), Some((27, 15)));
-        assert_eq!(origin_for(45, 9), Some((0, 0)));
-        assert_eq!(origin_for(44, 9), None);
-        assert_eq!(origin_for(100, 8), None);
+        // The clamp floor keeps six version chars; the fixed parts around it
+        // are 42 cells, so 48 is the widest the footer can ever run.
+        assert_eq!(width, 48);
     }
 
     #[test]
@@ -493,5 +542,41 @@ mod tests {
         assert!(!animated_env(true, None, Some("yes")));
         assert!(animated_env(true, None, Some("0")));
         assert!(animated_env(true, None, Some("")));
+    }
+
+    #[test]
+    fn every_stamp_row_paints_equal_width() {
+        // The user's screenshot: the bottom stamp row rendered one px wider
+        // than the rows above, a nub at the stamp's bottom-right. Every
+        // stamp row must carry exactly `width` px in cells.
+        for brackets in [false, true] {
+            for w in [9usize, 11, 13, 15, 17] {
+                let rows: Vec<Vec<Px>> =
+                    (0..STAMP_ROWS).map(|r| stamp_row(w, r, brackets)).collect();
+                for (r, row) in rows.iter().enumerate() {
+                    assert_eq!(row.len(), w, "stamp row {r} at width {w}");
+                    let cells = px_cells(row);
+                    assert_eq!(
+                        cells.chars().count(),
+                        2 * w,
+                        "stamp row {r} cells at width {w}"
+                    );
+                }
+            }
+        }
+        // And the composed visual rows of the FINAL frame agree: the F
+        // column (8) + gap (3) + stamp (34) on every line.
+        let rows = visual_rows(
+            FINAL,
+            "9.9",
+            to_ct(crate::theme::Theme::from_name("footnote-superscript").0.dim),
+        );
+        let widths: Vec<usize> = rows
+            .iter()
+            .map(|segs| segs.iter().map(|s| s.text.chars().count()).sum())
+            .collect();
+        for (i, w) in widths.iter().enumerate() {
+            assert_eq!(w, &(11 + 2 * 17), "row {i} width");
+        }
     }
 }
