@@ -2051,6 +2051,17 @@ else
     fail "AC13m: expected the fresh ERROR: $CIA_OUT"
 fi
 
+# AC13n: unanswered is a valid verdict when neither source settles the claim.
+PLAN_CIA_N="$CIA_REPO/cia_n.md"
+sed 's/| exists at src\/m.rs:1 |/| unanswered: no index or search settles this |/' "$PLAN_CIA_A" > "$PLAN_CIA_N"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_N" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13n: unanswered leaves the Code Index Audit section clean"
+else
+    fail "AC13n: expected a clean section: $CIA_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
