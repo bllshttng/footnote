@@ -156,7 +156,7 @@ pub(crate) fn detail_fields(
                 .map(str::to_string)
                 .unwrap_or_else(session_absent),
         ),
-        ("timestamp", item.ts.clone()),
+        ("timestamp", local_ts(&item.ts)),
         (
             "model",
             item.model
@@ -206,11 +206,16 @@ pub(crate) fn detail_fields(
                     Some(n) => format!("{n} ({p})"),
                     None => p.to_string(),
                 },
-                // No edge: the birth's reason, when the birth recorded one.
-                None => row
-                    .and_then(|a| a.lineage_reason.as_deref())
-                    .unwrap_or(NOT_RECORDED)
-                    .to_string(),
+                // No exact row: the birth event's parent id when the row
+                // carries one (a removed or spawn row whose session is
+                // gone); else the birth's reason, when one was recorded.
+                None => match item.parent.as_deref() {
+                    Some(p) => p.to_string(),
+                    None => row
+                        .and_then(|a| a.lineage_reason.as_deref())
+                        .unwrap_or(NOT_RECORDED)
+                        .to_string(),
+                },
             },
         ),
         (
@@ -230,17 +235,31 @@ pub(crate) fn detail_fields(
                     .to_string(),
             },
         ),
+        ("reason", or_not_recorded(item.reason.as_deref())),
+        ("crown", or_not_recorded(item.crown.as_deref())),
+        ("owner", or_not_recorded(item.owner.as_deref())),
     ]
+}
+
+/// `YYYY-MM-DD HH:MM:SS +HH:MM` in the operator's zone; an unparseable
+/// stamp shows raw.
+fn local_ts(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => chrono::TimeZone::from_utc_datetime(&chrono::Local, &t.naive_utc())
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string(),
+        Err(_) => ts.to_string(),
+    }
 }
 
 /// The rendered body: the event line, the nine fields, then the recovery line
 /// when the row carries one. The overlay clips a line that outruns its width,
 /// so a long id can read short here; the panel row behind it carries the same
 /// id, and `--json` from the verb carries it whole.
-pub(crate) fn detail_lines(item: &FeedItem, dest: &Destination<'_>) -> Vec<String> {
+pub(crate) fn detail_lines(item: &FeedItem, dest: &Destination<'_>, width: usize) -> Vec<String> {
     let mut lines = vec![format!("{}  {}", item.kind, item.title), String::new()];
     for (label, value) in detail_fields(item, dest) {
-        lines.push(format!("{label:<12} {value}"));
+        push_wrapped(&mut lines, label, &value, width);
     }
     if let Some(actor) = item.actor.as_deref() {
         lines.push(format!("{:<12} {}", "actor", actor));
@@ -253,6 +272,38 @@ pub(crate) fn detail_lines(item: &FeedItem, dest: &Destination<'_>) -> Vec<Strin
         lines.push((*detail).to_string());
     }
     lines
+}
+
+/// One field, wrapped: a value wider than the space after its 12-column
+/// label continues on the next line indented 13 columns, so the modal grows
+/// in height instead of clipping.
+fn push_wrapped(lines: &mut Vec<String>, label: &str, value: &str, width: usize) {
+    let budget = width.saturating_sub(13).max(8);
+    let mut first = true;
+    let mut chunk = String::new();
+    let mut chunk_w = 0usize;
+    for ch in value.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(0)
+            .max(1);
+        if chunk_w + cw > budget && !chunk.is_empty() {
+            if first {
+                lines.push(format!("{label:<12} {chunk}"));
+                first = false;
+            } else {
+                lines.push(format!("{}{chunk}", " ".repeat(13)));
+            }
+            chunk.clear();
+            chunk_w = 0;
+        }
+        chunk.push(ch);
+        chunk_w += cw;
+    }
+    if first {
+        lines.push(format!("{label:<12} {chunk}"));
+    } else if !chunk.is_empty() {
+        lines.push(format!("{}{chunk}", " ".repeat(13)));
+    }
 }
 
 /// The one-line footer: what pressing Enter does, named before it is pressed.
@@ -301,7 +352,9 @@ pub(crate) fn draw(
     dims: (usize, usize),
 ) {
     let dest = destination(&view.layout.agents, item);
-    let lines = detail_lines(item, &dest);
+    // The chrome's frame plus its two side pad cells.
+    let inner_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS + 2);
+    let lines = detail_lines(item, &dest, inner_w);
     let chrome =
         chrome::Chrome::new("event provenance", Anchor::Center).footer(detail_footer(&dest));
     draw_lines_overlay(
@@ -315,4 +368,101 @@ pub(crate) fn draw(
         &view.theme,
         None,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reaped_item() -> FeedItem {
+        FeedItem {
+            ts: "2026-09-28T16:48:49Z".into(),
+            kind: "session_reaped".into(),
+            node: None,
+            session_id: None,
+            harness: Some("codex".into()),
+            title: "jolly-finch removed".into(),
+            r#ref: None,
+            actor: Some("fno-py".into()),
+            model: None,
+            effort: None,
+            phase: None,
+            detail: None,
+            reason: Some(
+                "no unique codex rollout for this cwd after spawn, and here is a very long tail that cannot fit forty columns at all".into(),
+            ),
+            crown: Some("L2 x-0e67".into()),
+            owner: Some("king jolly-finch L2".into()),
+            parent: None,
+        }
+    }
+
+    // (AC11-HP) The three new fields render, and every line fits the width:
+    // a long value wraps under its label instead of clipping.
+    #[test]
+    fn the_removal_fields_render_and_wrap_at_width() {
+        let item = reaped_item();
+        let d = destination(&[], &item);
+        let lines = detail_lines(&item, &d, 40);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("reason") && l.contains("no unique codex rollout")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("crown") && l.contains("L2 x-0e67")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("owner") && l.contains("king jolly-finch L2")),
+            "{lines:?}"
+        );
+        // Continuation lines are indented 13 columns; the value is not lost.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("             ") && l.contains("long tail")),
+            "the wrapped tail continues indented: {lines:?}"
+        );
+        // Every line fits 40 display columns.
+        for l in &lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(l.as_str()) <= 40,
+                "line overflowed: {l:?}"
+            );
+        }
+    }
+
+    // (AC12-EDGE) Absent fields read NOT RECORDED, and a spawn row's parent
+    // survives the session's death through the row's own parent field.
+    #[test]
+    fn absent_fields_read_not_recorded_and_parent_falls_back() {
+        let mut item = reaped_item();
+        item.reason = None;
+        item.crown = None;
+        item.owner = None;
+        item.parent = Some("49a80492-388e-44a3-bd91-017be26bcaa0".into());
+        let d = destination(&[], &item);
+        let fields = detail_fields(&item, &d);
+        let by = |label: &str| {
+            fields
+                .iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        assert_eq!(by("reason"), NOT_RECORDED);
+        assert_eq!(by("crown"), NOT_RECORDED);
+        assert_eq!(by("owner"), NOT_RECORDED);
+        assert_eq!(
+            by("parent"),
+            "49a80492-388e-44a3-bd91-017be26bcaa0",
+            "the birth event's parent survives the removal"
+        );
+    }
 }

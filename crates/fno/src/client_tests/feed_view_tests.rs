@@ -29,6 +29,10 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         effort: None,
         phase: None,
         detail: None,
+        reason: None,
+        crown: None,
+        owner: None,
+        parent: None,
     }
 }
 
@@ -46,6 +50,10 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         effort: None,
         phase: None,
         detail: Some(resume.into()),
+        reason: None,
+        crown: None,
+        owner: None,
+        parent: None,
     }
 }
 
@@ -59,6 +67,7 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
         gen: 0,
         focused: false,
         hpan: 0,
+        last_fold: None,
     }
 }
 
@@ -124,16 +133,21 @@ fn lines_render_newest_first_with_marker() {
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
     assert_eq!(lines.len(), ROWS);
-    // Newest first: the projection hands rows oldest-first, so display
-    // index d reads storage len-1-d and the top row is x-c, the newest.
+    // Slot 0 is the `other` group header (no owners in this fixture); the
+    // top ITEM row shows the newest event.
     assert!(
-        lines[1].contains("x-c"),
-        "top row shows the newest: {}",
+        lines[1].contains("other"),
+        "group header first: {}",
         lines[1]
     );
-    assert!(lines[1].starts_with(" ▸"));
-    assert!(lines[2].contains("x-b"));
-    assert!(lines[3].contains("x-a"));
+    assert!(
+        lines[2].contains("x-c"),
+        "top row shows the newest: {}",
+        lines[2]
+    );
+    assert!(lines[2].starts_with(" ▸"));
+    assert!(lines[3].contains("x-b"));
+    assert!(lines[4].contains("x-a"));
     assert!(lines[5].trim().is_empty(), "below the last item: blank");
     assert!(lines.last().unwrap().contains("3 events"));
 }
@@ -145,12 +159,13 @@ fn offset_windows_the_items() {
         feed_item(Some("x-b"), Some("s-2")),
         feed_item(Some("x-c"), Some("s-3")),
     ]);
-    // Display index 1 (the second newest) opens the window: the newest row
-    // (x-c) is scrolled off, x-b leads, x-a follows.
+    // Slot offset 1 skips the group header, so the newest row (x-c) leads
+    // the window now.
     let lines = feed_panel_lines(&o, W, ROWS, 1);
-    assert!(lines[1].contains("x-b"));
-    assert!(lines[2].contains("x-a"));
-    assert!(lines[3].trim().is_empty());
+    assert!(lines[1].contains("x-c"));
+    assert!(lines[2].contains("x-b"));
+    assert!(lines[3].contains("x-a"));
+    assert!(lines[4].trim().is_empty());
 }
 
 #[test]
@@ -230,17 +245,30 @@ fn folding_first_open_claims_no_activity() {
 
 #[test]
 fn click_resolver_inverts_the_painter() {
-    // Row 0 is the header, the last row is the footer, and row n carries
-    // display item n-1 exactly when the window opens on it.
-    assert_eq!(feed_row_item(3, 0, ROWS, 0), None, "header");
-    assert_eq!(feed_row_item(3, ROWS - 1, ROWS, 0), None, "footer");
-    assert_eq!(feed_row_item(3, 1, ROWS, 0), Some(0));
+    // Row 0 is the panel header, the last row is the footer; painted row 1 is
+    // the group HEADER (no detail), row 2 the first item. The resolver reads
+    // the same slot list the painter drew.
+    let items: Vec<_> = (0..3)
+        .map(|i| {
+            let mut it = feed_item(Some("x-n"), Some("s-n"));
+            it.title = format!("event {i}");
+            it
+        })
+        .collect();
+    assert_eq!(feed_row_item(&items, 0, ROWS, 0), None, "panel header");
+    assert_eq!(feed_row_item(&items, ROWS - 1, ROWS, 0), None, "footer");
     assert_eq!(
-        feed_row_item(3, 4, ROWS, 0),
+        feed_row_item(&items, 1, ROWS, 0),
+        None,
+        "a group header never opens a detail"
+    );
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0), Some(2));
+    assert_eq!(
+        feed_row_item(&items, 5, ROWS, 0),
         None,
         "past the last item: blank"
     );
-    assert_eq!(feed_row_item(3, 1, ROWS, 2), Some(2), "offset applies");
+    assert_eq!(feed_row_item(&items, 3, ROWS, 2), Some(0), "offset applies");
 }
 
 #[test]
@@ -263,11 +291,13 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
     let f = v.feed.as_ref().unwrap();
     let lines = feed_panel_lines(f, w as usize - 1, v.term.0 as usize, 0);
     assert!(
-        lines[1].contains("x-c"),
-        "top row is the newest: {}",
-        lines[1]
+        lines[2].contains("x-c"),
+        "top ITEM row is the newest: {}",
+        lines[2]
     );
-    let hit = v.chrome_hit(1, col).unwrap();
+    // The header row never deep-links; the item row under it does.
+    assert!(v.chrome_hit(1, col).is_none(), "header row is chrome");
+    let hit = v.chrome_hit(2, col).unwrap();
     assert!(
         matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
         "the click names the event the top row painted"
@@ -353,9 +383,9 @@ fn wheel_scrolls_within_the_item_count() {
     for _ in 0..visible + 20 {
         v.scroll_feed(true);
     }
-    assert_eq!(v.feed_offset, 10);
+    assert_eq!(v.feed_offset, 11, "the clamp counts the group header");
     v.scroll_feed(false);
-    assert_eq!(v.feed_offset, 9);
+    assert_eq!(v.feed_offset, 10);
 }
 
 #[test]
@@ -515,7 +545,7 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
         "a stop-shaped recovery line is still not a measurement: {}",
         pane.1
     );
-    let lines = feed_detail::detail_lines(&item, &d);
+    let lines = feed_detail::detail_lines(&item, &d, 60);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
     assert!(feed_detail::detail_footer(&d).contains("resume line"));
 
@@ -775,4 +805,128 @@ fn the_parent_field_names_the_parent_row_when_the_edge_resolves() {
     let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
     let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
     assert_eq!(parent.1, feed_detail::NOT_RECORDED);
+}
+
+// (AC7-HP) The crowns band leads, then one header per owner ordered by
+// its newest row, then `other`; a header click resolves to no detail.
+#[test]
+fn display_slots_group_the_rows() {
+    let mut crown = feed_item(None, None);
+    crown.kind = "crown_vacated".into();
+    crown.ts = "2026-09-28T16:45:58Z".into();
+    crown.title = "warden left L2 e: succession".into();
+    let mut owned_a = feed_item(Some("x-a"), None);
+    owned_a.owner = Some("epic x-29a8 the epic".into());
+    owned_a.ts = "2026-09-28T17:00:00Z".into();
+    let mut owned_b = feed_item(Some("x-b"), None);
+    owned_b.owner = Some("epic x-29a8 the epic".into());
+    owned_b.ts = "2026-09-28T17:30:00Z".into();
+    let mut loose = feed_item(Some("x-c"), None);
+    loose.ts = "2026-09-28T18:00:00Z".into();
+    let items = vec![loose, owned_a, owned_b, crown];
+    let slots = feed_view::display_slots(&items);
+    // Slot shapes: crowns header + the crown row, the owner header with
+    // its rows newest first, then the other header with the loose row.
+    let shape: Vec<String> = slots
+        .iter()
+        .map(|s| match s {
+            feed_view::Slot::Header(h) => format!("H:{h}"),
+            feed_view::Slot::Item(i) => format!("I:{}", items[*i].node.as_deref().unwrap_or("?")),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "H:crowns",
+            "I:?",
+            "H:epic x-29a8 the epic",
+            "I:x-b",
+            "I:x-a",
+            "H:other",
+            "I:x-c",
+        ],
+        "{shape:?}"
+    );
+    // A header row never resolves to a detail.
+    assert_eq!(feed_row_item(&items, 1, ROWS, 0), None, "crowns header");
+    // The first item row IS the crown row.
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0), Some(3));
+}
+
+// (AC8-HP) The kind span goes bold in the brand colour for kinds that
+// need action; the flattened text is what the panel always drew.
+#[test]
+fn feed_panel_rows_style_the_actionable_kinds() {
+    let mut vacated = feed_item(Some("x-a"), None);
+    vacated.kind = "crown_vacated".into();
+    vacated.ts = "2026-09-28T16:45:58Z".into();
+    vacated.title = "warden left".into();
+    let o = overlay(vec![vacated]);
+    let rows = feed_view::feed_panel_rows(&o, W, ROWS, 0);
+    // Row 1 is the group header: every span bold.
+    assert!(
+        rows[1].iter().all(|s| s.bold),
+        "headers render bold: {:?}",
+        rows[1]
+    );
+    // Row 2 is the vacated row: its kind span is bold AND brand.
+    assert!(
+        rows[2]
+            .iter()
+            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
+        "the actionable kind is bold brand: {:?}",
+        rows[2]
+    );
+    assert!(
+        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
+        "the node id is bold: {:?}",
+        rows[2]
+    );
+    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    assert!(
+        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
+        "text is unchanged: {}",
+        lines[2]
+    );
+}
+
+// (AC9-HP) Local time: a UTC stamp renders in the zone the test pins.
+#[test]
+fn short_ts_renders_local_time() {
+    let tz = chrono::FixedOffset::east_opt(-7 * 3600).unwrap();
+    assert_eq!(feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz), "09:48");
+    assert_eq!(
+        feed_view::short_ts_in("not-a-time", &tz),
+        "not-a-time",
+        "unparseable stamps show raw"
+    );
+}
+
+// (AC10-EDGE) A settled fold goes stale and refolds on its own; the
+// operator's selected row survives the refresh.
+#[test]
+fn a_stale_fold_refolds_and_keeps_the_selection() {
+    let mut v = view_with_rows(vec![]);
+    let mut it = feed_item(Some("x-a"), Some("s-1"));
+    it.ts = "2026-09-28T16:00:00Z".into();
+    let mut other = feed_item(Some("x-b"), Some("s-2"));
+    other.ts = "2026-09-28T17:00:00Z".into();
+    v.feed = Some(overlay(vec![it.clone(), other.clone()]));
+    v.feed.as_mut().unwrap().last_fold =
+        Some(Instant::now() - feed_view::FEED_REFRESH_EVERY - std::time::Duration::from_secs(1));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    feed_view::maybe_kick(&mut v, &tx);
+    assert!(
+        v.feed.as_ref().unwrap().inflight,
+        "a stale fold arms the single-flight"
+    );
+    // Selection kept across a refresh: select the OLDER row (slot 2),
+    // refresh, and the same (ts, kind, title) stays selected.
+    v.feed.as_mut().unwrap().sel = 2;
+    let gen = v.feed.as_ref().unwrap().gen;
+    feed_view::apply_fold(&mut v, gen, Ok(vec![other, it]));
+    let f = v.feed.as_ref().unwrap();
+    assert_eq!(f.sel, 2, "the selected row survived the fold");
+    assert!(f.last_fold.is_some(), "the fold stamped its time");
+    let _ = rx;
 }
