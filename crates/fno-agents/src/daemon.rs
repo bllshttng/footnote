@@ -191,15 +191,11 @@ pub struct RecoveryReport {
     pub interrupted_write_temps: Vec<String>,
 }
 
-/// Resolve the resume identity for a daemon-hosted Codex thread.
-///
-/// An empty `short_id` is expected for this lane, so it cannot participate in
-/// the old state-directory recovery path. The full harness session id and cwd
-/// are the only durable inputs accepted for a resume. `allow_heal` admits the
-/// healed row shape (codex, no short id, no mux, no host mode) for the STOP
-/// re-attach alone: widening the default would also widen the startup
-/// recovery pass, whose candidates then settle Orphaned on a failed resume -
-/// rows the strict gate never touched.
+/// Resolve the resume identity for a daemon-hosted Codex thread: the full
+/// harness session id and cwd are the only durable inputs. `allow_heal`
+/// admits the healed row shape for the STOP re-attach alone; the startup
+/// recovery pass stays strict, or its candidates settle Orphaned on a failed
+/// resume.
 fn codex_thread_resume_identity(
     entry: &RegistryEntry,
     allow_heal: bool,
