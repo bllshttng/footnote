@@ -253,6 +253,7 @@ def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
     return fno_bin, worker_bin
 
 
+@pytest.mark.timeout(144)
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -479,6 +480,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         shutil.rmtree(mux_dir, ignore_errors=True)
 
 
+@pytest.mark.timeout(144)
 def test_codex_autonomous_pane_journey_completes_without_operator_input(
     tmp_path: Path, monkeypatch
 ) -> None:
