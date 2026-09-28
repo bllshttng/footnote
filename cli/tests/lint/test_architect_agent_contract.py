@@ -75,3 +75,11 @@ def test_blueprint_substrate_launches_architect():
     assert "Use the Skill tool to run fno:blueprint with args" in text, (
         "the one-line subagent prompt changed"
     )
+
+
+def test_planner_is_taught_the_unanswered_verdict():
+    _, body = _split_architect()
+    skill = (resolve_repo_root() / "skills" / "blueprint" / "SKILL.md").read_text(encoding="utf-8")
+    step = next(line for line in skill.splitlines() if line.startswith("2-index."))
+    for text in (body, step):
+        assert "unanswered" in text, "a planner surface drops the unanswered verdict the validator accepts"
