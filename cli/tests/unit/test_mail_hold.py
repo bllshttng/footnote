@@ -537,6 +537,99 @@ def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
     assert seen["from_name"] == "fno-mail-hold"
 
 
+def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path):
+    """The live injector refuses an unframed digest that contains peer tags."""
+    from fno.bus.cursor import scan_unread
+    from fno.bus.log import Envelope, append
+
+    home = tmp_path / "home"
+    state = tmp_path / "state"
+    bus = tmp_path / "bus"
+    for root in (home, state, bus):
+        root.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FNO_HOME", str(home / ".fno"))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(state / "agents"))
+    monkeypatch.setenv("FNO_STATE_DIR", str(state))
+    monkeypatch.setenv("FNO_BUS_DIR", str(bus))
+    monkeypatch.setattr("fno.paths.state_dir", lambda: state)
+    monkeypatch.setattr("fno.paths.bus_dir", lambda: bus)
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: state / "agents" / "registry.json"
+    )
+
+    entry = SimpleNamespace(
+        name=HANDLE,
+        harness="claude",
+        short_id=HANDLE,
+        harness_session_id=f"{HANDLE}-full",
+        mcp_channel_id=None,
+        delivery_policy=None,
+        mux=None,
+        messaging_socket_path=None,
+    )
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *_a, **_kw: True)
+    monkeypatch.setattr(hold_mod, "resolve_entry", lambda _handle: entry)
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda *_a, **_kw: None)
+    monkeypatch.setattr(dispatch, "_switchboard_identity", lambda *_a, **_kw: None)
+    monkeypatch.setattr(dispatch, "_switchboard_exchange", lambda *_a, **_kw: False)
+    monkeypatch.setattr("fno.agents.events.emit", lambda *_a, **_kw: None)
+
+    original = Envelope.new(
+        id="held-fno-mail",
+        thread="held-fno-mail",
+        from_="worker",
+        to=HANDLE,
+        kind="send",
+        body=(
+            '<fno_mail from="worker-session" harness="codex">'
+            "the held report"
+            "</fno_mail>"
+        ),
+        ts="2026-09-27T12:00:00Z",
+    )
+    append(original)
+
+    rendered: list[dict] = []
+
+    def fake_render(payload):
+        rendered.append(payload)
+        return (
+            f'<fno_mail from="{payload["from"]}" '
+            f'harness="{payload["harness"]}">'
+            f'{payload["body"]}</fno_mail>'
+        )
+
+    monkeypatch.setattr("fno.mail.envelope._render_in_rust", fake_render)
+    injected: list[str] = []
+
+    def fake_inject(_recipient, text, *, reason_out=None, **_kwargs):
+        injected.append(text)
+        paired = (
+            text.lstrip().startswith("<fno_mail ")
+            and text.count("<fno_mail") == 1
+            and text.count("</fno_mail>") == 1
+            and text.rstrip().endswith("</fno_mail>")
+        )
+        if not paired and reason_out is not None:
+            reason_out.append("unframed-fno-mail")
+        return paired
+
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", fake_inject)
+
+    result = hold_mod.release(HANDLE, held_for_s=60)
+
+    assert result["outcome"] == "delivered", result
+    assert result["miss_reason"] is None
+    assert len(rendered) == 1
+    assert "the held report" in rendered[0]["body"]
+    assert "<fno_mail" not in rendered[0]["body"]
+    assert len(injected) == 1
+    assert injected[0].count("<fno_mail") == 1
+    assert injected[0].count("</fno_mail>") == 1
+    assert scan_unread(HANDLE) == []
+
+
 def test_a_release_with_no_registry_row_names_that_as_the_miss(monkeypatch):
     """`inject-missed` alone cannot separate a dead lane from an absent row."""
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
