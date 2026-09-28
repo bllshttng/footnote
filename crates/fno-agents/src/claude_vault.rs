@@ -20,7 +20,7 @@ const SECURITY_ITEM_NOT_FOUND: i32 = 44;
 const SECURITY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Eq)]
-struct Principal {
+pub(crate) struct Principal {
     account_uuid: String,
     organization_uuid: String,
     // Carried for receipts ("wrong-account (<email>)"); identity is the uuids.
@@ -34,12 +34,12 @@ impl PartialEq for Principal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LiveClaude {
+pub(crate) struct LiveClaude {
     config_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ExternalFailure {
+pub(crate) enum ExternalFailure {
     Rejected,
     Unavailable,
     Malformed,
@@ -361,15 +361,7 @@ fn sync(options: &Options, external: &dyn External) -> (i32, Receipt) {
         if principals.iter().any(|p| p != &principals[0]) {
             return (4, Receipt::new(action, "ambiguous-slot", None));
         }
-        let mut best = 0usize;
-        let mut best_expiry = oauth(&blobs[0]).and_then(|o| o.expires_at);
-        for (i, item) in blobs.iter().enumerate().skip(1) {
-            let expiry = oauth(item).and_then(|o| o.expires_at);
-            if expiry > best_expiry {
-                best = i;
-                best_expiry = expiry;
-            }
-        }
+        let best = newest_blob(&blobs);
         (&blobs[best], Some(principals.swap_remove(best)))
     };
     let principal = match proven {
@@ -470,6 +462,17 @@ fn refresh(options: &Options, external: &dyn External) -> (i32, Receipt) {
     if live_owner(&options.slot_dir, &options.config_dir, &principal, external) {
         return (4, Receipt::new(action, "live-owner", Some(id.to_string())));
     }
+    refresh_stored(options, id, external)
+}
+
+/// The token-rotation half of `refresh`, after the live-session gate: read the
+/// stored blob, rotate it when it is near expiry, write it back. The health
+/// check calls this directly because its question is "does the stored login
+/// still work", not "does a live session sit on this config dir" - the
+/// session-suppressing verdict would silence the early alert exactly while
+/// the fleet works.
+fn refresh_stored(options: &Options, id: &str, external: &dyn External) -> (i32, Receipt) {
+    let action = "refresh";
     let path = options.store.join(id).join("blob");
     let blob = match fs::read_to_string(&path) {
         Ok(blob) => blob,
@@ -665,15 +668,8 @@ fn login(options: &Options, external: &dyn External) -> (i32, Receipt) {
     }
     // The blob with the later expiry is the live token; write it into the store
     // so the next `use` is a plain switch.
-    let mut best = 0usize;
-    let mut best_expiry = oauth(&proven[0].0).and_then(|item| item.expires_at);
-    for (index, (blob, _)) in proven.iter().enumerate().skip(1) {
-        let expiry = oauth(blob).and_then(|item| item.expires_at);
-        if expiry > best_expiry {
-            best = index;
-            best_expiry = expiry;
-        }
-    }
+    let proven_blobs: Vec<&String> = proven.iter().map(|(blob, _)| blob).collect();
+    let best = newest_blob(&proven_blobs);
     let (blob, principal) = proven.swap_remove(best);
     let dir = options.store.join(id);
     if fs::create_dir_all(&dir).is_err() || crate::paths::set_dir_mode_0700(&dir).is_err() {
@@ -776,7 +772,7 @@ pub(crate) fn stored_health(
         json: false,
         lock_held: true,
     };
-    Some(refresh(&options, external).1.verdict)
+    Some(refresh_stored(&options, id, external).1.verdict)
 }
 
 /// The store + slot paths the daemon's health check reads, resolved the way
@@ -942,6 +938,21 @@ fn scoped_service(slot_dir: &Path) -> Result<String, String> {
     digest.update(slot_dir.to_string_lossy().as_bytes());
     let hex = format!("{:x}", digest.finalize());
     Ok(format!("Claude Code-credentials-{}", &hex[..8]))
+}
+
+/// Index of the blob whose expiresAt is the latest; a missing expiry loses to
+/// one that has one.
+fn newest_blob(blobs: &[impl AsRef<str>]) -> usize {
+    let mut best = 0usize;
+    let mut best_expiry = oauth(blobs[0].as_ref()).and_then(|item| item.expires_at);
+    for (index, blob) in blobs.iter().enumerate().skip(1) {
+        let expiry = oauth(blob.as_ref()).and_then(|item| item.expires_at);
+        if expiry > best_expiry {
+            best = index;
+            best_expiry = expiry;
+        }
+    }
+    best
 }
 
 fn merge_refresh(blob: &str, response: &Value) -> Option<String> {
@@ -1574,6 +1585,29 @@ mod tests {
 
         let verdict = stored_health(temp.path(), &slot, "makers", &external);
         assert_eq!(verdict, Some("slot-owner".to_string()));
+    }
+
+    #[test]
+    fn stored_health_judges_a_standby_record_even_when_a_session_is_live() {
+        // A live session on the shared slot must not read as the standby
+        // record being healthy: the alert would never fire during work.
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-makers", "org-makers");
+        record(
+            temp.path(),
+            "makers",
+            &who,
+            &blob("stored", "spent-refresh", now_ms() - 1),
+        );
+        let mut external = MockExternal::default();
+        external.live.push(LiveClaude {
+            config_dir: Some(slot.clone()),
+        });
+        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
+
+        let verdict = stored_health(temp.path(), &slot, "makers", &external);
+        assert_eq!(verdict, Some("dead".to_string()));
     }
 
     #[test]

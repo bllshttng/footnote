@@ -326,7 +326,8 @@ fn shared_slot_ids(config_cwd: &Path) -> Vec<String> {
 /// One daemon pass of the early login-dead alert. Runs on the same 120s
 /// cadence as the cutover arm, even while cutover is disabled: the alert is
 /// the only repair hint a standby account gets. A verdict move from good (or
-/// unknown) to bad raises ONE operator notice; "unavailable" changes nothing.
+/// unknown) to bad raises ONE operator notice; verdicts outside the health
+/// vocabulary change nothing.
 pub fn run_health_tick(
     home: &crate::paths::AgentsHome,
     config_cwd: &Path,
@@ -348,7 +349,9 @@ pub fn run_health_tick(
             continue;
         };
         checked += 1;
-        if verdict == "unavailable" {
+        // Only verdicts the health vocabulary defines may move the state
+        // file; anything else (lock held, store broken, ...) changes nothing.
+        if !is_good_health(&verdict) && !is_bad_health(&verdict) {
             continue;
         }
         let was_bad = state
@@ -406,6 +409,10 @@ pub fn run_health_tick(
 
 fn is_bad_health(verdict: &str) -> bool {
     matches!(verdict, "dead" | "record-missing" | "unproven")
+}
+
+fn is_good_health(verdict: &str) -> bool {
+    matches!(verdict, "fresh" | "refreshed" | "slot-owner" | "live-owner")
 }
 
 fn read_last_cutover(root: &Path) -> Option<i64> {
