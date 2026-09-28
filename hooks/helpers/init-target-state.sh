@@ -955,7 +955,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # exempt; the one-liner would abort init on every host without fno.
   if command -v fno >/dev/null 2>&1; then
   for _tok in $INITIAL_INPUT; do
-    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] || continue
+    # Older x-prefixed graph IDs predate the separator used by current IDs.
+    [[ "$_tok" =~ ^([a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})$ ]] || continue
     case " $_GUARD_MATCHES " in
       *" $_tok "*) continue ;;  # already counted this distinct id
     esac
