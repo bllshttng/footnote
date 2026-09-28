@@ -1200,20 +1200,8 @@ fn run_reap_open(args: &[String]) -> i32 {
             && row.get("harness").and_then(Value::as_str) == Some(harness.trim())
             && row.get("session_id").and_then(Value::as_str) == Some(session_id.trim())
     });
-    let remaining = node_rows
-        .iter()
-        .filter(|row| crate::graph_store::is_open_phase_row(row, "execute"))
-        .count();
-    let higher_precedence = ["completed_at", "superseded_by", "deferred_at", "pr_number"]
-        .iter()
-        .any(|f| entry.get(*f).map(|v| !v.is_null()).unwrap_or(false))
-        || entry.get("persisted_status").and_then(Value::as_str) == Some("blocked")
-        || entry.get("status").and_then(Value::as_str) == Some("blocked");
-    let locked_by = entry
-        .get("locked_by")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    let expected_in_progress = locked_by || remaining > 0;
+    let (higher_precedence, expected_in_progress, remaining) =
+        crate::graph_keeper::reap_settlement_state(entry);
     let status = entry.get("status").and_then(Value::as_str).unwrap_or("");
     let status_ok = higher_precedence || (status == "in_progress") == expected_in_progress;
     if matching_open || !status_ok {

@@ -2642,6 +2642,50 @@ fn stamp_utc(v: &str) -> Result<String, StoreError> {
 /// settles a session that worked several nodes. `found` means "the named
 /// node exists" on the exact form and "at least one node matched" on the
 /// identity form; `node_ids` names every node the write touched.
+/// The settlement facts one node's row answers, shared by the in-write roll
+/// and the verb's read-back so the two can never drift: higher-precedence
+/// fields (a done, superseded, deferred or PR-bearing row keeps its own
+/// status), then a live execute row or a lock keeps `in_progress`, and
+/// everything else falls back to `idea`.
+pub(crate) fn reap_settlement_state(entry: &Value) -> (bool, bool, usize) {
+    let higher = ["completed_at", "superseded_by", "deferred_at", "pr_number"]
+        .iter()
+        .any(|f| entry.get(*f).map(|v| !v.is_null()).unwrap_or(false))
+        || entry.get("persisted_status").and_then(Value::as_str) == Some("blocked")
+        || entry.get("status").and_then(Value::as_str) == Some("blocked");
+    let locked = entry
+        .get("locked_by")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    let remaining = entry
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|r| crate::graph_store::is_open_phase_row(r, "execute"))
+                .count()
+        })
+        .unwrap_or(0);
+    (higher, locked || remaining > 0, remaining)
+}
+
+/// Roll one settled row's node off `in_progress` when nothing holds it open.
+fn roll_settled_status(entries: &mut [Value], idx: usize) {
+    let (higher, expected_in_progress, _remaining) = reap_settlement_state(&entries[idx]);
+    if higher {
+        return;
+    }
+    let status = if expected_in_progress {
+        "in_progress"
+    } else {
+        "idea"
+    };
+    entries[idx]
+        .as_object_mut()
+        .expect("row is an object")
+        .insert("status".into(), Value::String(status.into()));
+}
+
 pub(crate) fn session_reap_open(
     entries: &mut Vec<Value>,
     node_id: Option<&str>,
@@ -2713,6 +2757,11 @@ pub(crate) fn session_reap_open(
             let row_closed = reap_rows(&mut rows);
             if row_closed {
                 obj.insert("sessions".to_string(), Value::Array(rows));
+                // The settle rolls the node off in_progress when nothing
+                // holds it open any more, so every caller of the op (the
+                // verb and the store's python senders alike) settles the
+                // same way.
+                roll_settled_status(entries, idx);
             }
             Ok(json!({
                 "found": true,
@@ -2749,6 +2798,7 @@ pub(crate) fn session_reap_open(
                         node_ids.push(node);
                     }
                     obj.insert("sessions".to_string(), Value::Array(rows));
+                    roll_settled_status(entries, idx);
                 }
                 row_closed |= closed;
             }
