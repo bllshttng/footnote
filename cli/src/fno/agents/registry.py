@@ -1520,6 +1520,7 @@ def repair_registry_schema(
         raw, plan = _plan_registry_schema_repair(raw, target, to_version)
         if not apply:
             return plan
+        _refuse_probe_or_row_loss_write(target, raw, raw["agents"])
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup = target.with_name(f"{target.name}.bak.schema-repair-{stamp}")
         backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")

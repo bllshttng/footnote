@@ -51,10 +51,7 @@ pub fn check(inp: GuardInputs) -> Result<(), String> {
     let Some(home) = inp.home else {
         return Ok(());
     };
-    let shared = PathBuf::from(home)
-        .join(".fno")
-        .join("agents")
-        .join("registry.json");
+    let shared = crate::paths::AgentsHome::ambient_from(home).registry_json();
     if crate::paths::under_temp_dir(&shared) || !same_path(inp.target, &shared) {
         return Ok(());
     }
