@@ -311,6 +311,7 @@ crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_config_tmp.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/law_match.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
