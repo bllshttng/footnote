@@ -9,23 +9,24 @@
 //! new path. Nothing here ever deletes data: the only deletion is an empty
 //! legacy lock file after its data file moved and a non-blocking flock
 //! succeeds, and every conflict parks into `backups/state-root-migration/`.
-//! The `sqlite` kind is moved by [`crate::state_layout_sqlite`] (a later
-//! wave); until that lands the migrate pass reports those rows pending.
+//! The `sqlite` kind moves through a backup-API protocol in a later wave;
+//! until that lands the migrate pass reports those rows pending.
 //!
 //! The `fno` crate carries its own copy of the table parse and `place`
 //! (`crates/fno/src/state_layout.rs`), same file, same dialect - the
 //! dual-implementation inventory pattern (one TSV, two readers, no third
 //! mechanism).
 
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-
-/// The shipped layout table. The first PRODUCTION `include_str!` of a repo
-/// file outside a crate (the precedent at `proto.rs` is test-only). Safe
-/// because both crates build only from this workspace and are never packaged.
-pub const LAYOUT_TSV: &str = include_str!("../../../docs/state-root-layout.tsv");
+/// The shipped layout table, vendored beside this module: a `cargo package`
+/// tarball carries only crate-root files, so the repo's `docs/` copy cannot
+/// feed `include_str!` in a packaged build (the publish dry-run proved it).
+/// The repo file is the one EDIT source; the drift test pins this copy
+/// byte-identical to it, so a table edit that skips the copies fails CI.
+pub const LAYOUT_TSV: &str = include_str!("state-root-layout.tsv");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -439,18 +440,15 @@ fn move_entry(legacy: &Path, new: &Path) -> std::io::Result<()> {
 /// Legacy bytes then new bytes, through a tmp file in the new folder, fsync,
 /// rename over the new file. The new file's mode carries over (same dir).
 fn append_merge(legacy: &Path, new: &Path) -> std::io::Result<()> {
-    let mode = std::fs::metadata(new)?.permissions().mode();
+    let perms = std::fs::metadata(new)?.permissions();
     let tmp = new.with_extension(format!("migrating.{}", std::process::id()));
-    {
-        use std::io::Write;
-        let mut dst = std::fs::File::create(&tmp)?;
-        // Streamed: the logs this merges are documented unbounded, and a full
-        // read would spike the daemon's memory by both files' size.
-        std::io::copy(&mut std::fs::File::open(legacy)?, &mut dst)?;
-        std::io::copy(&mut std::fs::File::open(new)?, &mut dst)?;
-        dst.sync_all()?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    let mut dst = std::fs::File::create(&tmp)?;
+    // Streamed: the logs this merges are documented unbounded, and a full
+    // read would spike the daemon's memory by both files' size.
+    std::io::copy(&mut std::fs::File::open(legacy)?, &mut dst)?;
+    std::io::copy(&mut std::fs::File::open(new)?, &mut dst)?;
+    dst.sync_all()?;
+    std::fs::set_permissions(&tmp, perms)?;
     std::fs::rename(&tmp, new)?;
     Ok(())
 }
@@ -570,15 +568,15 @@ pub fn run_at_daemon_start(home: &crate::paths::AgentsHome) {
     }
 }
 
-/// `fno-agents state migrate [--apply] [--json]`: dry run by default.
+/// `fno-agents state migrate [--apply] [--json|-J]`: dry run by default.
 /// Resolves the state root the way every other state-root reader does.
 pub fn run_migrate_cli(args: &[String]) -> i32 {
     let mut apply = false;
-    let mut json = false;
+    let json = crate::json_output::requested(args);
     for arg in args {
         match arg.as_str() {
             "--apply" => apply = true,
-            "--json" => json = true,
+            other if crate::json_output::is_flag(other) => {}
             other => {
                 eprintln!("fno-agents state migrate: unknown arg: {other}");
                 return 2;
@@ -930,10 +928,13 @@ mod tests {
         }
         let root = tmp_root("refuse");
         std::fs::write(root.join("installed-rev"), b"abc\n").unwrap();
-        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let restore = std::fs::metadata(&root).unwrap().permissions();
+        let mut locked = restore.clone();
+        use std::os::unix::fs::PermissionsExt;
+        locked.set_mode(0o500);
+        std::fs::set_permissions(&root, locked).unwrap();
         let receipt = migrate(&root, true);
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::set_permissions(&root, restore).unwrap();
         let found = receipt
             .entries
             .iter()
@@ -946,5 +947,13 @@ mod tests {
         );
         assert!(root.join("installed-rev").exists(), "legacy untouched");
         clean(&root);
+    }
+    #[test]
+    fn vendored_table_matches_the_repo_copy() {
+        let repo = include_str!("../../../docs/state-root-layout.tsv");
+        assert_eq!(
+            LAYOUT_TSV, repo,
+            "the vendored layout table drifted from docs/state-root-layout.tsv;              edit the repo copy and copy it into both crates"
+        );
     }
 }

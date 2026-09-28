@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub const LAYOUT_TSV: &str = include_str!("../../../docs/state-root-layout.tsv");
+pub const LAYOUT_TSV: &str = include_str!("state-root-layout.tsv");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -191,5 +191,13 @@ mod tests {
             root.join("db").join("graph.json")
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+    #[test]
+    fn vendored_table_matches_the_repo_copy() {
+        let repo = include_str!("../../../docs/state-root-layout.tsv");
+        assert_eq!(
+            LAYOUT_TSV, repo,
+            "the vendored layout table drifted from docs/state-root-layout.tsv;              edit the repo copy and copy it into both crates"
+        );
     }
 }
