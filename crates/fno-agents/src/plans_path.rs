@@ -58,7 +58,7 @@ fn plans_dir(anchor: &Path) -> Option<PathBuf> {
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| DEFAULT_PLANS_DIR.to_string());
     if raw == DEFAULT_PLANS_DIR {
-        let canonical = canonical_repo_root(anchor).unwrap_or_else(|| worktree_repo_root(anchor));
+        let canonical = canonical_repo_root(anchor).unwrap_or_else(|| resolve_loose(anchor));
         let space = spaces_root(anchor, /*durable*/ false)
             .join(space_slug(&canonical))
             .join("plans");
@@ -847,6 +847,27 @@ mod tests {
             spaces.join(slug).join("plans"),
             "the sentinel resolves onto the project's space"
         );
+    }
+
+    #[test]
+    fn default_plans_dir_keeps_an_unregistered_child_root() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = Fixture::new("unregistered-child");
+        let _env = EnvGuard::new(&fx.pins());
+        let anchor = fx.base.join("unregistered/web");
+        let path = plan_doc_path(
+            &anchor,
+            "etl-search",
+            "x-abcd",
+            Some(LocalTimestamp::from_epoch(NOW).unwrap()),
+        )
+        .unwrap();
+        let expected = fx
+            .base
+            .join("spaces")
+            .join(space_slug(&anchor))
+            .join("plans");
+        assert_eq!(path.parent(), Some(expected.as_path()));
     }
 
     #[test]

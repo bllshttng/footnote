@@ -174,7 +174,7 @@ Not written by anything in this repo. Named so the gate can tell known junk from
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight | regenerates on view; safe to delete |
-| `.claude`, `.fno`, `.abilities`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below | <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
+| `.claude`, `.fno`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below |
 
 ## Unclassified (follow-up filed)
 
@@ -245,9 +245,9 @@ If you are cleaning up an install and hit one of these, find the writer first. I
 
 ## Foreign and cwd-relative debris
 
-A `.fno/`, `.claude/`, `.abilities/`, or `.impeccable/` directory nested *inside* the state root is not a root writer. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes --> Each holds project-relative paths written by a process whose working directory happened to be the state root. When `FNO_REPO_ROOT` is unset and `git rev-parse` fails, `paths.resolve_repo_root()` falls back to `Path.cwd()`. Foreign plugins do the same with their own literals.
+An unexpected plugin or project-state directory nested *inside* the state root is not a root writer. Each holds project-relative paths written by a process whose working directory happened to be the state root. When `FNO_REPO_ROOT` is unset and `git rev-parse` fails, `paths.resolve_repo_root()` falls back to `Path.cwd()`. Foreign plugins do the same with their own literals.
 
-Leave them. The finding is the cwd fallback, not the directories it produced. `.abilities` is the pre-rename state-root name, so anything under it predates the rename. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
+Leave them. The finding is the cwd fallback, not the directories it produced.
 
 ## The project journal and `FNO_EVENTS_PATH`
 

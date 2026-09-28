@@ -46,6 +46,9 @@
 #      is Claude Code config, not footnote state - nothing accumulates there.
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
+#      crates/fno-agents/src/plans_path.rs reads Claude Code's own
+#      plansDirectory setting to resolve the user-selected plan location; it
+#      writes no footnote state under .claude/.
 #      context_audit.py reads project-owned .claude/rules/*.md to census the
 #      exact progressive instructions Claude loads; it never writes there.
 #      guard-corpus-sweep.py joins ~/.claude/projects for the same reason: it
@@ -320,6 +323,7 @@ crates/fno-agents/src/hook/king_guard.rs
 crates/fno-agents/src/hook/stop.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/plans_dirs.rs
 crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
