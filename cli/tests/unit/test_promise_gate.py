@@ -801,7 +801,7 @@ def test_retryable_unknown_holds_open_on_all_three_verbs(routed, tmp_path, monke
     gh.write_text(
         "#!/bin/sh\n"
         'case "$*" in */pulls/42*) '
-        'printf \'%s\' \'{"state": "MERGED", "html_url": "https://github.com/o/r/pull/42"}\'; exit 0;; esac\n'
+        'printf \'%s\' \'{"state": "closed", "merged": true, "merged_at": "2026-06-01T10:00:00Z", "html_url": "https://github.com/o/r/pull/42"}\'; exit 0;; esac\n'
         "printf '%s' 'gh: network unreachable' >&2\nexit 1\n"
     )
     gh.chmod(0o755)
