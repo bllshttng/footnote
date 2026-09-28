@@ -223,6 +223,10 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
     transcript.write_text("")
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    # The Rust typed lane runs the real binary against this fake world; pin
+    # the resolver to None so the suite verifies the Python confirm contract
+    # below it (the stub-the-Rust-leg precedent, e4d6fa6048).
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
 
     calls: list[list[str]] = []
     # The mail-envelope render passes through to the real renderer (captured
@@ -266,6 +270,9 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")  # never gets the marker
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
+    # Pin the resolver to None so the Python confirm contract runs (see the
+    # first confirms-by-content test for the typed-lane stub rationale).
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
     _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
     failure: list[str] = []
