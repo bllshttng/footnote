@@ -93,6 +93,12 @@ def test_ac3hp_render_plist_contains_required_keys(tmp_home, plist_kwargs):
     ) in rendered
     assert "<string>pr-watch</string>" not in rendered
     assert "<false/>" in rendered  # RunAtLoad false
+    # AC7-HP: both launchd log paths end under the logs/ subfolder, never
+    # at the top level of the state root.
+    assert "/logs/pr-watcher.out.log" in rendered
+    assert "/logs/pr-watcher.err.log" in rendered
+    assert "/.fno/pr-watcher.out.log" not in rendered
+    assert "/.fno/pr-watcher.err.log" not in rendered
     # ProcessType Standard (x-c79d): the positive read is the control for the
     # negative one below.
     assert "<key>ProcessType</key>\n  <string>Standard</string>" in rendered

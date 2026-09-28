@@ -211,8 +211,8 @@ def render_plist(
     """
     home = str(Path.home())
     fno_state = Path(home) / ".fno"
-    log_out = str(fno_state / "pr-watcher.out.log")
-    log_err = str(fno_state / "pr-watcher.err.log")
+    log_out = str(fno_state / "logs" / "pr-watcher.out.log")
+    log_err = str(fno_state / "logs" / "pr-watcher.err.log")
 
     augmented_path = _augment_path(install_path or default_agent_path(fno_binary))
 
@@ -1080,7 +1080,7 @@ def _parked_block(events_path: Optional[Path], state_path: Optional[Path]) -> No
     base = Path(state_path) if state_path is not None else pr_watcher_state_path()
     if events_path is None:
         events_path = fno_state / "events.jsonl"
-    err_log = fno_state / "pr-watcher.err.log"
+    err_log = fno_state / "logs" / "pr-watcher.err.log"
 
     binary = resolve_binary()
     if binary is None:

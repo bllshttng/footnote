@@ -3031,10 +3031,12 @@ fn assistant_text_blocks(val: &Value) -> String {
 pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
     match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
         Some(p) => Some(PathBuf::from(p)),
-        None => match std::env::var_os("FNO_HOME") {
-            Some(p) => Some(PathBuf::from(p).join("corrections.log")),
-            None => home.map(|h| h.join(".fno/corrections.log")),
-        },
+        None => {
+            let root = std::env::var_os("FNO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.map(|h| h.join(".fno")))?;
+            Some(crate::state_layout::place(&root, "corrections.log"))
+        }
     }
 }
 

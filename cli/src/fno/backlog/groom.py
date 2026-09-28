@@ -528,8 +528,8 @@ def render_groom_plist(
         home=_xml_escape(home),
         workdir=_xml_escape(workdir or home),
         hour=int(hour),
-        log_out=_xml_escape(str(state / "groom.out.log")),
-        log_err=_xml_escape(str(state / "groom.err.log")),
+        log_out=_xml_escape(str(state / "logs" / "groom.out.log")),
+        log_err=_xml_escape(str(state / "logs" / "groom.err.log")),
     )
 
 

@@ -64,7 +64,7 @@ APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
 # one touch dropped main-branch protection for every session on every harness
 # lane. The rename leaves any stale old marker inert - fail-safe, no migration.
 MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
-OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
+OVERRIDE_LOG = FNO_HOME / "logs" / "merge-gate-overrides.log"
 # Both markers expire and are consumed: a forgotten sentinel must not linger.
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.

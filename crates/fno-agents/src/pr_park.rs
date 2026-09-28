@@ -49,7 +49,7 @@ impl Paths {
             state: root.join("pr-watcher-state.json"),
             delivery: root.join("pr-watcher-state-delivery.json"),
             events: root.join("events.jsonl"),
-            err_log: root.join("pr-watcher.err.log"),
+            err_log: crate::state_layout::place(&root, "pr-watcher.err.log"),
         }
     }
 
