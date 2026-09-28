@@ -51,17 +51,19 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Resolve the `fno` command: prefer an installed binary, fall back to
-# `python -m fno.cli` against the in-repo venv. Both spell the same
-# surface; the alias behavior is independent of invocation shape.
+# Resolve the `fno` command: prefer the in-repo venv (the TREE's surface,
+# which the menu assertions below pin), fall back to an installed binary,
+# then to a bare python3. An installed fno can lag the tree by whole verb
+# generations, and a menu test against it would pin a surface this checkout
+# no longer ships.
 resolve_fno() {
-    if command -v fno >/dev/null 2>&1; then
-        echo "fno"
-        return
-    fi
     local venv_py="$REPO_ROOT/cli/.venv/bin/python"
     if [[ -x "$venv_py" ]]; then
         echo "$venv_py -m fno.cli"
+        return
+    fi
+    if command -v fno >/dev/null 2>&1; then
+        echo "fno"
         return
     fi
     echo "python3 -m fno.cli"
@@ -94,9 +96,11 @@ verb_in_help() {
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
 # the advertised menu instead. `find` retired from the python surface; the
-# store serves it natively.
+# store serves it natively. `add` left the python advertised menu when its leg
+# went native: the native backlog serves it and the python help no longer
+# lists it.
 out=$(run_fno backlog --help 2>&1)
-for verb in add done next get triage; do
+for verb in done next get triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else
