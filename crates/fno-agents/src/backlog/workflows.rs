@@ -1567,6 +1567,7 @@ pub fn run_queue(tail: &[String]) -> i32 {
     if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
         return forward_to_python("queue", tail);
     }
+    let tail = &split_flag_values(tail);
     let mut ids_raw: Vec<String> = Vec::new();
     let mut reason: Option<String> = None;
     let mut iter = tail.iter().peekable();
@@ -1732,6 +1733,7 @@ pub fn run_unqueue(tail: &[String]) -> i32 {
 /// `fno backlog queued [--project NAME] [--all]`: the queue as JSON, sorted
 /// by priority then created_at (the cmd_queued twin).
 pub fn run_queued(tail: &[String]) -> i32 {
+    let tail = &split_flag_values(tail);
     let mut project: Option<String> = None;
     let mut show_all = false;
     let mut iter = tail.iter().peekable();
@@ -2235,6 +2237,23 @@ fn drop_owner_pr_refs(
 // the supersede verb
 // ---------------------------------------------------------------------------
 
+/// Split `--flag=value` spellings into two tokens so the parsers accept the
+/// equals form typer always accepted (values may themselves contain `=`).
+fn split_flag_values(tail: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(tail.len());
+    for arg in tail {
+        if let Some(rest) = arg.strip_prefix("--") {
+            if let Some(eq) = rest.find('=') {
+                out.push(format!("--{}", &rest[..eq]));
+                out.push(rest[eq + 1..].to_string());
+                continue;
+            }
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 /// `fno backlog supersede <new> --replaces <old> --cause TEXT --surface PATH...`
 /// The store mutation is native; the wheel keeps the plan-doc projection as a
 /// transport (the defer pattern), so the receipt names what the store
@@ -2243,7 +2262,7 @@ pub fn run_supersede(tail: &[String]) -> i32 {
     if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
         return forward_to_python("supersede", tail);
     }
-    let parsed = match parse_supersede_args(tail) {
+    let parsed = match parse_supersede_args(&split_flag_values(tail)) {
         Some(p) => p,
         None => return forward_to_python("supersede", tail),
     };
