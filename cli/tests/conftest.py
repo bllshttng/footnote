@@ -174,6 +174,22 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "tests/agents/test_spawn_pane.py::"
             "test_late_codex_identity_composes_across_every_peer_surface"
         ),
+        (
+            "tests/agents/test_spawn_pane.py::"
+            "test_codex_autonomous_pane_journey_completes_without_operator_input"
+        ),
+        (
+            "tests/agents/test_harness_capability_parity.py::"
+            "test_resolved_rows_match_between_readers"
+        ),
+        (
+            "tests/agents/test_send.py::"
+            "test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery"
+        ),
+        (
+            "tests/unit/test_graph_read_race.py::"
+            "test_ac3fr_no_false_negative_under_concurrent_writes"
+        ),
     }
 )
 

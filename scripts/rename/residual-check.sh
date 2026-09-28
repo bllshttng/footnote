@@ -17,6 +17,7 @@ cd "$ROOT"
 # packaging tokens in lockfiles (abi3 wheel tags, hermit-abi crate).
 KEEP_FILES=(
   ':!scripts/rename/**'
+  ':!scripts/ci/state-root-rows.baseline'
   ':!*.lock'
   ':!**/*.lock'
 )
