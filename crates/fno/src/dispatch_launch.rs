@@ -780,6 +780,8 @@ mod tests {
             node: None,
             message: "line one\nline \"two\" $ ` \u{1f600}".into(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "work"),
@@ -825,6 +827,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &configured_route, "work"),
@@ -869,6 +873,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &thread, "s"),
@@ -910,6 +916,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &pane, "s"),
@@ -953,6 +961,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         let argv = launch_spawn_argv("fno", &row_pinned, "s");
         assert!(
@@ -983,6 +993,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &new_tab, "s"),
@@ -1031,6 +1043,8 @@ mod tests {
             node: Some("x-1".into()),
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "s"),

@@ -60,6 +60,7 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
         .unwrap_or("");
     let node = payload.get("node").and_then(Value::as_str).unwrap_or("");
     let harness = payload.get("harness").and_then(Value::as_str).unwrap_or("");
+    let branch = payload.get("branch").and_then(Value::as_str).unwrap_or("");
     let cwd = Path::new(if recorded.is_empty() { "." } else { recorded });
 
     let git_cmd = vec![
@@ -106,6 +107,9 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
         "--harness".to_string(),
         harness.to_string(),
     ]);
+    if !branch.is_empty() {
+        cmd.extend(["--branch".to_string(), branch.to_string()]);
+    }
     match crate::king_board::budget::run_with_timeout_full(&cmd, Path::new("."), ENSURE_TIMEOUT) {
         Err(e) => (json!({ "hold": e.message() }), None),
         Ok(out) => {
@@ -224,6 +228,47 @@ mod tests {
         assert_eq!(
             receipt.as_deref(),
             Some("fno agents spawn: resuming x-eeee in its existing worktree /wt/x-eeee")
+        );
+    }
+
+    #[test]
+    fn a_picked_branch_rides_the_ensure_argv() {
+        // AC8-HP: a non-empty payload branch appends `--branch <branch>` to
+        // the ensure argv; the callers that name no branch (the node-seeded
+        // spawn, the codex lane) keep today's exact argv.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let args = dir.path().join("ensure-args");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho /wt/branch-target\n",
+            args.display()
+        );
+        let bin = crate::write_exec_stub(dir.path(), "fno-py", &script);
+        std::env::set_var("FNO_PY", &bin);
+        let payload = json!({
+            "recorded_cwd": dir.path().to_string_lossy(),
+            "node": "x-eeee",
+            "harness": "claude",
+            "branch": "feature/x",
+        });
+        let (answer, _receipt) = decide(&payload);
+        assert_eq!(answer, json!({ "workdir": "/wt/branch-target" }));
+        let recorded = std::fs::read_to_string(&args).unwrap();
+        let recorded: Vec<String> = recorded.lines().map(str::to_string).collect();
+        let branch_pos = recorded
+            .iter()
+            .position(|a| a == "--branch")
+            .expect("--branch rides the ensure argv");
+        assert_eq!(
+            recorded.get(branch_pos + 1).map(String::as_str),
+            Some("feature/x")
         );
     }
 }
