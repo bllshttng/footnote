@@ -1250,6 +1250,28 @@ else
     fail "AC11-EDGE: expected the unread finding: $NNPY_OUT"
 fi
 
+# AC11-EDGE-NODELESS: without a plan node, only a path-named approval can pass.
+PLAN_SCOPE_NO_NODE="$TMPDIR_BASE/nnpy_scope_no_node.md"
+cat > "$PLAN_SCOPE_NO_NODE" <<'EOF'
+---
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-b6cc1a2a +2 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_NO_NODE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -qF "this plan's node (the frontmatter names none)" <<< "$NNPY_OUT" \
+    && grep -qF "fno inbox decide <node-id>" <<< "$NNPY_OUT"; then
+    pass "AC11-EDGE-NODELESS: a plan without a node still requires path approval"
+else
+    fail "AC11-EDGE-NODELESS: expected the node-less scope ERROR: $NNPY_OUT"
+fi
+
 # AC11g (AC6-ERR): task surface naming a Python path with no table row.
 PLAN_NNPY_G="$TMPDIR_BASE/nnpy_g.md"
 cat > "$PLAN_NNPY_G" <<'EOF'
