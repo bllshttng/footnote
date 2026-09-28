@@ -2310,6 +2310,55 @@ def test_in_place_crown_refuses_when_the_identity_check_is_unavailable(
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (None, None, None)
 
 
+def test_in_place_crown_refuses_a_grantor_row_rebound_inside_the_lock_window(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """The grantor re-asserted under the lock is matched by name AND
+    session too. A grantor name rebound to a row crowned over the same
+    scope cannot bestow what the calling session no longer holds."""
+    import fno.agents.registry as registry_mod
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    grantor = _entry(
+        "lead",
+        harness_session_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        status="idle",
+        crown_level=1,
+        crown_scope="alpha,beta",
+    )
+    worker = _entry(
+        "worker", harness_session_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd", status="idle"
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [grantor, worker])
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+
+    real_update = registry_mod.update_registry
+
+    def _rebind_then_update(fn):
+        # The grantor's row is dropped and re-registered under the same name
+        # with a new session (keeping its crown) between the CLI's caller
+        # read and its stamp write.
+        real_update(
+            lambda rows: [
+                replace(row, harness_session_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+                if row.name == "lead"
+                else row
+                for row in rows
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _rebind_then_update)
+
+    with pytest.raises(CrownPromotionError, match="moved"):
+        promote_existing_session("worker", ["alpha"])
+    row = load_registry()[1]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (None, None, None), (
+        "a rebound grantor's authority never lands"
+    )
+
+
 
 
 def test_spawn_crown_refuses_before_launch_when_scope_already_occupied(

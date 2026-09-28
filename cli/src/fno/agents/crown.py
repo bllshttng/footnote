@@ -1093,7 +1093,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
-            live_caller = next((row for row in rows if row.name == grantor_name), None)
+            # The grantor re-asserted under the lock by name AND session, the
+            # same pair match the stamp below uses; a rebound grantor name
+            # cannot bestow what the calling session no longer holds.
+            live_caller = _locked_identity(rows, caller)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
                 raise CrownPromotionError(
                     f"refusing to crown {target_name!r}: the grantor's STORED "
