@@ -267,8 +267,9 @@ def test_map_covers_current_surface_once():
     # The native-verb replacement then deleted the hidden Python
     # `agents transcript-paths` action, freeing its row: 604 -> 603.
     # The decide shim's native retract door deleted its Python action,
-    # freeing the `decide retract` row: 603 -> 602. The Rust backlog front
-    # then retired Python `backlog add` and `backlog idea`: 602 -> 600.
+    # freeing the `decide retract` row: 603 -> 602.
+    # The native backlog doors retired Python `backlog add` and `backlog
+    # idea`, freeing two more rows: 602 -> 600.
     # The `backlog rank` T1 row stays: the mux menu binds the leaf and
     # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
     # is required even though the python leg is gone.
