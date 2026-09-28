@@ -2987,6 +2987,41 @@ fn registry_snapshot_pins_last_good_copy_on_collapse() {
                 .to_string_lossy()
                 .starts_with("registry.json.")
         });
-    assert!(has_newest, "the newest snapshot stays in rotation");
+    assert!(
+        has_newest,
+        "the newest snapshot dir entry stays in rotation"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rename_agent_emits_agent_renamed() {
+    let dir = tmpdir("rename-journal");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        let mut e = sample_entry("worker-a");
+        e.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+        registry.entries.push(e);
+    })
+    .unwrap();
+
+    rename_agent(&path, "worker-a", "vellum", None).unwrap();
+
+    let events = crate::events::committed_journal_text(&dir.join("events.jsonl"));
+    let renamed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["type"] == "agent_renamed")
+        .collect();
+    assert_eq!(renamed.len(), 1, "exactly one journal row: {events}");
+    let event = &renamed[0];
+    assert_eq!(event["source"], "daemon");
+    assert_eq!(event["data"]["name"], "vellum");
+    assert_eq!(event["data"]["from"], "worker-a");
+    assert_eq!(event["data"]["to"], "vellum");
+    assert_eq!(
+        event["data"]["harness_session_id"],
+        "aaaaaaaa-0000-0000-0000-111111111111"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

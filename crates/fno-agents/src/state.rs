@@ -2581,6 +2581,7 @@ pub fn rename_agent_displacing(
         source.short_id.clone(),
     );
     let old_name = source.name.clone();
+    let harness_session_id = source.harness_session_id.clone();
     if old_name == new_name {
         return Ok((old_name, new_name.to_string()));
     }
@@ -2645,6 +2646,25 @@ pub fn rename_agent_displacing(
     }) {
         Ok(inner) => inner?,
         Err(e) => return Err(e.to_string()),
+    }
+    // Every explicit rename journals itself (the reconcile title rename was
+    // the only agent_renamed emitter before), so `rename --from-journal` can
+    // rebuild labels after a registry loss. The event rides the SUCCESSFUL
+    // write, keyed by the row's full session id (d-e952ed19).
+    if let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let emitter = crate::events::EventEmitter::new(
+            crate::paths::AgentsHome::at(home_dir).events_jsonl(),
+            "daemon",
+        );
+        let _ = emitter.emit(
+            "agent_renamed",
+            &serde_json::json!({
+                "name": new_name,
+                "harness_session_id": harness_session_id,
+                "from": old_name,
+                "to": new_name,
+            }),
+        );
     }
     Ok((old_name, new_name.to_string()))
 }
