@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 
 use crate::agents_config::config_lookup;
 use crate::paths::{canonical_repo_root, space_slug, worktree_repo_root};
@@ -82,7 +82,7 @@ pub(crate) fn plan_doc_path(
     anchor: &Path,
     slug: &str,
     node: &str,
-    at: Option<LocalTimestamp>,
+    at: Option<PinnedTimestamp>,
 ) -> Result<PathBuf, String> {
     let dir = plans_content_dir(anchor).ok_or_else(|| "plans dir unresolved".to_string())?;
     Ok(dir.join(plan_doc_filename(anchor, slug, node, at)?))
@@ -90,25 +90,22 @@ pub(crate) fn plan_doc_path(
 
 /// A pinned render time: epoch seconds, the wire form `--now` carries so a
 /// recompute from a durable timestamp mints the same name on a later day.
+/// Rendered in UTC: the durable stamp it recomputes (a node's `created_at`)
+/// is a UTC ISO instant, so its date may not depend on the reader's timezone.
 #[derive(Clone, Copy)]
-pub struct LocalTimestamp(i64);
+pub struct PinnedTimestamp(i64);
 
-impl LocalTimestamp {
+impl PinnedTimestamp {
     pub fn from_epoch(secs: i64) -> Option<Self> {
-        Local
-            .timestamp_opt(secs, 0)
+        Utc.timestamp_opt(secs, 0)
             .single()
-            .map(|_| LocalTimestamp(secs))
+            .map(|_| PinnedTimestamp(secs))
     }
 
-    pub fn now() -> Self {
-        LocalTimestamp(chrono::Utc::now().timestamp())
-    }
-
-    fn datetime(self) -> chrono::DateTime<Local> {
-        Local.timestamp_opt(self.0, 0).single().unwrap_or_else(|| {
+    fn utc_datetime(self) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(self.0, 0).single().unwrap_or_else(|| {
             // from_epoch only constructs valid instants, so this never fires.
-            Local.timestamp_opt(0, 0).single().expect("epoch is valid")
+            Utc.timestamp_opt(0, 0).single().expect("epoch is valid")
         })
     }
 }
@@ -121,7 +118,7 @@ pub(crate) fn plan_doc_filename(
     anchor: &Path,
     slug: &str,
     node: &str,
-    at: Option<LocalTimestamp>,
+    at: Option<PinnedTimestamp>,
 ) -> Result<String, String> {
     let template = config_lookup(anchor, &["plans_filename"])
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -131,10 +128,12 @@ pub(crate) fn plan_doc_filename(
     // field-shaped literal so the rendered name carries it the same way.
     let template = preserve_unsupported_codes(&template);
     let items = chrono::format::strftime::StrftimeItems::new(&template);
-    let stamped = at
-        .unwrap_or_else(LocalTimestamp::now)
-        .datetime()
-        .format_with_items(items);
+    let stamped = match at {
+        Some(at) => at.utc_datetime().format_with_items(items.clone()),
+        // No pin names the wall clock: an interactive mint is dated today,
+        // locally.
+        None => Local::now().format_with_items(items),
+    };
     let mut name = stamped.to_string();
     substitute_fields(&mut name, |field| match field {
         "slug" => Ok(Some(slug.to_string())),
@@ -623,7 +622,7 @@ pub fn run_plan_path(args: &[String]) -> i32 {
     let mut slug: Option<String> = None;
     let mut node = String::new();
     let mut name_only = false;
-    let mut now: Option<LocalTimestamp> = None;
+    let mut now: Option<PinnedTimestamp> = None;
     let mut pos: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -642,7 +641,7 @@ pub fn run_plan_path(args: &[String]) -> i32 {
                 match args[i]
                     .parse::<i64>()
                     .ok()
-                    .and_then(LocalTimestamp::from_epoch)
+                    .and_then(PinnedTimestamp::from_epoch)
                 {
                     Some(at) => now = Some(at),
                     None => {
@@ -687,8 +686,11 @@ pub fn run_plan_path(args: &[String]) -> i32 {
 
 fn anchor_of(args: &[String]) -> PathBuf {
     match args.first() {
-        Some(p) if Path::new(p).is_dir() || Path::new(p).is_absolute() => PathBuf::from(p),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        // An explicit root wins even when it does not exist yet: decompose
+        // computes a child project's plans path before that repo is checked
+        // out, and a silent cwd fallback answers for the wrong root.
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
 }
 
@@ -798,7 +800,8 @@ mod tests {
     }
 
     /// 2026-09-27 12:00:00 UTC. Every render pins this instant so the date
-    /// codes in a template are deterministic.
+    /// codes in a template are deterministic (a pinned epoch renders in UTC,
+    /// so `20260927` holds on every machine).
     const NOW: i64 = 1790505600;
 
     #[test]
@@ -919,14 +922,14 @@ mod tests {
             &fx.root(),
             "my-slug",
             "zz-11aa",
-            LocalTimestamp::from_epoch(NOW),
+            PinnedTimestamp::from_epoch(NOW),
         )
         .unwrap();
         assert_eq!(name, "20260927-my-slug-zz-11aa.md");
 
         // Cleanup: doubled dashes collapse, a dangling `-.md` degrades, and
         // leading dashes strip. An empty slug and node leave only the date.
-        let name = plan_doc_filename(&fx.root(), "", "", LocalTimestamp::from_epoch(NOW)).unwrap();
+        let name = plan_doc_filename(&fx.root(), "", "", PinnedTimestamp::from_epoch(NOW)).unwrap();
         assert_eq!(name, "20260927.md", "empty slug and node degrade cleanly");
     }
 
@@ -939,7 +942,7 @@ mod tests {
         // too, not silently drop it.
         fs::write(fx.config(), "plans_filename = \"%q-%Y%m%d-{slug}.md\"\n").unwrap();
         let name =
-            plan_doc_filename(&fx.root(), "feature", "", LocalTimestamp::from_epoch(NOW)).unwrap();
+            plan_doc_filename(&fx.root(), "feature", "", PinnedTimestamp::from_epoch(NOW)).unwrap();
         assert_eq!(name, "%q-20260927-feature.md");
     }
 
@@ -953,7 +956,7 @@ mod tests {
             &fx.root(),
             "feature",
             "zz-11aa",
-            LocalTimestamp::from_epoch(NOW),
+            PinnedTimestamp::from_epoch(NOW),
         )
         .unwrap_err();
         assert!(err.contains("zz-11aa"), "the refusal names the node: {err}");

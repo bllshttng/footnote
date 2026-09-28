@@ -43,8 +43,11 @@ pub fn run(args: &[String]) -> i32 {
     // `.fno/config.toml` with a `[work]` table must win for that session,
     // exactly as it does for every other config read.
     let anchor = match args.first() {
-        Some(p) if Path::new(p).is_dir() => PathBuf::from(p),
-        _ => process_cwd,
+        // An explicit anchor wins even when its directory is gone: the guard
+        // passes a session cwd whose checkout may already be reaped, and a
+        // silent process-cwd fallback reads the wrong session's [work] table.
+        Some(p) => PathBuf::from(p),
+        None => process_cwd,
     };
     for dir in plans_dirs(&anchor) {
         println!("{}", dir.display());

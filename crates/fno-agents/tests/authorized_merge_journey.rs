@@ -164,7 +164,8 @@ fn a_queue_arm_walks_arm_pending_merge_and_reconcile_without_ever_merging_twice(
     assert_eq!(
         armed,
         Outcome::Armed {
-            head: HEAD.to_string()
+            head: HEAD.to_string(),
+            merge_grant: None,
         }
     );
     let calls = gh.merge_calls();
@@ -180,7 +181,8 @@ fn a_queue_arm_walks_arm_pending_merge_and_reconcile_without_ever_merging_twice(
     assert_eq!(
         again,
         Outcome::Armed {
-            head: HEAD.to_string()
+            head: HEAD.to_string(),
+            merge_grant: None,
         }
     );
     assert_eq!(gh.merge_calls().len(), 1, "re-arming spends no request");
