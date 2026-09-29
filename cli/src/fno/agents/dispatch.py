@@ -1784,7 +1784,6 @@ def _claude_create_path(
     crown_succeeded = False
     crown_outcome: Optional[str] = None
     crown_cleared: list = []
-    crown_reowned: list = []
     king_loop_armed: Optional[bool] = None
     king_unarmed_reason = ""
 
@@ -1794,7 +1793,7 @@ def _claude_create_path(
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
         nonlocal crown_declined, crown_succeeded
-        nonlocal crown_outcome, crown_cleared, crown_reowned
+        nonlocal crown_outcome, crown_cleared
         nonlocal king_loop_armed, king_unarmed_reason
         entry = new_entry
         # One-live-crown guard, inside the write lock so the check and
@@ -1815,7 +1814,7 @@ def _claude_create_path(
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
             assert crown_plan is not None  # set by the pre-launch call above
-            entries, crown_outcome, crown_cleared, crown_reowned = settle_spawn_crown(
+            entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None, heir=name,
                 heir_owner=build_heir_owner(
@@ -1859,7 +1858,6 @@ def _claude_create_path(
                 level=crown_level,
                 scope=crown_scope,
                 grantor=crown_grantor_val,
-                reowned=crown_reowned,
             )
         if crown_declined:
             print(
@@ -5853,13 +5851,12 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
         row = matches[0]
-        actual_name = row.get("name")
         # The uuid is the identity; the label may lag a rename.
         actual_fno_id = row.get("fno_id")
         if expected_fno_id is not None and actual_fno_id != expected_fno_id:
             print(
                 f"mux pane {pane} identity mismatch: addressed {expected_name} "
-                f"({expected_fno_id or '-'}) pane hosts {actual_name or '<unknown>'} "
+                f"({expected_fno_id or '-'}) pane hosts {row.get('name') or '<unknown>'} "
                 f"({actual_fno_id or '-'})",
                 file=sys.stderr,
             )
