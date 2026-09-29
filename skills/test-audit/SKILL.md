@@ -5,7 +5,7 @@ description: "Use when auditing or pruning an existing test surface, or when exp
 
 # Test Audit
 
-Three modes, one value bar. Authoring mode gates every new or changed test at write time. Audit mode sweeps tests that re-assert source, duplicate stronger proof, couple behavior to implementation, or keep test-only production seams alive. Continue broad audits as separate follow-up PRs. Optimize for confidence, not deletion count. Campaign mode prunes one whole subsystem's test surface. Read [CAMPAIGN.md](CAMPAIGN.md) before starting one.
+Three modes, one value bar. Authoring mode gates every new or changed test at write time. Audit mode sweeps tests that re-assert source, duplicate stronger proof, couple behavior to implementation, or keep test-only production seams alive. Continue broad audits as separate follow-up PRs. Optimize for confidence, not deletion count. Campaign mode prunes one whole subsystem's test surface. Read [CAMPAIGN.md](CAMPAIGN.md) before starting one. A project's campaign doc can replace the value bar, the retention bar and the ledger shape with a stricter keep rule. For that project's campaigns, the doc wins.
 
 ## Authoring gate
 

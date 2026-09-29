@@ -236,3 +236,69 @@ def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch
 # into the native resolver; they are pinned Rust-side by
 # fno-agents' session_identity_ambient stamp tests. The Python module is a
 # shim over that verb and carries no stamp logic to test here.
+
+
+def _silent_walk_claude_proof(monkeypatch, attested_id: str):
+    """The claude spawned worker's shape: the tree proves the claude family,
+    but the attester stays env_only - supervisor births poison the session id
+    out of the child env and darwin no longer reads harness env through ps,
+    so ancestry can never witness the id value."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: "claude"
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (attested_id, "env_only"),
+    )
+
+
+def test_name_only_claude_spawn_row_witness_resolves(tmp_path, monkeypatch):
+    """A claude spawned worker's stamp is name_only (the harness mints the id
+    after launch), its tree proves only the family, and no ancestor carries
+    the id. The worker's own spawn row - bound by its spawn-minted name -
+    witnesses the id, and the identity resolves canonically instead of
+    refusing the row that exists for this very launch."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    row = register_existing_session(harness="claude", session_id=mine, cwd="/x")
+    _silent_walk_claude_proof(monkeypatch, mine)
+    monkeypatch.setenv("FNO_AGENT_SELF", row.name)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
+    assert fields["COLLISION"] == ""
+
+
+def test_name_only_claude_stale_name_export_fails_closed(tmp_path, monkeypatch):
+    """The witness is bound to the spawn-minted name: when the row that name
+    holds a DIFFERENT session's id, it cannot witness the marker. A stale
+    name export (a reused spare process carrying the previous spawn's env)
+    stays ambiguous, and the live row that truly holds the marker is named."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    stale_row_id = "019cc082-1111-7283-97cc-751c46742a08"
+    stale = register_existing_session(harness="claude", session_id=stale_row_id, cwd="/x")
+    holder = register_existing_session(harness="claude", session_id=mine, cwd="/x")
+    _silent_walk_claude_proof(monkeypatch, mine)
+    monkeypatch.setenv("FNO_AGENT_SELF", stale.name)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == holder.name
+    assert fields["COLLISION_ID"] == mine
