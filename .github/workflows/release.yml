@@ -16,21 +16,37 @@ name: release
 #              cli-ci push run succeeded, publishes a rolling pre-release
 #              named `nightly` with no approval (rolling, replaceable, no
 #              registry).
-#   rc       - dispatch: builds the nightly commit (or inputs.sha) and stops
-#              at the `release` environment approval. PyPI + GitHub Release
-#              + the v<src>rcN tag all happen in the approved job.
-#   stable   - dispatch: promotes the newest v<src>rc* commit (or
-#              inputs.sha) in the approved job: PyPI, crates.io, the v<src>
-#              tag, the GitHub Release, the Homebrew tap, and the `stable`
-#              branch the plugin marketplaces pin.
+#   rc       - the Monday schedule, or dispatch: builds the newest green
+#              main sha (or inputs.sha, or the nightly tag for a dispatch)
+#              and stops at the `release` environment approval. PyPI +
+#              GitHub Release + the v<src>rc1 tag all happen in the
+#              approved job. The weekly cadence is the point: a candidate
+#              every Monday so no release ever stacks a year of PRs.
+#   stable   - dispatch only: promotes the newest v*rc* tag (or
+#              inputs.sha) in the approved job: PyPI, crates.io, the tag,
+#              the GitHub Release, the Homebrew tap, the `stable` branch
+#              the plugin marketplaces pin, and a one-patch version sync
+#              of main (nightly refuses while v<src> exists, so without
+#              the sync every promotion wedges the nightly).
+#
+# The cadence is backed by a nudge, not a memory act: the remind-stable job
+# opens one issue once a candidate has waited 3+ days on the promotion
+# click. Curated notes are drafted on a machine with the vault checkout:
+# scripts/release/draft-release-notes.py <tag> writes
+# internal/fno/releases/<version>.md for the user to trim.
 #
 # Rehearse on a fork with dry_run=true: cargo publish runs with --dry-run,
 # PyPI and the tap are skipped, and the GitHub Release is created as a draft.
 
 on:
   schedule:
-    # Daily; the channel input is absent on schedule, which resolves to nightly.
+    # Daily; the channel input is absent on schedule, which resolves to
+    # nightly - except the Monday slot below, which resolves to rc.
     - cron: "23 6 * * *"
+    # Weekly release candidate: Monday 06:43 UTC. github.event.schedule
+    # carries this exact string; resolve maps it to channel=rc on the
+    # newest green main sha.
+    - cron: "43 6 * * 1"
   workflow_dispatch:
     inputs:
       channel:
@@ -54,7 +70,7 @@ on:
 # shared group would park every nightly behind it (GitHub keeps one pending
 # run per group and cancels the older pending one).
 concurrency:
-  group: release-${{ inputs.channel || 'nightly' }}
+  group: release-${{ inputs.channel || (github.event.schedule == '43 6 * * 1' && 'rc-weekly' || 'nightly') }}
   cancel-in-progress: false
 
 permissions:
@@ -71,6 +87,7 @@ jobs:
       actions: read
     outputs:
       channel: ${{ steps.pick.outputs.channel }}
+      scheduled_rc: ${{ steps.pick.outputs.scheduled_rc }}
       sha: ${{ steps.pick.outputs.sha }}
       version: ${{ steps.math.outputs.version }}
       tag: ${{ steps.math.outputs.tag }}
@@ -86,7 +103,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          CHANNEL: ${{ inputs.channel }}
+          SCHEDULE: ${{ github.event.schedule }}
           WANTED_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
@@ -99,47 +117,74 @@ jobs:
             echo "::error::refusing to release from non-default branch '${branch}'; run this on '${default_branch}'"
             exit 1
           fi
-          echo "channel: ${CHANNEL}"
+
+          # A dispatch names its channel. A schedule carries only its cron
+          # string, so the Monday weekly slot resolves to channel=rc; any
+          # other schedule is the nightly.
+          channel="${CHANNEL}"
+          scheduled_rc=""
+          if [ -z "$channel" ]; then
+            if [ "$SCHEDULE" = "43 6 * * 1" ]; then
+              channel="rc"
+              scheduled_rc="1"
+            else
+              channel="nightly"
+            fi
+          fi
+          echo "channel: ${channel}"
 
           git fetch origin "${default_branch}" --no-tags
           main_ref="origin/${default_branch}"
 
           # 1. Pick the commit.
-          #    nightly: the newest main push whose rust-ci run succeeded AND
-          #    whose newest ancestor cli-ci push run also succeeded (a failed
-          #    cli shard on the newest cli-touching commit blocks the nightly,
-          #    so a red Python tree can never ride a green rust run).
-          #    rc: the wanted sha, else the nightly tag's commit.
-          #    stable: the wanted sha, else the newest v<src>rc* tag's commit.
-          case "$CHANNEL" in
+          #    The green-main selection (the newest main push whose rust-ci
+          #    run succeeded AND whose newest ancestor cli-ci push run also
+          #    succeeded - a failed cli shard on the newest cli-touching
+          #    commit blocks the pick, so a red Python tree can never ride a
+          #    green rust run) serves both the nightly and the weekly rc:
+          #    the candidate tracks the newest green main sha, not a
+          #    possibly week-old nightly tag.
+          pick_green_sha() {
+            local rust_sha cli_run
+            rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"
+            if [ -z "$rust_sha" ]; then
+              echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship"
+              exit 1
+            fi
+            echo "newest green rust-ci push run: ${rust_sha}"
+
+            cli_run="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
+              --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.databaseId) \(.headSha) \(.conclusion)"' \
+              | while read -r _run_id run_sha run_conclusion; do
+                  if git merge-base --is-ancestor "$run_sha" "$rust_sha" 2>/dev/null; then
+                    echo "$run_conclusion"
+                    break
+                  fi
+                done)"
+            if [ -n "$cli_run" ] && [ "$cli_run" != "success" ]; then
+              echo "::error::the newest cli-ci push run at or before ${rust_sha} concluded '${cli_run}'; the release is blocked until cli-ci is green"
+              exit 1
+            fi
+            [ -z "$cli_run" ] && echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here"
+
+            printf '%s' "$rust_sha"
+          }
+
+          #    nightly: the green-main selection.
+          #    rc: the wanted sha; else the weekly slot takes the
+          #        green-main selection; else a plain dispatch promotes the
+          #        nightly tag's commit.
+          #    stable: the wanted sha, else the newest v*rc* tag's commit.
+          case "$channel" in
             nightly)
-              rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"
-              if [ -z "$rust_sha" ]; then
-                echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship nightly"
-                exit 1
-              fi
-              echo "newest green rust-ci push run: ${rust_sha}"
-
-              cli_run="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
-                --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.databaseId) \(.headSha) \(.conclusion)"' \
-                | while read -r _run_id run_sha run_conclusion; do
-                    if git merge-base --is-ancestor "$run_sha" "$rust_sha" 2>/dev/null; then
-                      echo "$run_conclusion"
-                      break
-                    fi
-                  done)"
-              if [ -n "$cli_run" ] && [ "$cli_run" != "success" ]; then
-                echo "::error::the newest cli-ci push run at or before ${rust_sha} concluded '${cli_run}'; nightly blocked until cli-ci is green"
-                exit 1
-              fi
-              [ -z "$cli_run" ] && echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here"
-
-              sha="$rust_sha"
+              sha="$(pick_green_sha)"
               ;;
 
             rc)
               if [ -n "$WANTED_SHA" ]; then
                 sha="$WANTED_SHA"
+              elif [ -n "$scheduled_rc" ]; then
+                sha="$(pick_green_sha)"
               else
                 sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
                 if [ -z "$sha" ]; then
@@ -167,7 +212,7 @@ jobs:
               ;;
 
             *)
-              echo "::error::unknown channel '${CHANNEL}'"
+              echo "::error::unknown channel '${channel}'"
               exit 1
               ;;
           esac
@@ -179,24 +224,43 @@ jobs:
           fi
 
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "scheduled_rc=${scheduled_rc}" >> "$GITHUB_OUTPUT"
 
       - name: Idempotence - skip a nightly already published
         id: skip
+        env:
+          CHANNEL: ${{ steps.pick.outputs.channel }}
+          SCHEDULED_RC: ${{ steps.pick.outputs.scheduled_rc }}
+          SHA: ${{ steps.pick.outputs.sha }}
         run: |
           set -euo pipefail
-          channel="${{ steps.pick.outputs.channel }}"
-          sha="${{ steps.pick.outputs.sha }}"
+          channel="${CHANNEL}"
+          sha="${SHA}"
           if [ "$channel" = "nightly" ] && nightly_sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null)" \
              && git merge-base --is-ancestor "$sha" "$nightly_sha"; then
             echo "the nightly tag already carries ${sha} (or newer) - skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
+          # The weekly rc is a schedule, not a request: a quiet week must
+          # skip, not stack an identical candidate. If the newest v*rc* tag
+          # already carries the picked sha (or newer), there is nothing new
+          # to candidate.
+          if [ "$channel" = "rc" ] && [ "$SCHEDULED_RC" = "1" ]; then
+            newest_rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
+            if [ -n "$newest_rc_tag" ] \
+               && rc_sha="$(git rev-parse --verify "refs/tags/${newest_rc_tag}^{commit}" 2>/dev/null)" \
+               && git merge-base --is-ancestor "$rc_sha" "$sha"; then
+              echo "the newest candidate ${newest_rc_tag} already carries ${sha} (or newer) - skipping this week's rc"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - name: Compute version and tag
         id: math
         env:
-          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          CHANNEL: ${{ steps.pick.outputs.channel }}
           SHA: ${{ steps.pick.outputs.sha }}
         run: |
           set -euo pipefail
@@ -243,7 +307,7 @@ jobs:
   publish-nightly:
     name: publish the nightly pre-release (rolling, replaceable, no registry)
     needs: [resolve, binaries, wheels]
-    if: needs.resolve.outputs.skip != 'true' && (inputs.channel || 'nightly') == 'nightly'
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.channel == 'nightly'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -339,7 +403,7 @@ jobs:
   publish:
     name: publish rc / stable (one approval click)
     needs: [resolve, binaries, wheels]
-    if: needs.resolve.outputs.skip != 'true' && (inputs.channel || 'nightly') != 'nightly'
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.channel != 'nightly'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # THE click. Every publish leg sits in this one job, so one approval
@@ -492,3 +556,95 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "fno ${VERSION}: bump url + sha256 (auto, x-0afe)"
           git push
+
+      - name: Sync main past the release (stable only)
+        if: ${{ inputs.dry_run != true && env.CHANNEL == 'stable' }}
+        # Nightly refuses (exit 1, naming the sync-version bump) for as long
+        # as v<src> exists, so a shipped stable wedges every later nightly
+        # until main's version moves past it. On a weekly cadence that wedge
+        # would be permanent. Bump main one patch here, inside the same
+        # approved job: the click authorized the promotion, and this is its
+        # tail. Best effort: a rejected push (main moved mid-promotion)
+        # warns instead of failing a release that already shipped, and the
+        # next promotion or a manual sync-version heals it.
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          next="$(printf '%s' "$VERSION" | awk -F. -v OFS=. '{$NF += 1; print}')"
+          echo "bumping main to ${next} after v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash scripts/release/sync-version.sh "$next"
+          git add cli/src/fno/__init__.py \
+            crates/fno/Cargo.toml crates/fno/Cargo.lock \
+            crates/fno-agents/Cargo.toml crates/fno-agents/Cargo.lock \
+            .claude-plugin/plugin.json .claude-plugin/marketplace.json \
+            gemini-extension.json .codex-plugin/plugin.json \
+            .opencode/package.json plugins/openclaw/promise-tag-reader/package.json
+          if git diff --cached --quiet; then
+            echo "main already carries ${next} - nothing to sync"
+            exit 0
+          fi
+          git commit -m "chore(release): sync main to ${next} after v${VERSION}"
+          if git push origin "HEAD:${DEFAULT_BRANCH}"; then
+            echo "main synced to ${next}; the nightly is unblocked"
+          else
+            echo "::warning::could not push the version sync to ${DEFAULT_BRANCH} (main moved mid-promotion?); nightly stays wedged until a manual scripts/release/sync-version.sh ${next} lands"
+          fi
+
+  remind-stable:
+    name: remind when a candidate waits on promotion
+    # The stable channel stays hand-promoted by design: the approval click
+    # is the gate, and no schedule may click it. What was missing is the
+    # nudge - without it a candidate waits on memory, and next Monday's rc
+    # stacks on top of an unpromoted one. One issue at a time, opened only
+    # once the candidate is 3+ days old, naming the approval door and the
+    # notes-drafting command.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags: candidate age and promotion state
+
+      - name: Open the promotion reminder once the candidate is 3+ days old
+        run: |
+          set -euo pipefail
+          rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
+          if [ -z "$rc_tag" ]; then
+            echo "no candidate exists; nothing to remind about"
+            exit 0
+          fi
+          version="${rc_tag#v}"
+          version="${version%rc*}"
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "${rc_tag} is already promoted; nothing to remind about"
+            exit 0
+          fi
+          cut="$(git for-each-ref "refs/tags/${rc_tag}" --format='%(creatordate:unix)')"
+          age_days=$(( ($(date -u +%s) - cut) / 86400 ))
+          if [ "$age_days" -lt 3 ]; then
+            echo "${rc_tag} is ${age_days}d old; the reminder opens at 3 days"
+            exit 0
+          fi
+          cut_day="$(date -u -d "@${cut}" +%Y-%m-%d)"
+          title="stable promotion waiting: v${version} (${rc_tag} cut ${cut_day})"
+          open="$(gh issue list --state open --search "in:title \"stable promotion waiting: v${version}\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$open" ]; then
+            echo "reminder issue #${open} is already open"
+            exit 0
+          fi
+          body="$(printf '%s\n%s\n%s\n%s\n' \
+            "Candidate ${rc_tag} has waited ${age_days} days since ${cut_day}. Promote by hand when the notes read well:" \
+            "1. Actions -> release -> Run workflow -> channel: stable (the release environment approval is the gate; nothing auto-clicks it)." \
+            "2. Trim the draft first if you have not: python3 scripts/release/draft-release-notes.py ${rc_tag} writes internal/fno/releases/${version}.md, then \`gh release edit ${rc_tag} --notes-file <file>\`." \
+            "Weekly rcs keep coming either way; an unpromoted candidate does not block the next one.")"
+          gh issue create --title "$title" --body "$body"
