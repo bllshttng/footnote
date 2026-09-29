@@ -956,7 +956,7 @@ mod tests {
         let mut c = rusqlite::Connection::open(&published).unwrap();
         crate::event_store::ensure_schema(&mut c, &published).unwrap();
         c.execute(
-            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source) VALUES (1, 'e-1', x'01', 0, 'x', 't')",
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}')",
             [],
         )
         .unwrap();
@@ -965,7 +965,7 @@ mod tests {
         let mut c = rusqlite::Connection::open(&straggler).unwrap();
         crate::event_store::ensure_schema(&mut c, &straggler).unwrap();
         c.execute_batch(
-            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source) VALUES (1, 'e-1', x'01', 0, 'x', 't'), (2, 'e-2', x'02', 0, 'x', 't');",
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}'), (2, 'e-2', x'02', 0, 'x', 't', '{}');",
         )
         .unwrap();
         drop(c);
