@@ -16,6 +16,7 @@ use common::{
     ServerTermination,
 };
 use fno::proto::{Command, PanePlacement};
+use fno::tree::Dir;
 
 /// Same module-local serialization gate as `persistence.rs`: these tests own
 /// real PTYs + Unix sockets, and parallel runs contend for the runner's CPU.
@@ -91,7 +92,7 @@ fn drive_named_three_pane_layout(client: &mut FakeClient, scratch: &Scratch) {
     client.wait_layout(10, "workspace w appears", |l| {
         l.squads.iter().any(|s| s.name == "w")
     });
-    client.cmd(Command::SplitH);
+    client.cmd(Command::SplitDir(Dir::Right));
     client.wait_layout(10, "first split lands", |l| {
         l.squads
             .iter()
@@ -113,7 +114,7 @@ fn drive_named_three_pane_layout(client: &mut FakeClient, scratch: &Scratch) {
             .iter()
             .any(|s| s.name == "w" && s.tabs.len() == 1 && s.tabs[0].name == "edit")
     });
-    client.cmd(Command::SplitH);
+    client.cmd(Command::SplitDir(Dir::Right));
     client.wait_layout(10, "second split lands", |l| {
         l.squads
             .iter()
@@ -304,7 +305,7 @@ fn symptom_hand_split_survives_restart() {
     });
     // A hand split (the prefix-key mutation), the exact topology the template
     // lane never captures: two panes in ONE tab.
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     c.wait_layout(10, "split lands", |l| {
         l.squads
             .iter()

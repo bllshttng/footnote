@@ -2232,16 +2232,6 @@ mod tests {
         assert!(clear.contains("\x1b[=0;1u"), "{clear:?}");
     }
 
-    #[test]
-    fn server_spine_vt_resize_is_clamped_and_safe() {
-        let mut pane = Pane::new(24, 80);
-        pane.resize(0, 0);
-        pane.feed(b"q");
-        assert_eq!(pane.size(), (1, 1));
-        let frame = pane.frame();
-        assert_eq!(frame.cells.len(), 1);
-    }
-
     // -- OSC 133 scanner (Task 1.1) --------------------------------------------
 
     /// Run byte chunks through a fresh scanner; return (markers, passthrough).

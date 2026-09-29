@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use common::{spawn_server, Absorbed, ClientHarness, FakeClient};
 use fno::proto::Command;
+use fno::tree::Dir;
 
 struct Scratch(PathBuf);
 
@@ -110,9 +111,9 @@ fn multiclient_clamp_below_min_pane_size_recovers_exactly() {
 
     let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     a.wait_layout(10, "first layout", |l| l.panes.len() == 1);
-    a.cmd(Command::SplitH);
+    a.cmd(Command::SplitDir(Dir::Right));
     a.wait_layout(10, "2 panes", |l| l.panes.len() == 2);
-    a.cmd(Command::SplitV);
+    a.cmd(Command::SplitDir(Dir::Down));
     let before = a.wait_layout(10, "3 panes", |l| l.panes.len() == 3);
 
     let mut b = FakeClient::attach(&scratch.sock(), 3, 12, cwd.to_str().unwrap());
@@ -409,7 +410,7 @@ fn multiclient_server_outlives_client_crash_mid_command() {
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
 
-    b.cmd(Command::SplitH);
+    b.cmd(Command::SplitDir(Dir::Right));
     drop(b); // gone before reading the Layout the split produces
 
     let l = a.wait_layout(30, "split stands + regrown", |l| {
