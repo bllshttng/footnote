@@ -124,6 +124,17 @@ enum Kind {
 /// Entry: read the payload once, decide, print, always exit 0.
 pub fn run(_args: &[String]) -> i32 {
     let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+    // The guardrail preset owns whether this guard runs at all.
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if !crate::agents_config::guard_enabled(&cwd, "test-run") {
+        return super::emit_allow();
+    }
     let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
     let allow = |stage: &str| -> i32 {
         if trace {

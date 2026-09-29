@@ -192,6 +192,45 @@ pub(crate) fn config_lookup_global(keys: &[&str]) -> Option<toml::Value> {
     Some(cur.clone())
 }
 
+/// The guardrail preset for `cwd`: `FNO_GUARD_PRESET` wins over the
+/// `guards.preset` config key, so the preset works before the config schema
+/// carries the field. `strict` runs every gatable guard, `standard` (the
+/// default when nothing is set) keeps the two destructive-write guards on,
+/// `off` runs none. A malformed value reads as `strict`, so a typo never
+/// drops a guard.
+fn normalize_guard_preset(raw: &str) -> &'static str {
+    match raw.trim().trim_matches('"') {
+        "standard" => "standard",
+        "off" => "off",
+        _ => "strict",
+    }
+}
+
+pub(crate) fn guard_preset(cwd: &Path) -> &'static str {
+    if let Some(v) = non_empty_env("FNO_GUARD_PRESET") {
+        return normalize_guard_preset(&v.to_string_lossy());
+    }
+    match config_lookup(cwd, &["guards", "preset"]) {
+        Some(v) => normalize_guard_preset(&v.to_string()),
+        None => "standard",
+    }
+}
+
+/// Whether one gatable guard runs under the project's preset. Names are the
+/// guard ids the hooks know: pipe, test-run, bin-install, recursive-grep,
+/// bg-process, git-protection. The state-integrity guards (graph write
+/// protection and friends) never gate here.
+pub(crate) fn guard_enabled(cwd: &Path, guard: &str) -> bool {
+    match guard_preset(cwd) {
+        "strict" => true,
+        "off" => false,
+        _ => !matches!(
+            guard,
+            "recursive-grep" | "test-run" | "bin-install" | "bg-process"
+        ),
+    }
+}
+
 /// Per-field merged table across the candidates, the way Python's loader
 /// deep-merges candidate files: the highest-priority candidate that defines a
 /// field wins that field, and a lower candidate's other fields still fill in.
@@ -2157,6 +2196,44 @@ mod tests {
         let f = dir.join("explicit.toml");
         std::fs::write(&f, body).unwrap();
         f
+    }
+
+    // --- guardrail presets --------------------------------------
+
+    #[test]
+    fn guard_preset_absent_reads_standard_and_gates() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_config_env();
+        std::env::remove_var("FNO_GUARD_PRESET");
+        let dir =
+            write_project_settings("guard-absent", "[target.defaults]\nmax_iterations = 40\n");
+        assert_eq!(guard_preset(&dir), "standard");
+        assert!(guard_enabled(&dir, "pipe"));
+        assert!(guard_enabled(&dir, "git-protection"));
+        assert!(!guard_enabled(&dir, "recursive-grep"));
+        assert!(!guard_enabled(&dir, "test-run"));
+        assert!(!guard_enabled(&dir, "bin-install"));
+        assert!(!guard_enabled(&dir, "bg-process"));
+    }
+
+    #[test]
+    fn guard_env_beats_config_and_malformed_reads_strict() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_config_env();
+        std::env::remove_var("FNO_GUARD_PRESET");
+        let dir = write_project_settings("guard-env", "guards.preset = \"off\"\n");
+        // The config key on its own: off disables everything gatable.
+        assert!(!guard_enabled(&dir, "recursive-grep"));
+        assert!(!guard_enabled(&dir, "pipe"));
+        // The env beats the config key.
+        std::env::set_var("FNO_GUARD_PRESET", "strict");
+        assert!(guard_enabled(&dir, "recursive-grep"));
+        // A malformed value reads as strict, never as weaker.
+        std::env::set_var("FNO_GUARD_PRESET", "bogus");
+        assert!(guard_enabled(&dir, "bg-process"));
+        std::env::set_var("FNO_GUARD_PRESET", "off");
+        assert!(!guard_enabled(&dir, "pipe"));
+        std::env::remove_var("FNO_GUARD_PRESET");
     }
 
     // --- retirement sweep cadence -------------------------------

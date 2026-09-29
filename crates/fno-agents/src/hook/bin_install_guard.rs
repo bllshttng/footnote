@@ -54,6 +54,10 @@ pub fn run(_args: &[String]) -> i32 {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    // The guardrail preset owns whether this guard runs at all.
+    if !crate::agents_config::guard_enabled(&cwd, "bin-install") {
+        return super::emit_allow();
+    }
     let refusal = judge(&payload);
     super::emit_guard_decision(&cwd, "bin-install-guard", "Bash", refusal.is_some());
     match refusal {
