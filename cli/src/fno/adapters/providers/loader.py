@@ -946,14 +946,8 @@ def atomic_mutate_settings(
                     "atomic_mutate_settings: mutator must return a dict, "
                     f"got {type(updated).__name__}"
                 )
-            # Mirror the reader's suffix split: config.toml is TOML, any
-            # other file (settings.yaml) stays YAML, or the next read of it
-            # cannot parse what this write left behind.
             migrated = _strip_none(_flatten_config(updated))
-            if settings_path.suffix == ".toml":
-                content = tomli_w.dumps(migrated)
-            else:
-                content = yaml.safe_dump(migrated, sort_keys=False)
+            content = tomli_w.dumps(migrated) if settings_path.suffix == ".toml" else yaml.safe_dump(migrated, sort_keys=False)
             tmp_path: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(
