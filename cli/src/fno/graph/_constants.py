@@ -30,7 +30,12 @@ def _graph_json() -> Path:
         from fno import paths as _paths
         return _paths.graph_json()
     except Exception:
-        return _state_dir() / "graph.json"
+        root = _state_dir()
+        if (root / "db" / "graph.db").exists():
+            return root / "db" / "graph.json"
+        if (root / "graph.db").exists():
+            return root / "graph.json"
+        return root / "db" / "graph.json"
 
 
 def _graph_md() -> Path:

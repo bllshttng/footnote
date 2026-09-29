@@ -41,6 +41,13 @@ def _recent_iso(days_ago: int = 1) -> str:
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh graph store; its graph.json path is only the stable anchor."""
     g = tmp_path / "graph.json"
+    # The native door resolves the anchor through the layout ladder, and a
+    # fresh root would answer the db/ spelling. The empty legacy twin makes
+    # the ladder answer this root spelling, so every side of the seam reads
+    # one store.
+    import sqlite3
+
+    sqlite3.connect(tmp_path / "graph.db").close()
     # Patch the module-level constants so all operations hit this temp file
     import fno.graph._constants as gc
     import fno.graph.store as gs
