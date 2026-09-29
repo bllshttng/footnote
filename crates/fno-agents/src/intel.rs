@@ -1132,13 +1132,26 @@ fn fold_all(
     let response_time = crate::intel_insights::response_time(&rows);
     let parallel = crate::intel_insights::parallel(&rows);
     let (daily, daily_undated) = crate::intel_insights::daily(&rows);
+    // Live sessions with witnessed user turns the idle rule held out of the
+    // sample, named so the report can say what judging could not see.
+    let held_out = crate::intel_insights::held_out_live(&rows);
+    let held_out_json: Vec<Value> = held_out
+        .iter()
+        .map(|(session, turns)| json!({"session": session, "operator_turns": turns}))
+        .collect();
     let sample_block = match sample {
         crate::intel_insights::SampleRequest::None => None,
         crate::intel_insights::SampleRequest::N(n) => Some(json!({
-            "requested": n, "rank": "blake3(session_id)", "idle_secs": crate::intel_insights::IDLE_SECS
+            "requested": n,
+            "rank": "witnessed-turns-first, then blake3(session_id)",
+            "idle_secs": crate::intel_insights::IDLE_SECS,
+            "held_out_live": held_out_json
         })),
         crate::intel_insights::SampleRequest::All => Some(json!({
-            "requested": "all", "rank": "blake3(session_id)", "idle_secs": crate::intel_insights::IDLE_SECS
+            "requested": "all",
+            "rank": "witnessed-turns-first, then blake3(session_id)",
+            "idle_secs": crate::intel_insights::IDLE_SECS,
+            "held_out_live": held_out_json
         })),
     };
     Report {
