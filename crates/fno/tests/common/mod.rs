@@ -85,7 +85,12 @@ impl Scratch {
                 self.0.join("iso-cfg").join("settings.json"),
             )
             .env("FNO_E2E", "1")
-            .env("FNO_PROCESS_ADMISSION_MAX", "512");
+            .env("FNO_PROCESS_ADMISSION_MAX", "512")
+            // The events store resolves the native binary via FNO_BIN. A
+            // uv-bootstrapped python CLI inside HOME computes its repo root
+            // from the tools tree, finds no checkout build there, and PATH
+            // here carries no `fno` - the passthrough is the only channel.
+            .env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         // A server this command autospawns inherits the env and passes
         // it to every `fno-agents-worker` keeper it launches, so the keeper's
         // watchdog reaps it when this test binary exits. Applied after the
