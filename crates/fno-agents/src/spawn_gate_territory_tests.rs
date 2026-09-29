@@ -48,14 +48,9 @@ fn territory_cap_counts_live_and_suspect_node_claims_without_registry_node_field
     let parsed: serde_json::Value = serde_json::from_str(&err).unwrap();
     assert_eq!(parsed["reason"], serde_json::json!("territory_cap"));
     assert_eq!(parsed["count"], 2);
-}
 
-#[test]
-fn territory_cap_refuses_unreadable_claim_store_as_unknown() {
-    let _g = claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _env = EnvPin::take(&["FNO_HOME", "FNO_CLAIMS_ROOT"]);
+    // Same harness, the degrade arm: an unreadable claims root refuses as
+    // unknown, never an implicit zero.
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".fno")).unwrap();
     std::fs::write(dir.path().join(".fno/config.toml"), "schema_version = 1\n").unwrap();

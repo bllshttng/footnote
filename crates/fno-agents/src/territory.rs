@@ -1423,17 +1423,13 @@ path = "/repo/alpha"
             loose["live"], 0,
             "a stale node claim does not count: {rows:?}"
         );
-    }
 
-    #[test]
-    fn unreadable_claim_store_makes_territory_count_unknown() {
-        let _env = env_guard();
+        // Same fixture, the degrade arm: an unreadable claims root answers
+        // unknown, never an implicit zero row.
         let (tmp, cwd, registry) = fixture_env();
         std::fs::create_dir_all(tmp.path().join(".fno")).unwrap();
         std::fs::write(tmp.path().join(".fno/claims"), "not a directory").unwrap();
-
         let rows = territory_rows(&cwd, &registry);
-
         assert_eq!(
             rows.len(),
             1,
@@ -1446,8 +1442,7 @@ path = "/repo/alpha"
         );
         assert!(rows[0]["live"].is_null(), "{rows:?}");
 
-        // The same degrade with no root to resolve at all: unavailable, not
-        // an implicit zero.
+        // And with no root to resolve at all: unavailable, not zero.
         let error = live_node_claims_from(None).unwrap_err();
         assert!(error.0.contains("claims path unavailable"), "{error:?}");
     }

@@ -914,7 +914,7 @@ mod lockfile_tests {
     }
 
     #[test]
-    fn reap_one_refuses_a_fresh_replacement_after_a_stale_scan() {
+    fn replacements_survive_a_stale_reap_scan_and_a_lock_blocked_release() {
         let temp = TempDir::new().unwrap();
         with_claims_root(temp.path(), || {
             let key = "node:reap-race-test";
@@ -944,10 +944,7 @@ mod lockfile_tests {
                 fresh.holder
             );
         });
-    }
 
-    #[test]
-    fn release_waits_for_recovery_and_preserves_a_replacement_holder() {
         let temp = TempDir::new().unwrap();
         with_claims_root(temp.path(), || {
             let key = "node:release-race-test";
@@ -1098,7 +1095,7 @@ mod lockfile_tests {
     }
 
     #[test]
-    fn task_acquire_keeps_an_expired_claim_when_its_session_is_live() {
+    fn task_claims_honour_the_session_witness_through_acquire_and_reap() {
         let temp = TempDir::new().unwrap();
         with_claims_root(temp.path(), || {
             let key = "task:x-session-witness:1.1";
@@ -1228,10 +1225,7 @@ mod lockfile_tests {
                 "acquire did not recheck under lock"
             );
         });
-    }
 
-    #[test]
-    fn task_reap_rechecks_session_liveness_under_recovery_lock() {
         let temp = TempDir::new().unwrap();
         with_claims_root(temp.path(), || {
             let key = "task:x-session-witness:1.2";

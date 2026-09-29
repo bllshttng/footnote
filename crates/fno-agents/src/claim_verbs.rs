@@ -1229,67 +1229,73 @@ mod tests {
     }
 
     #[test]
-    fn native_claim_status_without_root_uses_lockfiles() {
-        let temp = tempfile::TempDir::new().unwrap();
-        with_claims_root(temp.path(), || {
-            let key = "node:native-status-test";
-            assert!(matches!(
-                crate::claims::acquire(
-                    key,
-                    "target-session:test-session",
-                    crate::claims::AcquireOpts {
-                        pid: Some(std::process::id()),
-                        ..Default::default()
-                    }
-                ),
-                crate::claims::AcquireOutcome::Acquired(_)
-            ));
-
-            assert_eq!(
-                run_claim(&["status".into(), key.into(), "--json".into()]),
-                0
-            );
-            assert!(
-                !temp.path().join("graph.db").exists(),
-                "native status must read the lockfile store without opening SQLite"
-            );
-        });
-    }
-
-    #[test]
-    fn native_release_stopped_removes_a_gone_session_claim() {
-        let temp = tempfile::TempDir::new().unwrap();
-        with_claims_root(temp.path(), || {
-            let key = "node:stopped-lockfile-test";
-            assert!(matches!(
-                crate::claims::acquire(
-                    key,
-                    "target-session:stopped-session",
-                    crate::claims::AcquireOpts {
-                        pid: Some(dead_pid()),
-                        ..Default::default()
-                    }
-                ),
-                crate::claims::AcquireOutcome::Acquired(_)
-            ));
-            let claims_dir = crate::claims::claims_dir_for(Some(temp.path())).unwrap();
-            let path = crate::claims::claim_path(key, Some(temp.path())).unwrap();
-            assert!(path.exists());
-
-            assert_eq!(
-                run_claim(&[
-                    "release-stopped".into(),
-                    "--name".into(),
-                    "worker".into(),
-                    "--session".into(),
-                    "stopped-session".into(),
-                    "--claims-dir".into(),
-                    claims_dir.display().to_string(),
-                ]),
-                0
-            );
-            assert!(!path.exists(), "the stopped session's lockfile is released");
-        });
+    fn native_claim_doors_answer_over_lockfiles_without_sqlite() {
+        // Both doors ride the same harness: acquire over the claims root,
+        // run the verb, and prove the answer came from the lockfile (no
+        // graph.db materialized).
+        let rows: Vec<(
+            &str,
+            &str,
+            Option<u32>,
+            Box<dyn Fn(&str, &str, &std::path::Path)>,
+        )> = vec![
+            (
+                "node:native-status-test",
+                "target-session:test-session",
+                Some(std::process::id()),
+                Box::new(|key: &str, _holder: &str, temp: &std::path::Path| {
+                    assert_eq!(
+                        run_claim(&["status".into(), key.into(), "--json".into()]),
+                        0
+                    );
+                    assert!(
+                        !temp.join("graph.db").exists(),
+                        "native status must read the lockfile store without opening SQLite"
+                    );
+                }),
+            ),
+            (
+                "node:stopped-lockfile-test",
+                "target-session:stopped-session",
+                Some(dead_pid()),
+                Box::new(|key: &str, holder: &str, temp: &std::path::Path| {
+                    let claims_dir = crate::claims::claims_dir_for(Some(temp)).unwrap();
+                    let path = crate::claims::claim_path(key, Some(temp)).unwrap();
+                    assert!(path.exists());
+                    let holder_session = holder.rsplit(':').next().unwrap();
+                    assert_eq!(
+                        run_claim(&[
+                            "release-stopped".into(),
+                            "--name".into(),
+                            "worker".into(),
+                            "--session".into(),
+                            holder_session.into(),
+                            "--claims-dir".into(),
+                            claims_dir.display().to_string(),
+                        ]),
+                        0
+                    );
+                    assert!(!path.exists(), "the stopped session's lockfile is released");
+                }),
+            ),
+        ];
+        for (key, holder, pid, run) in rows {
+            let temp = tempfile::TempDir::new().unwrap();
+            with_claims_root(temp.path(), || {
+                assert!(matches!(
+                    crate::claims::acquire(
+                        key,
+                        holder,
+                        crate::claims::AcquireOpts {
+                            pid,
+                            ..Default::default()
+                        }
+                    ),
+                    crate::claims::AcquireOutcome::Acquired(_)
+                ));
+                run(key, holder, temp.path());
+            });
+        }
     }
 
     fn dead_pid() -> u32 {
