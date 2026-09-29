@@ -224,8 +224,7 @@ class EffectStore:
 
         payload: dict[str, Any] = {
             "op": "effect-submit",
-            # isoformat, not model_dump's `Z` suffix: both legs digest the
-            # same expires_at string.
+            # isoformat, not model_dump's `Z` suffix: both legs digest the same string.
             "request": {
                 **request.model_dump(mode="json"),
                 "created_at": request.created_at.isoformat(),
