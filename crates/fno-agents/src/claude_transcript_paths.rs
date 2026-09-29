@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use crate::provider_cap::ClaudePaths;
 
 /// One store hit: `<projects>/*/<id>*.jsonl`.
-struct Hit {
-    path: PathBuf,
+pub(crate) struct Hit {
+    pub(crate) path: PathBuf,
     /// The file name: the stem-identity key across project dirs.
-    name: String,
+    pub(crate) name: String,
 }
 
 /// Every transcript in the store: `<projects>/*/*.jsonl`, sorted by path. A
 /// dotted stem is a sibling artifact (`<uuid>.orphaned-...`), never a
 /// transcript. Built once per batch and shared across the ids, the way the
 /// deleted Python bridge shared its listing.
-fn store_listing(projects_root: &Path) -> Vec<Hit> {
+pub(crate) fn store_listing(projects_root: &Path) -> Vec<Hit> {
     let mut hits = Vec::new();
     let Ok(dirs) = std::fs::read_dir(projects_root) else {
         return hits;
@@ -95,7 +95,7 @@ fn newest(hits: &[&Hit]) -> Option<PathBuf> {
 
 /// One id's answer out of a shared listing, or `None` when the id resolves
 /// to nothing in it.
-fn choose_from(listing: &[Hit], id: &str) -> Option<PathBuf> {
+pub(crate) fn choose_from(listing: &[Hit], id: &str) -> Option<PathBuf> {
     let hits: Vec<&Hit> = listing.iter().filter(|h| h.name.starts_with(id)).collect();
     let first = *hits.first()?;
     if hits.iter().any(|h| h.name != first.name) {
