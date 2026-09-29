@@ -645,42 +645,11 @@ fn ux_shot_backlog_node_detail() {
     write_shot(&frame, "ux-shot-backlog-detail", "the node detail overlay");
 }
 
-// The same three frames under the user's theme (Catppuccin): the panel
-// must stay on the theme's bg with its palette slots - the pale-fill
-// regression shot.
-#[test]
-fn ux_shot_backlog_sideline_column_catppuccin() {
-    use crate::frame_html::write_shot;
-    let mut view = sideline_backlog_view();
-    view.theme = crate::theme::Theme::from_name("catppuccin").0;
-    let frame = view.compose();
-    write_shot(
-        &frame,
-        "ux-shot-backlog-sideline-catppuccin",
-        "the backlog sideline, catppuccin",
-    );
-}
-
-#[test]
-fn ux_shot_backlog_node_detail_catppuccin() {
-    use crate::frame_html::write_shot;
-    let mut view = sideline_backlog_view();
-    view.theme = crate::theme::Theme::from_name("catppuccin").0;
-    if let Some(b) = view.backlog_board.as_mut() {
-        b.detail = Some(node_detail::NodeDetailOverlay {
-            node_id: "x-1".into(),
-            trail: vec![],
-            sel: 0,
-            scroll: 0,
-        });
-    }
-    let frame = view.compose();
-    write_shot(
-        &frame,
-        "ux-shot-backlog-detail-catppuccin",
-        "the node detail overlay, catppuccin",
-    );
-}
+// The same frames under the user's theme (Catppuccin) were evidence shots
+// with no assertion behind them; the palette contract lives in
+// `backlog_panel_cells_carry_distinct_attributes` and the theme's own
+// tests. Removed under the shrink-only test cap: the two variants guarded
+// no contract of their own.
 
 // ----: D6 proof - every edit key works from the board AND the detail ----
 
@@ -997,12 +966,13 @@ fn tag_facet_hides_while_empty_and_shows_with_values() {
 
 // The paint memos must rebuild only when their key moves. A build
 // counter makes the contract mechanical: same key, one build; any key
-// field, a rebuild.
+// field, a rebuild. Both slots answer to the same contract, so one test
+// walks both.
 #[test]
-fn board_body_memo_rebuilds_only_when_the_key_moves() {
+fn memo_rebuilds_only_when_the_key_moves() {
     let b = board_with(board_inputs());
     let builds = std::cell::Cell::new(0);
-    let key = |gen: u64, row: usize| crate::client::backlog_board::BodyKey {
+    let body_key = |gen: u64, row: usize| crate::client::backlog_board::BodyKey {
         gen,
         lane: 0,
         col: 0,
@@ -1013,42 +983,33 @@ fn board_body_memo_rebuilds_only_when_the_key_moves() {
         errors: 0,
         columns: vec!["ready".into()],
     };
+    let detail_key =
+        |mtime: Option<std::time::SystemTime>| crate::client::backlog_board::DetailKey {
+            gen: 1,
+            node: "x-1".into(),
+            sel: None,
+            w: 80,
+            doc: Some(("x-1".into(), "/plans/x-1.md".into(), mtime, String::new())),
+        };
     let build = |builds: &std::cell::Cell<usize>| {
         builds.set(builds.get() + 1);
         (Vec::new(), Vec::new(), None)
     };
-    let _ = b.board_body_cached(key(0, 0), || build(&builds));
-    let _ = b.board_body_cached(key(0, 0), || build(&builds));
+    let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
+    let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
     assert_eq!(builds.get(), 1, "same key reads the memo");
-    let _ = b.board_body_cached(key(0, 1), || build(&builds));
+    let _ = b.board_body_cached(body_key(0, 1), || build(&builds));
     assert_eq!(builds.get(), 2, "a moved cursor rebuilds");
-    let _ = b.board_body_cached(key(1, 1), || build(&builds));
+    let _ = b.board_body_cached(body_key(1, 1), || build(&builds));
     assert_eq!(builds.get(), 3, "a new read rebuilds");
-}
-
-// The detail memo keys on the document identity, so a doc re-read
-// (mtime or node move) must rebuild even with the same node and read.
-#[test]
-fn detail_memo_rebuilds_when_the_doc_identity_moves() {
-    let b = board_with(board_inputs());
-    let builds = std::cell::Cell::new(0);
-    let key = |mtime: Option<std::time::SystemTime>| crate::client::backlog_board::DetailKey {
-        gen: 1,
-        node: "x-1".into(),
-        sel: None,
-        w: 80,
-        doc: Some(("x-1".into(), "/plans/x-1.md".into(), mtime, String::new())),
-    };
-    let build = |builds: &std::cell::Cell<usize>| {
-        builds.set(builds.get() + 1);
-        (Vec::new(), Vec::new(), None)
-    };
-    let _ = b.detail_lines_cached(key(None), || build(&builds));
-    let _ = b.detail_lines_cached(key(None), || build(&builds));
-    assert_eq!(builds.get(), 1, "same identity reads the memo");
+    // The detail slot keys on the document identity: a doc re-read (mtime
+    // or node move) rebuilds even with the same node and read.
+    let _ = b.detail_lines_cached(detail_key(None), || build(&builds));
+    let _ = b.detail_lines_cached(detail_key(None), || build(&builds));
+    assert_eq!(builds.get(), 4, "same identity reads the memo");
     let later = std::time::SystemTime::now();
-    let _ = b.detail_lines_cached(key(Some(later)), || build(&builds));
-    assert_eq!(builds.get(), 2, "a re-read doc rebuilds");
+    let _ = b.detail_lines_cached(detail_key(Some(later)), || build(&builds));
+    assert_eq!(builds.get(), 5, "a re-read doc rebuilds");
 }
 
 // The cheap reading. The window flushes on 30s and the line names
