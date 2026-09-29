@@ -2,7 +2,7 @@
 
 **Set a target and walk away. Say f[no] to mostly done.**
 
-footnote is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin for Claude Code and Codex, with a standalone CLI underneath.
+footnote is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin on any harness that accepts plugins and hooks (Claude Code, Codex, OpenCode, and agy are wired today), with a standalone CLI underneath.
 
 ![The backlog board, running](docs/images/ux-shot-backlog-full-board.png)
 
