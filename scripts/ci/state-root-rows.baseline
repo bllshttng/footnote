@@ -23,7 +23,6 @@
 .update.lock
 agents
 announce-cursors
-approvals.db
 attention
 attest
 backup
@@ -42,15 +41,9 @@ claims
 config.toml
 config.toml.bak*
 config.toml.lock
-decisions.db
-decisions.db-shm
-decisions.db-wal
 decisions.jsonl
 decisions.jsonl.compact
 decisions.jsonl.corrupt
-events.db
-events.db-shm
-events.db-wal
 events.jsonl
 events.jsonl.1
 events.jsonl.ephemeral
@@ -102,9 +95,6 @@ provider-runtime-state.json
 provider-runtime-state.json.update.lock
 providers
 push-stamps
-questions.db
-questions.db-shm
-questions.db-wal
 questions.jsonl
 reclaim
 recovery
