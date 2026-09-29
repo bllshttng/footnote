@@ -237,15 +237,8 @@ pub(crate) async fn preview_with_theme_dir(
     let mut names = taken_names(cwd, theme_dir.as_deref());
     let mut candidates = Vec::new();
     for (source_name, text) in files {
-        let stem = if source_name.starts_with("https://") {
-            source_name.rsplit('/').next().unwrap_or("theme")
-        } else {
-            Path::new(&source_name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("theme")
-        };
-        let parsed = match parse_theme_text(&text, stem) {
+        let stem = source_stem(&source_name);
+        let parsed = match parse_theme_text(&text, &stem) {
             Ok(parsed) => parsed,
             Err(reason)
                 if matches!(source, Source::Folder(_))
@@ -272,6 +265,47 @@ pub(crate) async fn preview_with_theme_dir(
         candidates,
         skipped,
     })
+}
+
+fn source_stem(source_name: &str) -> String {
+    let filename = if source_name.starts_with("https://") {
+        let encoded = source_name.rsplit('/').next().unwrap_or("theme");
+        percent_decode_component(encoded).unwrap_or_else(|| encoded.to_string())
+    } else {
+        source_name.to_string()
+    };
+    Path::new(&filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("theme")
+        .to_string()
+}
+
+fn percent_decode_component(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            let high = hex_nibble(bytes[at + 1])?;
+            let low = hex_nibble(bytes[at + 2])?;
+            decoded.push((high << 4) | low);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn folder_files(folder: &Path) -> Result<Vec<PathBuf>, String> {
@@ -848,6 +882,14 @@ mod tests {
         .unwrap();
         assert_eq!(fno.len(), 1);
         assert_eq!(fno[0].0, "midnight");
+        assert_eq!(
+            source_stem("https://raw.githubusercontent.com/o/r/main/Catppuccin%20Mocha.conf"),
+            "Catppuccin Mocha"
+        );
+        assert_eq!(
+            source_stem("/tmp/Catppuccin Mocha.conf"),
+            "Catppuccin Mocha"
+        );
         let top = parse_theme_text("base = \"#101018\"\nbrand = \"blue\"", "top-level").unwrap();
         assert_eq!(top[0].0, "top-level");
         let top_unknown = parse_theme_text("base = \"#101018\"\nunknown = [\"red\"]", "top-level")

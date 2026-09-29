@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
-static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const DEFAULT_THRESHOLD_MIN: u64 = 10;
 /// Fail-open budget for the fold shell-out; a slow `fno-agents` yields no
