@@ -73,11 +73,11 @@ store.shutdown_keeper(Path(sys.argv[1]))
 ' "$1" 2>/dev/null || true
 }
 
-mkdir -p "$TMP/claude" "$TMP/fno"
+mkdir -p "$TMP/claude" "$TMP/fno/logs"
 # One in-window S1 event so the packet gets past its empty-log guard. The log
-# lives under FNO_HOME, not CLAUDE_DIR (footnote state never sits under .claude/).
+# lives under FNO_HOME/logs, not CLAUDE_DIR (footnote state never sits under .claude/).
 printf '%s | S1 | test | test.md | fixture event\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMP/fno/corrections.log"
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMP/fno/logs/corrections.log"
 
 # Two blocked nodes, one via `status` and one via blocked_count, plus a node
 # that must NOT appear. Seed the store through its stable path anchor.
