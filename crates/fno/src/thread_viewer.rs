@@ -7,9 +7,10 @@ use crate::tree::TabId;
 /// screen pane playing it, and the tab that holds the screen's leaf. A
 /// portal is never a pane and never a tab; the pane is only what plays
 /// now. `row_key` is the channel: the attach id (claude) or the registry
-/// name (every other harness - the command's `id` field); it only ever
-/// holds a key a row answered, and the row match in [`row_for_pane`]
-/// depends on that per-harness keying.
+/// name (every other harness - the command's `id` field); it holds a key a
+/// row answered, or - when a claude seat's screen names no claimable row -
+/// the screen's title marked unclaimed (`vellum?`), which no row answers,
+/// so [`row_for_pane`] resolves no row there.
 #[derive(Clone)]
 pub(crate) struct Portal {
     pub(crate) row_key: String,

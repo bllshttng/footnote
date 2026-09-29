@@ -246,7 +246,7 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
     # Positive control on the same fleet and the same recipient: the live
     # envelope DOES stamp it, so the absence above is the rule and not a
     # crownless fleet or an unresolvable row.
-    assert 'to_rank="L1 fno"' in envelope.wrap_fno_mail(
+    assert 'to_rank="Head of fno"' in envelope.wrap_fno_mail(
         "ping",
         from_="peer",
         to_session="session-king",

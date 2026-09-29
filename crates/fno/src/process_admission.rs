@@ -140,6 +140,8 @@ pub enum AdmissionReason {
     MeasurementUnavailable,
     LockUnavailable,
     EnvOverrideInvalid,
+    /// The machine arm's runaway brake holds: the box itself is failing.
+    MachineRunaway,
 }
 
 /// The result of one pre-spawn decision.
@@ -256,6 +258,7 @@ impl AdmissionDecision {
             AdmissionReason::MeasurementUnavailable => "measurement-unavailable",
             AdmissionReason::LockUnavailable => "lock-unavailable",
             AdmissionReason::EnvOverrideInvalid => "env-override-invalid",
+            AdmissionReason::MachineRunaway => "machine-runaway",
         };
         Some(format!(
             "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}{BYPASS_HINT}",
@@ -364,6 +367,77 @@ fn admission_disabled() -> Result<bool, String> {
     }
 }
 
+/// Where admission looks for the machine arm's runaway brake. Mirrors the
+/// fno-agents writer; `FNO_MACHINE_BRAKE` overrides the full path.
+fn brake_file_path() -> Option<std::path::PathBuf> {
+    if let Some(v) = std::env::var_os("FNO_MACHINE_BRAKE").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(v));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".fno")
+            .join("machine-brake.json"),
+    )
+}
+
+/// The machine arm's runaway brake, honored at admission: an unexpired brake
+/// refuses every spawn and names the group that caused it. A missing,
+/// unreadable, or expired file is ignored - the brake is arm-authored and
+/// self-expiring, and the attributed-process ceiling stays the hard gate.
+fn runaway_brake() -> Option<String> {
+    let text = std::fs::read_to_string(brake_file_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let until = value.get("until_epoch")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now >= until {
+        return None;
+    }
+    let left = until - now;
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unspecified");
+    let group = match value.get("group") {
+        None | Some(serde_json::Value::Null) => "unmeasured".to_string(),
+        Some(group) => format!(
+            "{} x{} (ppid {})",
+            group
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?"),
+            group
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            group
+                .get("ppid")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        ),
+    };
+    Some(format!(
+        "machine runaway brake holds ({left}s left): {reason}; largest group {group}"
+    ))
+}
+
+/// One machine-runaway refusal for whichever scope admits. The brake is a
+/// world fact the arm measured, so it outranks the census read below.
+fn brake_failure(scope: Scope, ceiling: usize, hold: String) -> AdmissionFailure {
+    AdmissionFailure {
+        decision: AdmissionDecision::Refuse {
+            count: None,
+            ceiling,
+            scope,
+            reason: AdmissionReason::MachineRunaway,
+        },
+        detail: hold,
+    }
+}
+
 fn override_failure(scope: Scope, ceiling: usize, detail: String) -> AdmissionFailure {
     AdmissionFailure {
         decision: AdmissionDecision::Refuse {
@@ -457,6 +531,9 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
                 detail,
             ))
         }
+    }
+    if let Some(hold) = runaway_brake() {
+        return Err(brake_failure(Scope::Fleet, DEFAULT_MAX_PROCESSES, hold));
     }
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
@@ -560,6 +637,9 @@ pub fn admit_tab(
         Ok(false) => {}
         Err(detail) => return Err(override_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, detail)),
     }
+    if let Some(hold) = runaway_brake() {
+        return Err(brake_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, hold));
+    }
     let ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
@@ -635,6 +715,9 @@ pub fn admit_pane(
                 detail,
             ))
         }
+    }
+    if let Some(hold) = runaway_brake() {
+        return Err(brake_failure(Scope::Fleet, DEFAULT_MAX_PROCESSES, hold));
     }
     let (fleet_ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
@@ -1476,6 +1559,10 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, CensusFailure> {
 
 #[cfg(test)]
 mod tests {
+    /// The brake tests drive the process-global FNO_MACHINE_BRAKE path; the
+    /// suite runs two threads, so both tests hold this lock end to end.
+    static BRAKE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     /// ESRCH means the pid exited between the listing and the read, so the
@@ -1919,5 +2006,45 @@ mod tests {
             classify_ledger_error(&io::Error::from_raw_os_error(libc::EACCES)),
             CensusFailure::Unread(_)
         ));
+    }
+
+    #[test]
+    fn an_unexpired_brake_refuses_and_an_absent_one_admits_unchanged() {
+        let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brake.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "until_epoch": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 600,
+                "reason": "machine runaway: 10005 processes",
+                "group": {"name": "g i t", "count": 8000, "ppid": 42},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_MACHINE_BRAKE", &path);
+        let failure = admit_fleet().err().expect("brake refuses");
+        match failure.decision() {
+            AdmissionDecision::Refuse {
+                reason: AdmissionReason::MachineRunaway,
+                ..
+            } => {}
+            other => panic!("expected MachineRunaway, got {other:?}"),
+        }
+        assert!(
+            failure.to_string().contains("largest group g i t x8000"),
+            "{}",
+            failure
+        );
+        // The absent-file branch: admission reads byte-for-byte as before.
+        std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
+        let permit = admit_fleet();
+        std::env::remove_var("FNO_MACHINE_BRAKE");
+        assert!(permit.is_ok(), "absent brake admits as before");
     }
 }

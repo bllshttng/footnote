@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.cli import cli, _is_batched_member
+from tests.goldens._door import door_graph
 
 
 runner = CliRunner()
@@ -115,21 +116,21 @@ def test_predicate_empty_string_is_ready():
 
 def test_next_skips_batched_member(graph_file):
     """AC1-EDGE: when the only ready node is a batch member, `next` returns null."""
-    graph_file([_node("ab-aaaa1111", batch="batch-ab12cd34")])
-    result = runner.invoke(cli, ["next", "--all"])
-    assert result.exit_code == 0
-    assert result.stdout.strip() == "null"
+    graph = graph_file([_node("ab-aaaa1111", batch="batch-ab12cd34")])
+    code, out, err = door_graph(graph, "next", "--all")
+    assert code == 0, err
+    assert out.strip() == "null"
 
 
 def test_next_returns_unbatched_sibling(graph_file):
     """`next` still selects a sibling node that is not batched."""
-    graph_file([
+    graph = graph_file([
         _node("ab-aaaa1111", batch="batch-ab12cd34"),
         _node("ab-bbbb2222"),
     ])
-    result = runner.invoke(cli, ["next", "--all"])
-    assert result.exit_code == 0
-    picked = json.loads(result.stdout)
+    code, out, err = door_graph(graph, "next", "--all")
+    assert code == 0, err
+    picked = json.loads(out)
     assert picked is not None
     assert picked["id"] == "ab-bbbb2222"
 
@@ -190,8 +191,9 @@ def test_update_batch_marks_node(graph_file):
     code, out = _native_update(graph, "ab-cccc3333", "--batch", "batch-ffff9999")
     assert code == 0, out
     # The mark now hides it from `next`.
-    picked = runner.invoke(cli, ["next", "--all"]).stdout.strip()
-    assert picked == "null"
+    dcode, dout, derr = door_graph(graph, "next", "--all")
+    assert dcode == 0, derr
+    assert dout.strip() == "null"
 
 
 def test_update_batch_null_clears_mark(graph_file):
@@ -199,6 +201,8 @@ def test_update_batch_null_clears_mark(graph_file):
     graph = graph_file([_node("ab-cccc3333", batch="batch-ffff9999")])
     code, out = _native_update(graph, "ab-cccc3333", "--batch", "null")
     assert code == 0, out
-    picked = json.loads(runner.invoke(cli, ["next", "--all"]).stdout)
+    dcode, dout, derr = door_graph(graph, "next", "--all")
+    assert dcode == 0, derr
+    picked = json.loads(dout)
     assert picked is not None
     assert picked["id"] == "ab-cccc3333"

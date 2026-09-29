@@ -427,7 +427,7 @@ fn cascade_close_parents(entries: &mut [Value], node_id: &str) -> Vec<String> {
 // events, drive audit, retro, plan tail
 // ---------------------------------------------------------------------------
 
-fn emit_event(name: &str, data: Value) {
+pub(crate) fn emit_event(name: &str, data: Value) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
     let Some(space) = crate::paths::space_dir_opt(&cwd) else {
         return;
@@ -1362,7 +1362,7 @@ fn external_backend_selected() -> bool {
     active_backend_name() != "graph"
 }
 
-fn active_backend_name() -> String {
+pub(crate) fn active_backend_name() -> String {
     std::env::var("FNO_TRACKER_BACKEND")
         .ok()
         .filter(|b| !b.trim().is_empty())

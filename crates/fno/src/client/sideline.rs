@@ -988,12 +988,16 @@ impl View {
         }
     }
 
-    /// The king label for line 2 of a card: the crowned row itself shows its
-    /// crown scope; a worker walks its lineage to the first crowned
-    /// ancestor and shows [`crown_display_name`]. No crowned ancestor, or a
-    /// lineage cycle (capped at one step per agent), labels nothing.
+    /// The lead label for line 2 of a card: the crowned row itself shows its
+    /// people title, else its crown scope; a worker walks its lineage to the
+    /// first crowned ancestor and shows [`crown_display_name`]. No crowned
+    /// ancestor, or a lineage cycle (capped at one step per agent), labels
+    /// nothing.
     pub(super) fn king_label(&self, a: &AgentRow) -> Option<String> {
         if a.crown_level.is_some() {
+            if let Some(title) = a.crown_title.as_deref().filter(|t| !t.is_empty()) {
+                return Some(title.to_string());
+            }
             return a.crown_scope.clone();
         }
         let mut parent = lineage_parent(a);

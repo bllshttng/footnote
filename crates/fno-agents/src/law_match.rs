@@ -4028,7 +4028,8 @@ mod scope_tests {
     /// graph) + tmp FNO_REPO_ROOT (journal, evidence root) + a work map.
     /// The env is process-global, so the lock serializes every env-touching
     /// door test; the guard drops after the env restore.
-    static DOOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static DOOR_ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     // Field 2 is the env lock guard, held for its Drop and never read.
     #[allow(dead_code)]

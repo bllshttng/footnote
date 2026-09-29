@@ -197,6 +197,7 @@ pub struct MachineSample {
     pub sessions: Option<Value>,
     pub unresolved: Option<Value>,
     pub top_rss: Option<Value>,
+    pub top_names: Option<Value>,
     pub sessions_error: Option<String>,
     #[serde(skip)]
     pub(crate) procs: Vec<crate::census::ProcRow>,
@@ -268,6 +269,7 @@ pub fn read(
         sessions: None,
         unresolved: None,
         top_rss: None,
+        top_names: None,
         sessions_error: None,
         procs,
         top_cpu: Vec::new(),
@@ -280,6 +282,7 @@ pub fn read(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     sample.top_cpu.truncate(3);
+    sample.top_names = Some(top_name_rows(&sample.procs));
     let mut warnings = Vec::new();
     let live = crate::spawn_gate::live_rows(&home.registry_json(), &mut warnings);
     sample.live_rows = Some(live.len() as u64);
@@ -448,6 +451,45 @@ pub fn sample_id() -> String {
     format!("ms-{}-{}", now_ms(), std::process::id())
 }
 
+/// Top process groups by executable basename: the fold that names a runaway.
+/// `ppid` is the most common parent inside the group, so one fork loop reads
+/// as one line in the sample and in a page body.
+pub fn top_name_rows(procs: &[crate::census::ProcRow]) -> Value {
+    let mut groups: std::collections::HashMap<String, (u64, std::collections::HashMap<u32, u64>)> =
+        Default::default();
+    for row in procs {
+        let name = row
+            .command
+            .split_whitespace()
+            .next()
+            .and_then(|token| token.rsplit('/').next())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let entry = groups.entry(name.to_string()).or_default();
+        entry.0 += 1;
+        *entry.1.entry(row.ppid).or_default() += 1;
+    }
+    let mut rows: Vec<(String, u64, u32)> = groups
+        .into_iter()
+        .map(|(name, (count, parents))| {
+            let ppid = parents
+                .into_iter()
+                .max_by_key(|(pid, n)| (*n, std::cmp::Reverse(*pid)))
+                .map(|(pid, _)| pid)
+                .unwrap_or_default();
+            (name, count, ppid)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(10);
+    json!(rows
+        .into_iter()
+        .map(|(name, count, ppid)| json!({"name": name, "count": count, "ppid": ppid}))
+        .collect::<Vec<_>>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +527,27 @@ mod tests {
             parse_swapusage_mb("total = 18432.00M used = 17080.75M free = 1M"),
             Some((18432.0, 17080.75))
         );
+    }
+
+    #[test]
+    fn top_names_fold_ranks_by_count_folds_paths_and_skips_the_unnamed() {
+        let row =
+            |pid: u32, ppid: u32, command: &str| crate::census::test_proc_row(pid, ppid, command);
+        let procs = vec![
+            row(1, 100, "git status"),
+            row(2, 100, "git diff"),
+            row(3, 200, "git log"),
+            row(4, 100, "ssh host"),
+            row(5, 1, "/usr/bin/rustc main.rs"),
+            row(6, 1, ""),
+        ];
+        let binding = top_name_rows(&procs);
+        let rows = binding.as_array().unwrap();
+        assert_eq!(rows[0]["name"], "git");
+        assert_eq!(rows[0]["count"], 3);
+        assert_eq!(rows[0]["ppid"], 100, "largest parent sub-group wins");
+        assert_eq!(rows[1]["name"], "rustc", "count ties sort by name");
+        assert_eq!(rows[2]["name"], "ssh");
+        assert_eq!(rows.len(), 3, "an empty command names no group");
     }
 }
