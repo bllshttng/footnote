@@ -33,7 +33,7 @@ summary() {
 
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
-mkdir -p "$D/fno/postmortems" "$D/fno/logs" "$D/claude"
+mkdir -p "$D/fno/logs" "$D/fno/postmortems" "$D/claude"
 
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 LOG="$D/fno/logs/corrections.log"

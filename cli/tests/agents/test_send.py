@@ -1757,6 +1757,7 @@ def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
     from fno import paths
     from fno.agents import dispatch as dispatch_mod
     from fno.agents import registry as registry_mod
+    from fno.mail import envelope as envelope_mod
 
     # The Rust renderer reads the registry under the SHARED flock while this
     # fixture holds it EXCLUSIVE for the whole call, so a real render would
@@ -1770,6 +1771,11 @@ def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
         lambda _payload: '<fno_mail from="fno">stub</fno_mail>',
     )
     monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        envelope_mod,
+        "wrap_fno_mail",
+        lambda body, **_kwargs: f'<fno_mail from="fno">{body}</fno_mail>',
+    )
     registry_path = paths.agents_registry_path()
     lock_path = registry_mod._registry_lock_path(registry_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
