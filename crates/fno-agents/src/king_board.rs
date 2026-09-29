@@ -383,7 +383,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // budget, and an unbounded in-process read cannot honor a deadline).
     let graph_path = graph_json_path(&cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    let entries: Option<Vec<Value>> = match budget.source_deadline() {
+    // The graph claims through the budget like every source: its read can
+    // cost real time on a loaded runner (a fresh-store open is fsync-heavy),
+    // and a claim recorded here is what makes a later "budget exhausted"
+    // receipt say "after backlog graph" instead of lying "before any
+    // source" while a source had in fact run.
+    let entries: Option<Vec<Value>> = match budget.start("backlog graph") {
         None => {
             warnings.push("graph not read: board budget exhausted".to_string());
             None
@@ -3342,7 +3347,12 @@ mod tests {
         );
 
         let payload = read_board(&BoardOpts {
-            budget_ms: 2_000,
+            // Room for a loaded runner's graph open: CI measured the
+            // fresh-store read eating the whole pre-reserve budget at
+            // 2,000ms, so no source ever dispatched and the timeout this
+            // test exercises never happened. The stub still outlives the
+            // deadline-minus-reserve bound, so the batch still times out.
+            budget_ms: 10_000,
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
