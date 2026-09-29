@@ -4,12 +4,19 @@
 #
 # Rules (reads existing tags with `git tag -l`; run inside a full checkout):
 # - nightly: version=<src>.dev<yyyymmdd>, tag=nightly (rolling, no v* tag).
-# - rc:      N is one more than the count of v<src>rc* tags; version=<src>rcN.
-# - stable:  version=<src>, tag=v<src>. Refuses (exit 1) while no v<src>rc*
-#            tag exists: stable promotes a candidate.
-# - Any channel refuses (exit 1) when v<src> already exists, naming the
-#   sync-version bump. For stable that same case exits 3: the release already
-#   shipped, which the caller reads as an idempotent no-op, not a failure.
+# - rc:      weekly-cadence math; every candidate gets a fresh patch so no
+#            two weekly rcs share a base (0.4.1rc1, 0.4.2rc1, ...):
+#              no v*rc* tag yet       -> <src>rc1
+#              newest rc base < src   -> <src>rc1     (main synced past it)
+#              newest rc base >= src  -> <base.patch+1>rc1
+# - stable:  promotes the NEWEST v*rc* tag: version = its base, tag=v<base>.
+#            Going by the candidate (not <src>) is what lets a candidate cut
+#            on a later patch than main's __version__ still promote.
+#            Refuses (exit 1) while no v*rc* tag exists: stable promotes a
+#            candidate.
+# - Nightly refuses (exit 1) when v<src> already exists, naming the
+#   sync-version bump. Stable exits 3 on an already-promoted candidate: the
+#   release already shipped, which the caller reads as an idempotent no-op.
 set -euo pipefail
 
 usage="usage: release-version.sh <nightly|rc|stable> <X.Y.Z> <yyyymmdd>"
@@ -31,13 +38,10 @@ case "$channel" in
   *) echo "release-version: channel '${channel}' must be nightly, rc or stable" >&2; exit 2 ;;
 esac
 
-# v<src> already released: stable is an idempotent no-op (exit 3); every other
-# channel is a real refusal naming the version bump.
-if git rev-parse -q --verify "refs/tags/v${src}" >/dev/null; then
-  if [ "$channel" = "stable" ]; then
-    echo "release-version: v${src} is already released - nothing to promote" >&2
-    exit 3
-  fi
+# Nightly is the only channel pinned to src, so it is the only one a released
+# v<src> stops. Stable exits 3 on an already-promoted candidate, and rc's
+# weekly-cadence math below always lands past both.
+if [ "$channel" = "nightly" ] && git rev-parse -q --verify "refs/tags/v${src}" >/dev/null; then
   echo "release-version: v${src} is released; bump main with scripts/release/sync-version.sh <next>" >&2
   exit 1
 fi
@@ -48,17 +52,32 @@ case "$channel" in
     echo "tag=nightly"
     ;;
   rc)
-    count="$(git tag -l "v${src}rc*" | wc -l | tr -d ' ')"
-    n=$((count + 1))
-    echo "version=${src}rc${n}"
-    echo "tag=v${src}rc${n}"
+    newest_rc="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
+    base="$src"
+    if [ -n "$newest_rc" ]; then
+      rc_base="${newest_rc%rc*}"
+      cand="${rc_base#v}"
+      newer="$(printf '%s\n%s\n' "$cand" "$src" | sort -V | tail -1)"
+      if [ "$newer" = "$cand" ]; then
+        base="$(printf '%s' "$cand" | awk -F. -v OFS=. '{$NF += 1; print}')"
+      fi
+    fi
+    echo "version=${base}rc1"
+    echo "tag=v${base}rc1"
     ;;
   stable)
-    if [ -z "$(git tag -l "v${src}rc*")" ]; then
-      echo "release-version: no v${src}rc* tag exists - stable promotes a candidate; cut an rc first" >&2
+    newest_rc="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
+    if [ -z "$newest_rc" ]; then
+      echo "release-version: no v*rc* tag exists - stable promotes a candidate; cut an rc first" >&2
       exit 1
     fi
-    echo "version=${src}"
-    echo "tag=v${src}"
+    version="${newest_rc%rc*}"
+    version="${version#v}"
+    if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+      echo "release-version: v${version} is already released - nothing to promote" >&2
+      exit 3
+    fi
+    echo "version=${version}"
+    echo "tag=v${version}"
     ;;
 esac
