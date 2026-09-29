@@ -602,7 +602,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     };
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
-    assert_eq!(by("king"), "L1 e-0001");
+    assert_eq!(by("lead"), "L1 e-0001");
     assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
 
     // A row whose session id does not match is NOT this event's session,
@@ -754,7 +754,7 @@ fn the_composed_frame_paints_every_field_and_its_action() {
         "session-id",
         "pane",
         "parent",
-        "king",
+        "lead",
     ] {
         assert!(text.contains(label), "the frame never painted {label}");
     }
