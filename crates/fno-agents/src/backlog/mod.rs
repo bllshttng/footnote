@@ -584,7 +584,9 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
 }
 
 fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String> {
-    if !graph.exists() {
+    // An anchor that names the database itself (`--graph .../graph.db`) maps
+    // to itself, so renaming it would retire the live store.
+    if !graph.exists() || database_path(graph) == graph {
         return Ok(());
     }
     let stored_rows: i64 = connection
@@ -1492,6 +1494,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
+        drop(connection);
+        let db = database_path(&graph);
+        drop(open(&db).unwrap());
+        assert!(
+            db.exists(),
+            "an anchor naming the database never retires it"
+        );
+        assert_eq!(
+            read_entries(&graph).unwrap().len(),
+            2,
+            "the store still answers"
+        );
     }
 
     #[test]
