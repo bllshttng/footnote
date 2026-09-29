@@ -73,7 +73,7 @@ pub fn run(_args: &[String]) -> i32 {
 
 /// The whole verdict for one payload: a refusal, or None to allow. A null
 /// payload, a non-Bash tool and a blank command allow.
-fn judge(payload: &Value) -> Option<String> {
+pub(super) fn judge(payload: &Value) -> Option<String> {
     if payload.is_null() {
         return None;
     }
