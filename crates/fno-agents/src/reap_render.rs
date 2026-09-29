@@ -493,6 +493,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         if let Some(unread) = &crowns.unread {
             out.push_str(&format!("  crowns unreadable ({unread})\n"));
         }
+        let revert_verb = if dry_run { "would revert" } else { "reverted" };
+        for r in &crowns.successions_reverted {
+            out.push_str(&format!(
+                "  {revert_verb} succession on {} (heir {} {}: predecessor session restored)\n",
+                r.scope, r.heir_name, r.evidence
+            ));
+        }
+        for reason in &crowns.successions_kept {
+            out.push_str(&format!("  kept succession ({reason})\n"));
+        }
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");
@@ -797,8 +807,14 @@ mod tests {
             }],
             unread: None,
             names_pruned: Vec::new(),
-            successions_reverted: Vec::new(),
-            successions_kept: Vec::new(),
+            successions_reverted: vec![crate::crown_names::RevertedSuccession {
+                scope: "x-dead".to_string(),
+                heir_name: "gone-heir".to_string(),
+                predecessor_name: "king-old".to_string(),
+                predecessor_session: Some("sess-old".to_string()),
+                evidence: "heir row removed".to_string(),
+            }],
+            successions_kept: vec!["x-live: heir row heir-live still busy".to_string()],
         });
         let text = render_reap(&s, false, false);
         assert!(
@@ -811,10 +827,24 @@ mod tests {
             text.contains("kept crown x-live (roster blocked)"),
             "{text}"
         );
+        assert!(
+            text.contains(
+                "reverted succession on x-dead (heir gone-heir heir row removed: predecessor session restored)",
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("kept succession (x-live: heir row heir-live still busy)"),
+            "{text}"
+        );
         let json = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
         assert_eq!(v["crowns"]["vacated"][0]["scope"], "zed");
         assert_eq!(v["crowns"]["kept"][0]["reason"], "roster blocked");
+        assert_eq!(
+            v["crowns"]["successions_reverted"][0]["heir_name"],
+            "gone-heir"
+        );
         // A pass that ran no crown sweep renders null, never a missing key.
         let json = render_reap(&summary(&[]), true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
@@ -837,11 +867,18 @@ mod tests {
             kept: vec![],
             unread: None,
             names_pruned: Vec::new(),
-            successions_reverted: Vec::new(),
+            successions_reverted: vec![crate::crown_names::RevertedSuccession {
+                scope: "x-dead".to_string(),
+                heir_name: "gone-heir".to_string(),
+                predecessor_name: "king-old".to_string(),
+                predecessor_session: Some("sess-old".to_string()),
+                evidence: "heir row removed".to_string(),
+            }],
             successions_kept: Vec::new(),
         });
         let text = render_reap(&s, false, true);
         assert!(text.contains("would vacate crown zed"), "{text}");
+        assert!(text.contains("would revert succession"), "{text}");
     }
 
     /// The doc's key list: every backticked snake_case token in the first
