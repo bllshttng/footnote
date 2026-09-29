@@ -719,13 +719,15 @@ describe("opencode hooks.json host", () => {
       join(import.meta.dir, "..", "..", "src", "fno", "harness_identity.py"),
       "utf8",
     )
-    // Only the marker tables themselves (HARNESS_SESSION_MARKERS,
-    // LEGACY_HARNESS_SESSION_MARKERS, SELF_SET_HARNESS_MARKERS), not the
-    // wider scrub lists further down the module.
-    const tables = py.split("\n").slice(116, 155).join("\n")
+    // The marker tables themselves (HARNESS_SESSION_MARKERS,
+    // LEGACY_HARNESS_SESSION_MARKERS, SELF_SET_HARNESS_MARKERS) plus the
+    // extra identity table further down; TARGET_SESSION_ID stays out (fno's
+    // own plumbing, legitimately inherited by a launched worker).
+    const tables = py.split("\n").slice(116, 191).join("\n")
     const names = new Set()
     for (const m of tables.matchAll(/\("([A-Z_]+)", "[a-z]+"\)/g)) names.add(m[1])
     names.delete("OPENCODE_SESSION_ID")
+    names.delete("TARGET_SESSION_ID")
     expect(names.size).toBeGreaterThan(4)
     for (const name of names) {
       expect(FOREIGN_SESSION_MARKERS).toContain(name)

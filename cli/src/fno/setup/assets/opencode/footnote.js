@@ -40,7 +40,7 @@
 //
 // If the gate refuses, a plain native OpenCode session is unaffected.
 
-import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { execFile } from "node:child_process"
 
@@ -222,8 +222,10 @@ function makeHandler(io, dir) {
           return
         }
 
-        // 2. Synthesize the transcript loop-check reads.
+        // 2. Synthesize the transcript loop-check reads. A fresh repo has
+        // no .fno/ yet; the gate never fails on its own scratch dir.
         try {
+          mkdirSync(join(dir, ".fno"), { recursive: true })
           writeFileSync(synth, synthesizeTranscript(items))
         } catch (e) {
           console.error(`[footnote] cannot write synth transcript: ${e}; leaving session idle`)
@@ -298,6 +300,7 @@ function makeHandler(io, dir) {
     async function distressScan(sid, synth, items) {
       try {
         if (!items) return
+        mkdirSync(join(dir, ".fno"), { recursive: true })
         writeFileSync(synth, synthesizeTranscript(items))
         const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
         await io.run(
@@ -364,6 +367,16 @@ const FOREIGN_SESSION_MARKERS = [
   "GEMINI_SESSION_ID",
   "CLAUDE_SESSION_ID",
   "CLAUDECODE",
+  // The extra identity table in harness_identity.py (_EXTRA_IDENTITY_NAMES)
+  // minus fno's own TARGET_SESSION_ID: live-journey finding - inherited
+  // CODEX_COMPANION_* names resolved a clean opencode session as claude.
+  "CLAUDECODE_SESSION_ID",
+  "HERMES_SESSION_ID",
+  "CODEX_CI",
+  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+  "CODEX_SHELL",
+  "CODEX_COMPANION_SESSION_ID",
+  "CODEX_COMPANION_TRANSCRIPT_PATH",
 ]
 
 /** Resolve the plugin root the hooks.json lives under: env hints first,
