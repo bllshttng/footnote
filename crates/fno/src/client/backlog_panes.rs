@@ -191,7 +191,9 @@ pub(crate) fn paint(
     });
     // The scroll rides after the memo read (a skip over the cached lines).
     let scroll = b.detail.as_ref().map(|d| d.scroll).unwrap_or(0);
-    let dfollow = dfollow_pre.map(|i| i.saturating_sub(scroll));
+    let dfollow_pre = dfollow_pre.map(|i| i.saturating_sub(scroll));
+    // The detail pane wears its follow line only while it holds focus.
+    let dfollow = if focus_pane { dfollow_pre } else { None };
     let detail_chrome = chrome::Chrome::new(
         format!("details \u{b7} {node}"),
         crate::popup::Anchor::Center,
