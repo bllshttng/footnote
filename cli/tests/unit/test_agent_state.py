@@ -173,17 +173,12 @@ def _clear_harness_env(monkeypatch):
 
 def test_harness_detection_defaults_to_claude(tmp_path, monkeypatch):
     """harness defaults to claude when no identity resolves and the walk
-    answers None."""
+    answers None; it honors the walk when it answers codex. The plugin-root
+    sniffs this replaces are gone."""
     _clear_harness_env(monkeypatch)
     monkeypatch.setattr("fno.agent.state.resolve_session_harness", lambda from_pid=None: None)
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.harness == "claude"
-
-
-def test_harness_detection_falls_back_to_the_process_walk(tmp_path, monkeypatch):
-    """No owned marker + a walk that answers codex resolves codex; the
-    plugin-root sniffs this replaces are gone."""
-    _clear_harness_env(monkeypatch)
     monkeypatch.setattr(
         "fno.agent.state.resolve_session_harness", lambda from_pid=None: "codex"
     )
@@ -193,17 +188,12 @@ def test_harness_detection_falls_back_to_the_process_walk(tmp_path, monkeypatch)
 
 def test_harness_detection_reads_opencode_marker(tmp_path, monkeypatch):
     """Only OPENCODE_SESSION_ID in the env resolves opencode - the case the
-    old allow-list mislabeled as claude."""
+    old allow-list mislabeled as claude. An EMPTY foreign marker is not an
+    identity, so opencode still resolves."""
     _clear_harness_env(monkeypatch)
     monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_x")
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.harness == "opencode"
-
-
-def test_harness_detection_opencode_marker_beats_empty_foreign_marker(tmp_path, monkeypatch):
-    """An EMPTY foreign marker is not an identity: opencode still resolves."""
-    _clear_harness_env(monkeypatch)
-    monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_x")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "")
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.harness == "opencode"

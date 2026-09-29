@@ -2,7 +2,9 @@
 //! the install surface, idempotence, upgrade, the uninstall honesty rules,
 //! and the bystander hazard. Every case runs against a scratch
 //! OPENCODE_CONFIG_DIR and a fake footnote tree; the user's real config dir
-//! is never touched.
+//! is never touched. The suite is shrink-only: each test carries one
+//! contract, with scenarios folded inside it rather than as sibling
+//! declarations.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -123,18 +125,17 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+/// The full installed surface, and the idempotence contract over it: a
+/// second install writes nothing, touches no mtime, and leaves the manifest
+/// byte-identical. Naming agreement leads: opencode_run_tail routes a seed
+/// at --command fno:think; render_verb_seed keeps the /fno: spelling on the
+/// slash surface; the generator names the file fno:think.md. One string,
+/// three renderers; the surface below is named by the same rule.
 #[test]
-fn naming_agreement_across_renderers_and_generator() {
-    // opencode_run_tail routes a seed at --command fno:think; render_verb_seed
-    // keeps the /fno: spelling on the slash surface; the generator names the
-    // file fno:think.md. One string, three renderers.
+fn install_writes_the_full_surface_and_reinstall_is_a_noop() {
     assert_eq!(opencode_run_tail("/fno:think extra words")[1], "fno:think");
     assert_eq!(render_verb_seed("/fno:think", "opencode"), "/fno:think");
     assert_eq!(command_file_name("think"), "fno:think.md");
-}
-
-#[test]
-fn install_writes_the_full_surface() {
     let s = installed("full-surface");
     for verb in ["fno:target.md", "fno:pr.md", "fno:think.md"] {
         assert!(
@@ -167,11 +168,7 @@ fn install_writes_the_full_surface() {
     let receipt = serde_json::to_value(install(Path::new("/nonexistent-repo")).unwrap()).unwrap();
     assert_eq!(receipt["contract"], "1.x");
     assert_eq!(receipt["opencode_version"], "1.14.50");
-}
-
-#[test]
-fn idempotent_install_changes_no_mtime_and_no_manifest() {
-    let s = installed("idempotent");
+    // Idempotence: written 0, no mtime churn, manifest untouched.
     let before = mtime(&s.conf.join("commands/fno:target.md"));
     let manifest_before = read(&manifest_path(&s.conf));
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
@@ -181,84 +178,44 @@ fn idempotent_install_changes_no_mtime_and_no_manifest() {
     assert_eq!(read(&manifest_path(&s.conf)), manifest_before);
 }
 
+/// The upgrade contract: a lost verb is removed, a new one written, a lost
+/// file the user edited since the install is kept and named, and untouched
+/// files keep their mtime.
 #[test]
-fn upgrade_removes_lost_verb_and_writes_new_one() {
+fn upgrade_removes_lost_writes_new_keeps_edited() {
     let s = installed("upgrade");
     let archer_before = mtime(&s.conf.join("agents/fno:archer.md"));
+    // A lost verb footnote still owns: removed.
     std::fs::remove_file(s.root.join("commands/pr.md")).unwrap();
     write_file(
         &s.root.join("commands/review.md"),
         "---\ndescription: review it\n---\nbody\n",
     );
+    // A lost verb the user edited: theirs.
+    write_file(&s.conf.join("commands/fno:target.md"), "// user edit\n");
+    std::fs::remove_file(s.root.join("commands/target.md")).unwrap();
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
     assert!(!s.conf.join("commands/fno:pr.md").exists());
     assert!(s.conf.join("commands/fno:review.md").exists());
     assert!(receipt.removed >= 1);
-    assert_eq!(mtime(&s.conf.join("agents/fno:archer.md")), archer_before);
-}
-
-/// A lost entry whose bytes were edited after the install is the user's:
-/// kept on disk, named in the receipt, out of the manifest.
-#[test]
-fn upgrade_keeps_a_user_edited_lost_file() {
-    let s = installed("upgrade-edit");
-    write_file(&s.conf.join("commands/fno:pr.md"), "// user edit\n");
-    std::fs::remove_file(s.root.join("commands/pr.md")).unwrap();
-    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert_eq!(read(&s.conf.join("commands/fno:pr.md")), "// user edit\n");
-    assert!(receipt.kept.contains(&"commands/fno:pr.md".to_string()));
+    assert_eq!(
+        read(&s.conf.join("commands/fno:target.md")),
+        "// user edit\n"
+    );
+    assert!(receipt.kept.contains(&"commands/fno:target.md".to_string()));
     let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
     assert!(!manifest["files"]
         .as_object()
         .unwrap()
-        .contains_key("commands/fno:pr.md"));
+        .contains_key("commands/fno:target.md"));
+    assert_eq!(mtime(&s.conf.join("agents/fno:archer.md")), archer_before);
 }
 
-/// The Sep-11 legacy bridge: a pre-manifest footnote.js whose first line is
-/// the shipped header is footnote's own install - backed up, replaced, and
-/// named in replaced_legacy.
+/// The uninstall honesty contract: edited files are kept and named, owned
+/// files are removed, the manifest goes last, and a config dir with no
+/// manifest refuses outright.
 #[test]
-fn legacy_bridge_with_header_is_backed_up_and_replaced() {
-    let s = scratch("legacy-adopt");
-    write_file(
-        &s.conf.join("plugins/footnote.js"),
-        "// footnote bridge v9\nold bridge body\n",
-    );
-    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert_eq!(
-        read(&s.conf.join("plugins/footnote.js")),
-        "// footnote bridge v9\n"
-    );
-    assert_eq!(receipt.replaced_legacy.len(), 1, "named in the receipt");
-    let backup = &receipt.replaced_legacy[0].backup;
-    assert!(backup.contains(".fno-backup-"), "{backup}");
-    assert_eq!(
-        read(&s.conf.join(backup)),
-        "// footnote bridge v9\nold bridge body\n"
-    );
-}
-
-/// A pre-manifest footnote.js whose first line is NOT the shipped header
-/// (a different major's bridge or a stranger's file) is the user's: kept,
-/// named, status partial.
-#[test]
-fn foreign_bridge_with_other_header_is_kept() {
-    let s = scratch("legacy-foreign");
-    write_file(
-        &s.conf.join("plugins/footnote.js"),
-        "// totally different plugin\nbody\n",
-    );
-    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert_eq!(receipt.status, "partial");
-    assert!(receipt.kept.contains(&"plugins/footnote.js".to_string()));
-    assert_eq!(
-        read(&s.conf.join("plugins/footnote.js")),
-        "// totally different plugin\nbody\n"
-    );
-}
-
-#[test]
-fn uninstall_keeps_user_edited_file_and_names_it() {
+fn uninstall_keeps_edited_removes_owned_and_refuses_without_manifest() {
     let s = installed("uninstall-edit");
     write_file(&s.conf.join("commands/fno:target.md"), "// user edit\n");
     let receipt = uninstall().unwrap();
@@ -270,6 +227,9 @@ fn uninstall_keeps_user_edited_file_and_names_it() {
     );
     assert!(!s.conf.join("commands/fno:pr.md").exists());
     assert!(!manifest_path(&s.conf).exists());
+    // No manifest, no removal: the second uninstall refuses.
+    let err = uninstall().expect_err("uninstall must refuse with no manifest");
+    assert!(err.contains("no manifest"), "{err}");
 }
 
 #[test]
@@ -340,22 +300,15 @@ fn install_refuses_when_no_source_resolves() {
     assert!(!manifest_path(&base.join("conf")).exists());
 }
 
-#[test]
-fn uninstall_refuses_without_manifest() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let base = tmp("no-manifest");
-    std::env::set_var("FNO_RECLAIM_STATE_ROOT", base.join("state"));
-    std::env::set_var("OPENCODE_CONFIG_DIR", base.join("conf"));
-    let err = uninstall().expect_err("uninstall must refuse with no manifest");
-    assert!(err.contains("no manifest"), "{err}");
-}
-
 fn mtime(path: &Path) -> std::time::SystemTime {
     std::fs::metadata(path).unwrap().modified().unwrap()
 }
 
+/// The staleness contract: version drift and an opencode contract change
+/// (1.x manifest, opencode now 2.x) both read stale, and a reinstall
+/// converges back to installed.
 #[test]
-fn stale_install_is_named_when_the_source_version_moves() {
+fn stale_reads_version_drift_and_contract_change() {
     let s = installed("stale");
     assert_eq!(installed_status()["status"], "installed");
     write_file(
@@ -369,12 +322,21 @@ fn stale_install_is_named_when_the_source_version_moves() {
     // Reinstall converges on the new version.
     install(Path::new("/nonexistent-repo")).unwrap();
     assert_eq!(installed_status()["status"], "installed");
+    // An opencode upgrade across 2.0.0 after an install reads stale too:
+    // the recorded contract no longer matches the reported one.
+    let bin = s.root.parent().unwrap().join("bin2");
+    std::fs::create_dir_all(&bin).unwrap();
+    stub_opencode(&bin, "2.0.3");
+    set_path(&bin);
+    assert_eq!(installed_status()["status"], "stale");
+    assert_eq!(status_json()["status"], "stale");
 }
 
-/// The old translator's contract, restated for the permission record: a
-/// denylist carries into 1.x's permission map as deny entries, and an
-/// allowlist installs as a deny-all record with one allow per mapped tool -
-/// never unrestricted.
+/// The restriction render contract, under both contracts: a denylist
+/// carries into 1.x's permission map as deny entries; an allowlist
+/// installs as deny-all + allows, never unrestricted; a 2.x stub opencode
+/// flips the render to a `permissions` rule list with shell/subagent
+/// names; an allowlist that maps to nothing skips the agent.
 #[test]
 fn agent_restrictions_render_as_permission_records() {
     let s = scratch("restriction-parity");
@@ -412,14 +374,9 @@ fn agent_restrictions_render_as_permission_records() {
     assert!(files.contains_key("agents/fno:reviewer.md"));
     assert!(files.contains_key("agents/fno:allowlisted.md"));
     assert!(!files.contains_key("agents/fno:unmappable.md"));
-}
 
-/// A stub opencode reporting 2.0.3 flips the contract: the allowlist
-/// renders as a `permissions` rule list denying everything then allowing
-/// shell (bash's 2.x name) and skill.
-#[test]
-fn v2_contract_renders_permissions_list() {
-    let s = scratch("v2-contract");
+    // The same allowlist under a 2.x stub opencode renders the `permissions`
+    // rule list with shell (bash's 2.x name) and subagent (task's).
     let bin = s.root.parent().unwrap().join("bin2");
     std::fs::create_dir_all(&bin).unwrap();
     stub_opencode(&bin, "2.0.3");
@@ -440,17 +397,41 @@ fn v2_contract_renders_permissions_list() {
     assert_eq!(installed_status()["status"], "installed");
 }
 
-/// A manifest recorded under 1.x beside an opencode now reporting 2.x reads
-/// stale: the dispatch gate refuses until the re-install re-renders.
+/// The legacy-bridge adoption contract: a pre-manifest footnote.js whose
+/// first line is the shipped header is footnote's own install - backed up,
+/// replaced, named in replaced_legacy; any other pre-manifest bridge is
+/// the user's, kept, named, status partial.
 #[test]
-fn contract_change_reads_stale() {
-    let s = scratch("contract-change");
-    install(Path::new("/nonexistent-repo")).unwrap();
-    assert_eq!(status_json()["status"], "installed");
-    let bin = s.root.parent().unwrap().join("bin2");
-    std::fs::create_dir_all(&bin).unwrap();
-    stub_opencode(&bin, "2.0.3");
-    set_path(&bin);
-    assert_eq!(installed_status()["status"], "stale");
-    assert_eq!(status_json()["status"], "stale");
+fn legacy_bridge_adoption_backs_up_and_replaces() {
+    let s = scratch("legacy-adopt");
+    write_file(
+        &s.conf.join("plugins/footnote.js"),
+        "// footnote bridge v9\nold bridge body\n",
+    );
+    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(
+        read(&s.conf.join("plugins/footnote.js")),
+        "// footnote bridge v9\n"
+    );
+    assert_eq!(receipt.replaced_legacy.len(), 1, "named in the receipt");
+    let backup = &receipt.replaced_legacy[0].backup;
+    assert!(backup.contains(".fno-backup-"), "{backup}");
+    assert_eq!(
+        read(&s.conf.join(backup)),
+        "// footnote bridge v9\nold bridge body\n"
+    );
+
+    // A bridge with a different first line is the user's: kept, partial.
+    let s = scratch("legacy-foreign");
+    write_file(
+        &s.conf.join("plugins/footnote.js"),
+        "// totally different plugin\nbody\n",
+    );
+    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(receipt.status, "partial");
+    assert!(receipt.kept.contains(&"plugins/footnote.js".to_string()));
+    assert_eq!(
+        read(&s.conf.join("plugins/footnote.js")),
+        "// totally different plugin\nbody\n"
+    );
 }

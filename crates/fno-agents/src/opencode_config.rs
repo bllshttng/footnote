@@ -643,10 +643,7 @@ mod tests {
         assert_eq!(strip_comments(third).trim(), "\"fno\"");
         let after = &text[elements[2].1..];
         assert!(strip_comments(after).trim_start().starts_with("],"));
-    }
-
-    #[test]
-    fn classify_maps_omo_and_stranger_specs() {
+        // Classification of the scanned entries: omo, stranger, innocent.
         assert_eq!(
             classify_spec("oh-my-openagent@latest"),
             Some(FindingKind::Omo)
@@ -657,26 +654,24 @@ mod tests {
             classify_spec("footnote@latest"),
             Some(FindingKind::Stranger)
         );
+        // The name sits mid-path in a real file: entry.
         assert_eq!(
             classify_spec("file:/x/oh-my-openagent/dist/index.js"),
             Some(FindingKind::Omo)
         );
         assert_eq!(classify_spec("opencode-antigravity-auth"), None);
-    }
-
-    #[test]
-    fn v2_object_entries_classify_by_package() {
-        let text = r#"{
+        // The 2.x object form classifies by its `package` value.
+        let v2 = r#"{
   "plugins": [
     { "package": "oh-my-openagent" },
     "opencode-acme-plugin"
   ]
 }"#;
-        let Some((_s, _e, elements)) = scan_plugin_array(text) else {
-            panic!("array not found");
+        let Some((_s, _e, v2e)) = scan_plugin_array(v2) else {
+            panic!("v2 array not found");
         };
-        assert_eq!(elements.len(), 2);
-        let (spec, is_object) = element_spec(&text[elements[0].0..elements[0].1]).unwrap();
+        assert_eq!(v2e.len(), 2);
+        let (spec, is_object) = element_spec(&v2[v2e[0].0..v2e[0].1]).unwrap();
         assert_eq!(spec, "oh-my-openagent");
         assert!(is_object);
         assert_eq!(classify_spec(&spec), Some(FindingKind::Omo));
