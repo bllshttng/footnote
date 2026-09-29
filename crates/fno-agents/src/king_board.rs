@@ -97,7 +97,7 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 /// The unplanned queue's ready source answers in-process now; the label
 /// names the function, the way `agents claim list` labels its source.
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
-pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
+pub(crate) const SRC_WORKED: &str = "backlog::worked::json_rows (-J)";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
 /// The driver feed: registry rows that target a node. In-process,
 /// like SRC_READY; the label names the mechanism, not a command.
@@ -588,25 +588,22 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 run_json(cmd, &cwd, bound)
             })
         });
-        // The worked read is a full fno-py cold start plus fleet roster read,
-        // so it rides the concurrent section too: its join waits below, after
-        // the other subprocess threads are already running, and only the
-        // ready thread (its one consumer) waits for the result.
+        // The worked read answers in-process now: the authority is native
+        // (backlog::worked), and the Python leg it used to shell out to is a
+        // refusing tombstone (x-4d8d). It still rides the concurrent section:
+        // the roster fold is real work, and only the ready thread (its one
+        // consumer) waits for the result.
         let t_worked = s_worked.map(|dl| {
-            let cwd = cwd_for_threads.clone();
             let spent_err = spent_err.clone();
             s.spawn(move || {
                 let bound = Budget::spawn_bound(dl);
                 if bound.is_zero() {
                     return SourceRead::over_budget(spent_err);
                 }
-                let mut cmd = fno_py_cmd();
-                cmd.extend([
-                    "backlog".to_string(),
-                    "worked".to_string(),
-                    "--json".to_string(),
-                ]);
-                run_json(cmd, &cwd, bound)
+                match crate::backlog::worked::json_rows() {
+                    Ok(rows) => SourceRead::ok(Value::Array(rows)),
+                    Err(reason) => SourceRead::err(format!("worked: {reason}")),
+                }
             })
         });
         let t_prs = s_prs.map(|dl| {

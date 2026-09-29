@@ -959,6 +959,50 @@ fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>,
 // The verb
 // ---------------------------------------------------------------------------
 
+/// The `--json` rows, in-process: the same payload `run --json` prints,
+/// without a process. The king board reads this directly because the Python
+/// worked leg is a refusing tombstone (x-4d8d).
+pub(crate) fn json_rows() -> Result<Vec<Value>, String> {
+    let graph = super::settings::graph_path();
+    // Strict, like the python twin's read_graph_strict: a corrupt graph is
+    // an unreadable authority, never an empty fleet.
+    let entries = crate::graph_store::read_rows_strict(&graph)
+        .map_err(|_| "the graph is unreadable".to_string())?;
+    let worked = live_worked_node_ids(&entries)?;
+    let by_id: BTreeMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
+        .collect();
+    Ok(worked
+        .iter()
+        .map(|(id, workers)| {
+            let entry = by_id.get(id.as_str()).copied();
+            let mut phases: Vec<&str> = Vec::new();
+            if let Some(sessions) = entry
+                .and_then(|e| e.get("sessions"))
+                .and_then(Value::as_array)
+            {
+                for row in sessions {
+                    let Some(phase) = row.get("phase").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if is_open_phase_row(row, phase) && !phases.contains(&phase) {
+                        phases.push(phase);
+                    }
+                }
+            }
+            json!({
+                "id": id,
+                "status": entry
+                    .and_then(|e| e.get("status").and_then(Value::as_str))
+                    .unwrap_or("unknown"),
+                "workers": workers,
+                "phases": phases,
+            })
+        })
+        .collect())
+}
+
 pub fn run(args: &[String]) -> i32 {
     let mut json_output = false;
     for arg in args {
@@ -974,9 +1018,22 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
     }
+    if json_output {
+        return match json_rows() {
+            Ok(rows) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+                );
+                0
+            }
+            Err(reason) => {
+                eprintln!("Error: worked authority unavailable: {reason}");
+                1
+            }
+        };
+    }
     let graph = super::settings::graph_path();
-    // Strict, like the python twin's read_graph_strict: a corrupt graph is
-    // an unreadable authority (exit 1), never an empty fleet.
     let Ok(entries) = crate::graph_store::read_rows_strict(&graph) else {
         eprintln!("Error: worked authority unavailable: the graph is unreadable");
         return 1;
@@ -993,41 +1050,6 @@ pub fn run(args: &[String]) -> i32 {
         .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
         .collect();
 
-    if json_output {
-        let rows: Vec<Value> = worked
-            .iter()
-            .map(|(id, workers)| {
-                let entry = by_id.get(id.as_str()).copied();
-                let mut phases: Vec<&str> = Vec::new();
-                if let Some(sessions) = entry
-                    .and_then(|e| e.get("sessions"))
-                    .and_then(Value::as_array)
-                {
-                    for row in sessions {
-                        let Some(phase) = row.get("phase").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        if is_open_phase_row(row, phase) && !phases.contains(&phase) {
-                            phases.push(phase);
-                        }
-                    }
-                }
-                json!({
-                    "id": id,
-                    "status": entry
-                        .and_then(|e| e.get("status").and_then(Value::as_str))
-                        .unwrap_or("unknown"),
-                    "workers": workers,
-                    "phases": phases,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-        );
-        return 0;
-    }
     for (id, workers) in &worked {
         println!(
             "{id}  {}  {}",
@@ -1043,4 +1065,31 @@ fn worked_status<'a>(by_id: &BTreeMap<&str, &'a Value>, id: &str) -> &'a str {
         .get(id)
         .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // x-4d8d: the king board reads this fold in-process, never the
+    // tombstoned Python leg. An all-terminal graph answers Ok(empty)
+    // without consulting the roster, so the native read is provable
+    // hermetically under a pinned state dir.
+    #[test]
+    fn json_rows_answers_ok_on_an_all_terminal_graph() {
+        let _guard = crate::claims::test_env_lock();
+        let prior = std::env::var_os("FNO_STATE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        std::env::set_var("FNO_STATE_DIR", dir.path());
+        let graph = crate::backlog::settings::graph_path();
+        crate::graph_store::seed_rows(&graph, &[json!({"id": "x-ffff", "status": "done"})])
+            .unwrap();
+        let rows = json_rows().expect("the native worked fold answers");
+        assert!(rows.is_empty());
+        match prior {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+    }
 }
