@@ -76,6 +76,12 @@ impl Scratch {
             .env("FNO_CLAUDE_DAEMON_DIR", self.0.join("iso-daemon"))
             .env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"))
             .env("FNO_CLAIMS_ROOT", &home)
+            // The FNO_* strip above removed any inherited FNO_BIN; a scratch
+            // Python leg (claims, the event store) resolves its native
+            // writer through it, and a runner with no `fno` on PATH would
+            // answer EventStoreUnavailable. The test's own binary IS a real
+            // fno, so pin it explicitly.
+            .env("FNO_BIN", env!("CARGO_BIN_EXE_fno"))
             .env(
                 "FNO_MUX_ADMISSION_NAMESPACE",
                 self.0.file_name().unwrap_or_default(),
@@ -85,12 +91,22 @@ impl Scratch {
                 self.0.join("iso-cfg").join("settings.json"),
             )
             .env("FNO_E2E", "1")
-            .env("FNO_PROCESS_ADMISSION_MAX", "512");
+            .env("FNO_PROCESS_ADMISSION_MAX", "512")
+            // The events store resolves the native binary via FNO_BIN. A
+            // uv-bootstrapped python CLI inside HOME computes its repo root
+            // from the tools tree, finds no checkout build there, and PATH
+            // here carries no `fno` - the passthrough is the only channel.
+            .env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         // A server this command autospawns inherits the env and passes
         // it to every `fno-agents-worker` keeper it launches, so the keeper's
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
         cmd.envs(test_owner::self_owner_env());
+        // A verb that delegates to the Python CLI (claims, events) resolves
+        // its native event-store writer through FNO_BIN first. Without this
+        // the installed copy falls back to PATH, which carries no `fno` on a
+        // CI runner, and the write dies with EventStoreUnavailable.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         if let Some(worker) = store_worker() {
             cmd.env("FNO_AGENTS_WORKER", worker);
         }
@@ -126,6 +142,9 @@ impl Scratch {
         for (k, v) in test_owner::self_owner_env() {
             cmd.env(k, v);
         }
+        // Same contract as isolate_command: the Python delegate needs the
+        // native writer spelled out, not hoped for on PATH.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         if let Some(worker) = store_worker() {
             cmd.env("FNO_AGENTS_WORKER", worker);
         }

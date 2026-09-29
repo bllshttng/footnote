@@ -2,7 +2,8 @@
 # tests/ci/test_release_version.sh
 #
 # Table test for the release version math: sync-version.sh's pre-release
-# shapes (AC3/AC4) and release-version.sh's channel/tag rules (AC1/AC2).
+# shapes and release-version.sh's channel/tag rules (nightly dev stamp,
+# weekly-cadence rc patch bumps, stable promoting the newest candidate).
 # Both run against a throwaway skeleton under mktemp -d; the real checkout
 # is only read. Needs git on PATH.
 set -uo pipefail
@@ -134,15 +135,25 @@ check_rc "nightly exits 0" "$rc" "0"
 grep -q '^version=0.4.0.dev20260925$' "$work/o" && grep -q '^tag=nightly$' "$work/o"
 check "nightly prints version=0.4.0.dev20260925 and tag=nightly" $?
 
-# AC1: rc N is one more than the existing v<src>rc* tag count.
+# Stable without any candidate refuses; no rc tag exists yet, so the refusal
+# is global, not version-scoped.
+run "$work/o" "$work/e" rver stable 0.6.0 20260925
+rc=$?
+check_rc "stable with no v*rc* tag exits 1" "$rc" "1"
+grep -q "cut an rc first" "$work/e"
+check "stable refusal names the missing candidate" $?
+
+# Weekly-cadence rc math: a fresh candidate base, never rc2..rcN on one base.
+# The newest candidate's base is past src, so the patch bumps (0.4.1rc1).
 git -C "$rv" tag v0.4.0rc1
 run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
 check_rc "rc exits 0" "$rc" "0"
-grep -q '^version=0.4.0rc2$' "$work/o" && grep -q '^tag=v0.4.0rc2$' "$work/o"
-check "rc after v0.4.0rc1 prints version=0.4.0rc2 and tag=v0.4.0rc2" $?
+grep -q '^version=0.4.1rc1$' "$work/o" && grep -q '^tag=v0.4.1rc1$' "$work/o"
+check "rc after v0.4.0rc1 prints version=0.4.1rc1 and tag=v0.4.1rc1" $?
 
-# AC2: a released v<src> refuses every non-stable channel, naming the bump.
+# A released v<src> refuses nightly only. rc keeps cutting: the patch bump
+# puts every weekly candidate past the released base.
 git -C "$rv" tag v0.4.0
 run "$work/o" "$work/e" rver nightly 0.4.0 20260925
 rc=$?
@@ -151,27 +162,45 @@ grep -q "sync-version" "$work/e"
 check "refusal names the sync-version bump" $?
 run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
-check_rc "rc at a released v0.4.0 exits 1" "$rc" "1"
+check_rc "rc at a released v0.4.0 exits 0" "$rc" "0"
+grep -q '^tag=v0.4.1rc1$' "$work/o"
+check "rc still prints v0.4.1rc1 past the released base" $?
 
-# Stable: idempotent no-op once v<src> exists.
+# Stable promotes the newest candidate; its base is released -> idempotent 3.
 run "$work/o" "$work/e" rver stable 0.4.0 20260925
 rc=$?
-check_rc "stable at a released v0.4.0 exits 3 (idempotent no-op)" "$rc" "3"
+check_rc "stable with a released base exits 3 (idempotent no-op)" "$rc" "3"
 
-# Stable without a candidate refuses (a version that has no v* tag at all).
-run "$work/o" "$work/e" rver stable 0.6.0 20260925
+# Weekly monotonic: the newest candidate base (0.4.1) drives the next bump.
+git -C "$rv" tag v0.4.1rc1
+run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
-check_rc "stable with no v0.6.0rc* tag exits 1" "$rc" "1"
-grep -q "v0.6.0rc" "$work/e"
-check "stable refusal names the missing candidate" $?
+check_rc "weekly rc exits 0" "$rc" "0"
+grep -q '^version=0.4.2rc1$' "$work/o" && grep -q '^tag=v0.4.2rc1$' "$work/o"
+check "weekly rc after v0.4.1rc1 prints v0.4.2rc1" $?
 
-# Stable promote path with a candidate present.
+# Main synced past the candidates: src wins again.
+run "$work/o" "$work/e" rver rc 0.4.5 20260925
+rc=$?
+check_rc "rc with src past the newest candidate exits 0" "$rc" "0"
+grep -q '^version=0.4.5rc1$' "$work/o"
+check "rc with src 0.4.5 prints v0.4.5rc1" $?
+
+# Stable derives from the newest candidate, not src: v0.4.1rc1 promotes as
+# v0.4.1 even though src says 0.4.0 (the old math refused here forever).
+run "$work/o" "$work/e" rver stable 0.4.0 20260925
+rc=$?
+check_rc "stable promote of v0.4.1rc1 exits 0" "$rc" "0"
+grep -q '^version=0.4.1$' "$work/o" && grep -q '^tag=v0.4.1$' "$work/o"
+check "stable promote prints version=0.4.1 and tag=v0.4.1" $?
+
+# The newest candidate wins by version, not src.
 git -C "$rv" tag v0.6.0rc1
-run "$work/o" "$work/e" rver stable 0.6.0 20260925
+run "$work/o" "$work/e" rver stable 0.4.0 20260925
 rc=$?
-check_rc "stable after v0.6.0rc1 exits 0" "$rc" "0"
+check_rc "stable with a newer candidate exits 0" "$rc" "0"
 grep -q '^version=0.6.0$' "$work/o" && grep -q '^tag=v0.6.0$' "$work/o"
-check "stable promote prints version=0.6.0 and tag=v0.6.0" $?
+check "stable promotes the newest candidate v0.6.0" $?
 
 # Misuse: a partial source version or a bad channel exits 2.
 run "$work/o" "$work/e" rver nightly 0.4 20260925
