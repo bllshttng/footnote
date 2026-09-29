@@ -204,7 +204,7 @@ fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
 
 // -- item 2: geometric navigation on a 2x2 grid ----------------------------
 
-// -- item 1b: the four directional splits (x-1b55) --------------------------
+// -- item 1b: the four directional splits -----------------------------------
 
 #[test]
 fn layout_e2e_split_dir_places_the_new_pane_on_each_side() {

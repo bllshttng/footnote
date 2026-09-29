@@ -2390,7 +2390,7 @@ mod tests {
 
     #[test]
     fn split_left_and_split_up_are_bindable_without_a_default_chord() {
-        // x-1b55: the two no-default split actions live in the table as
+        // The two no-default split actions live in the table as
         // sentinel rows (key 0). They resolve only under an explicit rebind,
         // which materializes the row with its real key; the live table never
         // carries a key-0 row, so the parity contract holds untouched.

@@ -43,7 +43,7 @@ fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
 }
 
 fn tab_menu_splits_on_the_viewed_tab_and_joins_on_another() {
-    // x-1b55: the menu's own tab picks the grid face. The viewed tab's menu
+    // The menu's own tab picks the grid face. The viewed tab's menu
     // offers Split (a tab joining into itself never made sense); any other
     // tab's menu offers Join and no Split.
     let mut v = view_with_agents(vec![]);
@@ -102,7 +102,7 @@ fn tab_menu_splits_on_the_viewed_tab_and_joins_on_another() {
 
 #[tokio::test]
 async fn tab_menu_split_cells_send_splitdir_and_a_stale_menu_refuses() {
-    // x-1b55: the viewed tab's Split cells send `Command::SplitDir` (the
+    // The viewed tab's Split cells send `Command::SplitDir` (the
     // server applies it to the sender's viewed tab, focused pane); a menu
     // left open across a view flip refuses by notice, never a send.
     let mut v = view_with_agents(vec![]);
@@ -140,7 +140,7 @@ async fn tab_menu_split_cells_send_splitdir_and_a_stale_menu_refuses() {
 
 #[test]
 fn tab_menu_viewed_split_grid_renders_for_the_capture() {
-    // x-1b55: the headless visual record. Renders the viewed tab's menu so
+    // The headless visual record. Renders the viewed tab's menu so
     // the PR can attach the actual grid the operator sees; run with
     // --nocapture to print it.
     let mut v = view_with_agents(vec![]);
