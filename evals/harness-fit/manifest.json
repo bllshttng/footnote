@@ -46,5 +46,12 @@
     "harbor": "harbor 0.23.0 through uvx",
     "concurrency": "one Harbor job at a time with n_concurrent_trials 4; Run 1 runs one attempt at a time beside Run 0",
     "stop_rule_granularity": "before each Harbor job, spent USD plus 3 x the arm's smoke cost per task x 89 must stay under the ceiling; before each Run 1 lane, spent USD plus 3 x the lane's projection must stay under it"
+  },
+  "amendment_4": {
+    "declared_at": "2026-09-29T23:40:00Z",
+    "scope": "attempts that never started; no grade or rule changes",
+    "docker_down": "a Run 0 trial whose docker environment never started is an infrastructure exclusion; harbor jobs resume -f RuntimeError reruns it in place; unrun arms run in the same seeded order",
+    "provider_cap": "a Run 1 spawn refused before the worker starts reads unavailable; a top-up pass reruns missing graded attempts up to 3 per task, at most 3 passes; each refusal stays counted by reason",
+    "started_attempts": "a started attempt or trial is never rerun; it is scored as it stands"
   }
 }
