@@ -160,12 +160,12 @@ async fn apply_action(
                 .ensure_reign_goal_typed(&scope, &owner)
                 .await
                 .map_err(|error| format!("Codex provider goal ensure refused: {error}"))?;
-            let expected = crate::codex_thread::reign_objective(&scope);
+            let expected = crate::codex_thread::lead_objective(&scope);
             verify_goal(&goal, &expected, GoalStatus::Active, "ensure")?;
             goal_receipt(session_id, &scope, &owner, &goal)
         }
         GoalAction::Pause { scope, owner } => {
-            let expected = crate::codex_thread::reign_objective(&scope);
+            let expected = crate::codex_thread::lead_objective(&scope);
             let current = thread
                 .goal_get_typed()
                 .await
@@ -179,7 +179,7 @@ async fn apply_action(
                     "continuation_owner": owner,
                 }));
             };
-            if current.objective != expected {
+            if !crate::codex_thread::is_lead_objective(&current.objective, &scope) {
                 return Err(format!(
                     "Codex provider goal pause refused: objective does not match reign: {:?}",
                     current.objective
@@ -204,7 +204,7 @@ async fn apply_action(
             pause_reign_goal_receipt(session_id, &scope, &owner, &paused.objective, &paused.usage)
         }
         GoalAction::Resume { scope, owner } => {
-            let expected = crate::codex_thread::reign_objective(&scope);
+            let expected = crate::codex_thread::lead_objective(&scope);
             let current = thread
                 .goal_get_typed()
                 .await
@@ -368,8 +368,7 @@ fn continuation_owner_for_goal(
     // Codex persists thread id, objective, and status only; Footnote derives
     // its owner from the selected crown scope or exact target session.
     if !scope.trim().is_empty() {
-        let expected = crate::codex_thread::reign_objective(scope);
-        if objective != expected.as_str() {
+        if !crate::codex_thread::is_lead_objective(objective, scope) {
             return Err(format!(
                 "Codex crowned goal objective does not match scope {:?}",
                 scope.trim()
@@ -377,7 +376,7 @@ fn continuation_owner_for_goal(
         }
         return Ok(format!("king:{}", scope.trim()));
     }
-    if objective.starts_with("$fno:reign ") {
+    if objective.starts_with("$fno:lead ") || objective.starts_with("$fno:reign ") {
         return Err("Codex reign goal owner requires the exact manifest scope".into());
     }
     if session_id.trim().is_empty() {

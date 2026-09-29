@@ -502,7 +502,7 @@ fn provider_receipt_matches(
                     let Some(scope) = scope.filter(|scope| !scope.trim().is_empty()) else {
                         return false;
                     };
-                    format!("$fno:reign {}", scope.trim())
+                    format!("$fno:lead {}", scope.trim())
                 } else {
                     let Some(objective) = command
                         .trim()
@@ -516,7 +516,10 @@ fn provider_receipt_matches(
                 };
                 let expected_owner = if !scope.unwrap_or_default().trim().is_empty() {
                     format!("king:{}", scope.unwrap_or_default().trim())
-                } else if let Some(scope) = objective.strip_prefix("$fno:reign ") {
+                } else if let Some(scope) = objective
+                    .strip_prefix("$fno:lead ")
+                    .or_else(|| objective.strip_prefix("$fno:reign "))
+                {
                     format!("king:{}", scope.trim())
                 } else {
                     format!("target:{session_id}")
