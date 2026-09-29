@@ -50,6 +50,7 @@ pub(crate) fn parse_source(input: &str, cwd: &Path) -> Result<Source, String> {
     }
     if has_url_scheme(input)
         || starts_with_ascii_case(input, "github.com/")
+        || starts_with_ascii_case(input, "www.github.com/")
         || starts_with_ascii_case(input, "raw.githubusercontent.com/")
     {
         return canonical_github_url(input).map(Source::Url);
@@ -823,6 +824,10 @@ mod tests {
             ),
             (
                 "raw.githubusercontent.com/octo/themes/main/mocha.conf?token=secret",
+                "query",
+            ),
+            (
+                "www.github.com/octo/themes/blob/main/mocha.conf?token=secret",
                 "query",
             ),
             (
