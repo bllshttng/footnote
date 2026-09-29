@@ -976,6 +976,42 @@ mod tests {
         assert_eq!(eligible, Some(2));
         assert_eq!(sampled, Some(2));
         assert!(rows[0].sampled && rows[1].sampled);
+        // held_out_live: live-with-turns rows only, rollout files merge at
+        // max, sorted by count.
+        let mut live = row("live", "claude");
+        live.idle = false;
+        live.operator_turns = vec!["t1".to_string(), "t2".to_string()];
+        let mut live2 = row("live2", "codex");
+        live2.idle = false;
+        live2.operator_turns = vec!["t1".to_string()];
+        let mut idle_with_turns = row("idleturns", "claude");
+        idle_with_turns.idle = true;
+        idle_with_turns.operator_turns = vec!["t1".to_string()];
+        let mut live_silent = row("livesilent", "claude");
+        live_silent.idle = false;
+        let mut rollout_a = row("rollout", "codex");
+        rollout_a.idle = false;
+        rollout_a.operator_turns = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let mut rollout_b = row("rollout", "codex");
+        rollout_b.idle = false;
+        rollout_b.operator_turns = vec!["t1".to_string()];
+        let rows4 = vec![
+            live,
+            live2,
+            idle_with_turns,
+            live_silent,
+            rollout_a,
+            rollout_b,
+        ];
+        let out = held_out_live(&rows4);
+        assert_eq!(
+            out,
+            vec![
+                ("rollout".to_string(), 3),
+                ("live".to_string(), 2),
+                ("live2".to_string(), 1),
+            ]
+        );
     }
 
     #[test]
@@ -1006,11 +1042,7 @@ mod tests {
         assert_eq!(eligible2, None);
         assert_eq!(sampled2, None);
         assert!(!rows2[0].sampled);
-    }
-
-    #[test]
-    fn mark_sampled_prefers_witnessed_turn_sessions_over_hash_rank() {
-        // The user-typed conversations sample first; the hash fills the rest.
+        // Witnessed-turn sessions sample first; the hash fills the rest.
         let mut loud = row("loud", "claude");
         loud.substantive = true;
         loud.idle = true;
@@ -1018,55 +1050,23 @@ mod tests {
         let mut silent = row("silent", "claude");
         silent.substantive = true;
         silent.idle = true;
-        let mut rows = vec![loud, silent];
+        let mut rows3 = vec![loud, silent];
         // N(1): the witnessed-turn session wins regardless of hash rank.
-        let (eligible, sampled) = mark_sampled(&mut rows, SampleRequest::N(1));
-        assert_eq!(eligible, Some(2));
-        assert_eq!(sampled, Some(1));
-        assert!(rows.iter().find(|r| r.session == "loud").unwrap().sampled);
-        assert!(!rows.iter().find(|r| r.session == "silent").unwrap().sampled);
-        // All: both picked.
-        let (eligible, sampled) = mark_sampled(&mut rows, SampleRequest::All);
-        assert_eq!(eligible, Some(2));
-        assert_eq!(sampled, Some(2));
-    }
-
-    #[test]
-    fn held_out_live_names_only_live_rows_with_witnessed_turns() {
-        let mut live = row("live", "claude");
-        live.idle = false;
-        live.operator_turns = vec!["t1".to_string(), "t2".to_string()];
-        let mut live2 = row("live2", "codex");
-        live2.idle = false;
-        live2.operator_turns = vec!["t1".to_string()];
-        let mut idle_with_turns = row("idleturns", "claude");
-        idle_with_turns.idle = true;
-        idle_with_turns.operator_turns = vec!["t1".to_string()];
-        let mut live_silent = row("livesilent", "claude");
-        live_silent.idle = false;
-        let mut rollout_a = row("rollout", "codex");
-        rollout_a.idle = false;
-        rollout_a.operator_turns = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
-        let mut rollout_b = row("rollout", "codex");
-        rollout_b.idle = false;
-        rollout_b.operator_turns = vec!["t1".to_string()];
-        let rows = vec![
-            live,
-            live2,
-            idle_with_turns,
-            live_silent,
-            rollout_a,
-            rollout_b,
-        ];
-        let out = held_out_live(&rows);
-        assert_eq!(
-            out,
-            vec![
-                ("rollout".to_string(), 3),
-                ("live".to_string(), 2),
-                ("live2".to_string(), 1),
-            ]
+        let (eligible3, sampled3) = mark_sampled(&mut rows3, SampleRequest::N(1));
+        assert_eq!(eligible3, Some(2));
+        assert_eq!(sampled3, Some(1));
+        assert!(rows3.iter().find(|r| r.session == "loud").unwrap().sampled);
+        assert!(
+            !rows3
+                .iter()
+                .find(|r| r.session == "silent")
+                .unwrap()
+                .sampled
         );
+        // All: both picked.
+        let (eligible4, sampled4) = mark_sampled(&mut rows3, SampleRequest::All);
+        assert_eq!(eligible4, Some(2));
+        assert_eq!(sampled4, Some(2));
     }
 
     fn write_facet(dir: &std::path::Path, sid: &str, mtime: u64, size: u64, friction: &str) {
