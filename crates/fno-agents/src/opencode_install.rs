@@ -823,65 +823,64 @@ pub fn status_json() -> serde_json::Value {
             }
         }
     };
-let mut doctor_lines: Vec<serde_json::Value> = Vec::new();
-let mut line = |level: &str, text: String| {
-    doctor_lines.push(json!({"level": level, "text": text}));
-};
-// Drift: a manifest file whose bytes no longer match the recorded hash.
-let drifted: Vec<String> = manifest
-    .as_ref()
-    .map(|m| {
-        m.files
-            .iter()
-            .filter(|(rel, hash)| {
-                std::fs::read(conf.join(rel))
-                    .map(|b| blake3::hash(&b).to_hex().as_str() != hash.as_str())
-                    .unwrap_or(false)
-            })
-            .map(|(rel, _)| rel.clone())
-            .collect()
-    })
-    .unwrap_or_default();
-for rel in &drifted {
-    line(
+    let mut doctor_lines: Vec<serde_json::Value> = Vec::new();
+    let mut line = |level: &str, text: String| {
+        doctor_lines.push(json!({"level": level, "text": text}));
+    };
+    // Drift: a manifest file whose bytes no longer match the recorded hash.
+    let drifted: Vec<String> = manifest
+        .as_ref()
+        .map(|m| {
+            m.files
+                .iter()
+                .filter(|(rel, hash)| {
+                    std::fs::read(conf.join(rel))
+                        .map(|b| blake3::hash(&b).to_hex().as_str() != hash.as_str())
+                        .unwrap_or(false)
+                })
+                .map(|(rel, _)| rel.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for rel in &drifted {
+        line(
         "WARN",
         format!(
             "opencode: {} changed since install (digest differs); re-run the install to restore it, or keep your edit",
             conf.join(rel).display()
         ),
     );
-}
-let bridge_present = conf.join(crate::opencode_install::BRIDGE_REL).is_file();
-let replaced_legacy_possible = manifest.is_none()
-    && bridge_present
-    && std::fs::read(conf.join(crate::opencode_install::BRIDGE_REL))
-        .ok()
-        .zip(
-            resolve_source(&std::env::current_dir().unwrap_or_default())
-                .ok()
-                .and_then(|root| {
-                    std::fs::read(
-                        root.join("cli/src/fno/setup/assets/opencode/footnote.js"),
-                    )
+    }
+    let bridge_present = conf.join(crate::opencode_install::BRIDGE_REL).is_file();
+    let replaced_legacy_possible = manifest.is_none()
+        && bridge_present
+        && std::fs::read(conf.join(crate::opencode_install::BRIDGE_REL))
+            .ok()
+            .zip(
+                resolve_source(&std::env::current_dir().unwrap_or_default())
                     .ok()
-                }),
-        )
-        .is_some_and(|(existing, shipped)| first_line_matches(&existing, &shipped));
-if manifest.is_none() && !bridge_present {
-    line(
-        "INFO",
-        "opencode: footnote is not installed; run fno config plugin install opencode".to_string(),
-    );
-} else if replaced_legacy_possible {
-    line(
+                    .and_then(|root| {
+                        std::fs::read(root.join("cli/src/fno/setup/assets/opencode/footnote.js"))
+                            .ok()
+                    }),
+            )
+            .is_some_and(|(existing, shipped)| first_line_matches(&existing, &shipped));
+    if manifest.is_none() && !bridge_present {
+        line(
+            "INFO",
+            "opencode: footnote is not installed; run fno config plugin install opencode"
+                .to_string(),
+        );
+    } else if replaced_legacy_possible {
+        line(
         "WARN",
         format!(
             "opencode: only the pre-manifest stop bridge is installed ({}); fno config plugin install opencode replaces it and keeps a backup",
             conf.join(crate::opencode_install::BRIDGE_REL).display()
         ),
     );
-}
-match status {
+    }
+    match status {
     "installed" => line(
         "OK",
         format!(
@@ -914,8 +913,8 @@ match status {
     ),
     _ => {}
 }
-if contract_changed {
-    line(
+    if contract_changed {
+        line(
         "WARN",
         format!(
             "opencode: agents were rendered for opencode {}, opencode now reports {}; re-run fno config plugin install opencode",
@@ -926,54 +925,55 @@ if contract_changed {
             _reported.as_deref().unwrap_or("an unknown version")
         ),
     );
-}
-if loaded.commands.is_none() || loaded.agents.is_none() {
-    line(
-        "INFO",
-        "opencode: could not read opencode's catalogs; install state is from the manifest only".to_string(),
-    );
-}
-let cwd = std::env::current_dir().unwrap_or_default();
-let findings = crate::opencode_config::audit(&cwd);
-let mut omo_files: Vec<String> = Vec::new();
-let mut stranger_files: Vec<String> = Vec::new();
-for f in &findings {
-    if f.kind == crate::opencode_config::FindingKind::Omo {
-        let slot = f.file.display().to_string();
-        if !omo_files.contains(&slot) {
-            omo_files.push(slot);
-        }
-    } else {
-        stranger_files.push(format!("{} lists \"{}\"", f.file.display(), f.entry));
     }
-}
-if !omo_files.is_empty() {
-    line(
+    if loaded.commands.is_none() || loaded.agents.is_none() {
+        line(
+            "INFO",
+            "opencode: could not read opencode's catalogs; install state is from the manifest only"
+                .to_string(),
+        );
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let findings = crate::opencode_config::audit(&cwd);
+    let mut omo_files: Vec<String> = Vec::new();
+    let mut stranger_files: Vec<String> = Vec::new();
+    for f in &findings {
+        if f.kind == crate::opencode_config::FindingKind::Omo {
+            let slot = f.file.display().to_string();
+            if !omo_files.contains(&slot) {
+                omo_files.push(slot);
+            }
+        } else {
+            stranger_files.push(format!("{} lists \"{}\"", f.file.display(), f.entry));
+        }
+    }
+    if !omo_files.is_empty() {
+        line(
         "WARN",
         format!(
             "opencode: oh-my-openagent is still in the plugin array of {}; fno: commands load twice and its task tool shadows footnote's; run fno config plugin install opencode to disable it, or delete the entry",
             omo_files.join(" and ")
         ),
     );
-}
-for s in &stranger_files {
-    line(
+    }
+    for s in &stranger_files {
+        line(
         "WARN",
         format!(
             "opencode: {}; an unrelated npm package (not footnote); footnote loads as a local plugin file; run the install to remove it",
             s
         ),
     );
-}
-for path in crate::opencode_config::omo_config_paths(&conf) {
-    line(
+    }
+    for path in crate::opencode_config::omo_config_paths(&conf) {
+        line(
         "INFO",
         format!(
             "opencode: {} keeps oh-my-openagent's settings; inert while no omo plugin loads, footnote never edits it",
             path.display()
         ),
     );
-}
+    }
 
     json!({
         "action": "status",

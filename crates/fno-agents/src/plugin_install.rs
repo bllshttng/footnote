@@ -1497,19 +1497,19 @@ fn run_opencode_arm(
                 ));
             }
 
-        if let Some(models) = crate::opencode_config::omo_agent_models() {
-            let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
-            if !block.is_empty() && block != "{}" {
-                say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
-                say(block);
+            if let Some(models) = crate::opencode_config::omo_agent_models() {
+                let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
+                if !block.is_empty() && block != "{}" {
+                    say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
+                    say(block);
+                }
+                if !not_carried.is_empty() {
+                    say(format!(
+                        "not carried from oh-my-openagent (no footnote counterpart): {}",
+                        not_carried.join(", ")
+                    ));
+                }
             }
-            if !not_carried.is_empty() {
-                say(format!(
-                    "not carried from oh-my-openagent (no footnote counterpart): {}",
-                    not_carried.join(", ")
-                ));
-            }
-        }
             let (_action, undo, refusals) = decide_plugin_array(&findings, yes);
             if json {
                 let mut value = serde_json::to_value(&receipt).unwrap_or_else(|_| json!({}));
