@@ -231,8 +231,7 @@ def dispatch_hold_verdict(
 ) -> Optional[DispatchHoldVerdict]:
     """Find a hold on a node, its parents, or its contained delivery owner.
 
-    One fno-agents verdict receipt answers; the Rust reader carries the
-    walk's cap and dedup contracts. An unreadable answer fails CLOSED,
+    One fno-agents verdict receipt answers; an unreadable one fails CLOSED,
     never as unheld.
     """
     if not isinstance(entry, dict):
