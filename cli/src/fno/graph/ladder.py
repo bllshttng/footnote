@@ -231,11 +231,9 @@ def dispatch_hold_verdict(
 ) -> Optional[DispatchHoldVerdict]:
     """Find a hold on a node, its parents, or its contained delivery owner.
 
-    One fno-agents verdict receipt answers: the Rust reader walks the same
-    bounded ancestry (64-step cap, enqueue-time dedup) and flattens the
-    first hold's fields. ``entries_by_id`` stays in the signature for the
-    callers; the binary resolves rows from the graph itself. An unreadable
-    answer fails CLOSED on the entry's own id, never as unheld.
+    One fno-agents verdict receipt answers; the Rust reader carries the
+    walk's cap and dedup contracts. An unreadable answer fails CLOSED,
+    never as unheld.
     """
     if not isinstance(entry, dict):
         return None

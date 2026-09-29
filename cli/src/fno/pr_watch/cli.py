@@ -50,9 +50,8 @@ def _resolve_fno_binary() -> str:
     return "fno-py"  # last resort: bare name (launchd may still find it via PATH)
 
 
-# The scoped merge freeze's record lives in the agents home; the arm's
-# per-PR pre-check reads it from `fno.pr_watch._dispatch` (the executor),
-# and the merge owner's own Rust gate is the authoritative reader.
+# The freeze record's readers: this arm's pre-check in _dispatch, and the
+# merge owner's Rust gate.
 
 
 # ---------------------------------------------------------------------------

@@ -811,8 +811,7 @@ def post_inbox_message(
 
 
 def _mark_control_pending(recipient: str) -> None:
-    """Stamp the tool-boundary pending flag (best-effort: a missed stamp
-    degrades to prompt-boundary delivery, never a loss)."""
+    """Stamp the tool-boundary pending flag (best-effort)."""
     try:
         from fno import paths
 

@@ -1274,9 +1274,8 @@ _MERGE_FLOOR_S = 150.0
 def merge_freeze_refusal(pr: int) -> Optional[str]:
     """The scoped merge freeze's answer for one PR, or None when it may merge.
 
-    One freeze-check receipt answers; the Rust gate owns the record. An
-    unreadable answer refuses fail closed; a missing record is a real
-    answer.
+    One freeze-check receipt answers; the Rust gate owns the record and an
+    unreadable answer refuses fail closed.
     """
     from fno.rust_binary import call_binary_json
 
