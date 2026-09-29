@@ -3638,8 +3638,10 @@ def dispatch_spawn_pane(
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
     )
-    bounded_codex = provider == "codex" and "--dangerously-bypass-approvals-and-sandbox" not in argv
-    codex_seed, argv = (argv[-1], argv[:-2]) if bounded_codex and message else ("", argv)
+    codex_seed = ""
+    fence = len(argv) > 1 and argv[-2] == "--"
+    if provider == "codex" and message and fence and "--dangerously-bypass-approvals-and-sandbox" not in argv:
+        codex_seed, argv = argv[-1], argv[:-2]
     if provider == "codex" and argv and argv[0] == provider:
         # Identity rides as config-set leaves; passthrough-checked like the
         # route splice. The argv[0] guard keeps it on codex's own form.
@@ -4311,10 +4313,7 @@ def dispatch_spawn_pane(
                     seed_state, seed_detail, seed_source, seed_pane = _seed_once()
                     if seed_state == "unconfirmed":
                         reaped, _ = _reap_spawned_pane(session, pane_id, runner)
-                        raise DispatchAskError(
-                            f"agent {name!r} seed never submitted after bind ({seed_detail}); pane {pane_id} " + ("reaped" if reaped else "kept"),
-                            exit_code=1,
-                        )
+                        raise DispatchAskError(f"agent {name!r} seed never submitted after bind ({seed_detail}); pane {pane_id} " + ("reaped" if reaped else "kept"), exit_code=1)
         elif provider == "claude" and not pin_session:
             # happy owns the id on this route, so the spawn CANNOT know it and
             # deliberately does not try. Guessing from the transcript store was
