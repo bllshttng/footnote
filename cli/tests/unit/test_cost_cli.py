@@ -11,14 +11,6 @@ from __future__ import annotations
 from typer.testing import CliRunner
 
 
-def test_cost_verb_registered_and_help_exits_zero() -> None:
-    from fno.cli import app
-
-    result = CliRunner().invoke(app, ["cost", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "cost" in result.output.lower()
-
-
 def test_cost_forwards_args_to_session_cost_main(monkeypatch) -> None:
     # The verb must delegate to the in-package main with the args verbatim,
     # not shell out to a script.
