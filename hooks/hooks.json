@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/git-protection.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/lib/guard-gate.sh git-protection python3 ${CLAUDE_PLUGIN_ROOT}/hooks/git-protection.py"
           },
           {
             "type": "command",
@@ -73,7 +73,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bg-process-guard.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/lib/guard-gate.sh bg-process python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bg-process-guard.py"
           },
           {
             "type": "command",
@@ -81,7 +81,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/recursive-grep-guard.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/lib/guard-gate.sh recursive-grep python3 ${CLAUDE_PLUGIN_ROOT}/hooks/recursive-grep-guard.py"
           },
           {
             "type": "command",
