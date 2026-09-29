@@ -17,7 +17,9 @@ fno has its own words for its own pieces, used everywhere in the codebase except
 A **citizen** is a session `fno agents spawn` creates: a row in the registry, addressable by `fno agents mail`, and surviving the session that spawned it. A citizen spawned against a backlog node also holds that node's claim; an ad-hoc citizen spawned without one does not.
 A **limb** is the harness's own subagent, Claude's Agent tool or Codex's task tool: nested inside its parent, gone when its parent's turn ends, visible but not addressable.
 The **mesh** is the whole set of citizens working a backlog together, coordinating over `fno agents mail` instead of one shared context window.
-A **lead** is a session granted authority over one scope, a portfolio of projects, one project, or one theme of epics, for one term; the grant expires on exit, and the graph it leaves behind is what outlives it.
+
+A **lead** is a session granted authority over one scope, a portfolio of projects, one project, or one theme of epics, for one term. The grant expires on exit. The graph it leaves behind is what outlives it.
+
 The **crown** is that authority itself, three levels deep at most, and a session holding no crown is a worker by default.
 
 ## Install
