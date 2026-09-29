@@ -1458,7 +1458,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // even on outcome none, so a quiet run cannot be mistaken for a sweep
     // that never ran.
     "question_sweep",
-    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 10-minute
     // floor and un-parked open rows whose head moved or whose park passed
     // 24h, marking finished rows handled. Emitted even on a quiet or skipped
     // run, so a quiet run cannot be mistaken for a sweep that never ran.

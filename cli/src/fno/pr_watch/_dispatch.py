@@ -1293,6 +1293,7 @@ def run_execute_queue(
 ) -> dict[str, int]:
     """Drain granted rows; executed, held, failed, skipped and budget sum to len(queue)."""
     from fno.pr import _merge
+    from fno.pr._review_hold import WORKTREE_DIRTY, WORKTREE_HEAD_MISMATCH
     from fno.pr_watch._state import WatermarkStore
 
     holder = f"pr-watch-merge:{os.getpid()}"
@@ -1380,18 +1381,20 @@ def run_execute_queue(
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
-                if bare.startswith("checks are red"):
-                    # A red hold never clears by retrying: the healer or the
-                    # worker owns the next push, so park with the why instead
-                    # of re-running the whole merge chain every tick. The park
-                    # sweep resumes the row on the next head change.
-                    entry["parked"] = "checks-red"
+                if bare.startswith(("checks are red", WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)):
+                    entry["parked"] = park = "checks-red" if bare.startswith("checks are red") else bare.split(":", 1)[0]
+                    entry["parked_head"] = None
                     store.set(key, entry)
-                    emit("pr_watch_parked", {"pr": pr, "reason": "checks-red"})
+                    emit("pr_watch_parked", {"pr": pr, "reason": park})
                     _notify_parked_pr(
                         notify, pr, cand.repo_slug, prior_retries,
                         "durable-grant merge",
                     )
+                    try:
+                        entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
+                    except Exception as exc:  # noqa: BLE001 - a failed read still parks
+                        log.warning("pr-watch: PR #%d head read failed while parking: %s", pr, exc)
+                    store.set(key, entry)
             else:
                 counts["failed"] += 1
                 _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)
