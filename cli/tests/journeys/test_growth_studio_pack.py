@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fno.approvals.models import classify_effect
 from fno.company.contracts import WorkOrderRef
 from fno.plugins.activate import activate, deactivate
 from fno.plugins.registry import PackRegistryStore
@@ -113,11 +112,8 @@ def test_pack_activates_resolves_and_deactivates_end_to_end(tmp_path):
     assert not any(r.role is not None and r.role.id in ROLE_IDS for r in after)
 
 
-def test_declared_publication_effect_still_requires_approval():
-    # The pack declares external.publication as a maximum-expected ceiling.
-    # classify_effect reads only the class: it still requires approval, so
-    # activation (which grants nothing) leaves dispatch blocked.
-    assert classify_effect("external.publication").value == "require_approval"
+# The declared-publication-effect classification moved to Rust
+# (effect_gate.rs, tested there); this file no longer asserts the table.
 
 
 def test_overlay_lowering_approval_floor_is_refused_as_authority_expansion(tmp_path):

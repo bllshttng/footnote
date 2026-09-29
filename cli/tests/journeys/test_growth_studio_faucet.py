@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fno.approvals.models import classify_effect
 from fno.plugins.verify import verify_pack
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -118,8 +117,8 @@ def test_every_packaged_agent_tool_list_is_bounded() -> None:
     assert all_tools & ALLOWED_TOOLS
 
 
-def test_publication_effect_still_requires_approval() -> None:
-    assert classify_effect("external.publication").value == "require_approval"
+# The declared-publication-effect classification moved to Rust
+# (effect_gate.rs, tested there); this file no longer asserts the table.
 
 
 # The faucet surface verifies clean: agents, skill, and runnable evaluators all

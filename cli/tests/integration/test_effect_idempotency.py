@@ -38,6 +38,12 @@ TRIALS = 5
 WORKERS = 6
 
 
+# Concurrency and idempotency here cross the Rust effect gate's submit door
+# (`authorized-merge` op effect-submit), so the module needs this checkout's
+# fno-agents dev build; smoke legs skip via the dev_build marker.
+pytestmark = pytest.mark.dev_build
+
+
 class AllowFounder:
     """Independent policy stand-in. Module-level so spawned children can import it."""
 

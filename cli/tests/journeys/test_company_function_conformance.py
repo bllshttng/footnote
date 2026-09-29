@@ -359,6 +359,7 @@ class _FounderAuthority:
         return principal_id == FOUNDER
 
 
+@pytest.mark.dev_build
 @pytest.mark.parametrize("role_id", ("support-response", "sales-outreach"))
 def test_approval_for_a_different_action_digest_cannot_authorize(
     role_id: str, tmp_path: Path
