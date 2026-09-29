@@ -1111,33 +1111,50 @@ fn slot_holder_is_parked(holder: &str, waiters_dir: &Path) -> bool {
     alive
 }
 
-/// Release the slot of every Live holder parked at a cargo admission door
-/// (an exact-holder release, so a claim that changed hands is a no-op).
-/// While the asker holds `build:cargo`, those holders are the deadlock
-/// population: they wait on the build claim this asker holds. Returns the
-/// holders stripped. `waiters_dir` and `root` are test seams; production
-/// passes the real waiters dir and the global root.
-fn release_parked_slot_holders(
+/// Take a run slot from a Live holder parked at a cargo admission door (an
+/// exact-holder release, so a claim that changed hands is a no-op). While
+/// the asker holds `build:cargo`, those holders are the deadlock
+/// population: they wait on the build claim this asker holds. The release
+/// and the acquire run back to back in one poll, so the freed slot is not
+/// offered to a rival waiter for longer than one claim write. Returns
+/// whether a slot was taken. `waiters_dir` and `root` are test seams;
+/// production passes the real waiters dir and the global root.
+fn steal_parked_slot(
     keys: &[String],
     holder: &str,
+    cargo_pid: u32,
+    worktree: &Path,
     waiters_dir: &Path,
     root: Option<&Path>,
-    events_dir: Option<&Path>,
-) -> Vec<String> {
-    let mut stripped = Vec::new();
+) -> bool {
     for key in keys {
         if let (crate::claims::ClaimState::Live, Some(rec)) = crate::claims::status(key, root) {
-            if rec.holder != holder && slot_holder_is_parked(&rec.holder, waiters_dir) {
-                eprintln!(
-                    "cargo admission: build holder takes {key} from {} (parked at the build door)",
-                    rec.holder
-                );
-                let _ = crate::claims::release(key, &rec.holder, root, events_dir);
-                stripped.push(rec.holder);
+            if rec.holder == holder || !slot_holder_is_parked(&rec.holder, waiters_dir) {
+                continue;
+            }
+            eprintln!(
+                "cargo admission: build holder takes {key} from {} (parked at the build door)",
+                rec.holder
+            );
+            let _ = crate::claims::release(key, &rec.holder, root, Some(worktree));
+            if let crate::claims::AcquireOutcome::Acquired(_) = crate::claims::acquire(
+                key,
+                holder,
+                crate::claims::AcquireOpts {
+                    pid: Some(cargo_pid),
+                    reason: Some(
+                        "cargo run slot; taken from a holder parked at the build door".to_string(),
+                    ),
+                    events_dir: Some(worktree.to_path_buf()),
+                    root: root.map(Path::to_path_buf),
+                    ..Default::default()
+                },
+            ) {
+                return true;
             }
         }
     }
-    stripped
+    false
 }
 
 fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
@@ -1192,15 +1209,17 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     };
     let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, _, w| {
         // While this asker holds build:cargo, a slot holder parked at the
-        // build door waits on the claim this asker holds; strip its slot so
-        // the next poll takes it. A build holder never stays parked behind
-        // the cap (the 2026-09-29 admission deadlock, twice).
+        // build door waits on the claim this asker holds; take its slot in
+        // the same poll. A build holder never stays parked behind the cap
+        // (the 2026-09-29 admission deadlock, twice).
         if crate::claims::status(BUILD_CLAIM_KEY, None)
             .1
             .is_some_and(|rec| rec.holder == holder)
         {
             if let Some(dir) = crate::claims::build_waiters_dir() {
-                release_parked_slot_holders(&keys, &holder, &dir, None, Some(&worktree));
+                if steal_parked_slot(&keys, &holder, cargo_pid, &worktree, &dir, None) {
+                    return OnHeld::Admit;
+                }
             }
         }
         wait.poll_held(rows, Some((cap, "cargo run slots")), None, w)
@@ -2501,17 +2520,18 @@ mod tests {
         let fast =
             admit_build_holder_free_slot(100, &worktree, &holder_of(100), &keys, Some(&root));
         assert!(fast.is_none(), "a full cap sends the holder to the queue");
-        let stripped = release_parked_slot_holders(
+        let stolen = steal_parked_slot(
             &keys,
             &holder_of(100),
+            100,
+            &worktree,
             &waiters,
             Some(&root),
-            Some(&worktree),
         );
-        assert_eq!(stripped, vec![holder_of(200)]);
+        assert!(stolen, "the parked holder's slot must be taken");
         let (_, s0) = crate::claims::status("test:cargo-run:0", Some(&root));
         let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
-        assert!(s0.is_none(), "the parked holder's slot must be freed");
+        assert_eq!(s0.unwrap().holder, holder_of(100));
         assert_eq!(s1.unwrap().holder, holder_of(300));
         let _ = std::fs::remove_dir_all(&root);
     }
