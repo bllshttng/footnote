@@ -1193,7 +1193,7 @@ if [[ "${3:-}" == "stage" ]]; then
 fi
 exec "__LAWBIN_FALLBACK__/fno" "$@"
 STUB
-sed -i '' "s|__LAWBIN_FALLBACK__|$STUBBIN|g" "$LAWBIN/fno"
+sed "s|__LAWBIN_FALLBACK__|$STUBBIN|g" "$LAWBIN/fno" > "$LAWBIN/fno.tmp" && mv "$LAWBIN/fno.tmp" "$LAWBIN/fno"
 chmod +x "$LAWBIN/fno"
 OUTPUT=$(PATH="$LAWBIN:$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_W" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if [[ "$EXIT_CODE" -eq 0 && "$OUTPUT" == *"d-f1cebabe"* && "$OUTPUT" == *"file-budget-exception"* ]]; then
