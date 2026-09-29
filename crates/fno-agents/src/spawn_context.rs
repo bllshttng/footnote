@@ -1459,6 +1459,23 @@ mod tests {
     }
 
     #[test]
+    fn session_identity_answers_the_nearest_harness_ancestor() {
+        // opencode sits NEARER than claude in the ancestry (claude spawned a
+        // shell that launched opencode): the walk stops at opencode - the
+        // nearest harness wins, which is what makes whoami read opencode
+        // from inside one.
+        let table = table_of(&[
+            proc_row(100, 90, "zsh -l"),
+            proc_row(90, 80, "opencode"),
+            proc_row(80, 70, REAL_SESSION),
+        ]);
+        assert_eq!(
+            session_identity_from_table(&table, 100),
+            Some((90, "opencode"))
+        );
+    }
+
+    #[test]
     fn session_identity_refuses_a_spare_ancestor() {
         // A thread worker's tool shells hang off a pooled bg-spare: the walk
         // must refuse, not continue to the daemon (pool machinery too) and

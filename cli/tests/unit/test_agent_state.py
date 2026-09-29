@@ -159,6 +159,7 @@ _HARNESS_ENVS = (
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_SESSION_ID",
     "GEMINI_SESSION_ID",
+    "OPENCODE_SESSION_ID",
     "CODEX_PLUGIN_ROOT",
     "GEMINI_PROJECT_DIR",
     "CLAUDE_PLUGIN_ROOT",
@@ -171,24 +172,41 @@ def _clear_harness_env(monkeypatch):
 
 
 def test_harness_detection_defaults_to_claude(tmp_path, monkeypatch):
-    """harness defaults to claude when no harness-specific env var is set."""
+    """harness defaults to claude when no identity resolves and the walk
+    answers None."""
     _clear_harness_env(monkeypatch)
+    monkeypatch.setattr("fno.agent.state.resolve_session_harness", lambda from_pid=None: None)
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.harness == "claude"
 
 
-def test_harness_detection_recognizes_codex(tmp_path, monkeypatch):
+def test_harness_detection_falls_back_to_the_process_walk(tmp_path, monkeypatch):
+    """No owned marker + a walk that answers codex resolves codex; the
+    plugin-root sniffs this replaces are gone."""
     _clear_harness_env(monkeypatch)
-    monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/fake/codex")
+    monkeypatch.setattr(
+        "fno.agent.state.resolve_session_harness", lambda from_pid=None: "codex"
+    )
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.harness == "codex"
 
 
-def test_harness_detection_recognizes_gemini(tmp_path, monkeypatch):
+def test_harness_detection_reads_opencode_marker(tmp_path, monkeypatch):
+    """Only OPENCODE_SESSION_ID in the env resolves opencode - the case the
+    old allow-list mislabeled as claude."""
     _clear_harness_env(monkeypatch)
-    monkeypatch.setenv("GEMINI_PROJECT_DIR", "/fake/gemini")
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_x")
     ctx = load_agent_context(project_root_override=tmp_path)
-    assert ctx.harness == "gemini"
+    assert ctx.harness == "opencode"
+
+
+def test_harness_detection_opencode_marker_beats_empty_foreign_marker(tmp_path, monkeypatch):
+    """An EMPTY foreign marker is not an identity: opencode still resolves."""
+    _clear_harness_env(monkeypatch)
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_x")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "")
+    ctx = load_agent_context(project_root_override=tmp_path)
+    assert ctx.harness == "opencode"
 
 
 def test_ac1_codex_session_marker_resolves_codex(tmp_path, monkeypatch):
