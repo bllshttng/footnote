@@ -425,8 +425,13 @@ describe("opencode native stop-hook bridge", () => {
       }
       return whoami.shell(strings, ...values)
     }
-    const hooks = await FootnotePlugin({ directory: dir, $, client })
-    await hooks.event({ event: { type: "session.created", properties: { sessionID: OC_SESSION_ID } } })
+    // Root unresolved: the created path must not run the real plugin's
+    // SessionStart scripts under test.
+    let hooks
+    await withEnv({ FNO_PLUGIN_ROOT: undefined, CLAUDE_PLUGIN_ROOT: undefined, FNO_HOME: dir, HOME: dir }, async () => {
+      hooks = await FootnotePlugin({ directory: dir, $, client })
+      await hooks.event({ event: { type: "session.created", properties: { sessionID: OC_SESSION_ID } } })
+    })
     expect(client.prompts.length).toBe(1)
     expect(client.prompts[0].body.noReply).toBe(true)
     expect(client.prompts[0].body.parts[0].text).toContain("You hold this crown")
@@ -697,6 +702,10 @@ describe("opencode hooks.json host", () => {
       expect(output.env.CLAUDE_CODE_SESSION_ID).toBe("")
       expect(output.env.CODEX_THREAD_ID).toBe("")
       expect(output.env.CLAUDECODE).toBe("")
+      // The launcher-stamped proof pair: alive-pid + known-harness name,
+      // the only identity a sandboxed tool shell can prove.
+      expect(Number(output.env.FNO_SESSION_PID)).toBeGreaterThan(0)
+      expect(output.env.FNO_SESSION_HARNESS).toBe("opencode")
     })
     rmSync(dir, { recursive: true, force: true })
   })

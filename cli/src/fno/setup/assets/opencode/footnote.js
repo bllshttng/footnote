@@ -648,6 +648,16 @@ async function server({ directory, worktree, client, $ }) {
       eventLog("shell.env", input?.sessionID)
       if (input?.sessionID) output.env.OPENCODE_SESSION_ID = input.sessionID
       for (const name of FOREIGN_SESSION_MARKERS) output.env[name] = ""
+      // The launcher-stamped proof pair (session_pid.py's rules): the
+      // marker alone cannot survive the owned-identity check when the
+      // tool shell's sandbox refuses the ancestry walk, so the shell gets
+      // the pid that PROVES the harness. Plugins run in-process, so
+      // process.pid is opencode itself - alive, and named a known
+      // harness, which is what the Rust stamp validation requires.
+      if (typeof process?.pid === "number" && process.pid > 0) {
+        output.env.FNO_SESSION_PID = String(process.pid)
+        output.env.FNO_SESSION_HARNESS = "opencode"
+      }
     },
   }
 }
