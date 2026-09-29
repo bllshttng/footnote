@@ -234,6 +234,29 @@ pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+/// The probe feed a board slice can afford, as `(tokens, cap_warning)`.
+///
+/// The per-handle arithmetic the batch prices with (`0.75s` a handle after a
+/// `20s` cold start, ceiling `60s`) bounds the feed to a measured prefix:
+/// claim-derived holders ride first, so a cap withholds the roster tail,
+/// which the unmeasured-holders warning then names. `affordable == 0` keeps
+/// the whole feed: the page bound declines to spawn and the run reads
+/// timed-out, the receipt the board-budget pins expect, never a silent
+/// trim. `affordable >= len` feeds everything.
+pub(crate) fn bound_truth_feed(
+    tokens: Vec<String>,
+    affordable: usize,
+) -> (Vec<String>, Option<String>) {
+    if affordable == 0 || affordable >= tokens.len() {
+        return (tokens, None);
+    }
+    let note = format!(
+        "truth probe: measuring the first {affordable} of {} holders within the board slice; the tail reads unmeasured",
+        tokens.len()
+    );
+    (tokens[..affordable].to_vec(), Some(note))
+}
+
 pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
 }
@@ -438,43 +461,14 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             read
         }
     };
-    // Undispatched is the one source this board SHELLS OUT for rather than
-    // classifying in-process. The in-process copy was a declared pure port of
-    // `backlog/undispatched.classify_planned_unclaimed`, and a port has to be
-    // re-ported every time the original moves. It did not move for a long
-    // time, then the Python side adopted the shared selection key and the two
-    // named different next nodes on the same graph. One implementation, at the
-    // cost of one subprocess inside the slice the source already had.
-    let undispatched = match s_undispatched {
-        None => {
-            spent(&mut sources, "undispatched", &budget);
-            budget.spent_read()
-        }
-        Some(dl) => {
-            let bound = Budget::spawn_bound(dl);
-            if bound.is_zero() {
-                spent(&mut sources, "undispatched", &budget);
-                budget.spent_read()
-            } else {
-                let mut cmd = fno_py_cmd();
-                cmd.extend([
-                    "backlog".to_string(),
-                    "undispatched".to_string(),
-                    "--json".to_string(),
-                ]);
-                let read = run_json(cmd, &cwd, bound);
-                mark(&mut sources, "undispatched", &read, false);
-                let rows = read
-                    .payload
-                    .as_ref()
-                    .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
-                match rows {
-                    Some(rows) => SourceRead::ok(Value::Array(rows)),
-                    None => read,
-                }
-            }
-        }
-    };
+    // Undispatched keeps its slice claim above; its SUBPROCESS moved into
+    // the concurrent section below. Its inline run sat between the slice
+    // claims and the registry-load source, and under fleet load it ate the
+    // whole wall before later sources could spawn: the beat read "budget
+    // exhausted after registry::load_registry" with unplanned and
+    // blocked_child never started (measured 2026-09-28, three beats in a
+    // row). One implementation, at the cost of one subprocess inside the
+    // slice the source already had.
 
     // Claimed nodes: from the locks to the rows, one graph read.
     let (claimed_nodes, mut holders, claimed_warnings) = match s_stalled {
@@ -560,6 +554,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         crate::needs::held_map(&home_dot_fno(), &cwd)
     };
     let (
+        undispatched,
         prs,
         pr_nodes,
         pr_gates,
@@ -573,6 +568,26 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         holder_activity_error,
         holder_starved,
     ) = std::thread::scope(|s| {
+        // Undispatched rides the concurrent section (moved out of the inline
+        // run above, whose wall it ate under fleet load). Its one consumer is
+        // the queue build after the scope, so its join waits with the others.
+        let t_undispatched = s_undispatched.map(|dl| {
+            let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
+            s.spawn(move || {
+                let bound = Budget::spawn_bound(dl);
+                if bound.is_zero() {
+                    return SourceRead::over_budget(spent_err);
+                }
+                let mut cmd = fno_py_cmd();
+                cmd.extend([
+                    "backlog".to_string(),
+                    "undispatched".to_string(),
+                    "--json".to_string(),
+                ]);
+                run_json(cmd, &cwd, bound)
+            })
+        });
         // The worked read is a full fno-py cold start plus fleet roster read,
         // so it rides the concurrent section too: its join waits below, after
         // the other subprocess threads are already running, and only the
@@ -705,6 +720,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         // every other source: its own 20s-to-60s page bound is capped by what
         // remains, and a page reached after the deadline is unmeasured, never
         // no-evidence (the probe measured ~7s of overrun into every board).
+        // The feed is also bounded per handle by the arithmetic the batch
+        // prices with: the slice funds a measured PREFIX - claim-derived
+        // holders ride first, and they are the set the queue warnings count -
+        // while the withheld tail reads unmeasured by name instead of dying
+        // as one empty page (measured 2026-09-28: a 33-holder feed timed out
+        // whole, three beats in a row).
         let t_truth = match (holders.is_empty(), s_truth) {
             (true, _) | (_, None) => None,
             (false, Some(dl)) => {
@@ -716,6 +737,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                             .unwrap_or_else(|| h.clone())
                     })
                     .collect();
+                let affordable =
+                    crate::truth_probe::family1_truth_affordable_handles(Budget::spawn_bound(dl));
+                let (tokens, cap_note) = bound_truth_feed(tokens, affordable);
+                if let Some(note) = cap_note {
+                    warnings.push(note);
+                }
                 Some(s.spawn(move || {
                     crate::truth_probe::family1_truth_probe_many_measured_within(&tokens, Some(dl))
                 }))
@@ -862,7 +889,23 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 ),
             },
         };
+        let undispatched = match t_undispatched {
+            None => budget.spent_read(),
+            Some(h) => h
+                .join()
+                .unwrap_or(SourceRead::err("undispatched: reader panicked")),
+        };
+        mark(&mut sources, "undispatched", &undispatched, false);
+        let undispatched = match undispatched
+            .payload
+            .as_ref()
+            .and_then(|r| r.get("rows").and_then(Value::as_array).cloned())
+        {
+            Some(rows) => SourceRead::ok(Value::Array(rows)),
+            None => undispatched,
+        };
         (
+            undispatched,
             prs,
             pr_nodes,
             pr_gates,
@@ -2446,6 +2489,30 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_feed_is_capped_to_the_affordable_prefix_and_names_the_tail() {
+        // The per-handle bound converts a killed empty page into a measured
+        // prefix: a slice funding part of the feed keeps the prefix
+        // (claim-derived holders ride first) and names the withheld tail.
+        let tokens: Vec<String> = (0..5).map(|i| format!("t-{i}")).collect();
+        let (feed, note) = bound_truth_feed(tokens.clone(), 3);
+        assert_eq!(feed, tokens[..3].to_vec());
+        let note = note.expect("a mid-feed cap names the tail");
+        assert!(
+            note.contains("measuring the first 3 of 5 holders"),
+            "{note:?}"
+        );
+        // A slice funding everything, and one funding nothing (the page
+        // bound declines to spawn, the run reads timed out - the receipt
+        // the budget pins expect), keep the whole feed and stay quiet.
+        let (feed, note) = bound_truth_feed(tokens.clone(), 5);
+        assert_eq!(feed, tokens);
+        assert!(note.is_none());
+        let (feed, note) = bound_truth_feed(tokens, 0);
+        assert_eq!(feed.len(), 5);
+        assert!(note.is_none());
+    }
+
+    #[test]
     fn a_working_handover_holder_keeps_its_node_out_of_unplanned_and_stale() {
         // AC7-HP: the ready feed cannot see a stale launch-window lease
         // (include_stale=false excludes it, worked ids too), so the old
@@ -3132,8 +3199,24 @@ mod tests {
         crate::paths::pin_test_claims_root(dir.path());
         let script =
             crate::write_exec_stub(dir.path(), "sleepy-fno-py", "#!/bin/sh\nexec sleep 5\n");
+        // `gh` answers with an empty-open-PR listing: the prs reads must
+        // never reach the network, whose discretionary GraphQL quota is
+        // shared machine-wide and reads exit 75 under a lock (measured: the
+        // quota refusal surfaced here as an unreadable undriven_pr).
+        let stub_dir = dir.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        crate::write_exec_stub(&stub_dir, "gh", "#!/bin/sh\necho '[]'\n");
         let prev = std::env::var_os("FNO_PY");
+        let prev_path = std::env::var_os("PATH");
         std::env::set_var("FNO_PY", &script);
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.display(),
+                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
+            ),
+        );
         let start = std::time::Instant::now();
         // The cwd too: from the crate dir the needs fold reads the canonical
         // checkout's live journal, which measured 20s in a debug build.
@@ -3147,6 +3230,10 @@ mod tests {
             Some(v) => std::env::set_var("FNO_PY", v),
             None => std::env::remove_var("FNO_PY"),
         }
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
         // The kill bound is the SLEEP length: an unbounded read would blow
         // past 5s, and a spawn after the in-process work would land past the
         // budget; the deadline-derived bound must keep the whole board under
@@ -3157,10 +3244,28 @@ mod tests {
         );
         let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
         // A budget kill is the board's own choice, not evidence about the
-        // source: it must not block completion, but it must stay named.
+        // source: it must not block completion, but it must stay named. The
+        // message names the offending queues so a real read failure (a live
+        // `gh` under a quota lock, once measured here) reads in the failure
+        // itself.
+        let unreadable: Vec<String> = payload["queues"]
+            .as_array()
+            .map(|qs| {
+                qs.iter()
+                    .filter(|q| q["status"] == "unreadable")
+                    .filter_map(|q| {
+                        Some(format!(
+                            "{}: {}",
+                            q["name"].as_str()?,
+                            q["error"].as_str().unwrap_or("?")
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         assert!(
             !parsed.unreadable_sources,
-            "the killed source must read as not-read, not unreadable"
+            "the killed source must read as not-read, not unreadable; unreadable queues: {unreadable:?}"
         );
         assert!(
             !parsed.blind_queues.is_empty(),
