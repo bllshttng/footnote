@@ -2691,7 +2691,7 @@ mod tests {
     /// A claude row with a recorded pid that ESRCHs must land in the stale
     /// set - the reboot case, the exact respawn the fix removes.
     #[test]
-    fn stale_live_attach_ids_flags_a_dead_pid_claiming_working() {
+    fn stale_live_attach_ids_rows() {
         let mut child = crate::pty::ChildGuard::spawn(&mut std::process::Command::new("true"));
         let pid = child.id();
         child.wait_now();
@@ -2704,12 +2704,7 @@ mod tests {
             stale.contains("deadbeef"),
             "a reaped pid ({pid}) with a working status must read stale"
         );
-    }
 
-    /// A LIVE pid whose recorded start time matches stays live; the same pid
-    /// with a mismatched recorded start (a reuse) reads stale.
-    #[test]
-    fn stale_live_attach_ids_reuses_start_time_equality_not_existence() {
         let pid = std::process::id();
         let Some(start) = registry_start_time(pid) else {
             return; // platform without start-time support; existence arm only
@@ -2731,13 +2726,7 @@ mod tests {
             stale_live_attach_ids(&reused).contains("aaaaaaaa"),
             "a live pid with a mismatched start time is a reused pid, not the worker"
         );
-    }
 
-    /// The fail-safe arms: no recorded pid, a non-claude row, a terminal
-    /// status, and a malformed document all keep the status-field verdict and
-    /// contribute nothing to the stale set.
-    #[test]
-    fn stale_live_attach_ids_fails_safe_without_positive_evidence() {
         let no_pid = reg(
             r#"{"name":"a","cwd":"/w","status":"working","harness":"claude","short_id":"aaaaaaaa"}"#,
         );
@@ -2769,6 +2758,13 @@ mod tests {
             "a malformed document contributes nothing"
         );
     }
+
+    /// A LIVE pid whose recorded start time matches stays live; the same pid
+    /// with a mismatched recorded start (a reuse) reads stale.
+
+    /// The fail-safe arms: no recorded pid, a non-claude row, a terminal
+    /// status, and a malformed document all keep the status-field verdict and
+    /// contribute nothing to the stale set.
 
     #[test]
     fn agent_rows_badge_lattice_derives_from_registry() {
@@ -2883,7 +2879,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_rows_counted_counts_the_nameless_row_it_skips() {
+    fn derive_rows_counted_rows() {
         // AC1-HP: the skipped row EXISTED. Its absence from the
         // vector was never news - that absence IS the defect shape. The count
         // is the positive marker a caller that reasons from absence needs.
@@ -2895,10 +2891,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "ok");
         assert_eq!(unattributable, 1);
-    }
 
-    #[test]
-    fn derive_rows_counted_counts_a_present_but_unparseable_mux_on_the_surviving_row() {
         // AC2-HP: a PRESENT `mux` key that does not parse into a
         // (session, pane_id) pair keeps the row (the sideline renders what it
         // can read) and counts it, because the row's pane is unknown. Pinned
@@ -2911,10 +2904,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].mux, None);
         assert_eq!(unattributable, 1);
-    }
 
-    #[test]
-    fn derive_rows_counted_is_zero_for_a_clean_registry() {
         // AC3-EDGE: the control that keeps the two counting tests
         // honest - a well-formed registry counts zero, so the count is a fact
         // about the rows and not a constant.
@@ -2929,6 +2919,8 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(unattributable, 0);
     }
+
+
 
     #[test]
     fn a_registered_row_with_a_full_uuid_short_id_attaches_by_its_job_id() {
@@ -3534,7 +3526,7 @@ unheard_of_field = true
     }
 
     #[test]
-    fn derive_rows_renders_unmeasured_not_dead_for_an_exited_row_with_a_live_pid() {
+    fn derive_rows_liveness_rows() {
         // AC1 (task 3): status says exited, but a recorded live pid
         // contradicts it. This is the exact shape task 1 stops the writer
         // from producing, and this is the render-layer half: even if such a
@@ -3552,10 +3544,7 @@ unheard_of_field = true
             row.exited,
             "exited keeps its today meaning: terminal status"
         );
-    }
 
-    #[test]
-    fn derive_rows_renders_dead_for_an_exited_row_with_a_confirmed_gone_pid() {
         // AC2: a terminal status corroborated by a pid that is confirmed
         // gone renders Dead -- the confident state stays confident.
         let raw = reg(
@@ -3565,10 +3554,7 @@ unheard_of_field = true
         let rows = derive_rows(&raw, NOW).unwrap();
         let row = rows.iter().find(|r| r.name == "cx-gone").unwrap();
         assert_eq!(row.liveness, Liveness::Dead);
-    }
 
-    #[test]
-    fn derive_rows_renders_alive_for_a_live_status_row() {
         let raw = reg(r#"{"name":"live-one","cwd":"/w","status":"live","harness":"claude"}"#);
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(
@@ -3576,6 +3562,8 @@ unheard_of_field = true
             Liveness::Alive
         );
     }
+
+
 
     #[test]
     fn full_harness_session_ids_remain_distinct_for_same_prefix() {
@@ -3681,7 +3669,7 @@ unheard_of_field = true
     // bare list, covered by the fixture test below; this pins the map so the
     // fix stays additive.
     #[test]
-    fn parse_roster_legacy_workers_map_yields_three_field_workers() {
+    fn parse_roster_rows() {
         let raw = r#"{"workers":{
             "ab12cd34":{"sessionId":"ab12cd34-9f00-4a2b-8888-000000000001",
                         "cwd":"/w","procStart":1751000000,
@@ -3696,10 +3684,7 @@ unheard_of_field = true
         assert_eq!(workers[0].cwd, "/w");
         // Missing seed.name falls back to the adopted-name convention (AC4-EDGE).
         assert_eq!(workers[1].name, "cc-ef56ab78");
-    }
 
-    #[test]
-    fn parse_roster_tolerates_field_drift_and_alien_workers() {
         // procStart as a date STRING (the drift that once zeroed typed
         // parsers) must not fail the parse; a worker without sessionId is
         // skipped alone, never the document.
@@ -3716,10 +3701,7 @@ unheard_of_field = true
             "orphan, empty, and dash-leading ids all skip"
         );
         assert_eq!(workers[0].short_id, "ab12cd34");
-    }
 
-    #[test]
-    fn parse_roster_garbage_is_none_and_unrecognized_shape_is_none() {
         // Garbage doc -> None (caller keeps last-good, AC1-ERR). An object
         // with NO workers key is an UNRECOGNIZED shape now, not an
         // empty roster: returning Some(empty) there is indistinguishable from
@@ -3738,6 +3720,8 @@ unheard_of_field = true
         assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
     }
 
+
+
     // ---- Union merge + dual-doc ReaderState (task 1.2) ----
 
     fn worker(short: &str, name: &str, cwd: &str) -> RosterWorker {
@@ -3750,8 +3734,8 @@ unheard_of_field = true
     }
 
     #[test]
-    fn merge_appends_foreign_rows_and_sorts(/* AC1-HP */) {
-        let reg = derive_rows(
+    fn registry_roster_merge_rows() {
+        let built = derive_rows(
             &reg(r#"{"name":"mmm","cwd":"/w","status":"live","provider":"claude","short_id":"aa11bb22"}"#),
             NOW,
         )
@@ -3760,7 +3744,7 @@ unheard_of_field = true
             worker("cc33dd44", "think-x-9999", "/w"),
             worker("aa11bb22", "already-owned", "/w"), // dedup: registry wins
         ];
-        let rows = merge_rows(reg, &roster);
+        let rows = merge_rows(built, &roster);
         // Two rows: the registry row + one foreign; the roster twin of the
         // owned session is suppressed (AC1-EDGE dedup).
         assert_eq!(rows.len(), 2);
@@ -3773,17 +3757,14 @@ unheard_of_field = true
         assert_eq!(foreign.attach_id.as_deref(), Some("cc33dd44"));
         assert!(!foreign.exited);
         assert_eq!(foreign.mux, None);
-    }
 
-    #[test]
-    fn merge_upgrades_exited_registry_row_present_in_roster(/* AC3-HP */) {
-        let reg = derive_rows(
+        let built = derive_rows(
             &reg(r#"{"name":"stale","cwd":"/w","status":"exited","provider":"claude","short_id":"ab12cd34"}"#),
             NOW,
         )
         .unwrap();
-        assert!(reg[0].exited, "derive keeps it exited");
-        let rows = merge_rows(reg, &[worker("ab12cd34", "n", "/w")]);
+        assert!(built[0].exited, "derive keeps it exited");
+        let rows = merge_rows(built, &[worker("ab12cd34", "n", "/w")]);
         assert_eq!(
             rows.len(),
             1,
@@ -3793,22 +3774,21 @@ unheard_of_field = true
         assert!(rows[0].external);
         assert_eq!(rows[0].name, "stale", "keeps its registry name");
         assert_eq!(rows[0].attach_id.as_deref(), Some("ab12cd34"));
-    }
 
-    #[test]
-    fn merge_empty_roster_is_byte_equal_to_registry_only(/* AC3-EDGE */) {
         let raw = reg(
             r#"{"name":"z","cwd":"/w","status":"live","provider":"claude","short_id":"aa11bb22"},
                         {"name":"a","cwd":"/x","status":"exited"}"#,
         );
-        let reg = derive_rows(&raw, NOW).unwrap();
-        let merged = merge_rows(reg.clone(), &[]);
+        let built = derive_rows(&raw, NOW).unwrap();
+        let merged = merge_rows(built.clone(), &[]);
         assert_eq!(
-            merged, reg,
+            merged, built,
             "no roster => registry-only derivation, verbatim"
         );
         assert!(merged.iter().all(|r| !r.external));
     }
+
+
 
     // ReaderState: two mtime-gated docs, merged change gate, per-source
     // last-good on a torn write vs empty on a vanished file (AC1-ERR, AC2-FR).
@@ -3987,7 +3967,7 @@ unheard_of_field = true
     }
 
     #[test]
-    fn parse_isolated_dirs_skips_managed_and_expands_tilde() {
+    fn parse_isolated_dirs_rows() {
         // Two records: a managed account (no config_dir, shares ~/.claude) and
         // an isolated one (~/.claude-alt). Only the isolated one contributes,
         // and its `~/` is expanded against HOME.
@@ -4009,10 +3989,7 @@ config_dir = "~/.claude-alt"
             dirs,
             vec![("alt".to_string(), PathBuf::from("/home/u/.claude-alt"))]
         );
-    }
 
-    #[test]
-    fn parse_isolated_dirs_reads_the_canonical_accounts_block() {
         // The test above is the same fixture under the pre-rename `providers`
         // spelling, so the pair pins both: a config migrated to `accounts` and
         // one not yet written since the rename must resolve identically. This
@@ -4038,10 +4015,7 @@ config_dir = "~/.claude-alt"
             dirs,
             vec![("alt".to_string(), PathBuf::from("/home/u/.claude-alt"))]
         );
-    }
 
-    #[test]
-    fn parse_isolated_dirs_tolerates_garbage_and_partial_records() {
         assert!(parse_isolated_dirs("not = toml = broken", None).is_empty());
         // A record missing `id` (or `config_dir`) is skipped, never a panic.
         let no_id = "[[providers.records]]\ncli = \"claude\"\nconfig_dir = \"/x\"\n";
@@ -4049,6 +4023,8 @@ config_dir = "~/.claude-alt"
         let empty_dir = "[[providers.records]]\nid = \"a\"\nconfig_dir = \"\"\n";
         assert!(parse_isolated_dirs(empty_dir, None).is_empty());
     }
+
+
 
     #[test]
     fn isolated_roster_workers_tagged_by_account(/* AC1-EDGE */) {
@@ -4483,7 +4459,7 @@ config_dir = "~/.claude-alt"
     }
 
     #[test]
-    fn truth_badge_dead_pid_no_badge() {
+    fn truth_badge_refusal_rows() {
         // AC3b/AC4: a dead-pid claim (suspect/stale) never earns a Working badge.
         let t = Tmp::new("dead");
         t.write_claim("x-dddd", 0x7fff_fff0, SID); // implausible pid -> dead
@@ -4492,10 +4468,7 @@ config_dir = "~/.claude-alt"
         let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
-    }
 
-    #[test]
-    fn truth_badge_reused_pid_no_badge() {
         // codex P3: holder exited and the pid was reused. The current process is
         // alive under that pid, but it STARTED after the claim's acquired_at, so
         // the create-time guard rejects it even with a recent fire.
@@ -4506,10 +4479,7 @@ config_dir = "~/.claude-alt"
         let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
-    }
 
-    #[test]
-    fn truth_badge_cross_host_no_badge() {
         // A claim recorded on another host never badges here (its pid namespace
         // is not ours), even if the local pid happens to be live.
         let t = Tmp::new("xhost");
@@ -4525,10 +4495,7 @@ config_dir = "~/.claude-alt"
         let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
-    }
 
-    #[test]
-    fn truth_badge_live_claim_stale_fire_no_badge() {
         // AC3-EDGE: claim-live but no recent fire -> waiting -> no sideline badge.
         let t = Tmp::new("staleFire");
         t.write_claim("x-dddd", std::process::id() as i32, SID);
@@ -4537,20 +4504,14 @@ config_dir = "~/.claude-alt"
         let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
-    }
 
-    #[test]
-    fn truth_badge_missing_signals_is_empty() {
         // AC5-ERR: no claim + no events file -> no badges, no panic.
         let t = Tmp::new("missing");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
         let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
-    }
 
-    #[test]
-    fn truth_badge_non_target_name_skipped() {
         // AC7-FR: a name with no parseable node id changes nothing.
         let t = Tmp::new("nontarget");
         t.write_claim("x-dddd", std::process::id() as i32, SID);
@@ -4560,6 +4521,11 @@ config_dir = "~/.claude-alt"
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
+
+
+
+
+
 
     #[test]
     fn newest_fire_wins_and_missing_events_empty() {
@@ -4595,7 +4561,7 @@ config_dir = "~/.claude-alt"
     }
 
     #[test]
-    fn parse_claude_agents_filters_to_tracked_and_maps_state() {
+    fn parse_claude_agents_rows() {
         // Domain Pitfall 4: only tracked ids survive, so the historical rows the
         // daemon returns never flood the sideline.
         let raw = r#"[
@@ -4615,10 +4581,7 @@ config_dir = "~/.claude-alt"
         assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Terminal));
         assert_eq!(got.get("99998888"), Some(&ObservedExternal::Terminal));
         assert!(!got.contains_key("aaaabbbb"), "untracked id is dropped");
-    }
 
-    #[test]
-    fn parse_claude_agents_maps_unknown_state_to_unknown_not_absence() {
         // codex P2: a tracked id PRESENT with a new/malformed/missing state is
         // per-id schema drift, kept in the map as `Unknown` - never dropped
         // (which reconcile would read as absence and delete).
@@ -4629,7 +4592,17 @@ config_dir = "~/.claude-alt"
         let got = parse_claude_agents(raw, &tracked(&["deadbeef", "cafef00d"])).unwrap();
         assert_eq!(got.get("deadbeef"), Some(&ObservedExternal::Unknown));
         assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Unknown));
+
+        // A non-array (or an unparseable body) is schema drift -> None, so the
+        // caller retains rows as unknown instead of deleting them (AC1-FR).
+        assert!(parse_claude_agents(r#"{"agents":[]}"#, &tracked(&["deadbeef"])).is_none());
+        assert!(parse_claude_agents("not json", &tracked(&["deadbeef"])).is_none());
+        // An empty array is a valid observation (nothing tracked is live).
+        assert!(parse_claude_agents("[]", &tracked(&["deadbeef"]))
+            .unwrap()
+            .is_empty());
     }
+
 
     #[test]
     fn reconcile_holds_a_record_observed_unknown() {
@@ -4645,20 +4618,9 @@ config_dir = "~/.claude-alt"
         assert_eq!(out[0].state, ExternalState::Unknown);
     }
 
-    #[test]
-    fn parse_claude_agents_none_on_schema_drift() {
-        // A non-array (or an unparseable body) is schema drift -> None, so the
-        // caller retains rows as unknown instead of deleting them (AC1-FR).
-        assert!(parse_claude_agents(r#"{"agents":[]}"#, &tracked(&["deadbeef"])).is_none());
-        assert!(parse_claude_agents("not json", &tracked(&["deadbeef"])).is_none());
-        // An empty array is a valid observation (nothing tracked is live).
-        assert!(parse_claude_agents("[]", &tracked(&["deadbeef"]))
-            .unwrap()
-            .is_empty());
-    }
 
     #[test]
-    fn reconcile_stopping_resolves_by_observation() {
+    fn reconcile_state_rows() {
         // AC1-FR: stopping + terminal -> stopped; + live -> failed (retry); +
         // absent -> removed (dropped).
         let mut obs = HashMap::new();
@@ -4682,10 +4644,7 @@ config_dir = "~/.claude-alt"
             Some(&HashMap::new()),
         );
         assert!(out.is_empty());
-    }
 
-    #[test]
-    fn reconcile_removing_returns_to_stopped_for_retry() {
         // AC3-FR: removing + terminal -> stopped (explicit rm retry); + absent ->
         // deleted as already removed.
         let mut obs = HashMap::new();
@@ -4701,10 +4660,7 @@ config_dir = "~/.claude-alt"
             Some(&HashMap::new()),
         );
         assert!(out.is_empty(), "removing + absent is fully removed");
-    }
 
-    #[test]
-    fn reconcile_stopped_live_clears_and_terminal_remains() {
         // A stopped tombstone seen live again clears (roster owns the row); seen
         // terminal it remains a tombstone.
         let mut obs = HashMap::new();
@@ -4717,10 +4673,7 @@ config_dir = "~/.claude-alt"
         let (out, _) =
             reconcile_external(vec![record("deadbeef", ExternalState::Stopped)], Some(&obs));
         assert_eq!(out[0].state, ExternalState::Stopped);
-    }
 
-    #[test]
-    fn reconcile_unavailable_holds_everything_unknown() {
         // AC1-FR "query unavailable": every non-unknown row is held as unknown
         // (safe stop retry), never deleted; an already-unknown row stays put.
         let (out, _) = reconcile_external(
@@ -4737,6 +4690,9 @@ config_dir = "~/.claude-alt"
         );
         assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
     }
+
+
+
 
     // (US4 resolve_branch family) moved verbatim into its own module: this file is over the
     // shrink-only line, and test motion is the sanctioned shrink.
