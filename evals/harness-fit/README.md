@@ -63,7 +63,7 @@ A grade-only dry run checked every replay task before Run 1. The hidden tests mu
 
 - The repo has no Cargo workspace manifest. Each Rust grade now runs `cargo test` inside its own crate.
 - x-632f kept no list of the eligible population, and the list cannot be rebuilt to match its picks. So the population for replacements is rebuilt from local git. It holds the first-parent PR merges on `origin/main` dated 2026-09-01 through 2026-09-28 (UTC) that add at least one test file. Each must name a node the graph resolves, because the prompt is that node's title and details. That gives 242 entries.
-- The replacement rule: a bad task gives way to the next entry after it in merge order that is not already sampled. That entry's grade must pass the dry run, and its hidden tests must run, not skip.
+- The replacement rule: a bad task gives way to the next unsampled entry after it in merge order. That entry's grade must pass the dry run, and its hidden tests must run, not skip.
 - A task whose node the graph cannot resolve is bad, because its prompt cannot come from the node. Three of x-632f's tasks carried a one-sentence prompt written by hand, and all three are replaced.
 
 ## Scope and limits
