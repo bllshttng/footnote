@@ -487,6 +487,17 @@ pub fn project(
     // assignment below.
     let mut crown_events = parse_crown_events(crown_raw);
     crown_events.sort_by_key(|c| ts_key(&c.ts));
+    // The themes render once per fold, not once per row: one tolerant store
+    // read feeds every crown row's title below.
+    let themes = crate::paths::AgentsHome::from_env_opt()
+        .map(|home| crate::crown_names::theme_map(&home.crown_names_json()))
+        .unwrap_or_default();
+    let rank = |level: i64, scope: &str| -> String {
+        let theme = themes
+            .get(crate::territory::canonical_scope(scope).as_str())
+            .cloned();
+        crate::crown_names::title(level as u32, scope, theme.as_deref())
+    };
     let mut seen_crowns: std::collections::HashSet<(String, String, String, String)> =
         std::collections::HashSet::new();
     for c in &crown_events {
@@ -508,7 +519,7 @@ pub fn project(
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
                     kind: "crown_granted".into(),
-                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    crown: Some(rank(c.level, &c.scope)),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -528,7 +539,7 @@ pub fn project(
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
                     kind: "crown_vacated".into(),
-                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    crown: Some(rank(c.level, &c.scope)),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -708,7 +719,19 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
                 || parent.as_deref().is_some_and(|p| scope_holds(scope, p))
         });
         if let Some((_, holder, level)) = king {
-            r.owner = Some(format!("king {holder} L{level}"));
+            let scope = held
+                .iter()
+                .find(|(s, _, _)| {
+                    r.node.as_deref().is_some_and(|n| scope_holds(s, n))
+                        || parent.as_deref().is_some_and(|p| scope_holds(s, p))
+                })
+                .map(|(s, _, _)| s.clone())
+                .unwrap_or_default();
+            let theme = crate::paths::AgentsHome::from_env_opt().and_then(|home| {
+                crate::crown_names::theme_for(&home.crown_names_json(), &scope)
+            });
+            let rank = crate::crown_names::title(*level as u32, &scope, theme.as_deref());
+            r.owner = Some(format!("{rank} ({holder})"));
         } else if let Some(p) = parent {
             let title = title_of(&p).unwrap_or_default();
             r.owner = Some(if title.is_empty() {

@@ -157,7 +157,9 @@ fn crown_at(grants: &[JEvent], vacates: &[JEvent], name: &str, before_ts: &str) 
     }
     let level = g.data.get("level").and_then(Value::as_i64)?;
     let scope = s_str(&g.data, "scope")?;
-    Some(format!("L{level} {scope}"))
+    let theme = crate::paths::AgentsHome::from_env_opt()
+        .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), scope));
+    Some(crate::crown_names::title(level as u32, scope, theme.as_deref()))
 }
 
 /// The pure fold. One `Removal` per receipt, plus one per `registry_row_removed`
