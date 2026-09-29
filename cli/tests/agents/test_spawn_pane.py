@@ -330,8 +330,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             str(rollout),
         ],
     )
-    # The daemon start would exec a real provider binary; the journey
-    # exercises the late-identity heal, not the daemon contract.
+    # The daemon start would exec a real provider; the journey exercises the heal.
     from fno.agents import codex_pane
 
     monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
