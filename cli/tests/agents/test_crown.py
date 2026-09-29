@@ -389,7 +389,7 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
 
     uncrowned = _crown_row("a", scope=None)
     granted_plan = plan_for([uncrowned])
-    _, outcome, vacated, _reowned = settle_spawn_crown([uncrowned], scope="epic-x", plan=granted_plan)
+    _, outcome, vacated = settle_spawn_crown([uncrowned], scope="epic-x", plan=granted_plan)
     assert outcome == "granted"
     assert vacated == []
 
@@ -406,15 +406,14 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
         },
     )
     succeeded_plan = plan_for([caller, child], succession=True)
-    rows, outcome, vacated, reowned = settle_spawn_crown(
+    rows, outcome, vacated = settle_spawn_crown(
         [caller, child], scope="epic-x", plan=succeeded_plan,
         heir="heir",
         heir_owner={"kind": "session", "harness": "codex", "session_id": "heir-sess", "cwd": "/w"},
     )
     assert outcome == "succeeded"
     assert [r.crown_scope for r in rows] == [None, None]
-    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
-    assert reowned == ["w5"]
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession"), ("w5", "reowned")]
     assert rows[1].spawn_provenance["owner"]["session_id"] == "heir-sess"
     assert rows[1].spawned_by_session == "caller-sess", "the birth edge stays history"
 
@@ -423,7 +422,7 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
     # applying a plan for a holder that is no longer there.
     stranger = _crown_row("stranger")
     race_plan = plan_for([caller, child], succession=True)
-    rows, outcome, vacated, _reowned = settle_spawn_crown(
+    rows, outcome, vacated = settle_spawn_crown(
         [stranger, child], scope="epic-x", plan=race_plan,
     )
     assert outcome == "declined"
@@ -435,14 +434,14 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
 
     dead = _crown_row("dead", status="exited")
     granted_plan = plan_for([dead])
-    rows, outcome, vacated, _reowned = settle_spawn_crown([dead], scope="epic-x", plan=granted_plan)
+    rows, outcome, vacated = settle_spawn_crown([dead], scope="epic-x", plan=granted_plan)
     assert outcome == "granted"
     assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
     assert rows[0].crown_scope is None
 
     rebound_plan = plan_for([caller, child], succession=True)
     rebound = replace(caller, harness_session_id="caller-sess-2")
-    rows, outcome, vacated, _reowned = settle_spawn_crown(
+    rows, outcome, vacated = settle_spawn_crown(
         [rebound, child], scope="epic-x", plan=rebound_plan,
     )
     assert outcome == "declined"
@@ -472,7 +471,7 @@ def test_settle_spawn_crown_declines_when_rust_is_unavailable(
         raise spawn_overlay_client.SpawnOverlayUnavailable("not built")
 
     monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", unavailable)
-    rows, outcome, vacated, _reowned = settle_spawn_crown([caller], scope="epic-x", plan=plan)
+    rows, outcome, vacated = settle_spawn_crown([caller], scope="epic-x", plan=plan)
     assert (outcome, vacated) == ("declined", [])
     assert asdict(rows[0]) == before
 

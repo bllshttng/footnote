@@ -1818,8 +1818,7 @@ def _claude_create_path(
                 entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None, heir=name,
                 heir_owner=build_heir_owner(
-                    new_entry.harness, new_entry.harness_session_id, new_entry.cwd
-                ),
+                    new_entry.harness, new_entry.harness_session_id, new_entry.cwd),
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True
@@ -5851,7 +5850,6 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
         row = matches[0]
-        # The uuid is the identity; the label may lag a rename.
         actual_fno_id = row.get("fno_id")
         if expected_fno_id is not None and actual_fno_id != expected_fno_id:
             print(
