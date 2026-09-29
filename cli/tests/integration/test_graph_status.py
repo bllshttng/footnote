@@ -706,13 +706,13 @@ def test_supersede_persists_old_row_superseded(tmp_graph):
     b = run_native_create(tmp_graph, "add", "new work")
     new_id = json.loads(b.stdout)["id"]
 
-    r = _invoke(
-        "backlog", "supersede", new_id,
+    r = run_native_create(
+        tmp_graph, "supersede", new_id,
         "--replaces", old_id,
         "--cause", "consolidated",
         "--surface", "src/x.py",
     )
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 0, r.stdout + r.stderr
 
     node = next(e for e in _read_entries(tmp_graph) if e["id"] == old_id)
     assert node["status"] == "superseded"

@@ -1502,10 +1502,1072 @@ fn normalize_plan_path(path: &str) -> String {
         .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// the queue verbs
+// ---------------------------------------------------------------------------
+
+/// Flatten one-or-many id args (the _expand_id_args twin): comma bundles and
+/// space-separated args both feed one list, first occurrence wins, whitespace
+/// stripped.
+fn expand_id_args(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for arg in raw {
+        for part in arg.split(',') {
+            let tid = part.trim();
+            if tid.is_empty() || out.iter().any(|e| e == tid) {
+                continue;
+            }
+            out.push(tid.to_string());
+        }
+    }
+    out
+}
+
+/// The shared prologue of the batch verbs: expand, refuse an empty set and
+/// non-node ids (the _expand_valid_ids twin, message for message).
+fn expand_valid_ids(raw: &[String]) -> Result<Vec<String>, i32> {
+    let ids = expand_id_args(raw);
+    if ids.is_empty() {
+        eprintln!("Error: at least one task_id is required");
+        return Err(1);
+    }
+    for tid in &ids {
+        if !has_node_id_prefix(tid) {
+            eprintln!("Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'");
+            return Err(1);
+        }
+    }
+    Ok(ids)
+}
+
+/// The missing-node gate for the multi-id verbs (the _require_nodes twin).
+fn require_nodes(rows: &[Value], ids: &[String]) -> Result<(), String> {
+    let missing: Vec<&String> = ids
+        .iter()
+        .filter(|id| find_node(rows, id).is_none())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+    Err(format!("feature(s) not found: {}", names.join(", ")))
+}
+
+/// The shared non-graph backend guard (the update door's guard, per verb):
+/// these verbs own graph state; under an external backend they refuse.
+fn refuse_non_graph_backend(verb: &str) -> Option<i32> {
+    let backend = active_backend_name();
+    if backend == "graph" {
+        return None;
+    }
+    eprintln!(
+        "fno backlog {verb}: this verb owns graph state; under the \
+         {backend} tracker backend it is refused. Track the item in the \
+         tracker by its id."
+    );
+    Some(1)
+}
+
+/// `fno backlog queue <ids> [--reason TEXT]`: stamps queued_at + queued_reason
+/// on every id in one locked mutation. Atomic across the batch.
+pub fn run_queue(tail: &[String]) -> i32 {
+    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+        return forward_to_python("queue", tail);
+    }
+    let tail = &split_flag_values(tail);
+    let mut ids_raw: Vec<String> = Vec::new();
+    let mut reason: Option<String> = None;
+    let mut iter = tail.iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--reason" | "-R" => match iter.next() {
+                Some(v) => reason = Some(v.clone()),
+                None => return forward_to_python("queue", tail),
+            },
+            other => ids_raw.push(other.to_string()),
+        }
+    }
+    if let Some(code) = refuse_non_graph_backend("queue") {
+        return code;
+    }
+    let Ok(ids) = expand_valid_ids(&ids_raw) else {
+        return 1;
+    };
+    let cleaned = reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(String::from);
+    let graph = settings::graph_path();
+    let Ok(rows) = graph_store::read_rows(&graph) else {
+        eprintln!("Error: the backlog graph could not be read");
+        return 1;
+    };
+    if let Err(message) = require_nodes(&rows, &ids) {
+        eprintln!("Error: {message}");
+        return 1;
+    }
+    let ids_for_apply = ids.clone();
+    let applied = graph_store::mutate_rows(
+        &graph,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+        |working| {
+            for id in &ids_for_apply {
+                let Some(resolved) = find_node(working, id).map(|n| {
+                    text_at(n, "id")
+                        .map(String::from)
+                        .unwrap_or_else(|| id.clone())
+                }) else {
+                    return Err(graph_store::StoreError::Invalid(format!(
+                        "feature(s) not found: {id}"
+                    )));
+                };
+                let Some(node) = working
+                    .iter_mut()
+                    .find(|e| text_at(e, "id").as_deref() == Some(resolved.as_str()))
+                else {
+                    return Err(graph_store::StoreError::Invalid(format!(
+                        "feature(s) not found: {id}"
+                    )));
+                };
+                let obj = node.as_object_mut().expect("row is an object");
+                obj.insert(
+                    "queued_at".into(),
+                    Value::String(graph_store::now_isoformat()),
+                );
+                obj.insert(
+                    "queued_reason".into(),
+                    cleaned.clone().map(Value::String).unwrap_or(Value::Null),
+                );
+            }
+            Ok(true)
+        },
+    );
+    if let Err(err) = applied {
+        eprintln!("Error: {err}");
+        return 1;
+    }
+    let suffix = cleaned
+        .as_deref()
+        .map(|r| format!(": \"{r}\""))
+        .unwrap_or_default();
+    for id in &ids {
+        println!("Queued {id}{suffix}");
+    }
+    0
+}
+
+/// `fno backlog unqueue <ids>`: clears queued state. Atomic across the batch;
+/// ids that were not queued still clear (idempotent) and warn non-fatally.
+pub fn run_unqueue(tail: &[String]) -> i32 {
+    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+        return forward_to_python("unqueue", tail);
+    }
+    let mut ids_raw: Vec<String> = Vec::new();
+    for arg in tail {
+        if arg == "--help" || arg == "-h" {
+            return forward_to_python("unqueue", tail);
+        }
+        ids_raw.push(arg.clone());
+    }
+    if let Some(code) = refuse_non_graph_backend("unqueue") {
+        return code;
+    }
+    let Ok(ids) = expand_valid_ids(&ids_raw) else {
+        return 1;
+    };
+    let graph = settings::graph_path();
+    let Ok(rows) = graph_store::read_rows(&graph) else {
+        eprintln!("Error: the backlog graph could not be read");
+        return 1;
+    };
+    if let Err(message) = require_nodes(&rows, &ids) {
+        eprintln!("Error: {message}");
+        return 1;
+    }
+    let ids_for_apply = ids.clone();
+    let not_queued: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let applied = graph_store::mutate_rows(
+        &graph,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+        |working| {
+            for id in &ids_for_apply {
+                let Some(resolved) = find_node(working, id).map(|n| {
+                    text_at(n, "id")
+                        .map(String::from)
+                        .unwrap_or_else(|| id.clone())
+                }) else {
+                    return Err(graph_store::StoreError::Invalid(format!(
+                        "feature(s) not found: {id}"
+                    )));
+                };
+                let Some(node) = working
+                    .iter_mut()
+                    .find(|e| text_at(e, "id").as_deref() == Some(resolved.as_str()))
+                else {
+                    return Err(graph_store::StoreError::Invalid(format!(
+                        "feature(s) not found: {id}"
+                    )));
+                };
+                let was_queued = truthy_field(node, "queued_at");
+                if !was_queued {
+                    not_queued.borrow_mut().push(id.clone());
+                }
+                let obj = node.as_object_mut().expect("row is an object");
+                obj.insert("queued_at".into(), Value::Null);
+                obj.insert("queued_reason".into(), Value::Null);
+            }
+            Ok(true)
+        },
+    );
+    if let Err(err) = applied {
+        eprintln!("Error: {err}");
+        return 1;
+    }
+    for id in &not_queued.into_inner() {
+        eprintln!("warning: {id} was not queued");
+    }
+    for id in &ids {
+        println!("Unqueued {id}");
+    }
+    0
+}
+
+/// `fno backlog queued [--project NAME] [--all]`: the queue as JSON, sorted
+/// by priority then created_at (the cmd_queued twin).
+pub fn run_queued(tail: &[String]) -> i32 {
+    let tail = &split_flag_values(tail);
+    let mut project: Option<String> = None;
+    let mut show_all = false;
+    let mut iter = tail.iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return forward_to_python("queued", tail),
+            "--project" => match iter.next() {
+                Some(v) => project = Some(v.clone()),
+                None => return forward_to_python("queued", tail),
+            },
+            "--all" | "-A" => show_all = true,
+            other => {
+                let _ = other;
+                return forward_to_python("queued", tail);
+            }
+        }
+    }
+    // Queue state is footnote-minted, so no external item can be queued:
+    // under an external backend the read answers the empty list (the
+    // cmd_queued twin), never a refusal.
+    if active_backend_name() != "graph" {
+        println!("[]");
+        return 0;
+    }
+    let graph = settings::graph_path();
+    let Ok(rows) = graph_store::read_rows(&graph) else {
+        eprintln!("Error: the backlog graph could not be read");
+        return 1;
+    };
+    let mut queued: Vec<&Value> = rows
+        .iter()
+        .filter(|e| {
+            truthy_field(e, "queued_at")
+                && !truthy_field(e, "completed_at")
+                && !truthy_field(e, "deferred_at")
+        })
+        .collect();
+    if project.is_none() && !show_all {
+        // The default read narrows to the ambient project when one detects.
+        if let Some(root) = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+        {
+            if let Some(detected) = crate::backlog_ready::detect_project(&rows, &root) {
+                project = Some(detected);
+            }
+        }
+    }
+    if let Some(p) = &project {
+        queued.retain(|e| text_at(e, "project") == Some(p.as_str()));
+    }
+    queued.sort_by_key(|e| {
+        (
+            match text_at(e, "priority") {
+                Some("p0") => 0,
+                Some("p1") => 1,
+                Some("p3") => 3,
+                _ => 2,
+            },
+            text_at(e, "created_at").unwrap_or("").to_string(),
+        )
+    });
+    let output: Vec<Value> = queued
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e.get("id"),
+                "title": e.get("title"),
+                "priority": e.get("priority"),
+                "project": e.get("project"),
+                "queued_at": e.get("queued_at"),
+                "queued_reason": e.get("queued_reason"),
+                "status": e.get("status"),
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap_or_else(|_| "[]".into())
+    );
+    0
+}
+
 // The unused-cell guard: the canonical close reads its post-state through
 // the RefCells above; this keeps the import list honest while the rich
 // Python surface still owns MergeEvidence's unused constructor arms.
 const _: () = ();
+
+// ---------------------------------------------------------------------------
+// the contain verb
+// ---------------------------------------------------------------------------
+
+/// The holder of a live/suspect `node:<id>` claim, else None (the
+/// _live_worker twin). A suspect claim still belongs to its session, so it
+/// counts as a worker here.
+fn live_worker(node_id: &str) -> Option<String> {
+    let key = format!("node:{node_id}");
+    let root = crate::claims::claims_root_for(&key);
+    let (state, rec) = crate::claims::status(&key, root.as_deref());
+    match state {
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect => {
+            rec.map(|r| r.holder)
+        }
+        _ => None,
+    }
+}
+
+/// True iff setting node_id.parent = proposed_parent_id forms a cycle (the
+/// _would_create_cycle twin): node_id sits in the proposed parent's ancestry.
+fn would_create_cycle(rows: &[Value], node_id: &str, proposed_parent: &str) -> bool {
+    if proposed_parent == node_id {
+        return true;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cur = Some(proposed_parent.to_string());
+    while let Some(id) = cur {
+        if !seen.insert(id.clone()) {
+            return true;
+        }
+        if id == node_id {
+            return true;
+        }
+        cur = find_node(rows, &id)
+            .and_then(|e| text_at(e, "parent"))
+            .filter(|p| !p.is_empty())
+            .map(String::from);
+    }
+    false
+}
+
+/// Refuse a deferred or superseded owner: a dead delivery unit cannot own
+/// containment (the refuse_dead_owner twin, message for message).
+fn refuse_dead_owner(owner: &Value, context: &str) -> Option<String> {
+    let completed = text_at(owner, "completed_at").unwrap_or("");
+    let legacy_defer = completed.starts_with("deferred:");
+    let dead =
+        truthy_field(owner, "deferred_at") || truthy_field(owner, "superseded_by") || legacy_defer;
+    if (truthy_field(owner, "completed_at") && !legacy_defer) || !dead {
+        return None;
+    }
+    let id = text_at(owner, "id").unwrap_or("?");
+    let (how, containment, remedy) =
+        if let Some(superseder) = text_at(owner, "superseded_by").filter(|s| !s.is_empty()) {
+            (
+            format!("was superseded by {superseder}"),
+            "its death already released the nodes it contained and nothing re-runs that release"
+                .to_string(),
+            format!(
+                "Run `fno backlog unsupersede {id}` to revive it \
+                 (clears superseded_by; `undefer` does not), or point the \
+                 adopt list at the superseding node, or give the group a \
+                 new slug so it mints a live delivery unit"
+            ),
+        )
+        } else {
+            (
+                "is deferred".to_string(),
+                "its contained nodes remain folded under it (defer keeps \
+             containment; nothing re-runs a release)"
+                    .to_string(),
+                format!(
+                    "Run `fno backlog undefer {id}` first (its \
+                 children resume contained, not released), or drop the \
+                 adopt list from this group"
+                ),
+            )
+        };
+    Some(format!(
+        "{context} resolves to {id}, which {how}; {containment}, \
+         so stamping containment here would leave every adoptee \
+         undispatchable with the no verb to free it. {remedy}"
+    ))
+}
+
+/// `fno backlog contain <owner> <ids...>`: folds existing nodes into an
+/// owner. One locked mutation, atomic across the batch; the guard ladder is
+/// the _contain.py twin, message for message and exit code for exit code.
+pub fn run_contain(tail: &[String]) -> i32 {
+    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+        return forward_to_python("contain", tail);
+    }
+    let mut positionals: Vec<&String> = Vec::new();
+    for arg in tail {
+        if arg.starts_with('-') {
+            return forward_to_python("contain", tail);
+        }
+        positionals.push(arg);
+    }
+    if positionals.is_empty() {
+        return forward_to_python("contain", tail);
+    }
+    let owner_arg = positionals[0].clone();
+    let ids_raw: Vec<String> = positionals[1..].iter().map(|s| s.to_string()).collect();
+    if let Some(code) = refuse_non_graph_backend("contain") {
+        return code;
+    }
+    let ids = expand_id_args(&ids_raw);
+    contain_write(&settings::graph_path(), &owner_arg, &ids)
+}
+fn contain_write(graph: &Path, owner_arg: &str, ids: &[String]) -> i32 {
+    if ids.is_empty() {
+        eprintln!("Error: at least one task_id is required");
+        return 1;
+    }
+    let Ok(rows) = graph_store::read_rows(graph) else {
+        eprintln!("Error: the backlog graph could not be read");
+        return 1;
+    };
+    let Some(owner_node) = find_node(&rows, owner_arg) else {
+        eprintln!("Error: owner not found: {owner_arg}");
+        return 3;
+    };
+    let owner_id = text_at(owner_node, "id").unwrap_or(owner_arg).to_string();
+    if truthy_field(owner_node, "completed_at") {
+        eprintln!(
+            "Error: owner {owner_id} is done; its PR already merged, so \
+             nothing will ever close a node folded into it now"
+        );
+        return 2;
+    }
+    if let Some(message) = refuse_dead_owner(owner_node, owner_arg) {
+        eprintln!("{message}");
+        return 2;
+    }
+    let exit_code: RefCell<i32> = RefCell::new(0);
+    let out_contained: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let out_warnings: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let owner = owner_id.clone();
+    let ids_owned = ids.to_vec();
+    let applied = graph_store::mutate_rows(
+        graph,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+        |working| {
+            if *exit_code.borrow() != 0 {
+                return Ok(false);
+            }
+            let Some(owner_node) = find_node(working, &owner) else {
+                exit_code.replace(3);
+                eprintln!("Error: owner not found: {owner}");
+                return Ok(false);
+            };
+            let owner_id = text_at(owner_node, "id")
+                .unwrap_or(owner.as_str())
+                .to_string();
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for tid in &ids_owned {
+                let Some(target) = find_node(working, tid) else {
+                    exit_code.replace(3);
+                    eprintln!("Error: feature(s) not found: {tid}");
+                    return Ok(false);
+                };
+                let target_id = text_at(target, "id").unwrap_or(tid.as_str()).to_string();
+                if let Some((_, prior)) = seen.iter().find(|(cid, _)| cid == &target_id) {
+                    exit_code.replace(1);
+                    eprintln!(
+                        "Error: node {target_id} is named twice ({prior} and \
+                         {tid}); two spellings of one id resolve to the same node"
+                    );
+                    return Ok(false);
+                }
+                seen.push((target_id.clone(), tid.clone()));
+            }
+            if seen.iter().any(|(cid, _)| cid == &owner_id) {
+                exit_code.replace(1);
+                eprintln!("Error: contain names the owner {owner_id} itself");
+                return Ok(false);
+            }
+            for (target_id, _) in &seen {
+                let target_idx = working
+                    .iter()
+                    .position(|e| text_at(e, "id") == Some(target_id.as_str()))
+                    .expect("target resolved twice must stay resolvable");
+                if let Some(holder) = live_worker(target_id) {
+                    exit_code.replace(2);
+                    eprintln!(
+                        "Error: {owner_id} adopts {target_id}, which is being \
+                         built right now by {holder}; adopting it would leave that \
+                         session holding a claim on a node that no longer dispatches, \
+                         and it would still open its own PR. Wait for it to land, or \
+                         stop it first"
+                    );
+                    return Ok(false);
+                }
+                if would_create_cycle(working, target_id, &owner_id) {
+                    exit_code.replace(2);
+                    eprintln!(
+                        "Error: adopting {target_id} into {owner_id} would \
+                         create a cycle"
+                    );
+                    return Ok(false);
+                }
+                let kids: Vec<String> = working
+                    .iter()
+                    .filter(|e| text_at(e, "parent") == Some(target_id.as_str()))
+                    .filter_map(|e| text_at(e, "id"))
+                    .map(String::from)
+                    .collect();
+                if !kids.is_empty() {
+                    exit_code.replace(2);
+                    let shown: Vec<&str> = kids.iter().take(3).map(String::as_str).collect();
+                    let ellipsis = if kids.len() > 3 { "..." } else { "" };
+                    eprintln!(
+                        "Error: {owner_id} adopts {target_id}, which has {} \
+                         child(ren) ({}{}); containment is one level, so they \
+                         would stay dispatchable and open their own PRs while \
+                         their parent closed. Adopt the children individually, \
+                         or re-parent them out first",
+                        kids.len(),
+                        shown.join(", "),
+                        ellipsis
+                    );
+                    return Ok(false);
+                }
+                let own_pr = working[target_idx].get("pr_number").and_then(Value::as_i64);
+                let own_cost = working[target_idx].get("cost_usd").and_then(Value::as_f64);
+                let not_done = text_at(&working[target_idx], "status") != Some("done");
+                if (own_pr.is_some() || own_cost.is_some()) && not_done {
+                    exit_code.replace(2);
+                    let what = if own_pr.is_some() {
+                        format!("has an open PR (#{})", own_pr.unwrap())
+                    } else {
+                        "has accrued cost".to_string()
+                    };
+                    eprintln!(
+                        "Error: {owner_id} adopts {target_id}, which {what} \
+                         and has not landed; it is its own delivery unit \
+                         mid-flight. Adopting it would hang open work under \
+                         the group, and the epic would close over it when the \
+                         group merges. Let it land first, or drop it from the \
+                         adopt list"
+                    );
+                    return Ok(false);
+                }
+                let mut warning: Option<String> = None;
+                if own_pr.is_some() || own_cost.is_some() {
+                    warning = Some(if own_pr.is_some() {
+                        format!("carries PR #{}", own_pr.unwrap())
+                    } else {
+                        "carries cost".to_string()
+                    });
+                } else {
+                    let obj = working[target_idx].as_object_mut().expect("row");
+                    obj.insert("contained_in".into(), Value::String(owner_id.clone()));
+                    if let Some(o) = obj.get_mut("released_from") {
+                        o.take();
+                    }
+                }
+                if let Some(reason) = &warning {
+                    out_warnings.borrow_mut().push(format!(
+                        "warning: contained {target_id} into {owner_id} but \
+                         did NOT mark it contained: it {reason}, so it is \
+                         its own delivery unit and is not closed by the \
+                         owner's merge"
+                    ));
+                }
+                let already = text_at(&working[target_idx], "parent") == Some(owner_id.as_str());
+                if !already {
+                    let obj = working[target_idx].as_object_mut().expect("row");
+                    obj.insert("parent".into(), Value::String(owner_id.clone()));
+                }
+                out_contained.borrow_mut().push(target_id.clone());
+            }
+            Ok(true)
+        },
+    );
+    if let Err(err) = applied {
+        eprintln!("Error: {err}");
+        return 1;
+    }
+    let code = exit_code.into_inner();
+    if code != 0 {
+        return code;
+    }
+    for line in out_warnings.into_inner() {
+        eprintln!("{line}");
+    }
+    let owner_id = owner.as_str();
+    for tid in out_contained.into_inner() {
+        println!("contained {tid} into {owner_id}; it ships inside {owner_id}'s PR");
+    }
+    0
+}
+/// Un-contain everything shipping inside owner_id; return the ids freed (the
+/// _release_contained_children twin). Each freed row drops the owner's PR
+/// refs so the owner's merge cannot close it.
+fn release_contained_children(entries: &mut [Value], owner_id: &str) -> Vec<String> {
+    let mut freed = Vec::new();
+    let owner_refs = pr_ref_set(entries, owner_id);
+    for e in entries.iter_mut() {
+        if text_at(e, "contained_in") != Some(owner_id) {
+            continue;
+        }
+        let obj = e.as_object_mut().expect("row");
+        obj.remove("contained_in");
+        drop_owner_pr_refs(obj, &owner_refs);
+        obj.insert("released_from".into(), Value::String(owner_id.to_string()));
+        if let Some(id) = obj.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                freed.push(id.to_string());
+            }
+        }
+    }
+    freed
+}
+
+/// Clear parent on the owner's non-done children; return the ids freed (the
+/// _release_parented_children twin). Done keeps parent as history.
+fn release_parented_children(entries: &mut [Value], owner_id: &str) -> Vec<String> {
+    let mut freed = Vec::new();
+    for e in entries.iter_mut() {
+        if text_at(e, "parent") != Some(owner_id) || truthy_field(e, "completed_at") {
+            continue;
+        }
+        let obj = e.as_object_mut().expect("row");
+        obj.insert("parent".into(), Value::Null);
+        if let Some(id) = obj.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                freed.push(id.to_string());
+            }
+        }
+    }
+    freed
+}
+
+/// The owner's (pr_number, repo-lowered slug) ref set (the release_contained
+/// comparison key).
+fn pr_ref_set(entries: &[Value], owner_id: &str) -> std::collections::BTreeSet<(i64, String)> {
+    let owner = entries.iter().find(|e| text_at(e, "id") == Some(owner_id));
+    let Some(owner) = owner else {
+        return Default::default();
+    };
+    let mut out = std::collections::BTreeSet::new();
+    let slug = |url: Option<&str>| {
+        super::pr_link::repo_slug_from_url(url)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default()
+    };
+    if let Some(n) = owner.get("pr_number").and_then(Value::as_i64) {
+        out.insert((n, slug(owner.get("pr_url").and_then(Value::as_str))));
+    }
+    for extra in owner
+        .get("additional_prs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(n) = extra.get("number").and_then(Value::as_i64) {
+            out.insert((n, slug(extra.get("url").and_then(Value::as_str))));
+        }
+    }
+    out
+}
+
+/// Drop PR refs inherited from the owner: the primary ref when it matches,
+/// and every matching additional ref.
+fn drop_owner_pr_refs(
+    obj: &mut serde_json::Map<String, Value>,
+    owner: &std::collections::BTreeSet<(i64, String)>,
+) {
+    if owner.is_empty() {
+        return;
+    }
+    let own = (
+        obj.get("pr_number").and_then(Value::as_i64),
+        obj.get("pr_url")
+            .and_then(Value::as_str)
+            .map(|u| super::pr_link::repo_slug_from_url(Some(u)))
+            .unwrap_or(None)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default(),
+    );
+    if let Some(n) = own.0 {
+        if owner.contains(&(n, own.1.clone())) {
+            obj.insert("pr_number".into(), Value::Null);
+            obj.insert("pr_url".into(), Value::Null);
+            obj.insert("merge_status".into(), Value::Null);
+        }
+    }
+    if let Some(extra) = obj.get_mut("additional_prs").and_then(Value::as_array_mut) {
+        extra.retain(|ref_row| {
+            let key = (
+                ref_row.get("number").and_then(Value::as_i64),
+                ref_row
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(|u| super::pr_link::repo_slug_from_url(Some(u)))
+                    .unwrap_or(None)
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default(),
+            );
+            match key.0 {
+                Some(n) => !owner.contains(&(n, key.1)),
+                None => true,
+            }
+        });
+    }
+}
+// ---------------------------------------------------------------------------
+// the supersede verb
+// ---------------------------------------------------------------------------
+
+/// Split `--flag=value` spellings into two tokens so the parsers accept the
+/// equals form typer always accepted (values may themselves contain `=`).
+fn split_flag_values(tail: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(tail.len());
+    for arg in tail {
+        if let Some(rest) = arg.strip_prefix("--") {
+            if let Some(eq) = rest.find('=') {
+                out.push(format!("--{}", &rest[..eq]));
+                out.push(rest[eq + 1..].to_string());
+                continue;
+            }
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+/// `fno backlog supersede <new> --replaces <old> --cause TEXT --surface PATH...`
+/// The store mutation is native; the wheel keeps the plan-doc projection as a
+/// transport (the defer pattern), so the receipt names what the store
+/// committed and the wheel only repaints plans.
+pub fn run_supersede(tail: &[String]) -> i32 {
+    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+        return forward_to_python("supersede", tail);
+    }
+    let parsed = match parse_supersede_args(&split_flag_values(tail)) {
+        Some(p) => p,
+        None => return forward_to_python("supersede", tail),
+    };
+    if let Some(code) = refuse_non_graph_backend("supersede") {
+        return code;
+    }
+    supersede_write(&settings::graph_path(), &parsed)
+}
+
+struct SupersedeArgs {
+    new_id: String,
+    old_id: String,
+    cause: Option<String>,
+    surfaces: Vec<String>,
+    reason: Option<String>,
+    force: bool,
+}
+
+const SUPERSEDE_EXAMPLE: &str = "fno backlog supersede <new> --replaces <old> \
+     --cause \"<what the old node was for>\" --surface <path/it/owned>";
+
+fn parse_supersede_args(tail: &[String]) -> Option<SupersedeArgs> {
+    let mut new_id: Option<String> = None;
+    let mut old_id: Option<String> = None;
+    let mut cause: Option<String> = None;
+    let mut surfaces: Vec<String> = Vec::new();
+    let mut reason: Option<String> = None;
+    let mut force = false;
+    let mut iter = tail.iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--replaces" => old_id = iter.next().cloned(),
+            "--cause" => cause = iter.next().cloned(),
+            "--surface" => match iter.next() {
+                Some(s) => surfaces.push(s.clone()),
+                None => return None,
+            },
+            "--reason" | "-R" => reason = iter.next().cloned(),
+            "--force" | "-F" => force = true,
+            other => {
+                if other.starts_with('-') {
+                    return None;
+                }
+                if new_id.is_some() {
+                    return None;
+                }
+                new_id = Some(other.to_string());
+                continue;
+            }
+        }
+        continue;
+    }
+    let new_id = new_id?;
+    let old_id = old_id?;
+    Some(SupersedeArgs {
+        new_id,
+        old_id,
+        cause,
+        surfaces,
+        reason,
+        force,
+    })
+}
+fn supersede_write(graph: &Path, args: &SupersedeArgs) -> i32 {
+    if !has_node_id_prefix(&args.new_id) {
+        eprintln!(
+            "Error: new_id must be a <prefix>-<4..8 hex> node id, got '{}'",
+            args.new_id
+        );
+        return 1;
+    }
+    if !has_node_id_prefix(&args.old_id) {
+        eprintln!(
+            "Error: --replaces must be a <prefix>-<4..8 hex> node id, got '{}'",
+            args.old_id
+        );
+        return 1;
+    }
+    if args.new_id == args.old_id {
+        eprintln!("Error: cannot supersede self");
+        return 1;
+    }
+    let cleaned_cause = args.cause.as_deref().map(str::trim).unwrap_or("");
+    if cleaned_cause.is_empty() {
+        eprintln!(
+            "Error: --cause is required and cannot be blank.\n\
+             A supersede carries the evidence trail: what the old\n\
+             node was for, and which repo paths must change to prove the new one\n\
+             replaced it. The old node's status reads superseded from the edge\n\
+             alone; a merged PR covering every declared surface later stamps the\n\
+             evidence verified_at.\n  {}",
+            SUPERSEDE_EXAMPLE
+        );
+        return 1;
+    }
+    if args.surfaces.is_empty() {
+        eprintln!(
+            "Error: at least one --surface is required.\n\
+             Name the repo-relative paths the old node owned; a merged PR\n\
+             touching all of them is what verifies this supersede.\n  {}",
+            SUPERSEDE_EXAMPLE
+        );
+        return 1;
+    }
+    let mut normalized: Vec<String> = Vec::new();
+    for raw in &args.surfaces {
+        let candidate = raw.trim().replace('\\', "/");
+        let bad = candidate.is_empty()
+            || candidate.starts_with('/')
+            || candidate
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..");
+        if bad {
+            eprintln!("Error: --surface must be a non-empty repo-relative path: {raw:?}");
+            return 1;
+        }
+        if !normalized.iter().any(|s| s == &candidate) {
+            normalized.push(candidate);
+        }
+    }
+    // The store mutation: every guard inside the locked apply, atomic like
+    // the python mutator. Refusals park an exit code and publish nothing.
+    let exit_code: RefCell<i32> = RefCell::new(0);
+    let freed: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let parent_freed: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let proj_kids: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let canonical: RefCell<(String, String)> = RefCell::new((String::new(), String::new()));
+    let applied = graph_store::mutate_rows(
+        graph,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+        |working| {
+            if *exit_code.borrow() != 0 {
+                return Ok(false);
+            }
+            let Some(new_node) = find_node(working, &args.new_id) else {
+                exit_code.replace(1);
+                eprintln!("Error: new node {} not found", args.new_id);
+                return Ok(false);
+            };
+            let new_canon = text_at(new_node, "id")
+                .unwrap_or(args.new_id.as_str())
+                .to_string();
+            let Some(old_node) = find_node(working, &args.old_id) else {
+                exit_code.replace(1);
+                eprintln!("Error: old node {} not found", args.old_id);
+                return Ok(false);
+            };
+            let old_canon = text_at(old_node, "id")
+                .unwrap_or(args.old_id.as_str())
+                .to_string();
+            if text_at(old_node, "status") == Some("done") {
+                exit_code.replace(1);
+                eprintln!(
+                    "Error: cannot supersede {}: it is already shipped \
+                     (status=done). Open a follow-up node instead.",
+                    args.old_id
+                );
+                return Ok(false);
+            }
+            if truthy_field(old_node, "superseded_by") {
+                exit_code.replace(1);
+                let by = text_at(old_node, "superseded_by").unwrap_or("?");
+                eprintln!(
+                    "Error: cannot supersede {}: it is already superseded \
+                     by {by}. Resolve the existing supersede chain first.",
+                    args.old_id
+                );
+                return Ok(false);
+            }
+            let kids = live_child_ids(working, &old_canon);
+            if !kids.is_empty() && !args.force {
+                exit_code.replace(1);
+                eprintln!(
+                    "Error: cannot supersede {}: it still has {} live \
+                     child(ren): {}. Superseding would strand them under a \
+                     dead unit. Re-run with --force to supersede anyway \
+                     (their parent is cleared so they stay dispatchable).",
+                    args.old_id,
+                    kids.len(),
+                    kids.join(", ")
+                );
+                return Ok(false);
+            }
+            // The canonical edge: supersedes on the new row, superseded_by on
+            // the old row, both by canonical id (the stored abbreviation
+            // would survive unsupersede as a stale forward edge).
+            let idx_new = working
+                .iter()
+                .position(|e| text_at(e, "id") == Some(new_canon.as_str()))
+                .expect("new node resolved twice must stay resolvable");
+            {
+                let obj = working[idx_new].as_object_mut().expect("row");
+                let mut supersedes: Vec<Value> = obj
+                    .get("supersedes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !supersedes
+                    .iter()
+                    .any(|v| v.as_str() == Some(old_canon.as_str()))
+                {
+                    supersedes.push(Value::String(old_canon.clone()));
+                }
+                obj.insert("supersedes".into(), Value::Array(supersedes));
+            }
+            let idx_old = working
+                .iter()
+                .position(|e| text_at(e, "id") == Some(old_canon.as_str()))
+                .expect("old node resolved twice must stay resolvable");
+            {
+                let obj = working[idx_old].as_object_mut().expect("row");
+                obj.insert("superseded_by".into(), Value::String(new_canon.clone()));
+                obj.insert(
+                    "supersession".into(),
+                    json!({
+                        "successor": new_canon,
+                        "cause": cleaned_cause,
+                        "reason": args
+                            .reason
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|r| !r.is_empty()),
+                        "surfaces": normalized,
+                        "verified_at": Value::Null,
+                        "evidence_pr": Value::Null,
+                        "matched_surfaces": [],
+                    }),
+                );
+            }
+            // Release the membership axis: contained children ship inside the
+            // dying unit's PR; epic children carry parent. Non-done only:
+            // done keeps parent as history.
+            let freed_ids = release_contained_children(working, &old_canon);
+            let parent_freed_ids = release_parented_children(working, &old_canon);
+            let by_id = |id: &str| {
+                working
+                    .iter()
+                    .find(|e| text_at(e, "id") == Some(id))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            };
+            let owner_plan = by_id(&old_canon)
+                .get("plan_path")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let proj: Vec<String> = parent_freed_ids
+                .iter()
+                .filter(|k| {
+                    by_id(k).get("plan_path").and_then(Value::as_str) != owner_plan.as_deref()
+                })
+                .cloned()
+                .collect();
+            freed.borrow_mut().extend(freed_ids);
+            parent_freed.borrow_mut().extend(parent_freed_ids);
+            proj_kids.borrow_mut().extend(proj);
+            canonical
+                .borrow_mut()
+                .clone_from(&(old_canon.clone(), new_canon.clone()));
+            Ok(true)
+        },
+    );
+    if let Err(err) = applied {
+        eprintln!("Error: {err}");
+        return 1;
+    }
+    let code = exit_code.into_inner();
+    if code != 0 {
+        return code;
+    }
+    let _ = canonical.into_inner();
+    println!("superseded {} with {}", args.old_id, args.new_id);
+    let freed = freed.into_inner();
+    if !freed.is_empty() {
+        println!(
+            "Released {} contained node(s) from {}; they are \
+             dispatchable again: {}",
+            freed.len(),
+            args.old_id,
+            freed.join(", ")
+        );
+    }
+    let parent_freed = parent_freed.into_inner();
+    if !parent_freed.is_empty() {
+        println!(
+            "Cleared parent on {} child(ren) of {} (revive-safe; a later \
+             undefer/unsupersede cannot strand them): {}",
+            parent_freed.len(),
+            args.old_id,
+            parent_freed.join(", ")
+        );
+    }
+    let mut project_ids = vec![args.old_id.clone(), args.new_id.clone()];
+    project_ids.extend(proj_kids.into_inner());
+    project_plans(graph, &project_ids);
+    0
+}
 
 #[cfg(test)]
 mod tests {
@@ -1533,6 +2595,55 @@ mod tests {
         assert!(!a.close_flags() && a.rich_flags());
         let a = parse_done_args(&["--force".into(), "--note".into(), "n".to_string()]);
         assert!(a.close_flags() && a.rich_flags());
+    }
+
+    #[test]
+    fn release_twins_free_only_their_own_children() {
+        let mut rows = vec![
+            json!({"id": "ab-11111111", "status": "in_progress"}),
+            json!({"id": "ab-22222222", "contained_in": "ab-11111111",
+                   "parent": "ab-11111111", "pr_number": 7,
+                   "pr_url": "https://github.com/acme/widget/pull/7"}),
+            json!({"id": "ab-33333333", "parent": "ab-11111111"}),
+            json!({"id": "ab-44444444", "parent": "ab-11111111",
+                   "status": "done", "completed_at": "2026-01-01T00:00:00+00:00"}),
+        ];
+        let owner = json!({"id": "ab-11111111", "pr_number": 7,
+                           "pr_url": "https://github.com/acme/widget/pull/7"});
+        let mut with_owner = vec![owner];
+        with_owner.extend(rows.clone());
+        let freed = release_contained_children(&mut with_owner, "ab-11111111");
+        assert_eq!(freed, vec!["ab-22222222".to_string()]);
+        let row = with_owner
+            .iter()
+            .find(|e| text_at(e, "id") == Some("ab-22222222"))
+            .unwrap();
+        assert!(row.get("contained_in").is_none());
+        assert_eq!(
+            row.get("released_from").and_then(Value::as_str),
+            Some("ab-11111111")
+        );
+        // The inherited ref (7 in the owner's name) dropped.
+        assert!(row.get("pr_number").and_then(Value::as_i64).is_none());
+
+        let parent_freed = release_parented_children(&mut rows, "ab-11111111");
+        assert_eq!(
+            parent_freed,
+            vec!["ab-22222222".to_string(), "ab-33333333".to_string()],
+            "every non-done parented child frees; done keeps parent as history"
+        );
+    }
+
+    #[test]
+    fn cycle_guard_walks_the_parent_chain() {
+        let rows = vec![
+            seed("ab-11111111", None),
+            seed("ab-22222222", Some("ab-11111111")),
+            seed("ab-33333333", Some("ab-22222222")),
+        ];
+        assert!(would_create_cycle(&rows, "ab-11111111", "ab-33333333"));
+        assert!(!would_create_cycle(&rows, "ab-33333333", "ab-11111111"));
+        assert!(would_create_cycle(&rows, "ab-22222222", "ab-22222222"));
     }
 
     #[test]
