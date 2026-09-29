@@ -363,7 +363,7 @@ def test_maintain_cli_appends_health_history(tmp_graph):
     result = _invoke(["--apply"])
     assert result.exit_code == 0, result.output
 
-    hist = Path.home() / ".fno" / "health-history.jsonl"
+    hist = Path.home() / ".fno" / "history" / "health-history.jsonl"
     assert hist.exists()
     lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
     maintain_records = [r for r in lines if r.get("scope") == "maintain"]
@@ -418,7 +418,7 @@ def test_maintain_budget_exceeded_exits_4_names_leg_and_appends_partial_row(
     assert "  harness-shape: 0" in result.stdout
     assert "dedup:" not in result.stdout
 
-    hist = Path.home() / ".fno" / "health-history.jsonl"
+    hist = Path.home() / ".fno" / "history" / "health-history.jsonl"
     lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
     row = [r for r in lines if r.get("scope") == "maintain"][-1]["report"]
     assert row["complete"] is False

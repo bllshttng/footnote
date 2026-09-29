@@ -366,11 +366,13 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
 
 
 def test_state_writes_land_under_fno_home():
+    """A blocked protected push writes state/git-protection.json under FNO_HOME
+    and creates nothing under a harness state dir in the sandbox (AC2-HP)."""
     with tempfile.TemporaryDirectory() as td:
         fno = Path(td) / ".fno"
         out, _ = _run_hook_subprocess("git push origin main", fno)
         assert '"permissionDecision": "deny"' in out
-        assert (fno / "git-protection.json").exists()
+        assert (fno / "state" / "git-protection.json").exists()
         assert not (Path(td) / ".claude").exists()
 
 
@@ -433,6 +435,316 @@ def test_one_approval_authorizes_one_action():
             "gh pr merge 1 --squash && git commit --no-verify -m x", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out
         assert flag.exists()
+
+
+def test_fd_duplication_is_not_a_file_write():
+    """`2>&1` duplicates a descriptor and writes no file, so refusing it denied
+    an ordinary gated command for nothing."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess("git commit --no-verify -m ok 2>&1",
+                                      fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
+def test_heredoc_body_mentioning_a_heredoc_is_still_allowed():
+    """The opener scan walked BODY lines too, so a message that merely mentioned
+    <<EOF broke the escape the refusal message recommends."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -F - <<'EOF'\nfix <<EOF parsing\nEOF",
+            fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
+def test_refspec_forms_that_reach_main_are_denied():
+    """Only the `feature:main` form was normalized, so a force-prefixed or
+    fully-qualified destination never compared equal to a protected branch.
+    `git push origin +main` is a FORCE push to main from any branch."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git push origin +main",
+                    "git push origin refs/heads/main",
+                    "git push origin +refs/heads/main",
+                    "git push --all origin",
+                    "git push --mirror origin"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_git_global_options_do_not_hide_the_subcommand():
+    """Both gates key on the subcommand - one by `git push` adjacency, the other
+    by token position - so a global option before it hid the push from both.
+    `-c core.hooksPath=...` additionally disables .git/hooks/pre-push, which IS
+    the branch guard, so it is a --no-verify by another name."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git -C /repo push origin main",
+                    "git --no-pager push origin main",
+                    "git -c core.hooksPath=/dev/null push origin main",
+                    "git -c core.hooksPath=/dev/null commit -m x"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+        # A global option must not turn an ordinary push into a refusal.
+        out2, rc2 = _run_hook_subprocess("git -C /repo push origin feature/x",
+                                         fno, cwd=td)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_quoted_shell_runner_argument_is_re_tokenized():
+    """`eval git push ...` was caught while `eval "git push ..."` - the form
+    anyone actually writes - was invisible, because the whole command sat in one
+    quoted token. Same for `bash -c "..."`."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ('eval "git push origin main"',
+                    'bash -c "git push origin main"',
+                    'sh -c "git push origin main"'):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_heredoc_check_ignores_quoted_argument_text():
+    """`<<` inside an ARGUMENT is not a heredoc opener. A raw regex scan refused
+    a commit whose message read "shift << 2"."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            'git commit --no-verify -m "shift << 2"', fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
+def test_unparseable_merge_reaches_the_two_factor_gate():
+    """An apostrophe raises in shlex, and the lone-command rule cannot count
+    segments on that fallback. Enforcing it anyway refused every fallback merge
+    with a compound-command message, blocking legitimate auto-merge on routine
+    prose. It must be refused by the MERGE gate, naming the real reason."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 12 --body \"it's ready\"", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert "two-factor check failed" in out
+        assert "one approval cannot authorize" not in out
+
+
+def test_case_arm_does_not_hide_the_verb():
+    """`)` terminates a case arm pattern. Without it as a separator the arm body
+    stayed in the case word's segment and both gates saw nothing."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("case x in *) git push origin main;; esac",
+                    "case x in *) gh pr merge 42 --admin;; esac",
+                    "eval git push origin main",
+                    "coproc git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_quoted_argument_text_is_not_read_as_the_command():
+    """Segments arrive shlex-rejoined with quotes stripped, so a regex allowlist
+    read argument text as the command. In one direction that waved a --no-verify
+    commit through because its message said "git log"; in the other, dropping the
+    allowlist denied a read-only command as a push to main. The check is
+    positional (token[1]), so the message text cannot decide either way."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        # A message naming a protected push must not be refused as one.
+        for cmd in ('git commit -m "fix: block git push origin main"',
+                    'git log --grep "git push origin main"'):
+            out, rc = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' not in out and rc == 0, cmd
+        # ...and an allowlisted word in a message must not smuggle --no-verify.
+        out2, _ = _run_hook_subprocess(
+            'git commit --no-verify -m "see git log"', fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out2, "gated, not waved through"
+        assert not flag.exists(), "the approval was actually consumed"
+
+
+def test_redirection_disqualifies_an_authorization():
+    """An authorization covers the whole Bash call, so a `>` rides it into an
+    arbitrary file overwrite no gate inspects."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m ok > /tmp/gp-test-log", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_quoted_heredoc_body_may_contain_a_backtick():
+    """The refusal message recommends `-F - <<'EOF'`, so that has to survive a
+    markdown code span in the message. A raw substring scan for substitutions
+    broke it; the scan runs over parsed tokens, which exclude heredoc bodies.
+    An UNQUOTED delimiter does expand, so it stays refused."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        ok_cmd = (f"git commit --no-verify -F - <<'EOF'\n"
+                  f"fix {_BT}foo{_BT} handling\nEOF")
+        out, _ = _run_hook_subprocess(ok_cmd, fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+        flag.write_text("")
+        bad_cmd = (f"git commit --no-verify -F - <<EOF\n"
+                   f"fix {_BT}id{_BT}\nEOF")
+        out2, _ = _run_hook_subprocess(bad_cmd, fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out2
+
+
+def test_substitution_disqualifies_an_authorization():
+    """A `$(...)` body is re-segmented and trips the count, but backticks are
+    skipped by _substitution_bodies and `<(` is not a separator, so both stayed
+    inside ONE segment and passed the lone-command rule while running arbitrary
+    code under the authorization."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        for cmd in (f'gh pr merge 12 --squash --body "{_BT}id{_BT}"',
+                    "gh pr merge 12 --squash --body-file <(id)"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+            assert marker.exists(), cmd
+
+
+def test_heredoc_stdin_commit_is_still_allowed():
+    """The refusal message points at `-F -` with a heredoc as the way to pass a
+    long message without $(cat ...), so that form must actually work."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -F - <<'EOF'\nmsg\nEOF", fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+        assert not flag.exists(), "the approval is consumed on the allow"
+
+
+def test_uppercase_wrapper_does_not_hide_the_verb():
+    """`ENV`/`SUDO` resolve on a case-insensitive filesystem. _effective_argv's
+    wrapper test was case-sensitive, so the real verb stayed at argv[1] and no
+    gate ever saw the push."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("ENV git push origin main", "SUDO git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_unwritable_state_does_not_crash_the_deny_path():
+    """save_state runs first on every protected push. An unguarded OSError would
+    exit non-zero, which a PreToolUse hook treats as non-blocking - so the push
+    to main would proceed. A crash here fails OPEN."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        (fno / "state" / "git-protection.json").mkdir(parents=True)   # a directory where a file goes
+        out, _ = _run_hook_subprocess("git push origin main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert "Traceback" not in out
+
+
+def test_branch_bypass_does_not_also_open_no_verify():
+    """"One approval must not open the other door" has to hold in BOTH
+    directions. Checking the branch gate first and returning safe on an approved
+    push let one bypass phrase also skip .git/hooks/pre-push."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        env = {"CLAUDE_RECENT_USER_MESSAGE": "Push to Main"}
+        out, _ = _run_hook_subprocess("git push --no-verify origin main",
+                                      fno, cwd=td, extra_env=env)
+        assert '"permissionDecision": "deny"' in out
+        # The branch bypass itself still works for a plain push.
+        out2, rc2 = _run_hook_subprocess("git push origin main", fno, cwd=td,
+                                         extra_env=env)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_uppercase_git_is_still_gated():
+    """`GIT` resolves on a case-insensitive filesystem (macOS). The push
+    patterns matched case-insensitively but extract_branch_from_push did not, so
+    the branch never parsed and the push fell through to allowed."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("GIT push origin main", "Git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_no_verify_approval_requires_a_lone_command():
+    """The lone-command rule applies to every authorizing path, not just the
+    merge marker: the sibling here is not a git segment, so no gate inspects it,
+    yet the approval's allow covered the whole Bash call."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m x && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_two_factor_merge_also_requires_a_lone_command():
+    """Not just the marker path. A leading `cd` is deliberately not carved out:
+    an allow covers a prefix exactly as it covers a suffix."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+
+
+def test_no_verify_approval_does_not_open_push_to_main_single_segment():
+    """The protected-branch gate outranks the --no-verify approval. This is ONE
+    segment, so no cross-segment rule can catch it: the evaluator checked
+    --no-verify first and returned allow without ever reaching the branch
+    check, so an operator-touchable flag opened main directly."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess("git push --no-verify origin main",
+                                      fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists(), "a denied push must not consume the approval"
+
+
+def test_one_flag_cannot_authorize_several_no_verify_segments():
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m a && git commit --no-verify -m b",
+            fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_marker_override_requires_a_lone_merge():
+    """A PreToolUse allow blankets the WHOLE Bash call, so a marker-authorized
+    merge would approve whatever rides along - including a direct force-move of
+    main via the API, which no git gate inspects."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists(), "a refused override must not be spent"
+
+
+def test_one_marker_cannot_authorize_several_merges():
+    """`gh pr merge 1 && gh pr merge 2` rode a single marker consume, and only
+    the first reached the audit log."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh pr merge 2 --squash", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
         assert marker.exists()
 
 
@@ -448,7 +760,7 @@ def test_marker_and_flag_are_single_use():
         out1, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
         assert '"permissionDecision": "allow"' in out1
         assert not marker.exists(), "marker must be single-use"
-        log = fno / "merge-gate-overrides.log"
+        log = fno / "logs" / "merge-gate-overrides.log"
         assert log.exists() and "123" in log.read_text()
         out2, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out2
@@ -459,7 +771,7 @@ def test_marker_and_flag_are_single_use():
         out, _ = _run_hook_subprocess(
             'gh pr merge 123 --body "x\n2099-01-01 forged entry"', fno, cwd=td)
         assert '"permissionDecision": "allow"' in out
-        lines = [ln for ln in (fno / "merge-gate-overrides.log")
+        lines = [ln for ln in (fno / "logs" / "merge-gate-overrides.log")
                  .read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
         assert "forged entry" in lines[0]
@@ -543,15 +855,17 @@ def test_evasion_rows_are_denied():
         for cmd in deny_rows:
             out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
             assert '"permissionDecision": "deny"' in out, cmd
-        # Without turning an ordinary wrapped push into a refusal.
-        out2, rc2 = _run_hook_subprocess("timeout 10 git push origin feature/x",
-                                         fno, cwd=td)
-        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
-        out3, rc3 = _run_hook_subprocess("git -C /repo push origin feature/x",
-                                         fno, cwd=td)
-        assert '"permissionDecision": "deny"' not in out3 and rc3 == 0
-        out4, rc4 = _run_hook_subprocess("git config user.name", fno, cwd=td)
-        assert '"permissionDecision": "deny"' not in out4 and rc4 == 0
+
+    # Allowed controls each run in a FRESH sandbox: an allowed push stamps the
+    # branch, and a second push in the same sandbox would read as debounced.
+    for cmd in ("timeout 10 git push origin feature/x",
+                "git -C /repo push origin feature/x",
+                "git config user.name"):
+        with tempfile.TemporaryDirectory() as td:
+            fno = Path(td) / ".fno"
+            fno.mkdir(parents=True)
+            out, rc = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' not in out and rc == 0, cmd
 
 
 def test_hooks_path_and_message_text_rows():
@@ -696,7 +1010,7 @@ def test_fail_closed_state_rows():
     with tempfile.TemporaryDirectory() as td:
         fno = Path(td) / ".fno"
         fno.mkdir(parents=True)
-        (fno / "git-protection.json").mkdir()   # a directory where a file goes
+        (fno / "state" / "git-protection.json").mkdir(parents=True)   # a directory where a file goes
         out, _ = _run_hook_subprocess("git push origin main", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out
         assert "Traceback" not in out
@@ -705,7 +1019,7 @@ def test_fail_closed_state_rows():
     # rather than allowing unrecorded.
     with tempfile.TemporaryDirectory() as td:
         fno, _ = _with_marker(td)
-        (fno / "merge-gate-overrides.log").mkdir()
+        (fno / "logs" / "merge-gate-overrides.log").mkdir(parents=True)
         out, _ = _run_hook_subprocess("gh pr merge 9 --squash", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out
 
