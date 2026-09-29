@@ -515,8 +515,8 @@ def phase_seconds_left() -> Optional[float]:
 
 
 def _ritual_timeout() -> float:
-    """Cap one cold ritual at its measured 120s budget and leave a 10s phase
-    reserve so timeout is recorded before the phase alarm fires."""
+    """Cap one cold ritual at 135s, above the measured 128s high, and leave
+    15s under the drain's attempt floor to persist before the phase alarm."""
     left = phase_seconds_left()
     if left is None:
         return _RITUAL_TIMEOUT_CAP_S
@@ -1267,7 +1267,7 @@ def _run_tick(
 
 # A real merge took about 120s, and head attempts ran 115-128s under load.
 _MERGE_FLOOR_S = 150.0
-_RITUAL_TIMEOUT_CAP_S = 120.0
+_RITUAL_TIMEOUT_CAP_S = 135.0
 
 
 def run_execute_queue(
