@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 struct RestoreConfigEnv {
     config: Option<std::ffi::OsString>,
     binary: Option<std::ffi::OsString>,
+    mux_dir: Option<std::ffi::OsString>,
 }
 
 impl Drop for RestoreConfigEnv {
@@ -16,6 +17,10 @@ impl Drop for RestoreConfigEnv {
             Some(value) => std::env::set_var("FNO_BIN", value),
             None => std::env::remove_var("FNO_BIN"),
         }
+        match self.mux_dir.take() {
+            Some(value) => std::env::set_var("FNO_MUX_DIR", value),
+            None => std::env::remove_var("FNO_MUX_DIR"),
+        }
     }
 }
 
@@ -24,6 +29,28 @@ impl Drop for RestoreConfigEnv {
 // it missed. This owner test also guards the theme-import entry and preview.
 #[tokio::test]
 async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let _env_lock = crate::digest_overlay::ENVIRONMENT_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreConfigEnv {
+        config: std::env::var_os("FNO_CONFIG"),
+        binary: std::env::var_os("FNO_BIN"),
+        mux_dir: std::env::var_os("FNO_MUX_DIR"),
+    };
+    let config_path = source_dir.path().join("isolated-config.toml");
+    std::fs::write(&config_path, "").unwrap();
+    let mux_dir = source_dir.path().join("isolated-mux");
+    std::fs::create_dir_all(&mux_dir).unwrap();
+    let fake_fno = source_dir.path().join("fno-config-stub");
+    std::fs::write(&fake_fno, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = std::fs::metadata(&fake_fno).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_fno, permissions).unwrap();
+    std::env::set_var("FNO_CONFIG", &config_path);
+    std::env::set_var("FNO_MUX_DIR", &mux_dir);
+    std::env::set_var("FNO_BIN", &fake_fno);
+
     let mut view = View::new(
         (30, 100),
         "main".into(),
@@ -48,8 +75,6 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
         .iter()
         .take(crate::theme::THEME_NAMES.len())
         .all(|action| matches!(action, AuxAction::ApplyTheme(_))));
-
-    let source_dir = tempfile::tempdir().unwrap();
     let name = format!("theme-import-{}", std::process::id());
     let source_path = source_dir.path().join(format!("{name}.toml"));
     std::fs::write(
@@ -73,36 +98,35 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
         theme_import_ui::ThemeImportUi::Preview { candidates, .. }
             if candidates.len() == 1 && candidates[0].name == name
     ));
+    let local_preview = view.theme_import.clone();
 
-    {
-        let _env_lock = crate::digest_overlay::ENVIRONMENT_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _restore = RestoreConfigEnv {
-            config: std::env::var_os("FNO_CONFIG"),
-            binary: std::env::var_os("FNO_BIN"),
-        };
-        let config_path = source_dir.path().join("isolated-config.toml");
-        std::fs::write(&config_path, "").unwrap();
-        let fake_fno = source_dir.path().join("fno-config-stub");
-        std::fs::write(&fake_fno, "#!/bin/sh\nexit 1\n").unwrap();
-        let mut permissions = std::fs::metadata(&fake_fno).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&fake_fno, permissions).unwrap();
-        std::env::set_var("FNO_CONFIG", &config_path);
-        std::env::set_var("FNO_BIN", &fake_fno);
-        let single_dir = source_dir.path().join("saved-single-theme");
-        crate::digest_overlay::set_themes_dir_for_test(Some(single_dir.clone()));
-        theme_import_ui::save(&mut view).await.unwrap();
-        assert!(single_dir.join(format!("{name}.toml")).is_file());
-        assert!(view
-            .user_themes
-            .iter()
-            .any(|(user_name, _)| user_name == &name));
-        assert_eq!(view.theme.name, name);
-        assert!(view.pending_ground.is_some());
-        crate::digest_overlay::set_themes_dir_for_test(None);
-    }
+    view.theme_import = theme_import_ui::ThemeImportUi::Entry(String::new());
+    view.reopen_settings_keeping_sel();
+    let refused_url = b"http://github.com/octo/themes/blob/main/theme.conf\n".to_vec();
+    theme_import_ui::entry_keys(&mut view, &refused_url)
+        .await
+        .unwrap();
+    assert!(
+        view.notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("HTTPS")),
+        "notice: {:?}",
+        view.notice
+    );
+    view.theme_import = local_preview;
+    view.reopen_settings_keeping_sel();
+
+    let single_dir = source_dir.path().join("saved-single-theme");
+    crate::digest_overlay::set_themes_dir_for_test(Some(single_dir.clone()));
+    theme_import_ui::save(&mut view).await.unwrap();
+    assert!(single_dir.join(format!("{name}.toml")).is_file());
+    assert!(view
+        .user_themes
+        .iter()
+        .any(|(user_name, _)| user_name == &name));
+    assert_eq!(view.theme.name, name);
+    assert!(view.pending_ground.is_some());
+    crate::digest_overlay::set_themes_dir_for_test(None);
 
     let terminal_candidate = crate::theme_import::candidate(
         "terminal-import",
