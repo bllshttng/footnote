@@ -3047,14 +3047,14 @@ mod tests {
                 harness_session_id: Some("aaaa1111-2222-3333-4444-555566667777".into()),
                 status: crate::AgentStatus::Live,
                 crown_level: Some(2),
-                crown_scope: Some("x-8b8d,x-9471,x-d742".into()),
+                crown_scope: Some("x-dddd,x-eeee,x-ffff".into()),
                 ..default_row()
             });
         })
         .unwrap();
         let store = serde_json::json!({
             "version": 1,
-            "crowns": {"x-8b8d,x-9471,x-d742": {
+            "crowns": {"x-dddd,x-eeee,x-ffff": {
                 "name": "kestrel", "regnal": 1, "holder_session": null,
                 "nodes": [], "updated_at": "2026-09-29T00:00:00Z",
                 "theme": "native backlog", "title": "Lead of native backlog"
@@ -3063,8 +3063,8 @@ mod tests {
         std::fs::write(home.crown_names_json(), store.to_string()).unwrap();
         for rank in [
             "Lead of native backlog",
-            "Lead of x-8b8d,x-9471,x-d742",
-            "L2 x-8b8d,x-9471,x-d742",
+            "Lead of x-dddd,x-eeee,x-ffff",
+            "L2 x-dddd,x-eeee,x-ffff",
         ] {
             let payload = format!(
                 "<fno_mail from=\"aaaa1111-2222-3333-4444-555566667777\" harness=\"codex\" from_rank=\"{rank}\" id=\"msg-1\">hi\n</fno_mail>"

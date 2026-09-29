@@ -1171,9 +1171,9 @@ mod tests {
             crown_line_text(
                 Some("Kestrel"),
                 "Lead of native backlog",
-                "x-8b8d,x-9471,x-d742"
+                "x-dddd,x-eeee,x-ffff"
             ),
-            "Kestrel, Lead of native backlog (x-8b8d,x-9471,x-d742)"
+            "Kestrel, Lead of native backlog (x-dddd,x-eeee,x-ffff)"
         );
         assert_eq!(
             crown_line_text(None, "L1 fno", "fno"),
@@ -1186,19 +1186,19 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
-            json!([crown_row("kestrel", "x-8b8d,x-9471,x-d742", 2, "sess-k")]),
+            json!([crown_row("kestrel", "x-dddd,x-eeee,x-ffff", 2, "sess-k")]),
         );
         let store = store_path(tmp.path());
         let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-8b8d,x-9471,x-d742", "kestrel").unwrap();
-        let shown = set_theme(&store, &registry, "x-8b8d,x-9471,x-d742", "native backlog").unwrap();
+        name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
+        let shown = set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
         assert_eq!(shown, "Lead of native backlog");
         let dump = snapshot(&store).unwrap();
-        let rec = &dump["crowns"]["x-8b8d,x-9471,x-d742"];
+        let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
         assert_eq!(rec["theme"], json!("native backlog"));
         assert_eq!(rec["title"], json!("Lead of native backlog"));
         assert_eq!(
-            stored_title(&store, "x-8b8d,x-9471,x-d742").as_deref(),
+            stored_title(&store, "x-dddd,x-eeee,x-ffff").as_deref(),
             Some("Lead of native backlog")
         );
     }
@@ -1248,8 +1248,8 @@ mod tests {
         assert_eq!(title(2, "x-aaaa", None), "Lead of x-aaaa");
         assert_eq!(title(7, "fno", Some("native backlog")), "L7 fno");
         assert_eq!(
-            legacy_label(2, "x-8b8d,x-9471,x-d742"),
-            "L2 x-8b8d,x-9471,x-d742"
+            legacy_label(2, "x-dddd,x-eeee,x-ffff"),
+            "L2 x-dddd,x-eeee,x-ffff"
         );
     }
 

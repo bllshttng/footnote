@@ -161,7 +161,7 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal ensure refused: {error}"))?;
             let expected = crate::codex_thread::lead_objective(&scope);
-            verify_goal(&goal, &expected, GoalStatus::Active, "ensure")?;
+            verify_goal(&goal, &expected, &scope, GoalStatus::Active, "ensure")?;
             goal_receipt(session_id, &scope, &owner, &goal)
         }
         GoalAction::Pause { scope, owner } => {
@@ -194,12 +194,12 @@ async fn apply_action(
                     &current.usage,
                 );
             }
-            verify_goal(&current, &expected, GoalStatus::Active, "pause")?;
+            verify_goal(&current, &expected, &scope, GoalStatus::Active, "pause")?;
             let paused = thread
                 .goal_set_typed(&current.objective, GoalStatus::Paused)
                 .await
                 .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
-            verify_goal(&paused, &expected, GoalStatus::Paused, "pause")?;
+            verify_goal(&paused, &expected, &scope, GoalStatus::Paused, "pause")?;
             verify_usage_preserved(&current, &paused, "pause")?;
             pause_reign_goal_receipt(session_id, &scope, &owner, &paused.objective, &paused.usage)
         }
@@ -210,12 +210,12 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
                 .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
-            verify_goal(&current, &expected, GoalStatus::Paused, "resume")?;
+            verify_goal(&current, &expected, &scope, GoalStatus::Paused, "resume")?;
             let active = thread
                 .goal_set_typed(&current.objective, GoalStatus::Active)
                 .await
                 .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
-            verify_goal(&active, &expected, GoalStatus::Active, "resume")?;
+            verify_goal(&active, &expected, &scope, GoalStatus::Active, "resume")?;
             verify_usage_preserved(&current, &active, "resume")?;
             goal_receipt(session_id, &scope, &owner, &active)
         }
@@ -265,12 +265,12 @@ async fn provider_action(
                     .await
                     .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
                     .ok_or_else(|| "Codex goal resume refused: no paused reign goal".to_string())?;
-                verify_goal(&current, &objective, GoalStatus::Paused, "resume")?;
+                verify_goal(&current, &objective, scope, GoalStatus::Paused, "resume")?;
                 let active = thread
                     .goal_set_typed(&current.objective, GoalStatus::Active)
                     .await
                     .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
-                verify_goal(&active, &objective, GoalStatus::Active, "resume")?;
+                verify_goal(&active, &objective, scope, GoalStatus::Active, "resume")?;
                 verify_usage_preserved(&current, &active, "resume")?;
                 return Ok(json!({
                     "verified": true,
@@ -296,11 +296,11 @@ async fn provider_action(
                     ));
                 }
                 Some(current) if current.status == GoalStatus::Active => {
-                    verify_goal(&current, &objective, GoalStatus::Active, "goal-set")?;
+                    verify_goal(&current, &objective, scope, GoalStatus::Active, "goal-set")?;
                     current
                 }
                 Some(current) => {
-                    verify_goal(&current, &objective, GoalStatus::Paused, "goal-set")?;
+                    verify_goal(&current, &objective, scope, GoalStatus::Paused, "goal-set")?;
                     let active = thread
                         .goal_set_typed(&objective, GoalStatus::Active)
                         .await
@@ -313,7 +313,7 @@ async fn provider_action(
                     .await
                     .map_err(|error| format!("Codex provider goal set refused: {error}"))?,
             };
-            verify_goal(&goal, &objective, GoalStatus::Active, "goal-set")?;
+            verify_goal(&goal, &objective, scope, GoalStatus::Active, "goal-set")?;
             Ok(json!({
                 "verified": true,
                 "action": "goal_set",
@@ -425,10 +425,16 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn verify_goal(
     goal: &NativeGoal,
     expected_objective: &str,
+    scope: &str,
     expected_status: GoalStatus,
     action: &str,
 ) -> Result<(), String> {
-    if goal.objective != expected_objective {
+    // A live goal may still carry the retired `$fno:reign` spelling; both
+    // spellings of one scope verify.
+    let objective_matches = goal.objective == expected_objective
+        || (crate::codex_thread::is_lead_objective(&goal.objective, scope)
+            && crate::codex_thread::is_lead_objective(expected_objective, scope));
+    if !objective_matches {
         return Err(format!(
             "Codex provider goal {action} refused: objective does not match reign: {:?}",
             goal.objective
@@ -588,15 +594,17 @@ mod tests {
     }
 
     #[test]
-    fn resume_requires_the_exact_paused_reign_goal() {
+    fn resume_verifies_a_paused_lead_goal_in_either_spelling() {
         let goal = NativeGoal {
             thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Paused,
             usage: GoalUsage::default(),
         };
-        assert!(verify_goal(&goal, "$fno:reign x-aaaa", GoalStatus::Paused, "resume").is_ok());
-        assert!(verify_goal(&goal, "$fno:reign x-bbbb", GoalStatus::Paused, "resume").is_err());
+        assert!(verify_goal(&goal, "$fno:reign x-aaaa", "x-aaaa", GoalStatus::Paused, "resume").is_ok());
+        let lead = crate::codex_thread::lead_objective("x-aaaa");
+        assert!(verify_goal(&goal, &lead, "x-aaaa", GoalStatus::Paused, "resume").is_ok());
+        assert!(verify_goal(&goal, "$fno:reign x-bbbb", "x-bbbb", GoalStatus::Paused, "resume").is_err());
     }
 
     #[test]
