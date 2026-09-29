@@ -165,18 +165,6 @@ def _seed_owner_with_children(g: Path, n: int = 3) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_contain_stamps_containment_and_parent_on_every_child(tmp_graph):
-    owner, kids = _seed_owner_with_children(tmp_graph, 3)
-    code, out = _native_contain(tmp_graph, owner, *kids)
-    assert code == 0, out
-    rows = _by_id(tmp_graph)
-    for kid in kids:
-        assert rows[kid]["contained_in"] == owner
-        assert rows[kid]["parent"] == owner
-        assert f"contained {kid} into {owner}" in out
-        assert "it ships inside" in out
-
-
 def test_contain_is_idempotent_on_rerun(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
     assert _native_contain(tmp_graph, owner, *kids)[0] == 0

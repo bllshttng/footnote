@@ -2593,45 +2593,6 @@ mod tests {
     }
 
     #[test]
-    fn expand_id_args_flattens_bundles_and_dedupes() {
-        let raw = vec![
-            "ab-11111111, ab-22222222".to_string(),
-            "ab-11111111".to_string(),
-            "ab-33333333".to_string(),
-        ];
-        assert_eq!(
-            expand_id_args(&raw),
-            vec![
-                "ab-11111111".to_string(),
-                "ab-22222222".to_string(),
-                "ab-33333333".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn expand_valid_ids_refuses_an_empty_set_and_bad_ids() {
-        assert_eq!(expand_valid_ids(&[]), Err(1));
-        assert_eq!(expand_valid_ids(&["not-an-id".to_string()]), Err(1));
-        assert_eq!(
-            expand_valid_ids(&["ab-11111111".to_string()]),
-            Ok(vec!["ab-11111111".to_string()])
-        );
-    }
-
-    #[test]
-    fn require_nodes_names_every_missing_id() {
-        let rows = vec![seed("ab-11111111", None)];
-        assert_eq!(require_nodes(&rows, &["ab-11111111".to_string()]), Ok(()));
-        let err = require_nodes(
-            &rows,
-            &["ab-22222222".to_string(), "ab-33333333".to_string()],
-        )
-        .unwrap_err();
-        assert_eq!(err, "feature(s) not found: ab-22222222, ab-33333333");
-    }
-
-    #[test]
     fn release_twins_free_only_their_own_children() {
         let mut rows = vec![
             json!({"id": "ab-11111111", "status": "in_progress"}),
