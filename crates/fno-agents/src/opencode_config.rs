@@ -521,11 +521,17 @@ pub fn suggested_agent_block(models: &[(String, String)]) -> (String, Vec<String
     let mut block = serde_json::Map::new();
     let mut carried: Vec<&str> = Vec::new();
     for (footnote, omo_names) in OMO_TO_FOOTNOTE {
+        // One model per footnote agent: the first omo agent with an
+        // assignment wins the slot; its siblings still count as carried -
+        // their counterpart exists, the slot just went to another.
+        let mut slotted = false;
         for omo in omo_names.iter() {
             if let Some((_, model)) = models.iter().find(|(name, _)| name.as_str() == *omo) {
-                block.insert((*footnote).to_string(), json!({ "model": model }));
+                if !slotted {
+                    block.insert((*footnote).to_string(), json!({ "model": model }));
+                    slotted = true;
+                }
                 carried.push(*omo);
-                break;
             }
         }
     }
