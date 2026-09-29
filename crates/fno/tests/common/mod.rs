@@ -98,6 +98,11 @@ impl Scratch {
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
         cmd.envs(test_owner::self_owner_env());
+        // A verb that delegates to the Python CLI (claims, events) resolves
+        // its native event-store writer through FNO_BIN first. Without this
+        // the installed copy falls back to PATH, which carries no `fno` on a
+        // CI runner, and the write dies with EventStoreUnavailable.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         if let Some(worker) = store_worker() {
             cmd.env("FNO_AGENTS_WORKER", worker);
         }
@@ -136,6 +141,9 @@ impl Scratch {
         for (k, v) in test_owner::self_owner_env() {
             cmd.env(k, v);
         }
+        // Same contract as isolate_command: the Python delegate needs the
+        // native writer spelled out, not hoped for on PATH.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         if let Some(worker) = store_worker() {
             cmd.env("FNO_AGENTS_WORKER", worker);
         }
