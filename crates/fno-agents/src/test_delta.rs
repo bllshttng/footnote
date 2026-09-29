@@ -220,43 +220,4 @@ mod tests {
         assert_eq!(over_cap(&delta, 1), Some(2));
         assert_eq!(over_cap(&delta, 2), None);
     }
-
-    #[test]
-    fn shrink_only_gate_passes_a_flat_delta_and_refuses_net_new_tests() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "test"]);
-        std::fs::write(dir.path().join("lib.rs"), "#[test]\nfn base_case() {}\n").unwrap();
-        run(&["add", "lib.rs"]);
-        run(&["commit", "-q", "-m", "base"]);
-        assert_eq!(shrink_only_gate(dir.path(), "main"), Ok(()));
-
-        std::fs::write(
-            dir.path().join("lib.rs"),
-            "#[test]\nfn base_case() {}\n#[test]\nfn extra_case() {}\n",
-        )
-        .unwrap();
-        run(&["add", "lib.rs"]);
-        run(&["commit", "-q", "-m", "add"]);
-
-        let err = match shrink_only_gate(dir.path(), "main") {
-            Err(ShrinkGate::OverCap(msg)) => msg,
-            other => panic!("expected an over-cap refusal: {other:?}"),
-        };
-        assert!(err.contains("net +1 test declarations"), "{err}");
-        assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
-    }
 }

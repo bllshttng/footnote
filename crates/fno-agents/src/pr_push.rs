@@ -1606,26 +1606,18 @@ exit 1
     }
 
     #[test]
-    fn ac2_err_a_failed_runs_read_is_err_never_green_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let gh = stub_gh(dir.path());
-        std::fs::write(dir.path().join("fail-runs"), b"").unwrap();
-        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
-            .expect_err("the runs read failed");
-        assert!(
-            err.contains("actions/runs"),
-            "err names the runs read: {err}"
-        );
-    }
-
-    #[test]
-    fn a_failed_status_read_is_err_never_green_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let gh = stub_gh(dir.path());
-        std::fs::write(dir.path().join("fail-status"), b"").unwrap();
-        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
-            .expect_err("the status read failed");
-        assert!(err.contains("status"), "err names the status read: {err}");
+    fn a_failed_gh_read_is_err_never_green_rows() {
+        for (marker, fragment) in [("fail-runs", "actions/runs"), ("fail-status", "status")] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = stub_gh(dir.path());
+            std::fs::write(dir.path().join(marker), b"").unwrap();
+            let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
+                .expect_err("the gh read failed");
+            assert!(
+                err.contains(fragment),
+                "err names the {fragment} read: {err}"
+            );
+        }
     }
 
     // The record parser: clean and torn captures read empty without touching
@@ -1684,45 +1676,44 @@ exit 1
     }
 
     #[test]
-    fn pr_push_refuses_a_net_new_test_declaration() {
+    fn the_shrink_gate_refuses_net_new_tests_and_passes_a_flat_delta() {
+        // Unit row: the OverCap message names the table, the flat delta is
+        // Ok, and a Diff failure is its own variant.
         let dir = tempfile::tempdir().unwrap();
         let (_origin, work) = push_repo(
             dir.path(),
             "#[test]\nfn kept_case() {}\n",
             "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
         );
-        let argv = [
-            "--cwd",
-            work.as_str(),
-            "--no-preflight",
-            "--stamps-dir",
-            dir.path().join("stamps").to_str().unwrap(),
-        ]
-        .map(str::to_string);
+        let err =
+            match crate::test_delta::shrink_only_gate(std::path::Path::new(&work), "origin/main") {
+                Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
+                other => panic!("expected an over-cap refusal: {other:?}"),
+            };
+        assert!(err.contains("net +1 test declarations"), "{err}");
+        assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
 
-        assert_eq!(run_push(&argv), 3);
-    }
-
-    // The allow case is a genuinely flat delta: the base test kept and a
-    // non-test edit on top. A kept-but-unmodified test would not prove the
-    // push path past the gate.
-    #[test]
-    fn pr_push_allows_a_flat_test_delta() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_origin, work) = push_repo(
-            dir.path(),
-            "#[test]\nfn kept_case() {}\n",
-            "#[test]\nfn kept_case() {}\n\nfn helper() {}\n",
-        );
-        let argv = [
-            "--cwd",
-            work.as_str(),
-            "--no-preflight",
-            "--stamps-dir",
-            dir.path().join("stamps").to_str().unwrap(),
-        ]
-        .map(str::to_string);
-
-        assert_eq!(run_push(&argv), 0);
+        // Wiring rows: the verb refuses the +1 head with 3 and pushes the
+        // flat head with 0. The flat body keeps the base test and adds a
+        // non-test edit, so the delta is genuinely flat.
+        for (feat_body, expected) in [
+            (
+                "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+                3,
+            ),
+            ("#[test]\nfn kept_case() {}\n\nfn helper() {}\n", 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_origin, work) = push_repo(dir.path(), "#[test]\nfn kept_case() {}\n", feat_body);
+            let argv = [
+                "--cwd",
+                work.as_str(),
+                "--no-preflight",
+                "--stamps-dir",
+                dir.path().join("stamps").to_str().unwrap(),
+            ]
+            .map(str::to_string);
+            assert_eq!(run_push(&argv), expected);
+        }
     }
 }
