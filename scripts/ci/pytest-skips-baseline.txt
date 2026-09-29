@@ -243,3 +243,5 @@ cli/tests/unit/test_strand.py::_seed_idea::pytest.skip  # native create door: th
 cli/tests/goldens/_door.py::door::pytest.skip  # native door: the golden receipts drive the fno-agents binary; without a dev build there is no door to pin
 cli/tests/integration/test_collision.py::_native_supersede::pytest.skip  # native supersede door: the guard ladder is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_contain.py::_native_contain::pytest.skip  # native contain door: the guard ladder is the Rust leg's; no dev build means no door to pin
+cli/tests/unit/test_decompose.py::_native_supersede::pytest.skip  # native supersede door: the release contract is the Rust leg's; no dev build means no door to pin
+cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # native supersede door: the evidence-record contract is the Rust leg's; no dev build means no door to pin
