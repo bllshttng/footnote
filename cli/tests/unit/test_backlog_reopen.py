@@ -496,43 +496,47 @@ def test_the_event_schema_requires_a_reason():
 # -- update projects difficulty (restored from the x-dd1f branch; main moved
 # its own difficulty coverage to test_graph_status.py) --
 
-
 @pytest.mark.real_plan_projection
-def test_update_difficulty_reaches_the_plan_doc(tmp_path):
-    """`--difficulty` is a mirrored key, so the edit must trigger the projection
-    like `--priority` does; before this it changed the graph and left the doc."""
+@pytest.mark.parametrize(
+    ("doc_seed", "node_over", "args", "expect_present", "expect_value"),
+    [
+        pytest.param(
+            None, {}, ("--difficulty", "high"), True, "high",
+            id="set-writes-the-doc",
+        ),
+        pytest.param(
+            "difficulty: high", {}, ("--difficulty", "null"), False, None,
+            id="null-clears-the-doc",
+        ),
+        pytest.param(
+            "difficulty: medium", {"difficulty": None}, ("--priority", "p1"), True, "medium",
+            id="persisted-null-band-survives-a-priority-edit",
+        ),
+    ],
+)
+def test_update_mirrored_keys_project_to_the_plan_doc(
+    tmp_path, doc_seed, node_over, args, expect_present, expect_value
+):
+    """`--difficulty` is a mirrored key, so an edit must trigger the projection
+    like `--priority` does; a persisted difficulty: null must not delete a band
+    the doc authored since; an explicit null clears the doc."""
+    front = "---\nstatus: ready\ncreated: 2026-05-05\n"
+    if doc_seed:
+        front += f"{doc_seed}\n"
     plan = tmp_path / "plan.md"
-    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\n---\n\n# a plan\n")
-    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
+    plan.write_text(front + "---\n\n# a plan\n")
+    root = sandbox(
+        tmp_path,
+        _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan), **node_over),
+    )
 
-    code, out = _native_update(root, "ab-11111111", "--difficulty", "high")
+    code, out = _native_update(root, "ab-11111111", *args)
     assert code == 0, out
-    assert "difficulty: high" in plan.read_text()
-
-
-@pytest.mark.real_plan_projection
-def test_update_difficulty_null_clears_the_plan_doc(tmp_path):
-    """The explicit clear reaches the doc even on a row that never held the key."""
-    plan = tmp_path / "plan.md"
-    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: high\n---\n\n# a plan\n")
-    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
-
-    code, out = _native_update(root, "ab-11111111", "--difficulty", "null")
-    assert code == 0, out
-    assert "difficulty" not in plan.read_text()
-
-
-@pytest.mark.real_plan_projection
-def test_update_priority_keeps_a_persisted_null_band_off_the_doc(tmp_path):
-    """Rows minted before the intake fix still store difficulty: null; a
-    mirrored edit on them must not delete the band the doc authored since."""
-    plan = tmp_path / "plan.md"
-    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: medium\n---\n\n# a plan\n")
-    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, difficulty=None, plan_path=str(plan)))
-
-    code, out = _native_update(root, "ab-11111111", "--priority", "p1")
-    assert code == 0, out
-    assert "difficulty: medium" in plan.read_text()
+    text = plan.read_text()
+    if expect_present:
+        assert f"difficulty: {expect_value}" in text
+    else:
+        assert "difficulty" not in text
 
 
 def _native_update(root: Path, *args: str):

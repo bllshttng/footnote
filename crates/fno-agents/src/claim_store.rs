@@ -1051,70 +1051,50 @@ mod lockfile_tests {
 
     #[cfg(unix)]
     #[test]
-    fn strict_claim_listing_refuses_symlinked_lockfiles() {
+    fn strict_claim_listing_refuses_symlinked_and_mislabeled_lockfiles() {
         let temp = TempDir::new().unwrap();
+        // A symlinked lockfile is not a regular file: the strict scan refuses
+        // the whole listing rather than guessing at the target.
         let path = claims::claim_path("node:x-symlink", Some(temp.path())).unwrap();
         let directory = path.parent().unwrap();
         std::fs::create_dir_all(directory).unwrap();
         let target = temp.path().join("claim-target");
         std::fs::write(&target, "not a lockfile").unwrap();
         std::os::unix::fs::symlink(target, &path).unwrap();
-
         let error =
             claims::list_in_strict(&[directory.to_path_buf()], Some("node:"), true).unwrap_err();
         assert!(error.contains("not a regular file"), "{error}");
-    }
 
-    #[test]
-    fn strict_claim_listing_refuses_a_lockfile_with_a_mismatched_key() {
-        let temp = TempDir::new().unwrap();
-        let root = Some(temp.path().to_path_buf());
-        let record = match claims::acquire(
-            "node:x-original",
-            "target-session:owner",
-            claims::AcquireOpts {
-                pid: Some(std::process::id()),
-                root: root.clone(),
-                ..Default::default()
-            },
-        ) {
-            claims::AcquireOutcome::Acquired(record) => record,
-            other => panic!("claim fixture failed: {other:?}"),
-        };
-        let wrong_path = claims::claim_path("node:x-mismatch", Some(temp.path())).unwrap();
-        std::fs::write(&wrong_path, claims::serialize_claim(&record).unwrap()).unwrap();
-        let directory = wrong_path.parent().unwrap();
-
-        let error =
-            claims::list_in_strict(&[directory.to_path_buf()], Some("node:"), true).unwrap_err();
-        assert!(error.contains("filename does not match key"), "{error}");
-    }
-
-    #[test]
-    fn strict_node_listing_refuses_a_node_filename_with_a_non_node_claim() {
-        let temp = TempDir::new().unwrap();
-        let record = match claims::acquire(
-            "task:x-original:1.1",
-            "target-session:owner",
-            claims::AcquireOpts {
-                pid: Some(std::process::id()),
-                root: Some(temp.path().to_path_buf()),
-                ..Default::default()
-            },
-        ) {
-            claims::AcquireOutcome::Acquired(record) => record,
-            other => panic!("claim fixture failed: {other:?}"),
-        };
-        let node_path = claims::claim_path("node:x-mismatch", Some(temp.path())).unwrap();
-        std::fs::write(&node_path, claims::serialize_claim(&record).unwrap()).unwrap();
-
-        let error = claims::list_in_strict(
-            &[node_path.parent().unwrap().to_path_buf()],
-            Some("node:"),
-            true,
-        )
-        .unwrap_err();
-        assert!(error.contains("filename does not match key"), "{error}");
+        // A lockfile whose recorded key disagrees with its filename refuses,
+        // whatever prefix pair collides: node record under a node name for a
+        // different id, and a task record under a node name.
+        for (record_key, file_key) in [
+            ("node:x-original", "node:x-mismatch"),
+            ("task:x-original:1.1", "node:x-mismatch"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let record = match claims::acquire(
+                record_key,
+                "target-session:owner",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root: Some(temp.path().to_path_buf()),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            let wrong_path = claims::claim_path(file_key, Some(temp.path())).unwrap();
+            std::fs::write(&wrong_path, claims::serialize_claim(&record).unwrap()).unwrap();
+            let error = claims::list_in_strict(
+                &[wrong_path.parent().unwrap().to_path_buf()],
+                Some("node:"),
+                true,
+            )
+            .unwrap_err();
+            assert!(error.contains("filename does not match key"), "{error}");
+        }
     }
 
     #[test]

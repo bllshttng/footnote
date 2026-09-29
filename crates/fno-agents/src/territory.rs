@@ -1445,10 +1445,9 @@ path = "/repo/alpha"
             "{rows:?}"
         );
         assert!(rows[0]["live"].is_null(), "{rows:?}");
-    }
 
-    #[test]
-    fn missing_claim_root_is_unknown_not_zero() {
+        // The same degrade with no root to resolve at all: unavailable, not
+        // an implicit zero.
         let error = live_node_claims_from(None).unwrap_err();
         assert!(error.0.contains("claims path unavailable"), "{error:?}");
     }
