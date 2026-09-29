@@ -3557,7 +3557,6 @@ class TestFleetLegRunsAfterACutPRLeg:
         """The phase that failed tonight is king_wake, not the sweep: cut IT
         at its own slice and the fleet legs after it still run and still
         record an outcome."""
-        import json as _json
         import time as _time
 
         from fno.pr_watch import cli as prcli
@@ -4425,9 +4424,7 @@ class TestScanResumesLeastRecentlyPolled:
         eligible=0, acted=0. Every candidate must be rich-read and scanned."""
         from types import SimpleNamespace
 
-        import fno.config as config_mod
         import fno.pr_watch._dispatch as d
-        from fno.config import AutoMergeBlock
         from fno.pr_watch._state import WatermarkStore
 
         prs = list(range(1, 12))
@@ -4442,8 +4439,8 @@ class TestScanResumesLeastRecentlyPolled:
         monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
         reads = self._counting_reads(deps, clock)
 
-        res = self._tick(tmp_path, deps, monkeypatch, store_path,
-                         deadline=clock["t"] + 110.0)
+        self._tick(tmp_path, deps, monkeypatch, store_path,
+                   deadline=clock["t"] + 110.0)
 
         assert reads == prs, f"every state-backed candidate is rich-read: {reads}"
         # The merge phase drains a granted row for PR 11 straight from the
