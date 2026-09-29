@@ -215,17 +215,16 @@ class EffectStore:
     # -- approval lifecycle ----------------------------------------------
 
     def submit(self, request: ApprovalRequest) -> ApprovalRequest:
-        """Record one exact request through the Rust effect gate. The door's
+        """Record one exact request through the Rust effect gate: the door's
         effect-submit op owns the insert, the outbox row, and the DENY
-        refusal: a denied effect class never becomes pending. The db path
-        rides the payload so a test's tmp store stays tmp.
+        refusal. The db path rides the payload so a test's tmp store stays tmp.
         """
         from fno.rust_binary import VerbUnavailable, verb_call
 
         payload: dict[str, Any] = {
             "op": "effect-submit",
-            # isoformat, not model_dump's `Z` suffix: the Rust digest binds
-            # the expires_at string, so both sides must serialize it alike.
+            # isoformat, not model_dump's `Z` suffix: both legs digest the
+            # same expires_at string.
             "request": {
                 **request.model_dump(mode="json"),
                 "created_at": request.created_at.isoformat(),
@@ -242,8 +241,7 @@ class EffectStore:
                 RefusalReason.STORE_UNAVAILABLE,
                 f"the effect store door is unavailable ({exc}); the request is not recorded",
                 fields=["request_id"],
-                recovery="Check the fno-agents binary (`fno doctor`), then retry the effect; "
-                "the retry re-files this same request.",
+                recovery="Check the fno-agents binary, then retry; the retry re-files it.",
             )
         if out.get("result") == "refused":
             if out.get("reason") == "denied_effect_class":
