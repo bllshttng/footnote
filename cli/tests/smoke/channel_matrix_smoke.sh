@@ -86,7 +86,7 @@ shared_smoke() {
   # $@ = candidate directories holding the installed fno / fno-agents binaries;
   # the first one carrying an fno binary wins (channels disagree about where
   # the tool bin lands, and a macOS pip --user fallback lands elsewhere still).
-  local bin_dir="" d
+  local bin_dir="" agents_bin="" d
   for d in "$@"; do
     if [ -x "$d/fno" ]; then
       bin_dir="$d"
@@ -106,7 +106,17 @@ shared_smoke() {
     miss "version" "rc=$RC out: $(printf '%s' "$OUT" | tail -1)"
   fi
 
-  run_capture "$bin_dir/fno-agents" --version
+  # The agents binary need not sit beside the front door: the cargo channel
+  # lands it in the uv tool bin instead. Search every candidate; fall back to
+  # beside-the-front-door so the miss message names the expected spot.
+  for d in "$@"; do
+    if [ -x "$d/fno-agents" ]; then
+      agents_bin="$d/fno-agents"
+      break
+    fi
+  done
+  agents_bin="${agents_bin:-$bin_dir/fno-agents}"
+  run_capture "$agents_bin" --version
   if [ "$RC" -eq 0 ]; then
     pass "agents-version" "fno-agents --version answers"
   else
@@ -289,6 +299,8 @@ row_claude_plugin_session() {
 row_codex_plugin_session() {
   assert_clean_machine
   install_cli_via_npm @openai/codex || return 0
+  # codex refuses a CODEX_HOME that does not exist yet.
+  mkdir -p "$BASE/codex-home"
   export CODEX_HOME="$BASE/codex-home"
   run_capture codex plugin marketplace add "$REPO_ROOT"
   if [ "$RC" -ne 0 ]; then
@@ -410,8 +422,13 @@ row_cargo() {
     miss "cargo-install" "rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
     return 0
   fi
-  # cargo install lands the front door here; its first-run bootstrap
-  # provisions fno-agents into the uv tool bin instead.
+  # cargo install lands the front door here; its first forwarded verb
+  # bootstraps the wheel, whose data scripts carry fno-agents into the uv
+  # tool bin ($HOME/.local/bin). `fno backlog` never provisions, so warm up
+  # once, and keep the tool bin on PATH for the front door's bare-name
+  # sibling fallback.
+  export PATH="$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
+  run_capture "$CARGO_HOME/bin/fno" config get config.review.posture
   shared_smoke "$CARGO_HOME/bin" "$HOME/.local/bin"
 }
 
