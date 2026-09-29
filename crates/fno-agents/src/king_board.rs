@@ -2749,9 +2749,6 @@ mod tests {
         // answers must never be a driver candidate: it would let a finished
         // worker suppress its node's undriven-PR row. Mirrors the
         // spawn_gate.LIVE_STATUSES vocabulary.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -2828,9 +2825,6 @@ mod tests {
         // The stamp is absent on four registry rows in five (measured
         // 2026-09-17: 6 of 31). A live row whose session id sits on a
         // non-terminal entry's OPEN phase row is that entry's driver.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
@@ -2867,9 +2861,6 @@ mod tests {
         // row closed (measured 2026-09-17, PR 2126). The PR keeps the join
         // alive; a PR-less node whose planner closed its row stays
         // dispatchable (the closed-planner ruling).
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
@@ -2916,9 +2907,6 @@ mod tests {
         // one on another node: the join must land on the open node, so the
         // abandoned node keeps its undriven_pr instead of borrowing a driver
         // it no longer has.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
@@ -2960,9 +2948,6 @@ mod tests {
     fn the_stamp_wins_over_the_graph_join() {
         // A row that already carries `node` is never re-resolved: the stamp
         // wins and the graph is not consulted for it.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
@@ -3007,9 +2992,6 @@ mod tests {
         // ~/.fno/agents via AgentsHome, which panics under test with no
         // declared root (paths.rs) - this test already pins HOME, so it also
         // pins FNO_AGENTS_HOME under the same tempdir to declare one.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -3062,9 +3044,6 @@ mod tests {
 
     #[test]
     fn the_scope_error_queue_is_actionable_and_loud() {
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -3089,9 +3068,6 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_scope_is_a_scope_error() {
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -3118,9 +3094,6 @@ mod tests {
         // source reads as unreadable - never the measured 40,776ms-against-
         // 30,000ms overrun, and never the 4.9s the captured-slice shape
         // accepted.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -3176,9 +3149,6 @@ mod tests {
         // whose truth batch sleeps 30s, the board must cap the batch at what
         // remains of its own 2,000ms budget, return inside ~2.75s, and read
         // the holder UNMEASURED - never no-evidence.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&[
             "FNO_AGENTS_HOME",
@@ -3282,9 +3252,6 @@ mod tests {
         // A timeout against the board's own deadline is the board stopping,
         // not the source failing: the queues must read not-read, the flag
         // must stay off, and the receipt must name the read.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
         let _restore = EnvRestore::take(&[
             "FNO_AGENTS_HOME",
