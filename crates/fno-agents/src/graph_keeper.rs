@@ -4222,7 +4222,9 @@ mod tests {
         let (dir, state) = sqlite_state(json!({
             "entries": [{"id": "x-a", "slug": "node-a", "title": "a", "status": "ready"}]
         }));
-        let db = rusqlite::Connection::open(dir.path().join("graph.db")).unwrap();
+        // The store resolves through the layout now; open the same file the
+        // keeper read_state seeded, not the legacy root spelling.
+        let db = rusqlite::Connection::open(crate::backlog::database_path(&state.graph)).unwrap();
         db.execute("DELETE FROM graph_meta WHERE key = 'version'", [])
             .unwrap();
         drop(db);

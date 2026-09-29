@@ -1364,12 +1364,15 @@ mod tests {
     }
 
     /// AC14-HP: a client using the new `db/graph.json` anchor spelling against
-    /// an unmigrated root (no `db/` at all) resolves the legacy `graph.db`.
+    /// an unmigrated root (the legacy `graph.json` + `graph.db` pair) resolves
+    /// the legacy store; the anchor kind probes the `.db` twin, so the legacy
+    /// `graph.db` must exist for the legacy arm to fire.
     #[test]
     fn a_db_spelled_anchor_on_an_unmigrated_root_opens_the_legacy_store() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("graph.db"), b"SQLite format 3\0").unwrap();
         let db = database_path(&root.join("db").join("graph.json"));
         assert_eq!(db, root.join("graph.db"));
     }

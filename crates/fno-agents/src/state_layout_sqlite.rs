@@ -293,13 +293,20 @@ struct Drain {
 }
 
 impl Drain {
-    fn fail(self, src: &Connection, why: String) -> Status {
-        let _ = src.execute_batch("ROLLBACK;");
+    fn fail(self, guard: &Connection, why: String) -> Status {
+        let _ = guard.execute_batch("ROLLBACK;");
         let _ = std::fs::remove_file(&self.migrating);
         let _ = std::fs::remove_file(&self.fence);
         Status::Refused(why)
     }
 }
+
+/// The busy-retry ceiling for the backup: the copy waits this long for its
+/// pages, then the row reads refused and nothing is deleted. A write
+/// transaction open on the copy source turns every step Busy, and the stock
+/// run_to_completion retries Busy forever - the ceiling exists so a future
+/// lock shape can never hang the lane again.
+const BACKUP_BUDGET: Duration = Duration::from_secs(30);
 
 /// The drain-copy-publish-park body. The fence is written before the first
 /// open and removed last. The drain transaction stays open until the legacy
@@ -319,81 +326,106 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
     if std::fs::write(&fence, std::process::id().to_string()).is_err() {
         return Status::Refused("cannot write the fence".to_string());
     }
-    let src = match Connection::open(legacy) {
+    // The drain transaction lives on its own guard connection: an open
+    // write transaction on the copy SOURCE turns every backup step Busy
+    // (sqlite reads its own uncommitted state as an unsnapshotted write),
+    // so the guard holds RESERVED to park other writers while a second,
+    // transaction-free connection takes the copy.
+    let guard = match Connection::open(legacy) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_file(&fence);
             return Status::Refused(format!("cannot open the legacy store: {e}"));
         }
     };
-    let _ = src.busy_timeout(Duration::from_millis(DRAIN_BUSY_TIMEOUT_MS));
-    if let Err(e) = src.execute_batch("BEGIN IMMEDIATE;") {
+    let _ = guard.busy_timeout(Duration::from_millis(DRAIN_BUSY_TIMEOUT_MS));
+    if let Err(e) = guard.execute_batch("BEGIN IMMEDIATE") {
         let _ = std::fs::remove_file(&fence);
         return Status::Pending(format!(
             "a writer holds the legacy store past the busy timeout ({e})"
         ));
     }
-    // Copy through the SQLite backup API into db/<name>.migrating.
     let migrating = migrating_path(new);
     let drain = Drain {
         fence: fence.clone(),
         migrating: migrating.clone(),
     };
+    // Copy through the SQLite backup API into db/<name>.migrating.
+    let src = match Connection::open(legacy) {
+        Ok(c) => c,
+        Err(e) => return drain.fail(&guard, format!("cannot open the copy source: {e}")),
+    };
     let _ = std::fs::remove_file(&migrating);
     let mut dst = match Connection::open(&migrating) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&src, format!("cannot create the copy target: {e}")),
+        Err(e) => return drain.fail(&guard, format!("cannot create the copy target: {e}")),
     };
-    let copied = rusqlite::backup::Backup::new(&src, &mut dst)
-        .and_then(|b| b.run_to_completion(5, Duration::from_millis(50), None))
-        .map_err(|e| e.to_string());
-    if let Err(e) = copied {
-        return drain.fail(&src, format!("backup copy failed: {e}"));
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst)
+        .map_err(|e| e.to_string())
+        .and_then(|b| {
+            let deadline = std::time::Instant::now() + BACKUP_BUDGET;
+            loop {
+                match b.step(5) {
+                    Ok(rusqlite::backup::StepResult::More) => {}
+                    Ok(rusqlite::backup::StepResult::Done) => return Ok(()),
+                    Ok(other) => return Err(format!("backup step read {other:?}")),
+                    Err(e) => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(format!("backup stayed busy past the budget: {e}"));
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        });
+    if let Err(e) = backup {
+        return drain.fail(&guard, format!("backup copy failed: {e}"));
     }
     let counts = match table_counts(&src) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&src, format!("cannot count the legacy store: {e}")),
+        Err(e) => return drain.fail(&guard, format!("cannot count the legacy store: {e}")),
     };
     let integrity: String = match dst.query_row("PRAGMA integrity_check;", [], |r| r.get(0)) {
         Ok(v) => v,
-        Err(e) => return drain.fail(&src, format!("integrity check failed: {e}")),
+        Err(e) => return drain.fail(&guard, format!("integrity check failed: {e}")),
     };
     if integrity != "ok" {
-        return drain.fail(&src, format!("integrity_check read {integrity}"));
+        return drain.fail(&guard, format!("integrity_check read {integrity}"));
     }
     let dst_counts = match table_counts(&dst) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&src, format!("cannot count the copy: {e}")),
+        Err(e) => return drain.fail(&guard, format!("cannot count the copy: {e}")),
     };
     if counts != dst_counts {
-        return drain.fail(&src, "row counts diverge between the copies".to_string());
+        return drain.fail(&guard, "row counts diverge between the copies".to_string());
     }
     // Publish: fsync the copy file, then rename it over db/<name>.
     if std::fs::File::open(&migrating)
         .and_then(|f| f.sync_all())
         .is_err()
     {
-        return drain.fail(&src, "cannot fsync the copy".to_string());
+        return drain.fail(&guard, "cannot fsync the copy".to_string());
     }
     drop(dst);
     if std::fs::rename(&migrating, new).is_err() {
-        return drain.fail(&src, "cannot publish the copy".to_string());
+        return drain.fail(&guard, "cannot publish the copy".to_string());
     }
     // Park the legacy trio, record the verify counts, close the drain.
     let dir = backup_dir(root, stamp);
     if std::fs::create_dir_all(&dir).is_err() {
-        return drain.fail(&src, "cannot create the backup folder".to_string());
+        return drain.fail(&guard, "cannot create the backup folder".to_string());
     }
     for suffix in ["", "-wal", "-shm"] {
         let name = format!("{}{suffix}", row.legacy);
         let p = root.join(&name);
         if p.exists() && std::fs::rename(&p, dir.join(&name)).is_err() {
-            return drain.fail(&src, format!("cannot park {name}"));
+            return drain.fail(&guard, format!("cannot park {name}"));
         }
     }
     let _ = write_verify_record(&dir, &counts);
-    let _ = src.execute_batch("ROLLBACK;");
+    let _ = guard.execute_batch("ROLLBACK;");
     drop(src);
+    drop(guard);
     let _ = std::fs::remove_file(&fence);
     Status::Moved
 }
@@ -443,7 +475,12 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "the committed row moved");
         assert!(!legacy.exists(), "the legacy file parked");
-        assert!(root.join("backups").join("t1").join("graph.db").exists());
+        assert!(root
+            .join("backups")
+            .join("state-root-migration")
+            .join("t1")
+            .join("graph.db")
+            .exists());
         drop(c);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -518,21 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn probe_backup_step_under_an_open_drain_txn() {
-        let root = tmp_root("fno-sq-probe");
-        let legacy = root.join("graph.db");
-        let conn = Connection::open(&legacy).unwrap();
-        conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
-            .unwrap();
-        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
-        let mut dst = Connection::open(root.join("copy.db")).unwrap();
-        let mut b = rusqlite::backup::Backup::new(&conn, &mut dst).unwrap();
-        let r = b.step(5);
-        eprintln!("PROBE step under open BEGIN IMMEDIATE: {r:?}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn the_verify_passes_on_a_untouched_parked_copy() {
         let root = tmp_root("fno-sq-verify");
         let legacy = root.join("graph.db");
@@ -547,17 +569,26 @@ mod tests {
         ));
         // Younger than the verify delay: the sweep reads nothing yet.
         assert!(verify_sweep(&root, "t5").is_empty());
-        // Age the record past the delay by rewriting its mtime is not
-        // portable; instead point the sweep at a second, aged stamp.
-        let dir = root.join("backups").join("t6");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("verify.tsv"), "t\t1\n").unwrap();
-        let aged = dir.join("aged.db");
-        let c = Connection::open(&aged).unwrap();
-        c.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
+        // Age the parked record past the delay portably with FileTimes;
+        // the parked copy's counts still match the record, so the stamp
+        // verifies and its record is consumed. The sweep's stamp argument
+        // is the CURRENT run, so an absent t6 leaves t5 in the sweep.
+        let record = root
+            .join("backups")
+            .join("state-root-migration")
+            .join("t5")
+            .join("verify.tsv");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&record)
             .unwrap();
-        drop(c);
-        let out = verify_sweep(&root, "t5");
+        f.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(60)),
+        )
+        .unwrap();
+        drop(f);
+        let out = verify_sweep(&root, "t6");
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(matches!(out[0].1, Status::Moved), "{out:?}");
         std::fs::remove_dir_all(&root).ok();
