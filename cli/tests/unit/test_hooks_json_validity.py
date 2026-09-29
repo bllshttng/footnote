@@ -530,12 +530,11 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
 
 
 def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> None:
-    """The complete shared Bash guard chain must fire on BOTH lanes.
+    """One shared dispatcher must own the complete Bash guard chain on BOTH lanes.
 
     A concurrent branch rewriting either manifest can drop a registration
-    and still merge clean, so the assertion names every command rather than
-    counting hooks. Order matters too: git-protection.py runs first, so a
-    refusal it already owns is never re-decided here.
+    and still merge clean, so the assertion pins one command per harness.
+    Guard ordering is owned inside the dispatcher and covered at that boundary.
     """
     guards = [
         ("hooks/git-protection.py", "python3"),
@@ -566,7 +565,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        expected = [f"{interp} ${{{root_var}}}/{guard}" for guard, interp in guards]
+        expected = [f"bash ${{{root_var}}}/hooks/pretooluse-bash-dispatch.sh"]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )

@@ -423,12 +423,14 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
 }
 
 #[test]
-fn a_named_theme_bands_on_its_surface_and_never_paints_the_brand_across_a_row() {
+fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
     // The named-theme band pair is stamp-on-sel: neutral text on the sel
-    // surface. The brand never fills a banded row's text - the highlight
-    // pass alone restores the lane accent, on the glyph and state word
-    // only. (A red band across every cell was the bug this PR fixes; the
-    // default-theme tests could not see it.)
+    // surface. No signal color fills a banded row's text - the highlight
+    // pass alone restores a lane accent, on the glyph and state word
+    // only. (A red brand band across every cell was the original bug;
+    // the monochrome ruling made brand equal to text, so the old
+    // fg != brand guard would fire on every text cell and retired with
+    // the failure mode it guarded.)
     let mut v = card_view(king_and_worker());
     v.theme = crate::theme::Theme::from_name("footnote-superscript").0;
     v.term = (30, 140);
@@ -445,7 +447,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_the_brand_across_a_row() 
         let row = display_i - offset;
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, v.theme.sel, "the band is the sel surface");
-            assert_ne!(cell.fg, v.theme.brand, "the brand never fills a banded row");
+            assert_ne!(cell.fg, v.theme.needs_you, "no signal fills a banded row");
         }
     }
 }
