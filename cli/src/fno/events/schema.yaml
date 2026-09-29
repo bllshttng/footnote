@@ -1626,7 +1626,7 @@ event_types:
     description: "One `fno agents claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
     sources: [fno-loop]
     data:
-      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, lock_mirror_cleared, roots]
+      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, roots]
       properties:
         scanned:
           type: integer
@@ -1672,9 +1672,6 @@ event_types:
           description: "Count of files that classified reapable but the post-archive re-read did not confirm the move."
         apply:
           type: boolean
-        lock_mirror_cleared:
-          type: integer
-          description: "Graph entries whose locked_by/claimed_at mirror was cleared for reaped node claims. Default sweeps only: an explicit --root sweep owns someone else's claims tree, not this graph."
         roots:
           type: array
           items:
@@ -2883,6 +2880,23 @@ event_types:
         cleared_rows:
           type: array
 
+  - name: crown_succession_reverted
+    description: "A succession whose heir died before binding reverted: the reap sweep restored the predecessor's session on the crown-name record past the revert window, with the heir's registry row removed or terminal as the evidence. The pending marker cleared; the regnal stays bumped as lineage."
+    sources: [daemon]
+    data:
+      required: [scope, heir_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        predecessor_name:
+          type: string
+        predecessor_session:
+          type: [string, "null"]
+        evidence:
+          type: string
+
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
@@ -2996,6 +3010,23 @@ event_types:
           type: string
         pr:
           type: [integer, "null"]
+
+  - name: worker_reap_refused
+    description: "The retirement sweep's commit refused to reap a driver row whose node still carries an open PR while the session never recorded a dispatch termination: the row is kept, a reap-keep fleet task files the resume order, and this event is the mechanical trail. Emitted only when the task filing is NEW, so one event per row per PR, not one per sweep pass. session_id is the row's harness session the resume command targets; caller names the sweep door that refused."
+    sources: [daemon]
+    data:
+      required: [name, node, pr, session_id, caller]
+      properties:
+        name:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+        session_id:
+          type: string
+        caller:
+          type: string
 
   - name: burn_watch_wake
     description: "The burn arm waked a worker whose spend or node age grew while its branch and node touched_at stayed flat. attempt counts from 1; delivered is receipt-confirmed landing; via names the leg that carried it (mail, resume, or a durable receipt held over a busy turn)."
@@ -5408,7 +5439,7 @@ event_types:
           description: "Who un-parked it: 'manual' (fno-agents pr-park unpark) or 'sweep'."
 
   - name: park_sweep
-    description: "The daemon's park sweep on its 6h floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
+    description: "The daemon's park sweep on its 10-minute floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
     sources: [daemon]
     data:
       required: [outcome]

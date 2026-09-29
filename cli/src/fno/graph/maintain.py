@@ -2653,9 +2653,6 @@ def run_pass(
                     if n.get("completed_at") or n.get("deferred_at"):
                         continue  # raced to done/deferred; leave it
                     reason = cand.reason()
-                    # Mirror cmd_defer: clear claim/completion so the cascade derives status.
-                    n["locked_by"] = None
-                    n["locked_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = reason
@@ -2684,8 +2681,6 @@ def run_pass(
                     # stale (deferring it would sink active work).
                     if not is_stale_ready(n, datetime.now(timezone.utc), ready_staleness_days):
                         continue
-                    n["locked_by"] = None
-                    n["locked_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = STALE_QUARANTINE_REASON

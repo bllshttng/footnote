@@ -1,4 +1,4 @@
-<!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
+<!-- style-exception: canonical court prose predates the style rules; bundled into skills/lead verbatim -->
 # The minion clause (canonical)
 
 The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](once.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.

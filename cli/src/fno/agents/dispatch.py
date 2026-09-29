@@ -837,7 +837,7 @@ def _reign_typed_message(
     the receipt names the not-typed case with the remedy.
     """
     if crown_level is not None and crown_scope and not revive:
-        return f"/fno:reign {crown_scope}\n{message}", True
+        return f"/fno:lead {crown_scope}\n{message}", True
     return message, False
 
 
@@ -1815,7 +1815,7 @@ def _claude_create_path(
             assert crown_plan is not None  # set by the pre-launch call above
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
-                exclude_name=name if revive else None,
+                exclude_name=name if revive else None, heir=name,
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True
@@ -1886,7 +1886,7 @@ def _claude_create_path(
                 "reign typed"
                 if reign_typed
                 else "NOT typed (revived session keeps its own payload; send "
-                f"'/fno:reign {crown_scope}' by raw mail if it should reign)"
+                f"'/fno:lead {crown_scope}' by raw mail if it should reign)"
             )
             print(f"spawn: crown over {crown_scope!r} recorded; {tail}", file=sys.stderr)
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:

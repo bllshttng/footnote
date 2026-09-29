@@ -42,7 +42,7 @@ mod sweep_scope;
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-use row_menu::build_row_menu;
+use row_menu::{build_row_menu, build_tab_menu};
 
 // The placement pickers (attach `p`, portal `P`) and the launch moment
 // (terminal guard + splash) live in their own modules; client.rs is
@@ -1672,6 +1672,10 @@ enum MenuAction {
     /// presses.
     TabMoveTo,
     TabJoin(Dir),
+    /// Split the VIEWED tab from its own menu cell: a `Command::SplitDir`
+    /// on the focused pane, the menu twin of the `%` family. Only the
+    /// viewed tab's menu offers it; other tabs' menus offer Join.
+    TabSplit(Dir),
     TabClose,
     /// (6.2) Respawn an exited row - the menu twin of peek `r`, the
     /// same `Command::RespawnAgent`.
@@ -1796,88 +1800,6 @@ fn build_section_menu(
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Section { key, label, squad },
-        actions,
-    }
-}
-
-/// (5.1) The tab-strip context menu for one tab cell, resolved through
-/// the SAME `tab_cell_at` the drag pickup uses (LD-A: one hit test per
-/// surface, so a drag and a click can never disagree about where a tab is).
-/// Every item binds an existing wire command; nothing here needs a server
-/// change, because a tab-bar cell sits in no pane rect and was never
-/// forwarded. Destructive items sit last, after a `Rule`.
-///
-/// Save/apply layout are deliberately ABSENT: `ControlVerb::LayoutGet` /
-/// `LayoutApply` ride one-shot `ClientMsg::Control` connections (`fno mux
-/// pane ...`), which an attached TUI client cannot send, so a menu item for
-/// them would bind to a verb this socket can never carry. That needs a
-/// `Command` surface and is filed rather than faked.
-fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut actions: Vec<MenuAction> = Vec::new();
-    let mut add = |row: PopupRow, acts: &[MenuAction]| {
-        rows.push(row);
-        actions.extend_from_slice(acts);
-    };
-    let cell = |glyph: &str, label: &str| GridCell {
-        glyph: glyph.into(),
-        label: label.into(),
-    };
-    // Join mirrors the row menu's split grid: the picked cell IS the side of
-    // the focused pane the joined tab lands on. No hint: no prefix binding
-    // names a join (the gesture path is the tab drag), and LD9 forbids a
-    // literal chord standing in for one.
-    add(
-        PopupRow::Header(tab_group_label(
-            tab_label_text(&tab.name, idx, tab.named),
-            tab.panes.len(),
-        )),
-        &[],
-    );
-    add(PopupRow::Rule, &[]);
-    // Every tab verb answers a bare in-menu key from the same
-    // registry its hint reads: n for New tab, the angle brackets for the
-    // reorder pair - app vocabulary beside the prefix chords (prefix+c, and
-    // prefix+< / prefix+> mean the same moves from outside the menu).
-    add(entry_acc("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
-    add(
-        entry_acc("✎", "Rename", "rename-tab"),
-        &[MenuAction::TabRename],
-    );
-    add(
-        entry_acc("◧", "Move left", "move-tab-left"),
-        &[MenuAction::TabReorder(-1)],
-    );
-    add(
-        entry_acc("◨", "Move right", "move-tab-right"),
-        &[MenuAction::TabReorder(1)],
-    );
-    add(
-        entry_acc("⇥", "Move to…", "move-tab-to"),
-        &[MenuAction::TabMoveTo],
-    );
-    add(
-        PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
-        &[
-            MenuAction::TabJoin(Dir::Left),
-            MenuAction::TabJoin(Dir::Right),
-        ],
-    );
-    add(
-        PopupRow::Grid(vec![cell("⬒", "Join Up"), cell("⬓", "Join Down")]),
-        &[MenuAction::TabJoin(Dir::Up), MenuAction::TabJoin(Dir::Down)],
-    );
-    add(PopupRow::Rule, &[]);
-    // `✕ Close`, not `✕ Close tab`: one shape with the row menu's `✕ Remove`,
-    // so the two destructive affordances read as one vocabulary. The prefix
-    // `&` chord is untouched; in-menu the entry answers the scoped `x`.
-    add(
-        entry_acc("✕", "Close", "close-tab"),
-        &[MenuAction::TabClose],
-    );
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Tab(tab.id),
         actions,
     }
 }
@@ -2919,7 +2841,8 @@ impl View {
             return false;
         };
         self.clear_peek();
-        self.row_menu = Some(build_tab_menu(idx, &tab, anchor));
+        let viewed = self.active_squad_active_tab_id() == Some(tid);
+        self.row_menu = Some(build_tab_menu(idx, &tab, anchor, viewed));
         self.row_menu_esc.clear();
         true
     }
@@ -11026,6 +10949,20 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("join-tab send failed: {e}"))?;
             return Ok(());
         }
+        (MenuTarget::Tab(tid), MenuAction::TabSplit(dir)) => {
+            // Split the viewed tab from its own cell: a SplitDir on the
+            // focused pane, the menu twin of the `%` family. The menu only
+            // builds Split rows on the viewed tab, so a non-viewed target
+            // here is a stale menu; name it rather than guess.
+            if view.active_squad_active_tab_id() != Some(tid) {
+                view.set_notice("split acts on the viewed tab".into());
+                return Ok(());
+            }
+            write_msg(sock_w, &ClientMsg::Command(Command::SplitDir(dir)))
+                .await
+                .map_err(|e| format!("split-tab send failed: {e}"))?;
+            return Ok(());
+        }
         (MenuTarget::Tab(tid), MenuAction::TabClose) => {
             let Some((_, _, tab)) = view.find_tab(tid) else {
                 view.set_notice("tab is no longer here".into());
@@ -11053,6 +10990,7 @@ async fn execute_row_menu_action(
         | (_, MenuAction::TabReorder(_))
         | (_, MenuAction::TabMoveTo)
         | (_, MenuAction::TabJoin(_))
+        | (_, MenuAction::TabSplit(_))
         | (_, MenuAction::TabClose) => {
             view.set_notice("action does not apply to this row".into());
             return Ok(());
@@ -11350,6 +11288,7 @@ async fn execute_row_menu_action(
         | MenuAction::TabReorder(_)
         | MenuAction::TabMoveTo
         | MenuAction::TabJoin(_)
+        | MenuAction::TabSplit(_)
         | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
     }
     Ok(())

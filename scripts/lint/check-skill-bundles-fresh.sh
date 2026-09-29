@@ -8,6 +8,10 @@
 # each type; the diff catches frontmatter drift on references/agents.
 set -euo pipefail
 
+# The gate prints nothing until a drift line, so a set -e death mid-parse used
+# to exit 2 with zero diagnostics. Name the line.
+trap 'echo "ERROR: bundle freshness check died at line $LINENO" >&2' ERR
+
 # Resolve REPO_ROOT defensively. The naive $(git rev-parse ...) inside
 # command substitution can propagate git's rc=128 silently when bash is
 # running with inherit_errexit (seen on GitHub Actions ubuntu-latest with

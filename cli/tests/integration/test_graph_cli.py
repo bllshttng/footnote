@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -40,6 +41,13 @@ def _recent_iso(days_ago: int = 1) -> str:
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh graph store; its graph.json path is only the stable anchor."""
     g = tmp_path / "graph.json"
+    # The native door resolves the anchor through the layout ladder, and a
+    # fresh root would answer the db/ spelling. The empty legacy twin makes
+    # the ladder answer this root spelling, so every side of the seam reads
+    # one store.
+    import sqlite3
+
+    sqlite3.connect(tmp_path / "graph.db").close()
     # Patch the module-level constants so all operations hit this temp file
     import fno.graph._constants as gc
     import fno.graph.store as gs
@@ -412,9 +420,9 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
         # filing-time dedup receipt mixes into r.output via CliRunner).
         ids.append(json.JSONDecoder().raw_decode(r.output)[0]["id"])
     # Mix comma and space separators.
-    r = _invoke("backlog", "queue", f"{ids[0]},{ids[1]}", ids[2], "--reason", "batch")
-    assert r.exit_code == 0, r.output
-    queued_ids = {x["id"] for x in json.loads(_invoke("backlog", "queued").output)}
+    r = _native_verb("queue", f"{ids[0]},{ids[1]}", ids[2], "--reason", "batch")
+    assert r.exit_code == 0, r.output + r.stderr
+    queued_ids = {x["id"] for x in json.loads(_native_verb("queued").output)}
     assert queued_ids == set(ids)
     # Same reason on all three.
     for tid in ids:
@@ -426,7 +434,7 @@ def test_queue_batch_is_atomic_on_unknown_id(tmp_graph):
     """If any ID is unknown, no nodes are queued."""
     r = _native_verb("add", "Real")
     real_id = json.loads(r.output)["id"]
-    r = _invoke("backlog", "queue", f"{real_id},ab-deadbeef")
+    r = _native_verb("queue", f"{real_id},ab-deadbeef")
     assert r.exit_code != 0
     # Real node was NOT queued because the batch aborted.
     data = json.loads(_native_get(real_id))
@@ -438,18 +446,18 @@ def test_unqueue_accepts_multiple_ids(tmp_graph):
     for title in ("UnqA", "UnqB"):
         r = _native_verb("add", title)
         ids.append(json.loads(r.output)["id"])
-    _invoke("backlog", "queue", ids[0])
-    _invoke("backlog", "queue", ids[1])
-    r = _invoke("backlog", "unqueue", f"{ids[0]},{ids[1]}")
-    assert r.exit_code == 0
-    queued_listing = json.loads(_invoke("backlog", "queued").output)
+    _native_verb("queue", ids[0])
+    _native_verb("queue", ids[1])
+    r = _native_verb("unqueue", f"{ids[0]},{ids[1]}")
+    assert r.exit_code == 0, r.stderr
+    queued_listing = json.loads(_native_verb("queued").output)
     assert queued_listing == []
 
 
 def test_done_clears_queued_state(tmp_graph):
     r = _native_verb("add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
-    _invoke("backlog", "queue", nid)
+    _native_verb("queue", nid)
     # Evidence lands on the row first; the canonical bare close's mutation is
     # what clears the queued ghost fields, and the subject of this test is
     # that clear, not the note path.
@@ -1856,6 +1864,31 @@ def test_next_selects_healthy_ready_node(tmp_graph):
     }])
     r = _invoke("backlog", "next", "--project", "fno")
     assert '"id": "ab-live"' in r.output
+
+
+def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkeypatch):
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    recent = _recent_iso(1)
+    plan = _write_plan(tmp_graph.parent, "claimed-next.md", "Claimed next")
+    node_id = "ab-next0001"
+    _seed_graph_text(tmp_graph, json.dumps({"entries": [{
+        "id": node_id, "title": "Claimed next", "project": "fno",
+        "plan_path": str(plan), "created_at": recent, "priority": "p2",
+    }]}) + "\n")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "next-session")
+
+    result = _invoke("backlog", "next", "--project", "fno", "--claim", "next-session")
+
+    assert result.exit_code == 0, result.output
+    assert f'"id": "{node_id}"' in result.output
+    assert claim_status(f"node:{node_id}")["state"] == "live"
+    # The served holder is the claim projection: the lockfile is the holder
+    # of record and no graph owner is ever written.
+    served = read_graph(tmp_graph)[0]
+    assert served["locked_by"] == "next-session"
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

@@ -49,6 +49,7 @@ pub mod settings;
 pub mod style_check;
 pub mod title_gate;
 pub mod update_cli;
+pub mod worked;
 pub mod workflows;
 
 use crate::backlog::model::Node;
@@ -146,8 +147,43 @@ pub fn content_version(entries: &[Value]) -> String {
     format!("sqlite:{:x}", hash.finalize())
 }
 
+/// The store behind a graph anchor. The state-root spellings (the anchor at
+/// the root, or its `db/` twin) resolve through the layout table, so the
+/// legacy and new spellings reach one physical file; every other parent
+/// (a space, a test fixture) keeps the sibling store.
 pub fn database_path(graph: &Path) -> PathBuf {
-    graph.with_extension("db")
+    let name = match graph.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return graph.with_extension("db"),
+    };
+    if name != "graph.json" && name != "graph-archive.json" {
+        return graph.with_extension("db");
+    }
+    let parent = match graph.parent() {
+        Some(p) => p,
+        None => return graph.with_extension("db"),
+    };
+    let root = if parent.file_name().is_some_and(|n| n == "db") {
+        match parent.parent() {
+            Some(r) => r,
+            None => return graph.with_extension("db"),
+        }
+    } else {
+        parent
+    };
+    crate::state_layout::place(root, name).with_extension("db")
+}
+
+/// The state root an anchor belongs to: the same walk `database_path` does
+/// behind its db/ parent check, so the migration fence resolves from the
+/// same place the move wrote it.
+fn state_root_of(graph: &Path) -> &Path {
+    let parent = graph.parent().unwrap_or(graph);
+    if parent.file_name().is_some_and(|n| n == "db") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    }
 }
 
 /// The sole graph store.
@@ -205,6 +241,9 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
 }
 
 fn open_connection(graph: &Path) -> Result<Connection, String> {
+    // A migration publishing under this root parks the legacy inode we
+    // would otherwise open; the bounded fence wait orders us after it.
+    crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let path = database_path(graph);
     let size = match path.metadata() {
         Ok(metadata) => metadata.len(),
@@ -1209,6 +1248,11 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
+    // Project the external claim store once for the whole export: the claim
+    // is the holder of record, and the stored lock fields are the retired
+    // mirror. Loading each node through `nodes::load` would rescan every
+    // lockfile for every row.
+    let node_claims = nodes::node_claims_by_id()?;
     let mut statement = connection
         .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
         .map_err(|error| error.to_string())?;
@@ -1220,7 +1264,8 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     let mut typed: Vec<(i64, String, Value)> = Vec::new();
     for id in ids {
         let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
             return Err(format!("node {id} vanished mid-export"));
         };
         typed.push((ordinal, id, node.to_json()));
@@ -1231,6 +1276,13 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();
     merged.append(&mut typed);
+    // One projection for every served row, typed and raw alike: a typed
+    // row carries the retired mirror's lock fields in its extras, so only
+    // a uniform pass serves the claim store's word everywhere.
+    for (_, id, body) in &mut merged {
+        let claim = node_claims.get(id).cloned().unwrap_or_default();
+        nodes::project_claim_value(body, claim);
+    }
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(merged.into_iter().map(|(_, _, row)| row).collect())
 }
@@ -1331,6 +1383,25 @@ mod tests {
     /// deleted the write.
     #[test]
     fn an_opener_never_restamps_the_empty_version_over_a_first_write() {
+        // The AC14 resolution ladder rides the same boundary: an unmigrated
+        // root answers a db-spelled anchor with the legacy store, a migrated
+        // root answers an old-spelled anchor with the moved store. The
+        // anchor kind probes the .db twin, so each arm seeds its own.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("graph.db"), b"SQLite format 3\0").unwrap();
+        let db = database_path(&root.join("db").join("graph.json"));
+        assert_eq!(db, root.join("graph.db"), "unmigrated: legacy store");
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        std::fs::write(root.join("db").join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("db").join("graph.db"), b"SQLite format 3\0").unwrap();
+        let db = database_path(&root.join("graph.json"));
+        assert_eq!(
+            db,
+            root.join("db").join("graph.db"),
+            "migrated: moved store"
+        );
         let (_dir, graph) = fixture("graph.json");
         drop(open(&graph).unwrap());
         let mut writer = open(&graph).unwrap();
@@ -1500,9 +1571,10 @@ mod tests {
             .unwrap();
         assert_eq!(nodes_left, 1, "the surviving node stays");
         // The mirrors cascade with the node row; a pragma-less connection
-        // would strand these as orphans.
+        // would strand these as orphans. node_claims is absent by design:
+        // the claim mirror retires, and ensure_table drops the table on
+        // every open, so there is nothing left to strand.
         for table in [
-            "node_claims",
             "node_dispatch",
             "node_provenance",
             "supersessions",

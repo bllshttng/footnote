@@ -450,7 +450,7 @@ def grant_error(
                     "as an agent fno cannot resolve, not an attended human. A "
                     "shell that once hosted a worker keeps that variable. If you "
                     "are the human at this shell, rerun as: "
-                    "env -u FNO_AGENT_SELF fno agents crown <args>."
+                    "env -u FNO_AGENT_SELF fno agents org promote <args>."
                 )
         return (
             "cannot verify the grantor's authority: the agent registry could not "
@@ -690,6 +690,7 @@ def settle_spawn_crown(
     scope: str,
     plan: dict,
     exclude_name: Optional[str] = None,
+    heir: Optional[str] = None,
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
@@ -707,7 +708,7 @@ def settle_spawn_crown(
     try:
         answer = spawn_overlay_call({
             "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
-            "plan": plan, "rows": [asdict(row) for row in rows],
+            "plan": plan, "heir": heir, "rows": [asdict(row) for row in rows],
         })
         outcome = answer["outcome"]
         if outcome not in ("granted", "succeeded", "declined"):
@@ -1197,7 +1198,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 f"held by live row {holder.name!r} (holding "
                 f"{holder.crown_scope!r}). Three ways out, cheapest "
                 "first:\n"
-                f"  re-scope the holder   fno agents crown {holder.name} --scope "
+                f"  re-scope the holder   fno agents org promote {holder.name} --scope "
                 "<other territory>   (both sessions stay live; retry this "
                 "command after)\n"
                 "  holder looks dead     fno agents reconcile   (a row whose "
@@ -1284,9 +1285,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     from fno.agents.harness_map import DispatchResolveError, normalize_command
 
     try:
-        verb = normalize_command(f"/fno:reign {scope}", target_harness or "")
+        verb = normalize_command(f"/fno:lead {scope}", target_harness or "")
     except DispatchResolveError:
-        verb = f"/fno:reign {scope}"
+        verb = f"/fno:lead {scope}"
     if caller is not None and target_name == caller.name:
         receipt["reign_delivery"] = "skipped: self-edit, this session already reigns"
     else:

@@ -142,7 +142,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
 
     // Self re-scope from here on. A crown is stamped by a grantor, never
     // self-declared: an edit that neither adds nor drops anything is the
-    // succession shape, and succession runs through `spawn --crown`.
+    // succession shape, and succession runs through `spawn --promote`.
     if added.is_empty() && dropped.is_empty() {
         return Ok(refused(Some(&format!(
             "refusing to crown {name:?}: that is this session, and a crown is stamped by a \
@@ -187,7 +187,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
             )
         };
         return Ok(refused(Some(&format!(
-            "{lead}, so the command is fno agents crown <own handle> {command}"
+            "{lead}, so the command is fno agents org promote <own handle> {command}"
         ))));
     }
 

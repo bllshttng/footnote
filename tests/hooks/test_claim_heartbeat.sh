@@ -512,7 +512,7 @@ printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
 bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
 if [[ "$bind_calls" -eq 1 ]] \
     && grep -q "do pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
-    && grep -q -- "--owner 182b29c8-owner-uuid" "$CALLLOG"; then
+    && ! grep -q -- "--owner" "$CALLLOG"; then
   pass "T23 successful raw gh pr create invokes the binder once"
 else
   fail "T23 expected one bind-created call; calls: $(cat "$CALLLOG")"
@@ -635,7 +635,7 @@ export STUB_BIND_RC=1 STUB_BIND_OUTPUT='{"outcome":"refused","refusal":"branch u
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
 bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
-manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 \
       && "$err" == *"branch unknown"* && "$err" == *"$manual"* ]]; then
   pass "T32 binder refusal retries once, then prints exact manual recovery"
@@ -665,8 +665,9 @@ err="$(printf '%s' "$payload" | PATH="$REAL_BIN:$PATH" FNO_CONFIG="$REAL_CONFIG"
 # The bind lands in graph.db and the read comes back through the keeper.
 row_json="$(uv run --project "$REPO_ROOT/cli" python -c "import json; from pathlib import Path; from fno.graph.store import read_graph_strict; print(json.dumps(read_graph_strict(Path('$REAL_GRAPH'))[0]))")"
 if [[ "$rc" -eq 0 && "$(jq -r '.status' <<<"$row_json")" == in_review \
-      && "$(jq -r '.pr_number' <<<"$row_json")" == 42 \
-      && "$(jq -r '.locked_by' <<<"$row_json")" == owner-session ]]; then
+      && "$(jq -r '.pr_number' <<<"$row_json")" == 42 ]]; then
+  # Ownership reads through the claim store now, so the bind stamps no
+  # locked_by mirror: the row lands in_review with the PR bound.
   pass "T33 real PostToolUse binds the graph and removes the node from ready"
 else
   fail "T33 rc=$rc row=$row_json stderr=[$err]"
@@ -682,7 +683,7 @@ started="$(date +%s)"
 err="$(printf '%s' "$payload" | FNO_PR_BIND_CREATED_TIMEOUT=1 CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
 elapsed=$(( $(date +%s) - started ))
 bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
-manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 && "$elapsed" -le 5 \
       && "$err" == *"timed out"* && "$err" == *"$manual"* ]]; then
   pass "T34 binder timeout retries once, stays bounded, and prints recovery"

@@ -524,7 +524,9 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
 
     cfg = tmp_path / "config.toml"
     state_dir = tmp_path / "state"
-    graph_json = state_dir / "graph.json"
+    # The fresh state dir holds no store yet, so the resolution ladder
+    # answers the db/ spelling.
+    graph_json = state_dir / "db" / "graph.json"
     cfg.write_text(f'state_dir = "{state_dir}"\n')
 
     code = (

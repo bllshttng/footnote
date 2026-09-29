@@ -39,6 +39,10 @@ All scanned sessions. Tokens (input, output, cache read, cache write), lines add
 ## At a glance
 Four lines, one number each, all `scanned`: sessions in window, attended sessions, operator turns, relay turns. (Fold totals.)
 
+## Sample
+One line, from the fold's `sample` block: requested, rank, and `held_out_live` (live sessions with witnessed user turns the idle rule held out of judging).
+
+
 ## Where the operator actually was
 The attended sessions with their nodes and PRs. One line each:
 node, PR, operator turns vs injected ones, outcome from the facet.

@@ -210,8 +210,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.12.20"
       - name: Install PyYAML
         run: python3 -m pip install --quiet "pyyaml>=6"
+      # The generator fail-closes when it cannot verify pack manifests through
+      # the in-tree fno-py (`uv run --project cli`); without uv the job dies
+      # refusing every pack, never green.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
       - name: Run the bundle freshness check
         run: bash scripts/lint/check-skill-bundles-fresh.sh
 
@@ -375,6 +384,9 @@ jobs:
   # measured legs finish below the cap.
   # If a shard approaches the step cap below, split again or cut work. Do not
   # raise either cap.
+  # A hang must stay cheap: the per-test ceiling and every timeout marker stay
+  # at or under one fifth of the 12-minute step cap, enforced by
+  # cli/tests/unit/test_pytest_timeout_configured.py. Each shard lists tests over 30s.
   smoke-pytest:
     needs: [pr-affected]
     if: ${{ !cancelled() && needs.pr-affected.outputs.python_full == 'true' }}
@@ -451,6 +463,24 @@ jobs:
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true' EXIT
           : "$start"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/13
+
+  slow-e2e:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    # The real-pane test rebuilds both native binaries; its separate 144s cap
+    # names the slow step while this bounds setup and the Cargo work around it.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision the slow-test runner
+        uses: ./.github/actions/smoke-setup
+
+      - name: Run the slow pane lane
+        env:
+          FNO_PYTEST_SHARD: "1/1"
+        run: uv run --project cli fno-py doctor test --stream cli/tests/agents/test_pane_journeys.py -- -m slow_e2e
 
   smoke-rest:
     needs: [pr-affected]
@@ -677,9 +707,11 @@ jobs:
     # raising the number: a raised cap only hides the growth until the next
     # PR pays it. The real-process integration shard moved to its own job,
     # test-agents-integration. After that split the widest of 12 passing
-    # runs sampled 2026-09-24 was 11.1m. 20 leaves room for a cold cargo
-    # cache, and a hang fails sooner.
-    timeout-minutes: 20
+    # runs sampled 2026-09-24 was 11.1m; the lib suite has since grown
+    # past 6550 tests and the env-holding fixtures serialize behind one
+    # shared lock, so 30 leaves room for a cold cargo cache and a hang
+    # still fails sooner than a stuck queue would.
+    timeout-minutes: 30
 
     # The claim classifier parity harness needs the FULL oracle package
     # (pydantic included: fno.claims.staleness imports claims/types.py), not a

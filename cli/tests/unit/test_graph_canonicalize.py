@@ -118,13 +118,12 @@ def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_pat
 
     commit_rows_via_store(path, _noop)
 
-    # The stored row through the store read: the migration derives the
-    # modeled locked_at stamp and leaves the nested sessions one alone. The
-    # legacy top-level key itself is retired by the publish (canonicalize
-    # drops it once the stamp exists) -- the nested session copy is a
-    # different record and survives untouched.
+    # The stored row through the store read: the legacy top-level key itself
+    # is retired by the publish, and the lock family now projects from the
+    # claim store, so the unbacked legacy lock reads unheld. The nested
+    # session copy is a different record and survives untouched.
     raw = read_graph_strict(path)[0]
-    assert raw["locked_at"] == timestamp
+    assert raw["locked_at"] is None
     assert raw.get("claimed_at") is None
     assert raw["sessions"][0]["claimed_at"] == timestamp
 

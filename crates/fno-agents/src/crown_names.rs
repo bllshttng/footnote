@@ -11,7 +11,8 @@
 //! {"version": 1, "crowns": {"<canonical scope>": {
 //!   "name": "Barnaby", "regnal": 1,
 //!   "holder_session": "<harness session uuid>" | null,
-//!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z"}}}
+//!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z",
+//!   "theme": "native backlog", "title": "Lead of native backlog"}}}
 //! ```
 //!
 //! `holder_session` is the live holder row's `harness_session_id` (law
@@ -36,6 +37,38 @@ pub struct CrownNameRecord {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The succession carried but not yet proven. Skipped in the JSON while
+    /// absent, so the frozen wire shape above holds unless a succession is
+    /// mid-flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_succession: Option<PendingSuccession>,
+}
+
+/// A succession carried but not yet proven: written when `carry_succession`
+/// nulls the holder, cleared when the heir's beat refreshes the record or a
+/// fresh grant forgets it, and reverted by the reap sweep once the heir is
+/// provably gone unbound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSuccession {
+    pub heir_name: String,
+    pub predecessor_name: String,
+    #[serde(default)]
+    pub predecessor_session: Option<String>,
+    pub ts: String,
+}
+
+/// One reverted succession: the receipt the reap sweep reports and journals.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RevertedSuccession {
+    pub scope: String,
+    pub heir_name: String,
+    pub predecessor_name: String,
+    pub predecessor_session: Option<String>,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +172,39 @@ pub fn display(name: &str, regnal: u32) -> String {
     format!("{first}{}{numeral}", chars.as_str())
 }
 
+/// The people title for a level (L0 Chief of a portfolio, L1 Head of a
+/// project, L2 Lead of a theme). `scope` is the fallback text when no theme
+/// names the lead's epics, so a Chief with no named portfolio reads
+/// "Chief of" its project list.
+pub fn title(level: u32, scope: &str, theme: Option<&str>) -> String {
+    match level {
+        0 => format!("Chief of {}", theme.unwrap_or(scope)),
+        1 => format!("Head of {scope}"),
+        2 => format!("Lead of {}", theme.unwrap_or(scope)),
+        n => format!("L{n} {scope}"),
+    }
+}
+
+/// The pre-title rank string, `L{level} {scope}` - what queued mail from
+/// before the upgrade carries and what every stored rank must still verify
+/// against during the one-release window.
+pub fn legacy_label(level: u32, scope: &str) -> String {
+    format!("L{level} {scope}")
+}
+
+/// A theme is 2 to 40 characters of letters, digits, spaces, hyphens and
+/// apostrophes. No quote or angle bracket: the title rides inside a quoted
+/// mail attribute.
+fn valid_theme(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() >= 2
+        && b.len() <= 40
+        && b[0].is_ascii_alphanumeric()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b' ' || *c == b'\'' || *c == b'-')
+}
+
 /// The live crowns indexed by canonical scope - the one liveness read every
 /// rule here shares (`territory::live_crowns`, never a private copy).
 fn live_index(registry_path: &Path) -> Result<BTreeMap<String, crate::territory::Crown>, String> {
@@ -177,6 +243,29 @@ pub fn live_names(
     let store = read(store_path)?;
     let live = live_index(registry_path)?;
     Ok(live_names_in(&store, &live))
+}
+
+/// Scope -> stored people title for every record that counts as live (the
+/// same liveness rule [`live_names`] applies). A record with no title yet is
+/// skipped, so the fold stamp reads `null` and the ledger falls back.
+pub fn live_titles(
+    store_path: &Path,
+    registry_path: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    let store = read(store_path)?;
+    let live = live_index(registry_path)?;
+    Ok(store
+        .crowns
+        .iter()
+        .filter_map(|(scope, rec)| {
+            let crown = live.get(scope)?;
+            let bound = rec.holder_session.as_deref();
+            if bound.is_some() && bound != crown.holder_session.as_deref() {
+                return None;
+            }
+            Some((scope.clone(), rec.title.clone()?))
+        })
+        .collect())
 }
 
 /// Name an un-named live crown. Refusals (pattern, a duplicate live name,
@@ -235,6 +324,11 @@ pub fn name_crown(
                 holder_session,
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
+                theme: None,
+                title: live
+                    .get(&canon)
+                    .map(|c| title(c.level as u32, &canon, None)),
+                pending_succession: None,
             },
         );
         Ok(display(name, 1))
@@ -350,12 +444,17 @@ pub fn keep_from(
             ));
         }
         store.crowns.remove(&old);
+        // A re-scope clears the theme: the epics changed, so the next
+        // check-in must name the theme again. The title recomputes from the
+        // bare scope until it does.
         store.crowns.insert(
             new.clone(),
             CrownNameRecord {
                 holder_session: crown.holder_session.clone(),
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
+                theme: None,
+                title: Some(title(crown.level as u32, &new, None)),
                 ..rec
             },
         );
@@ -366,17 +465,108 @@ pub fn keep_from(
 }
 
 /// A succession: regnal + 1, the heir unbound until its first beat binds it.
+/// `pending` records the succession so the reap sweep can revert it when the
+/// heir proves unable to bind; `None` (an old caller) keeps today's shape.
 /// A crown with no record succeeds to no record.
-pub fn carry_succession(store_path: &Path, scope: &str) -> Result<(), String> {
+pub fn carry_succession(
+    store_path: &Path,
+    scope: &str,
+    pending: Option<PendingSuccession>,
+) -> Result<(), String> {
     let canon = crate::territory::canonical_scope(scope);
     update(store_path, |store| {
         if let Some(rec) = store.crowns.get_mut(&canon) {
             rec.regnal = rec.regnal.saturating_add(1);
             rec.holder_session = None;
+            rec.pending_succession = pending;
             rec.updated_at = now_stamp();
         }
         Ok(())
     })
+}
+
+/// Set (once per scope) a lead's theme. The crown must be live and named;
+/// L1 refuses ("Head of <project> takes the project name; no theme"); the
+/// same theme again is a no-op; a different theme names the current one and
+/// refuses (set once per scope, like the name).
+pub fn set_theme(
+    store_path: &Path,
+    registry_path: &Path,
+    scope: &str,
+    theme: &str,
+) -> Result<String, String> {
+    let theme = theme.trim();
+    if !valid_theme(theme) {
+        return Err(format!(
+            "a theme is 2-40 characters (letters, digits, spaces, hyphens and apostrophes; no quote or angle bracket), got {theme:?}"
+        ));
+    }
+    let canon = crate::territory::canonical_scope(scope);
+    let live = live_index(registry_path)?;
+    update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        if !names.contains_key(&canon) {
+            return Err("every live crown needs a name; check in with --name <name>".into());
+        }
+        if live.get(&canon).is_some_and(|c| c.level == 1) {
+            return Err("Head of <project> takes the project name; no theme".into());
+        }
+        let verdict = {
+            let rec = store
+                .crowns
+                .get(&canon)
+                .expect("the named check passed, so the record exists");
+            match rec.theme.as_deref() {
+                Some(existing) if existing == theme => Ok(rec
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| title(live[&canon].level as u32, &canon, Some(existing)))),
+                Some(existing) => Err(format!(
+                    "this lead's theme is already {existing:?}; the theme is set once per scope, like the name"
+                )),
+                None => Ok(String::new()),
+            }
+        };
+        verdict?;
+        let rec = store
+            .crowns
+            .get_mut(&canon)
+            .expect("the named check passed, so the record exists");
+        rec.theme = Some(theme.to_string());
+        rec.title = Some(title(live[&canon].level as u32, &canon, Some(theme)));
+        rec.updated_at = now_stamp();
+        Ok(rec.title.clone().unwrap_or_default())
+    })
+}
+
+/// The live theme over `scope`, or None. A missing or malformed store reads
+/// as no theme (the tolerant read the mail envelope uses).
+pub fn theme_for(store_path: &Path, scope: &str) -> Option<String> {
+    let canon = crate::territory::canonical_scope(scope);
+    let store = read(store_path).ok()?;
+    store.crowns.get(&canon)?.theme.clone()
+}
+
+/// Every stored theme keyed by canonical scope, tolerant (a missing or
+/// malformed file reads as empty) - the once-per-fold read the feed's
+/// crown rows and owner text render from.
+pub fn theme_map(store_path: &Path) -> BTreeMap<String, String> {
+    let store = match read(store_path) {
+        Ok(s) => s,
+        Err(_) => return BTreeMap::new(),
+    };
+    store
+        .crowns
+        .into_iter()
+        .filter_map(|(scope, rec)| rec.theme.map(|t| (scope, t)))
+        .collect()
+}
+
+/// The stored people title over `scope`, tolerant like [`theme_for`].
+pub fn stored_title(store_path: &Path, scope: &str) -> Option<String> {
+    let canon = crate::territory::canonical_scope(scope);
+    let store = read(store_path).ok()?;
+    store.crowns.get(&canon)?.title.clone()
 }
 
 /// Drop the record (a fresh grant over the scope starts unnamed).
@@ -408,10 +598,103 @@ pub fn bind_and_refresh(
                 rec.holder_session = crown.holder_session.clone();
             }
         }
+        // A beat over the scope by the live holder is the proof the
+        // succession waited for: the heir is alive and reading its crown.
+        rec.pending_succession = None;
         rec.nodes = nodes;
         rec.updated_at = now_stamp();
         Ok(())
     })
+}
+
+/// Revert successions whose heir died before binding. A pending record
+/// reverts only when the heir never bound (`holder_session` still null),
+/// the window elapsed, and the heir's registry row is gone (the codex
+/// bind-window reaper removes rows) or terminal. The predecessor's session
+/// is restored so resume is the recovery path; the regnal stays bumped, a
+/// monotonic lineage counter. `apply: false` reports the same lists and
+/// writes nothing, the sweep's dry-run contract. Answers the reverted rows
+/// and the kept reasons (a live heir keeps its succession).
+pub fn revert_stale_pending(
+    store_path: &Path,
+    registry_path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    window_s: i64,
+    apply: bool,
+) -> Result<(Vec<RevertedSuccession>, Vec<String>), String> {
+    let mut reverted = Vec::new();
+    let mut kept = Vec::new();
+    let store_doc = read(store_path)?;
+    let mut stale: Vec<(String, PendingSuccession)> = Vec::new();
+    for (scope, rec) in &store_doc.crowns {
+        let Some(pending) = rec.pending_succession.as_ref() else {
+            continue;
+        };
+        if rec.holder_session.is_some() {
+            continue;
+        }
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&pending.ts) else {
+            kept.push(format!("{scope}: pending succession has an unparsable ts"));
+            continue;
+        };
+        if now
+            .signed_duration_since(ts.with_timezone(&chrono::Utc))
+            .num_seconds()
+            <= window_s
+        {
+            continue;
+        }
+        stale.push((scope.clone(), pending.clone()));
+    }
+    if stale.is_empty() {
+        return Ok((reverted, kept));
+    }
+    let reg = crate::state::load_registry(registry_path)
+        .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
+    for (scope, pending) in stale {
+        let evidence = match reg.entries.iter().find(|e| e.name == pending.heir_name) {
+            None => "heir row removed".to_string(),
+            Some(row) if crate::loop_reign::is_terminal(row) => {
+                format!("heir row {:?}", row.status)
+            }
+            Some(row) => {
+                kept.push(format!(
+                    "{scope}: heir row {} still {:?}",
+                    pending.heir_name, row.status
+                ));
+                continue;
+            }
+        };
+        if apply {
+            // The write-lock re-check: a bind landing between the classify
+            // above and this write must not be clobbered by the revert, and
+            // a declined write must never read as a reverted succession.
+            let mut written = false;
+            update(store_path, |store| {
+                if let Some(rec) = store.crowns.get_mut(&scope) {
+                    if rec.holder_session.is_none() && rec.pending_succession.is_some() {
+                        rec.holder_session = pending.predecessor_session.clone();
+                        rec.pending_succession = None;
+                        rec.updated_at = now_stamp();
+                        written = true;
+                    }
+                }
+                Ok(())
+            })?;
+            if !written {
+                kept.push(format!("{scope}: heir bound mid-sweep; revert skipped"));
+                continue;
+            }
+        }
+        reverted.push(RevertedSuccession {
+            scope,
+            heir_name: pending.heir_name,
+            predecessor_name: pending.predecessor_name,
+            predecessor_session: pending.predecessor_session,
+            evidence,
+        });
+    }
+    Ok((reverted, kept))
 }
 
 /// Drop every record `live_names` would not count. Answers the dropped
@@ -453,8 +736,325 @@ pub fn snapshot(store_path: &Path) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Apply `--name` / `--keep-name-from` / `--theme` before the beat runs. A
+/// refusal (duplicate live name, already-named crown, wrong holder, missing
+/// name or theme) names the holder or the missing flag; the caller prints
+/// it and exits 2 with no beat journalled.
+pub fn apply_crown_naming(
+    store_path: &Path,
+    registry_path: &Path,
+    name: Option<&str>,
+    rescope_from: Option<&str>,
+    theme: Option<&str>,
+    level: Option<i64>,
+    scope: &str,
+) -> Result<(), String> {
+    match (name, rescope_from) {
+        (Some(_), Some(_)) => Err("use one of --name or --keep-name-from, not both".into()),
+        (Some(n), None) => name_crown(&store_path, &registry_path, scope, n).map(|_| ()),
+        (None, Some(old)) => crate::crown_names::keep_from(&store_path, &registry_path, old, scope),
+        (None, None) => Ok(()),
+    }?;
+    if let Some(theme) = theme {
+        set_theme(&store_path, &registry_path, scope, theme)?;
+    }
+    if !ensure_named_crown(&store_path, &registry_path, scope)? {
+        return Err("every live crown needs a name; check in with --name <name>".into());
+    }
+    if matches!(level, Some(0) | Some(2)) && theme_for(&store_path, scope).is_none() {
+        return Err(
+            "every lead names its theme once per scope; check in with --theme <theme>".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The first line of every beat: identity first, then the facts. An unnamed
+/// lead gets the once-only instruction instead of a name.
+pub fn crown_line_text(name: Option<&str>, title_txt: &str, scope: &str) -> String {
+    match name {
+        Some(name) => format!("{name}, {title_txt} ({scope})"),
+        None => "unnamed lead - name it once: fno agents org checkin --name <name>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_checkin_naming_and_theme_flows() {
+        fn an_unnamed_live_crown_cannot_complete_checkin() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
+            let err = apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                None,
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("every live crown needs a name"), "{err}");
+        }
+
+        fn a_successor_checkin_carries_the_name_into_its_registry_label() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]),
+            );
+            name_crown(&store, &registry, "x-aaaa", "barnaby").unwrap();
+            carry_succession(&store, "x-aaaa", None).unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]),
+            );
+            apply_crown_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let rows = crate::state::load_registry(&registry).unwrap();
+            assert_eq!(rows.entries[0].name, "barnaby");
+        }
+
+        fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([
+                    crown_row("king-a", "x-aaaa", 2, "sess-a"),
+                    crown_row("king-b", "fno", 1, "sess-b"),
+                ]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("barnaby"), "{err}");
+            assert!(err.contains("x-aaaa"), "{err}");
+        }
+
+        fn naming_an_already_named_crown_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-b", "fno", 1, "sess-b")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("ernest"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("already named"), "{err}");
+        }
+
+        fn combining_the_two_naming_flags_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            assert!(apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                Some("a"),
+                Some("old"),
+                None,
+                None,
+                "fno"
+            )
+            .is_err());
+        }
+
+        fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
+            assert_eq!(
+                crown_line_text(
+                    Some("Kestrel"),
+                    "Lead of native backlog",
+                    "x-dddd,x-eeee,x-ffff"
+                ),
+                "Kestrel, Lead of native backlog (x-dddd,x-eeee,x-ffff)"
+            );
+            assert_eq!(
+                crown_line_text(None, "L1 fno", "fno"),
+                "unnamed lead - name it once: fno agents org checkin --name <name>"
+            );
+        }
+
+        fn a_themed_l2_checkin_records_theme_and_title() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-dddd,x-eeee,x-ffff", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
+            let shown =
+                set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
+            assert_eq!(shown, "Lead of native backlog");
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
+            assert_eq!(rec["theme"], json!("native backlog"));
+            assert_eq!(rec["title"], json!("Lead of native backlog"));
+            assert_eq!(
+                stored_title(&store, "x-dddd,x-eeee,x-ffff").as_deref(),
+                Some("Lead of native backlog")
+            );
+        }
+
+        fn a_beat_without_a_theme_refuses_and_names_the_flag() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "x-aaaa")
+                .unwrap_err();
+            assert!(
+                err.contains("every lead names its theme once per scope"),
+                "{err}"
+            );
+            assert!(err.contains("--theme"), "{err}");
+        }
+
+        fn an_l1_refuses_a_theme_and_titles_by_project() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("folio", "fno", 1, "sess-f")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "fno", "folio").unwrap();
+            let err = set_theme(&store, &registry, "fno", "native backlog").unwrap_err();
+            assert!(err.contains("takes the project name"), "{err}");
+            assert_eq!(title(1, "fno", None), "Head of fno");
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["crowns"]["fno"]["title"], json!("Head of fno"));
+        }
+
+        fn titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form() {
+            assert_eq!(title(0, "fno", None), "Chief of fno");
+            assert_eq!(title(0, "fno", Some("ReadyRule")), "Chief of ReadyRule");
+            assert_eq!(title(2, "x-aaaa", None), "Lead of x-aaaa");
+            assert_eq!(title(7, "fno", Some("native backlog")), "L7 fno");
+            assert_eq!(
+                legacy_label(2, "x-dddd,x-eeee,x-ffff"),
+                "L2 x-dddd,x-eeee,x-ffff"
+            );
+        }
+
+        fn a_theme_with_a_quote_or_bad_length_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            for bad in ["na\"tive", "na<ti", "x"] {
+                let err = set_theme(&store, &registry, "x-aaaa", bad).unwrap_err();
+                assert!(err.contains("2-40 characters"), "{err}");
+            }
+            assert!(set_theme(&store, &registry, "x-aaaa", "o'brien-team").is_ok());
+        }
+
+        fn the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            assert_eq!(
+                set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap(),
+                "Lead of native backlog"
+            );
+            let err = set_theme(&store, &registry, "x-aaaa", "other theme").unwrap_err();
+            assert!(err.contains("native backlog"), "{err}");
+            assert!(err.contains("set once per scope"), "{err}");
+        }
+
+        fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            // The told-to re-scope: the same holder now holds a new scope.
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "new-scope", 2, "sess-k")]),
+            );
+            keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["new-scope"];
+            assert!(rec.get("theme").is_none() || rec["theme"].is_null());
+            assert_eq!(rec["title"], json!("Lead of new-scope"));
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "new-scope")
+                .unwrap_err();
+            assert!(err.contains("--theme"), "{err}");
+        }
+        an_unnamed_live_crown_cannot_complete_checkin();
+        a_successor_checkin_carries_the_name_into_its_registry_label();
+        a_duplicate_live_name_refuses_naming_and_names_the_holder();
+        naming_an_already_named_crown_refuses();
+        combining_the_two_naming_flags_refuses();
+        the_crown_line_leads_and_the_unnamed_line_teaches_the_flag();
+        a_themed_l2_checkin_records_theme_and_title();
+        a_beat_without_a_theme_refuses_and_names_the_flag();
+        an_l1_refuses_a_theme_and_titles_by_project();
+        titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form();
+        a_theme_with_a_quote_or_bad_length_refuses();
+        the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop();
+        a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one();
+    }
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
@@ -508,6 +1108,12 @@ mod tests {
             .any(|alias| alias == "king-a"));
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["fno"]["regnal"], json!(1));
+        // The numeral table then the bare number.
+        assert_eq!(display("barnaby", 1), "Barnaby");
+        assert_eq!(display("barnaby", 2), "Barnaby II");
+        assert_eq!(display("barnaby", 3), "Barnaby III");
+        assert_eq!(display("barnaby", 20), "Barnaby XX");
+        assert_eq!(display("barnaby", 21), "Barnaby 21");
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-a"));
     }
 
@@ -575,6 +1181,9 @@ mod tests {
                         holder_session: None,
                         nodes: Vec::new(),
                         updated_at: now_stamp(),
+                        theme: None,
+                        title: None,
+                        pending_succession: None,
                     },
                 )]),
             },
@@ -681,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn carry_succession_bumps_regnal_and_unbinds_twice_for_two_successions() {
+    fn carry_succession_bumps_regnal_pends_the_predecessor_and_unbinds_twice() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
@@ -694,14 +1303,37 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
+        // An unmarked carry (an old caller) keeps the frozen wire shape.
+        carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(2));
         assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
+        let raw = std::fs::read_to_string(store_path(tmp.path())).unwrap();
+        assert!(
+            !raw.contains("pending_succession"),
+            "the frozen wire shape must not grow a null key: {raw}"
+        );
+        // A marked carry pends the succession for the reap sweep's revert.
+        carry_succession(
+            &store_path(tmp.path()),
+            "x-aaaa",
+            Some(PendingSuccession {
+                heir_name: "king-heir".into(),
+                predecessor_name: "king-a".into(),
+                predecessor_session: Some("sess-a".into()),
+                ts: now_stamp(),
+            }),
+        )
+        .unwrap();
         // A second succession before the heir checks in reads regnal 3.
-        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(3));
+        assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
+        let pending = &dump["crowns"]["x-aaaa"]["pending_succession"];
+        assert_eq!(pending["heir_name"], json!("king-heir"));
+        assert_eq!(pending["predecessor_name"], json!("king-a"));
+        assert_eq!(pending["predecessor_session"], json!("sess-a"));
+        assert!(pending["ts"].is_string());
     }
 
     #[test]
@@ -718,7 +1350,17 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
+        carry_succession(
+            &store_path(tmp.path()),
+            "x-aaaa",
+            Some(PendingSuccession {
+                heir_name: "king-heir".into(),
+                predecessor_name: "king-old".into(),
+                predecessor_session: Some("sess-old".into()),
+                ts: now_stamp(),
+            }),
+        )
+        .unwrap();
         bind_and_refresh(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
@@ -732,7 +1374,9 @@ mod tests {
             json!("sess-heir")
         );
         assert_eq!(dump["crowns"]["x-aaaa"]["nodes"], json!(["x-bbbb"]));
-        // The carried record still counts while unbound (null session).
+        // The beat is the proof the succession waited for: the pending
+        // marker clears and the heir's session holds the name.
+        assert!(dump["crowns"]["x-aaaa"].get("pending_succession").is_none());
     }
 
     #[test]
@@ -783,6 +1427,9 @@ mod tests {
                     holder_session: Some("sess-a".into()),
                     nodes: vec!["x-1".into()],
                     updated_at: now_stamp(),
+                    theme: None,
+                    title: None,
+                    pending_succession: None,
                 },
             )]),
         };
@@ -812,6 +1459,9 @@ mod tests {
                     holder_session: Some("sess-other".into()),
                     nodes: Vec::new(),
                     updated_at: now_stamp(),
+                    theme: None,
+                    title: None,
+                    pending_succession: None,
                 },
             )]),
         };
@@ -836,12 +1486,150 @@ mod tests {
         assert!(live_names(&store_path(tmp.path()), &registry_path(tmp.path())).is_err());
     }
 
+    // -- pending succession: revert matrix --
+
+    fn pending_record(heir: &str, pred: &str, session: Option<&str>, ts: &str) -> CrownNameRecord {
+        CrownNameRecord {
+            name: "Folio".into(),
+            regnal: 2,
+            holder_session: None,
+            nodes: Vec::new(),
+            updated_at: now_stamp(),
+            theme: None,
+            title: None,
+            pending_succession: Some(PendingSuccession {
+                heir_name: heir.into(),
+                predecessor_name: pred.into(),
+                predecessor_session: session.map(String::from),
+                ts: ts.into(),
+            }),
+        }
+    }
+
+    fn old_ts() -> &'static str {
+        "2026-08-01T00:00:00Z"
+    }
+
     #[test]
-    fn display_uses_the_numeral_table_then_the_bare_number() {
-        assert_eq!(display("barnaby", 1), "Barnaby");
-        assert_eq!(display("barnaby", 2), "Barnaby II");
-        assert_eq!(display("barnaby", 3), "Barnaby III");
-        assert_eq!(display("barnaby", 20), "Barnaby XX");
-        assert_eq!(display("barnaby", 21), "Barnaby 21");
+    fn a_stale_pending_succession_reverts_by_heir_evidence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The predecessor row survives (exited, resumable); one heir's row
+        // was REMOVED by the bind-window reaper, another went terminal, one
+        // heir is still live, one is inside the window.
+        write_registry(
+            tmp.path(),
+            json!([
+                json!({
+                    "name": "king-old", "status": "exited", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-old",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-terminal", "status": "exited", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-t",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                crown_row("heir-live", "other", 1, "sess-l"),
+            ]),
+        );
+        let store = store_path(tmp.path());
+        write(
+            &store,
+            &Store {
+                version: 1,
+                crowns: BTreeMap::from([
+                    (
+                        "fno".into(),
+                        pending_record("jolly-finch", "king-old", Some("sess-old"), old_ts()),
+                    ),
+                    (
+                        "x-tttt".into(),
+                        pending_record("heir-terminal", "king-two", Some("sess-two"), old_ts()),
+                    ),
+                    (
+                        "x-llll".into(),
+                        pending_record("heir-live", "king-three", Some("sess-3"), old_ts()),
+                    ),
+                    (
+                        "x-yyyy".into(),
+                        pending_record("young-heir", "king-four", Some("sess-4"), &now_stamp()),
+                    ),
+                ]),
+            },
+        )
+        .unwrap();
+        let (reverted, kept) = revert_stale_pending(
+            &store,
+            &registry_path(tmp.path()),
+            chrono::Utc::now(),
+            3_600,
+            true,
+        )
+        .unwrap();
+        assert_eq!(reverted.len(), 2, "{reverted:?}");
+        assert_eq!(reverted[0].scope, "fno");
+        assert_eq!(reverted[0].heir_name, "jolly-finch");
+        assert_eq!(reverted[0].evidence, "heir row removed");
+        assert_eq!(reverted[1].scope, "x-tttt");
+        assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(kept[0].contains("heir-live"), "{kept:?}");
+        let dump = snapshot(&store).unwrap();
+        // Reverted records name the predecessor again, marker gone.
+        assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-old"));
+        assert!(dump["crowns"]["fno"].get("pending_succession").is_none());
+        assert_eq!(
+            dump["crowns"]["x-tttt"]["holder_session"],
+            json!("sess-two")
+        );
+        // The live heir's record is untouched, and the young one keeps.
+        assert_eq!(dump["crowns"]["x-llll"]["holder_session"], json!(null));
+        assert_eq!(
+            dump["crowns"]["x-llll"]["pending_succession"]["heir_name"],
+            json!("heir-live")
+        );
+        assert_eq!(
+            dump["crowns"]["x-yyyy"]["pending_succession"]["heir_name"],
+            json!("young-heir")
+        );
+
+        // The dry run reports the same revert and writes nothing.
+        write(
+            &store,
+            &Store {
+                version: 1,
+                crowns: BTreeMap::from([(
+                    "fno".into(),
+                    pending_record("gone-heir", "king-old", Some("sess-old"), old_ts()),
+                )]),
+            },
+        )
+        .unwrap();
+        let (reverted, _kept) = revert_stale_pending(
+            &store,
+            &registry_path(tmp.path()),
+            chrono::Utc::now(),
+            3_600,
+            false,
+        )
+        .unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        let dump = snapshot(&store).unwrap();
+        assert_eq!(dump["crowns"]["fno"]["holder_session"], json!(null));
+        assert_eq!(
+            dump["crowns"]["fno"]["pending_succession"]["heir_name"],
+            json!("gone-heir")
+        );
+        // A forgotten record (a fresh grant) is a no-op for the revert.
+        forget(&store, "fno").unwrap();
+        let (reverted, _kept) = revert_stale_pending(
+            &store,
+            &registry_path(tmp.path()),
+            chrono::Utc::now(),
+            3_600,
+            true,
+        )
+        .unwrap();
+        assert!(reverted.is_empty(), "{reverted:?}");
     }
 }

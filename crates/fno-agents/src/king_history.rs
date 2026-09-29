@@ -1769,6 +1769,9 @@ mod verdict_tests {
 
     #[test]
     fn run_end_to_end_degraded_from_inputs() {
+        // No lock take here: input_tree's DeclaredRoot::declare takes the env
+        // lock and the returned pin holds it for the test's lifetime; a
+        // second take deadlocks (paths.rs note on declare_held).
         let (_pin, root, manifest, journal) =
             input_tree("[king]\ncheckin_interval = \"30m\"\ncompaction_ceiling = 3\n");
         assert_eq!(
@@ -2251,7 +2254,7 @@ mod tests {
                     "content": [{"type": "text", "text": "crates/fno-agents/src/king_history.rs:40 owns the reading."}]
                 }
             }),
-            claude_tool("Bash", json!({"command":"fno agents court --json"})),
+            claude_tool("Bash", json!({"command":"fno agents org --json"})),
             claude_tool("Bash", json!({"command":"fno do pr watch status"})),
             claude_tool("Bash", json!({"command":"fno whoami context"})),
             claude_tool("Bash", json!({"command":"fno agents spawn worker"})),

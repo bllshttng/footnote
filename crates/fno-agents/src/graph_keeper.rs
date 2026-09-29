@@ -1421,7 +1421,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             // Unknown claim state must refuse, not read as "nothing is
             // claimed": the Python leg this verb replaced failed closed
             // (`live_claimed_node_ids(strict=True)`).
-            _ => crate::claims::list(Some("node:"), None, false)
+            _ => crate::claims::list_strict(Some("node:"), None, false)
                 .map_err(|e| {
                     StoreError::ClaimsUnavailable(format!(
                         "live claim state is unavailable; ready selection refused: {e}"
@@ -1495,6 +1495,52 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
 /// serialized result") is checkable on the wire. `read` is the soft path
 /// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
 /// diagnoses without writing.
+/// The one status read only the display surfaces carry: a live WORK claim
+/// reads its idea/ready node as in_progress while it holds; a
+/// blueprint-session claim leases the planning window only and never moves
+/// the word. Reply-only, over a private copy: the cached rows and every
+/// write snapshot (begin, the rank board lanes, wire_rows) keep the stored
+/// status.
+fn overlay_work_claim_statuses(entries: &mut [Value]) {
+    let Ok(claims) = crate::backlog::nodes::node_claims_by_id() else {
+        return;
+    };
+    for entry in entries.iter_mut() {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(claim) = claims.get(id) else {
+            continue;
+        };
+        if !claim.work {
+            continue;
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            // The holder projects with the status: the cached rows were read
+            // at a graph version the claim store has since moved past, and
+            // the stored lock fields are the retired mirror.
+            let mut stamp = |key: &str, value: &Option<String>| {
+                obj.insert(
+                    key.to_string(),
+                    value.clone().map(Value::String).unwrap_or(Value::Null),
+                );
+            };
+            stamp("locked_by", &claim.locked_by);
+            stamp("locked_by_harness", &claim.harness);
+            stamp("locked_by_harness_session", &claim.harness_session);
+            stamp("locked_at", &claim.locked_at);
+            stamp("session_id", &claim.locked_by);
+            if obj
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| matches!(status, "idea" | "ready"))
+            {
+                obj.insert("status".to_string(), Value::String("in_progress".into()));
+            }
+        }
+    }
+}
+
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let strict = params
         .get("strict")
@@ -1513,6 +1559,7 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // The cached rows are shared (Arc), so the reply carries a private copy:
     // the marker is reply-only and must never reach a write snapshot.
     let mut entries = (*entries).clone();
+    overlay_work_claim_statuses(&mut entries);
     crate::node_reading::attach_reading(&mut entries);
     Ok(json!({ "entries": entries }))
 }
@@ -1553,6 +1600,7 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             None => missing.push(token.clone()),
         }
     }
+    overlay_work_claim_statuses(&mut out);
     crate::node_reading::attach_reading(&mut out);
     Ok(json!({"entries": out, "missing": missing}))
 }
@@ -4219,10 +4267,12 @@ mod tests {
         // AC7-ERR: a store whose db names sqlite but holds no version errors
         // kind unreadable, and the splice refuses so the reply keeps its
         // exact shape.
-        let (dir, state) = sqlite_state(json!({
+        let (_dir, state) = sqlite_state(json!({
             "entries": [{"id": "x-a", "slug": "node-a", "title": "a", "status": "ready"}]
         }));
-        let db = rusqlite::Connection::open(dir.path().join("graph.db")).unwrap();
+        // The store resolves through the layout now; open the same file the
+        // keeper read_state seeded, not the legacy root spelling.
+        let db = rusqlite::Connection::open(crate::backlog::database_path(&state.graph)).unwrap();
         db.execute("DELETE FROM graph_meta WHERE key = 'version'", [])
             .unwrap();
         drop(db);
