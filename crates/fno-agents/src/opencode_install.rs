@@ -877,11 +877,16 @@ match status {
     "installed" => line(
         "OK",
         format!(
-            "opencode: footnote {} installed: {} command(s), {} agent(s), {} skill(s), all loaded",
+            "opencode: footnote {} installed: {} command(s), {} agent(s), {} skill(s), {}",
             manifest.as_ref().map(|m| m.version.as_str()).unwrap_or("?"),
             cmds.len(),
             agents.len(),
-            skills.len()
+            skills.len(),
+            if loaded.commands.is_some() && loaded.agents.is_some() {
+                "all loaded"
+            } else {
+                "catalogs unreadable"
+            }
         ),
     ),
     "stale" => line(
