@@ -5,7 +5,7 @@
   "ceiling_usd": 200.0,
   "arms": {
     "run0": ["claude-code+zai-env", "opencode+zai-provider", "zcode", "pi+zai-provider"],
-    "run0_reference": "terminus-2",
+    "run0_reference": "terminus-2+zai-provider",
     "run1_lanes": ["claude", "opencode", "zcode", "pi"]
   },
   "fixed": {
@@ -30,9 +30,21 @@
     "an arm under 20 graded attempts is underpowered and fires no rule alone"
   ],
   "prices": {
-    "glm-5.3-flash": {"input_per_m": null, "output_per_m": null, "cache_read_per_m": null, "cache_write_per_m": null},
-    "claude-sonnet-4-5": {"input_per_m": 3.0, "input_per_m_note": "Terminus 2 reference arm, Sonnet pricing; fill exact per-million USD rates from the vendor pricing page before Run 0",
-    "output_per_m": 15.0, "cache_read_per_m": 0.3, "cache_write_per_m": 3.75}
+    "glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "glm-5.3-flash[1m]": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "GLM-5.3-Flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "zai/glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "zai-coding-plan/glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15}
   },
-  "prices_note": "null rates are filled from the z.ai pricing page in a commit dated before the first results commit; the report refuses to price a null rate (cost reads unmeasured)"
+  "prices_note": "GLM-5.3-Flash list price from the z.ai pricing page, read 2026-09-29: input 0.15, cached input 0.03, output 0.50 USD per 1M tokens. z.ai lists no cache-write charge and bills written tokens as input, so cache write is 0.15. The report prices by the exact model string, so every string an arm can report carries the same rates. An unlisted string reads unmeasured.",
+  "amendment_1": {
+    "declared_at": "2026-09-29T20:05:00Z",
+    "run0_repeats": 1,
+    "run0_repeats_reason": "Run 0 is one pass per arm over the 89 Terminal-Bench 2 tasks, paired by task. The 3-repeat rule applies to Run 1.",
+    "run0_timeout": "each Terminal-Bench 2 task's own agent timeout at timeout_multiplier 1.0; the 45m budget applies to Run 1",
+    "run0_reference_model": "Terminus 2 runs glm-5.3-flash through z.ai like every other arm; the Sonnet price row is removed",
+    "harbor": "harbor 0.23.0 through uvx",
+    "concurrency": "one Harbor job at a time with n_concurrent_trials 4; Run 1 runs one attempt at a time beside Run 0",
+    "stop_rule_granularity": "before each Harbor job, spent USD plus 3 x the arm's smoke cost per task x 89 must stay under the ceiling; before each Run 1 lane, spent USD plus 3 x the lane's projection must stay under it"
+  }
 }
