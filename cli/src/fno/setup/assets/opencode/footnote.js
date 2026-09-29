@@ -663,6 +663,17 @@ function makeV2Io(ctx) {
 }
 
 async function setup(ctx) {
+  // opencode 1.18+ ALSO calls setup, with a plugin-authoring context
+  // (agent, catalog, command, ...) whose return value is unused; the 1.x
+  // server arm is the live one there. A real 2.x context carries the
+  // tool/session hook seams and takes the V2 wiring below.
+  const hasV2Seams =
+    ctx &&
+    ctx.tool &&
+    typeof ctx.tool.hook === "function" &&
+    ctx.session &&
+    typeof ctx.session.hook === "function"
+  if (!hasV2Seams) return () => {}
   const dir = ctx.directory || process.cwd()
   const handle = makeHandler(makeV2Io(ctx), dir)
   reportOnce(

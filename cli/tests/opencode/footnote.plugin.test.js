@@ -175,7 +175,13 @@ function stubCtx(rows, opts = {}) {
   const synthetics = []
   const ctx = {
     directory: opts.directory,
+    // The V2 hook seams: setup() registers nothing without them (a context
+    // like opencode 1.18's plugin-authoring one is a no-op).
+    tool: {
+      hook() {},
+    },
     session: {
+      hook() {},
       async context(o) {
         if (opts.contextError) throw new Error("context read failed")
         return rows
@@ -724,6 +730,13 @@ describe("opencode hooks.json host", () => {
     for (const name of names) {
       expect(FOREIGN_SESSION_MARKERS).toContain(name)
     }
+  })
+
+  test("a 1.18-style authoring context registers nothing from setup", async () => {
+    const dir = makeProject()
+    const hooks = await setupV2({ directory: dir })
+    expect(typeof hooks).toBe("function")
+    rmSync(dir, { recursive: true, force: true })
   })
 
   test("handled events leave a client.app.log line", async () => {

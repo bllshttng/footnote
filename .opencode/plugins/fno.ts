@@ -515,8 +515,18 @@ type V2Context = {
 }
 
 /** The opencode 2 entrypoint: the orchestrator prompt only. Global hooks
- * belong to the installed bridge. */
+ * belong to the installed bridge. opencode 1.18+ also calls setup with a
+ * plugin-authoring context (agent, catalog, command, ...) that carries no
+ * hook seams and uses no return value; the V1 server arm is the live one
+ * there, so a context without the seams registers nothing. */
 export function setupV2(ctx: V2Context): () => void {
+  const hasV2Seams =
+    ctx &&
+    ctx.tool &&
+    typeof ctx.tool.hook === "function" &&
+    ctx.session &&
+    typeof ctx.session.hook === "function"
+  if (!hasV2Seams) return () => {}
   if (!isActivated()) return () => {}
   const projectDir = ctx.directory ?? process.cwd()
 
