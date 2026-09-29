@@ -137,7 +137,7 @@ def test_match_component_reaps_garbage_only(tmp_path):
         in_garbage.wait()
 
 
-def test_reap_rooted_reports_cmdline_and_cwd(tmp_path):
+def test_reap_rooted_reports_cmdline_and_cwd(tmp_path, monkeypatch):
     """The report carries what the failure message needs: the pid, its cwd
     (which names the leaking test dir) and its cmdline."""
     leaf = tmp_path / "leaf"
@@ -151,6 +151,21 @@ def test_reap_rooted_reports_cmdline_and_cwd(tmp_path):
         assert row["pid"] == proc.pid
         assert row["cwd"] == str(leaf)
         assert row["cmdline"] and "sleep" in " ".join(row["cmdline"])
+
+        from fno.agents import orphans
+
+        calls = 0
+
+        def _read_processes(_reaper):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyError("process exited during metadata read")
+            return iter(())
+
+        monkeypatch.setattr(orphans, "iter_processes", _read_processes)
+        assert reap_rooted([str(tmp_path)]) == []
+        assert calls == 2
     finally:
         proc.kill()
         proc.wait()

@@ -377,86 +377,6 @@ pub(crate) fn classify(porcelain: &str, discount: Option<&dyn Fn(&str) -> bool>)
     }
 }
 
-/// Node-id candidates as delimiter-bounded segments of a branch name or
-/// directory basename: the delimiter-bounded id rule
-/// `cli/src/fno/pr/closure.py` scans with, replicated without a regex
-/// dependency. Non-overlapping left-to-right keeps a consumed suffix from
-/// being reused to invent a second candidate.
-pub(crate) fn scan_node_tokens(s: &str) -> Vec<String> {
-    let b = s.as_bytes();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < b.len() {
-        let bounded_start = i == 0 || b[i - 1] == b'/' || b[i - 1] == b'-';
-        if bounded_start {
-            if let Some((len, cand)) = try_node_id(&b[i..]) {
-                if !out.contains(&cand) {
-                    out.push(cand);
-                }
-                i += len;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Match `[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}` at the slice start, greedily
-/// with backtracking, returning (consumed bytes, candidate). The dash is
-/// optional: the minter briefly minted dash-less ids. The match must be
-/// delimiter-bounded on the right: end of string, `/` or `-`.
-fn try_node_id(b: &[u8]) -> Option<(usize, String)> {
-    if b.is_empty() || !b[0].is_ascii_lowercase() {
-        return None;
-    }
-    if b[0] == b'x' {
-        let mut hex_run = 0usize;
-        while hex_run < 8
-            && 1 + hex_run < b.len()
-            && b[1 + hex_run].is_ascii_hexdigit()
-            && !b[1 + hex_run].is_ascii_uppercase()
-        {
-            hex_run += 1;
-        }
-        for hlen in (4..=hex_run).rev() {
-            let end = 1 + hlen;
-            if end < b.len() && b[end] != b'/' && b[end] != b'-' {
-                continue;
-            }
-            return Some((end, String::from_utf8_lossy(&b[..end]).to_string()));
-        }
-    }
-    let mut run = 1usize;
-    while run < 8 && run < b.len() && (b[run].is_ascii_lowercase() || b[run].is_ascii_digit()) {
-        run += 1;
-    }
-    for plen in (1..=run).rev() {
-        // Dashed: prefix '-' hex. Compact: the head's own tail is the hex.
-        let hex_start = if plen < b.len() && b[plen] == b'-' {
-            plen + 1
-        } else {
-            plen
-        };
-        let mut hex_run = 0usize;
-        while hex_run < 8
-            && hex_start + hex_run < b.len()
-            && b[hex_start + hex_run].is_ascii_hexdigit()
-            && !b[hex_start + hex_run].is_ascii_uppercase()
-        {
-            hex_run += 1;
-        }
-        for hlen in (4..=hex_run).rev() {
-            let end = hex_start + hlen;
-            if end < b.len() && b[end] != b'/' && b[end] != b'-' {
-                continue;
-            }
-            return Some((end, String::from_utf8_lossy(&b[..end]).to_string()));
-        }
-    }
-    None
-}
-
 /// External truth the done-node arm reads, injected so unit tests can feed
 /// fixtures instead of building a graph store and claims files.
 pub(crate) struct DoneNodeReaders<'a> {
@@ -608,7 +528,7 @@ fn resolve_node_ids(target: &Path, branch: Option<&str>) -> Vec<String> {
     }
     if let Some(b) = branch {
         if !b.is_empty() {
-            let v = scan_node_tokens(b);
+            let v = crate::node_branch::node_ids(b);
             if !v.is_empty() {
                 return v;
             }
@@ -616,7 +536,7 @@ fn resolve_node_ids(target: &Path, branch: Option<&str>) -> Vec<String> {
     }
     target
         .file_name()
-        .map(|n| scan_node_tokens(&n.to_string_lossy()))
+        .map(|n| crate::node_branch::node_ids(&n.to_string_lossy()))
         .unwrap_or_default()
 }
 
@@ -1414,26 +1334,6 @@ mod tests {
         let v = reapable(wt.to_str().unwrap());
 
         assert!(v.reapable, "line was: {}", v.line());
-    }
-
-    // -- the node-token scanner (the branch_node_ids rule) --------------------
-
-    #[test]
-    fn scan_node_tokens_finds_compact_legacy_delimiter_bounded_ids() {
-        assert_eq!(scan_node_tokens("feature/x-cccc-1234"), vec!["x-cccc"]);
-        assert_eq!(scan_node_tokens("feature/x-1179a"), vec!["x-1179a"]);
-        assert_eq!(scan_node_tokens("x-7b9cd"), vec!["x-7b9cd"]);
-        assert_eq!(scan_node_tokens("feature/xd863-close"), vec!["xd863"]);
-        assert_eq!(scan_node_tokens("repro/x-7aafb-repro"), vec!["x-7aafb"]);
-        assert!(scan_node_tokens("main").is_empty());
-        assert!(scan_node_tokens("fix/thing").is_empty());
-        assert!(scan_node_tokens("feature/xd863g").is_empty());
-        // fixed-width hex: the greedy read takes the longest valid id
-        assert_eq!(scan_node_tokens("feature/x-5b667"), vec!["x-5b667"]);
-        assert_eq!(
-            scan_node_tokens("x-ab123-x-cd456"),
-            vec!["x-ab123", "x-cd456"]
-        );
     }
 
     // -- the done-node arm -----------------------------------------------------

@@ -687,11 +687,32 @@ fn decisions_payload(rows: Vec<Value>) -> Vec<u8> {
 }
 
 #[test]
-fn head_grant_subject_scopes_repo_pr_and_head() {
+fn parse_head_grant_subject_round_trips_the_minted_shape() {
+    let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
     assert_eq!(
-        head_grant_subject("o/r", 42, "abc"),
-        "merge-grant:o/r#42@abc"
+        parse_head_grant_subject(&format!("merge-grant:o/r#42@{sha}")),
+        Some(("o/r".to_string(), 42, sha.to_string()))
     );
+    // A bare repo slug is a real subject shape: the minter holds whatever
+    // the remote normalizes to, with or without an owner.
+    assert_eq!(
+        parse_head_grant_subject(&format!("merge-grant:footnote#2739@{sha}")),
+        Some(("footnote".to_string(), 2739, sha.to_string()))
+    );
+    for bad in [
+        "merge-grant:o/r#42@short",
+        "merge-grant:#42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "other:o/r#42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:o/r#zero@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:o/r#0@a29b38c37b18e737eaf850e8765920498287cabf",
+    ] {
+        assert_eq!(
+            parse_head_grant_subject(bad),
+            None,
+            "{bad} must not parse as a merge-grant subject"
+        );
+    }
 }
 
 #[test]
@@ -752,16 +773,13 @@ fn an_operator_row_without_a_readable_decision_reads_conflict() {
 }
 
 #[test]
-fn a_missing_stdout_reads_unreadable_never_absent() {
-    // AC2-ERR fail-closed polarity: a dead probe is not "no grant".
+fn unreadable_decisions_reads_never_grant() {
+    // AC2-ERR fail-closed polarity: a dead probe is not "no grant", and a
+    // payload without the decisions array is a shape the CLI never emits.
     assert_eq!(
         head_grant_status(None),
         HeadGrant::Unreadable("the decisions read did not answer".to_string())
     );
-}
-
-#[test]
-fn a_payload_without_the_decisions_array_reads_unreadable() {
     let payload = br#"{"error": "damaged index"}"#.to_vec();
     assert_eq!(
         head_grant_status(Some(&payload)),

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 const AGENTS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -273,6 +274,103 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
     }
     ClaudeAgentsSnapshot::Known {
         rows: parsed_rows,
+        warnings,
+    }
+}
+
+/// The RAW `claude agents --json --all` rows, the `claude_agents_rows` twin
+/// for consumers that key rows on the session id instead of the short id
+/// (`backlog worked`'s fleet fold): every non-interactive object passes
+/// through unmangled, and every failure mode degrades to an empty row list
+/// plus the registry-only warning word the roster classifier tolerates.
+pub(crate) struct RawAgents {
+    pub rows: Vec<Value>,
+    pub warnings: Vec<String>,
+}
+
+const REGISTRY_ONLY_MARK: &str = "falling back to registry-only view";
+
+pub(crate) fn read_all_agents_raw() -> RawAgents {
+    let output = match run_all_agents_command() {
+        Ok(output) => output,
+        Err(error) => {
+            return RawAgents {
+                rows: Vec::new(),
+                warnings: vec![format!(
+                    "claude agents --json failed to start ({error}); live_status unavailable, {REGISTRY_ONLY_MARK}"
+                )],
+            }
+        }
+    };
+    if !output.success {
+        let head = String::from_utf8_lossy(&output.stderr);
+        let head = head.trim();
+        let head = if head.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            head.to_string()
+        };
+        let head: String = head.chars().take(200).collect();
+        return RawAgents {
+            rows: Vec::new(),
+            warnings: vec![format!(
+                "claude agents --json exited non-zero; stderr: '{head}'; {REGISTRY_ONLY_MARK}"
+            )],
+        };
+    }
+    parse_raw_all_agents(&output.stdout)
+}
+
+fn parse_raw_all_agents(stdout: &[u8]) -> RawAgents {
+    let parsed: Value = match serde_json::from_slice(stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return RawAgents {
+                rows: Vec::new(),
+                warnings: vec![format!(
+                    "claude agents --json parse failure: {error}; {REGISTRY_ONLY_MARK}"
+                )],
+            }
+        }
+    };
+    let rows = match parsed {
+        Value::Array(rows) => rows,
+        Value::Object(mut object) => match object.remove("agents") {
+            Some(Value::Array(rows)) => rows,
+            _ => {
+                return RawAgents {
+                    rows: Vec::new(),
+                    warnings: vec![format!(
+                        "claude agents --json response missing 'agents' array; {REGISTRY_ONLY_MARK}"
+                    )],
+                }
+            }
+        },
+        _ => {
+            return RawAgents {
+                rows: Vec::new(),
+                warnings: vec![format!(
+                    "claude agents --json response has unexpected shape; {REGISTRY_ONLY_MARK}"
+                )],
+            }
+        }
+    };
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        let Some(object) = row.as_object() else {
+            warnings.push(format!(
+                "claude agents --json row {index} is not an object; skipped"
+            ));
+            continue;
+        };
+        if object.get("kind").and_then(Value::as_str) == Some("interactive") {
+            continue;
+        }
+        out.push(Value::Object(object.clone()));
+    }
+    RawAgents {
+        rows: out,
         warnings,
     }
 }

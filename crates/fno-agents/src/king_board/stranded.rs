@@ -9,8 +9,9 @@
 use super::budget::{run_with_timeout, RunFailure};
 use super::queues::NODE_ID_BODY;
 use super::{s_str, Budget, SourceRead, KING_PRIORITIES};
+use crate::node_branch;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -54,21 +55,31 @@ pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<TreeEntry> {
 }
 
 /// The node id a tree belongs to, and whether `worktree ensure --name <id>`
-/// can find it again. Exact basename or `feature/`-stripped branch -> the id
-/// with `resumable = true`; a basename that EXTENDS a node id (`x-2222-prep`)
-/// still names it, with `resumable = false` - only such a tree can hold the
-/// node's prep commits, and the king resumes it from inside.
-pub(crate) fn tree_node_id(path: &Path, branch: Option<&str>) -> Option<(String, bool)> {
+/// can find it again. Exact basename -> the id with `resumable = true`; a
+/// branch naming the id through the one parser is resumable only when the
+/// branch is one of the node's OWN names (`node_branch::accepted`), so a
+/// hand-made side branch reads unresumable; a basename that EXTENDS a node
+/// id (`x-2222-prep`) still names it, with `resumable = false` - only such a
+/// tree can hold the node's prep commits, and the king resumes it from
+/// inside.
+pub(crate) fn tree_node_id(
+    path: &Path,
+    branch: Option<&str>,
+    candidates: &HashMap<String, Value>,
+) -> Option<(String, bool)> {
     let name_re = regex::Regex::new(&format!("^{NODE_ID_BODY}$")).ok()?;
     let base = path.file_name()?.to_string_lossy().into_owned();
     if name_re.is_match(&base) {
         return Some((base, true));
     }
     if let Some(b) = branch {
-        if let Some(short) = b.strip_prefix("refs/heads/feature/") {
-            if name_re.is_match(short) {
-                return Some((short.to_string(), true));
-            }
+        let short = b.strip_prefix("refs/heads/").unwrap_or(b);
+        if let Some(id) = node_branch::owner(short) {
+            let resumable = candidates
+                .get(&id)
+                .map(|r| node_branch::accepted(r).iter().any(|n| n == short))
+                .unwrap_or(false);
+            return Some((id, resumable));
         }
     }
     // Successively shorter prefixes at `-` boundaries: `x-2222-prep` finds
@@ -176,7 +187,7 @@ fn probe_tree(
 /// just that tree.
 pub(crate) fn read_stranded_trees(
     repos: &[PathBuf],
-    candidates: &HashSet<String>,
+    candidates: &HashMap<String, Value>,
     budget: &mut Budget,
 ) -> SourceRead {
     let mut rows: Vec<Value> = Vec::new();
@@ -198,10 +209,10 @@ pub(crate) fn read_stranded_trees(
             Err(e) => return SourceRead::err(e.message().to_string()),
         };
         for (tree, branch) in parse_worktree_porcelain(&listing) {
-            let Some((id, resumable)) = tree_node_id(&tree, branch.as_deref()) else {
+            let Some((id, resumable)) = tree_node_id(&tree, branch.as_deref(), candidates) else {
                 continue;
             };
-            if !candidates.contains(&id) {
+            if !candidates.contains_key(&id) {
                 continue;
             }
             match probe_tree(&tree, &branch, budget) {
@@ -222,9 +233,10 @@ pub(crate) fn read_stranded_trees(
     SourceRead::ok(Value::Array(rows))
 }
 
-/// The graph-side candidate set: king-priority nodes that are not terminal
-/// and not deferred. Pure over the entries so tests can build it directly.
-pub(crate) fn stranded_candidates(entries: &[Value]) -> HashSet<String> {
+/// The graph-side candidate map: king-priority nodes that are not terminal
+/// and not deferred, keyed id -> row (the row feeds the branch-shape
+/// resumable check). Pure over the entries so tests can build it directly.
+pub(crate) fn stranded_candidates(entries: &[Value]) -> HashMap<String, Value> {
     entries
         .iter()
         .filter(|e| KING_PRIORITIES.contains(&s_str(e, "priority").unwrap_or("")))
@@ -234,7 +246,7 @@ pub(crate) fn stranded_candidates(entries: &[Value]) -> HashSet<String> {
                 .map(|s| s != "deferred" && !s.starts_with("deferred:"))
                 .unwrap_or(false)
         })
-        .filter_map(|e| s_str(e, "id").map(str::to_string))
+        .filter_map(|e| s_str(e, "id").map(|id| (id.to_string(), e.clone())))
         .collect()
 }
 
@@ -287,26 +299,57 @@ branch refs/heads/feature/x-eeee
 
     #[test]
     fn node_id_comes_from_the_basename_the_branch_or_a_prefix() {
+        let candidates = HashMap::new();
         assert_eq!(
-            tree_node_id(Path::new("/base/footnote/x-eeee"), None),
+            tree_node_id(Path::new("/base/footnote/x-eeee"), None, &candidates),
             Some(("x-eeee".to_string(), true))
         );
+        let row = json!({"id": "x-ffff", "type": "feature", "slug": "some-work", "priority": "p1", "status": "ready"});
+        let candidates = stranded_candidates(&[row]);
         assert_eq!(
             tree_node_id(
                 Path::new("/base/footnote/worker-04"),
-                Some("refs/heads/feature/x-ffff")
+                Some("refs/heads/feature/x-ffff"),
+                &candidates
             ),
             Some(("x-ffff".to_string(), true))
         );
         assert_eq!(
-            tree_node_id(Path::new("/base/repo/x-2222-prep"), None),
+            tree_node_id(Path::new("/base/repo/x-2222-prep"), None, &candidates),
             Some(("x-2222".to_string(), false))
         );
         assert_eq!(
-            tree_node_id(Path::new("/base/footnote/worker-04"), None),
+            tree_node_id(Path::new("/base/footnote/worker-04"), None, &candidates),
             None
         );
-        assert_eq!(tree_node_id(Path::new("/base/footnote/notes"), None), None);
+        assert_eq!(
+            tree_node_id(Path::new("/base/footnote/notes"), None, &candidates),
+            None
+        );
+    }
+
+    #[test]
+    fn the_branch_shape_decides_resumable() {
+        let row = json!({"id": "x-ffff", "type": "bug", "slug": "wrong-close-on-the-board", "priority": "p1", "status": "ready"});
+        let candidates = stranded_candidates(&[row]);
+        // The node's own minted branch is resumable.
+        assert_eq!(
+            tree_node_id(
+                Path::new("/base/footnote/worker-04"),
+                Some("refs/heads/bugfix/x-ffff-wrong-close-on-the"),
+                &candidates
+            ),
+            Some(("x-ffff".to_string(), true))
+        );
+        // A hand-made side branch names the node but is never resumed from.
+        assert_eq!(
+            tree_node_id(
+                Path::new("/base/footnote/worker-04"),
+                Some("refs/heads/feature/x-ffff-w2"),
+                &candidates
+            ),
+            Some(("x-ffff".to_string(), false))
+        );
     }
 
     #[test]
@@ -318,9 +361,9 @@ branch refs/heads/feature/x-eeee
             json!({"id": "x-defer", "priority": "p1", "status": "deferred"}),
         ];
         let candidates = stranded_candidates(&entries);
-        assert!(candidates.contains("x-eeee"));
-        assert!(!candidates.contains("x-9999"));
-        assert!(!candidates.contains("x-dddd"));
-        assert!(!candidates.contains("x-defer"));
+        assert!(candidates.contains_key("x-eeee"));
+        assert!(!candidates.contains_key("x-9999"));
+        assert!(!candidates.contains_key("x-dddd"));
+        assert!(!candidates.contains_key("x-defer"));
     }
 }

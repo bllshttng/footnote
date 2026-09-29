@@ -77,7 +77,7 @@ def test_tracker_owned_verbs_refuse_under_external(argv, tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
     if (
-        argv[:2] in (["backlog", "update"], ["backlog", "add"])
+        argv[:2] in (["backlog", "update"], ["backlog", "add"], ["backlog", "queue"])
         or argv[:2] == ["backlog", "session"]
     ):
         # The update, add and session leaves answer natively now; their guard

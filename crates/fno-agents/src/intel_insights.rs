@@ -329,9 +329,10 @@ pub(crate) enum SampleRequest {
     All,
 }
 
-/// The idle, substantive, attended rows, sampled by blake3 rank and marked
-/// on the rows. Returns the `(eligible, sampled)` counts for the
-/// populations block; both `None` when nothing was requested.
+/// The idle, substantive, attended rows, sampled with witnessed-turn
+/// sessions first and the rest by blake3 rank, marked on the rows. Returns
+/// the `(eligible, sampled)` counts for the populations block; both `None`
+/// when nothing was requested.
 pub(crate) fn mark_sampled(
     rows: &mut [SessionRow],
     request: SampleRequest,
@@ -346,10 +347,22 @@ pub(crate) fn mark_sampled(
     eligible_ids.sort_unstable();
     eligible_ids.dedup();
     let eligible = eligible_ids.len();
+    // A hash rank over a population where most sessions hold no user speech
+    // spends the sample on silent rows. Witnessed-turn sessions jump the
+    // rank; the hash fills what is left.
+    let witnessed: HashSet<&str> = rows
+        .iter()
+        .filter(|r| !r.operator_turns.is_empty())
+        .map(|r| r.session.as_str())
+        .collect();
+    let (witnessed_ids, silent): (Vec<&str>, Vec<&str>) = eligible_ids
+        .into_iter()
+        .partition(|id| witnessed.contains(id));
+    let mut picked: HashSet<String> = witnessed_ids.iter().map(|s| s.to_string()).collect();
     match request {
         SampleRequest::None => (None, None),
         SampleRequest::All => {
-            let picked = pick_sample(&eligible_ids, None);
+            picked.extend(pick_sample(&silent, None));
             let n = picked.len();
             for r in rows.iter_mut() {
                 r.sampled |= picked.contains(&r.session);
@@ -357,7 +370,8 @@ pub(crate) fn mark_sampled(
             (Some(eligible), Some(n))
         }
         SampleRequest::N(n) => {
-            let picked = pick_sample(&eligible_ids, Some(n));
+            let fill = n.saturating_sub(picked.len());
+            picked.extend(pick_sample(&silent, Some(fill)));
             let taken = picked.len();
             for r in rows.iter_mut() {
                 r.sampled |= picked.contains(&r.session);
@@ -365,6 +379,24 @@ pub(crate) fn mark_sampled(
             (Some(eligible), Some(taken))
         }
     }
+}
+
+/// Live sessions with witnessed operator turns the idle rule held out of
+/// the sample: what judging could not see. One entry per session, the max
+/// witnessed-turn count across a session's rollout files.
+pub(crate) fn held_out_live(rows: &[SessionRow]) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for r in rows
+        .iter()
+        .filter(|r| !r.idle && !r.operator_turns.is_empty())
+    {
+        match out.iter_mut().find(|(s, _)| s == &r.session) {
+            Some((_, n)) => *n = (*n).max(r.operator_turns.len()),
+            None => out.push((r.session.clone(), r.operator_turns.len())),
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 /// The gap from each witnessed operator turn back to the last assistant
@@ -944,6 +976,42 @@ mod tests {
         assert_eq!(eligible, Some(2));
         assert_eq!(sampled, Some(2));
         assert!(rows[0].sampled && rows[1].sampled);
+        // held_out_live: live-with-turns rows only, rollout files merge at
+        // max, sorted by count.
+        let mut live = row("live", "claude");
+        live.idle = false;
+        live.operator_turns = vec!["t1".to_string(), "t2".to_string()];
+        let mut live2 = row("live2", "codex");
+        live2.idle = false;
+        live2.operator_turns = vec!["t1".to_string()];
+        let mut idle_with_turns = row("idleturns", "claude");
+        idle_with_turns.idle = true;
+        idle_with_turns.operator_turns = vec!["t1".to_string()];
+        let mut live_silent = row("livesilent", "claude");
+        live_silent.idle = false;
+        let mut rollout_a = row("rollout", "codex");
+        rollout_a.idle = false;
+        rollout_a.operator_turns = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let mut rollout_b = row("rollout", "codex");
+        rollout_b.idle = false;
+        rollout_b.operator_turns = vec!["t1".to_string()];
+        let rows4 = vec![
+            live,
+            live2,
+            idle_with_turns,
+            live_silent,
+            rollout_a,
+            rollout_b,
+        ];
+        let out = held_out_live(&rows4);
+        assert_eq!(
+            out,
+            vec![
+                ("rollout".to_string(), 3),
+                ("live".to_string(), 2),
+                ("live2".to_string(), 1),
+            ]
+        );
     }
 
     #[test]
@@ -974,6 +1042,31 @@ mod tests {
         assert_eq!(eligible2, None);
         assert_eq!(sampled2, None);
         assert!(!rows2[0].sampled);
+        // Witnessed-turn sessions sample first; the hash fills the rest.
+        let mut loud = row("loud", "claude");
+        loud.substantive = true;
+        loud.idle = true;
+        loud.operator_turns = vec!["2026-09-28T10:00:00Z".to_string()];
+        let mut silent = row("silent", "claude");
+        silent.substantive = true;
+        silent.idle = true;
+        let mut rows3 = vec![loud, silent];
+        // N(1): the witnessed-turn session wins regardless of hash rank.
+        let (eligible3, sampled3) = mark_sampled(&mut rows3, SampleRequest::N(1));
+        assert_eq!(eligible3, Some(2));
+        assert_eq!(sampled3, Some(1));
+        assert!(rows3.iter().find(|r| r.session == "loud").unwrap().sampled);
+        assert!(
+            !rows3
+                .iter()
+                .find(|r| r.session == "silent")
+                .unwrap()
+                .sampled
+        );
+        // All: both picked.
+        let (eligible4, sampled4) = mark_sampled(&mut rows3, SampleRequest::All);
+        assert_eq!(eligible4, Some(2));
+        assert_eq!(sampled4, Some(2));
     }
 
     fn write_facet(dir: &std::path::Path, sid: &str, mtime: u64, size: u64, friction: &str) {

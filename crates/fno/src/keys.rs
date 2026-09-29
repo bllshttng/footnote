@@ -191,8 +191,9 @@ pub fn resolve_keymap(
                 slot.1 = *byte;
             }
         }
-        // A key sitting on the prefix byte can never dispatch.
-        if let Some((action, _)) = final_map.iter().find(|(_, k)| *k == prefix) {
+        // A key sitting on the prefix byte can never dispatch. Sentinel
+        // rows (key 0) hold no chord, so they can sit beside anything.
+        if let Some((action, _)) = final_map.iter().find(|(_, k)| *k == prefix && *k != 0) {
             let action = action.clone();
             if let Some(i) = proposed.iter().position(|(a, _)| *a == action) {
                 warnings.push(KeymapWarning(format!(
@@ -214,8 +215,11 @@ pub fn resolve_keymap(
         }
         // Two actions on one byte: the later PROPOSAL loses, so a swap survives
         // (each half moves off the other's key) while a genuine double-booking
-        // is refused.
+        // is refused. Sentinel rows (key 0) hold no chord and never collide.
         let dup = final_map.iter().enumerate().find_map(|(i, (_, k))| {
+            if *k == 0 {
+                return None;
+            }
             final_map[i + 1..]
                 .iter()
                 .find(|(_, k2)| k2 == k)
@@ -991,8 +995,32 @@ fn default_bindings() -> Vec<KeyBinding> {
     };
     vec![
         // panes
-        b(b'%', "split-h", Cmd(C::SplitH), Panes, "split horizontal"),
-        b(b'"', "split-v", Cmd(C::SplitV), Panes, "split vertical"),
+        b(
+            b'%',
+            "split-right",
+            Cmd(C::SplitDir(Dir::Right)),
+            Panes,
+            "split right",
+        ),
+        b(
+            b'"',
+            "split-down",
+            Cmd(C::SplitDir(Dir::Down)),
+            Panes,
+            "split down",
+        ),
+        // Key 0 is the sentinel for "bindable, no default chord": arrows and
+        // hjkl are taken by focus and resize, so `split-up`/`split-left` ship
+        // unbound and materialize in the live table only once a
+        // `config.mux.keys` rebind names them (see `bindings_for`).
+        b(0, "split-up", Cmd(C::SplitDir(Dir::Up)), Panes, "split up"),
+        b(
+            0,
+            "split-left",
+            Cmd(C::SplitDir(Dir::Left)),
+            Panes,
+            "split left",
+        ),
         b(
             b'h',
             "focus-left",
@@ -1323,6 +1351,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 fn bindings_for(map: &Keymap) -> Vec<KeyBinding> {
     let mut rows = default_bindings();
+    // A sentinel row (key 0: bindable, no default chord) enters the live
+    // table only once a rebind gives it a real key; shipping it unbound
+    // would break the parity contract between `chord()` and the modal.
+    rows.retain(|kb| kb.key != 0 || map.rebinds.iter().any(|(a, _)| a == &kb.action));
     for (action, byte) in &map.rebinds {
         if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
             kb.key = *byte;
@@ -1531,7 +1563,7 @@ pub fn selector_hint() -> &'static str {
 /// would advertise a dead sequence the moment anyone set `config.mux.prefix`.
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
-    vec![
+    let rows = vec![
         // The digit jump reads arbitrary numbers now, so the row
         // names the resolve doors instead of a nine-tab ceiling: Enter is the
         // explicit one, the quiet window covers number-then-nothing, and a
@@ -1617,7 +1649,22 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "rename · move · remove (confirm) the workspace row".into(),
             KeySection::SidelineRows,
         ),
-    ]
+    ];
+    // Bindable, no default chord: the two split directions with no free key.
+    // Listed while unbound so the reference names the action and its rebind
+    // door; each row leaves this table once a rebind materializes the action
+    // in `key_bindings` (no double row).
+    let mut rows = rows;
+    for (action, label) in [("split-up", "split up"), ("split-left", "split left")] {
+        if key_for(action).is_none() {
+            rows.push((
+                "-".into(),
+                format!("{label} (no default chord; rebind via config.mux.keys.{action})"),
+                KeySection::Panes,
+            ));
+        }
+    }
+    rows
 }
 
 /// The single-byte chord table. PREFIX (literal) and the digit range are
@@ -1845,11 +1892,14 @@ mod tests {
             events,
             vec![
                 Event::Forward(b"a".to_vec()),
-                Event::Cmd(Command::SplitH),
+                Event::Cmd(Command::SplitDir(Dir::Right)),
                 Event::Forward(b"b".to_vec()),
             ]
         );
-        assert_eq!(scan_all(&[b"\x02\""]), vec![Event::Cmd(Command::SplitV)]);
+        assert_eq!(
+            scan_all(&[b"\x02\""]),
+            vec![Event::Cmd(Command::SplitDir(Dir::Down))]
+        );
         assert_eq!(
             scan_all(&[b"\x02l"]),
             vec![Event::Cmd(Command::FocusDir(Dir::Right))]
@@ -2079,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_keymap_applies_a_prefix_and_a_rebind() {
+    fn resolve_keymap_apply_rows() {
         let (map, warn) = resolve_keymap(
             Some("C-a"),
             &[("detach".into(), "Q".into()), ("SEARCH".into(), "?".into())],
@@ -2092,10 +2142,52 @@ mod tests {
         );
         assert_eq!(map.prefix, 0x01);
         assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+
+        // A REAL exchange: `n` and `p` trade places, neither moving to a free
+        // key first. Checking entries one at a time against a half-applied map
+        // refuses both (whichever comes first sees the other still parked on its
+        // target), so this is the case that pins judging the FINAL assignment.
+        for order in [
+            vec![("next-tab", "p"), ("prev-tab", "n")],
+            vec![("prev-tab", "n"), ("next-tab", "p")],
+        ] {
+            let entries: Vec<(String, String)> = order
+                .iter()
+                .map(|(a, k)| ((*a).to_string(), (*k).to_string()))
+                .collect();
+            let (map, warn) = resolve_keymap(None, &entries);
+            assert!(warn.is_empty(), "a swap is legal: {warn:?}");
+            assert_eq!(map.rebinds.len(), 2, "both halves of the swap apply");
+            let key = |a: &str| map.rebinds.iter().find(|(x, _)| x == a).map(|(_, k)| *k);
+            assert_eq!((key("next-tab"), key("prev-tab")), (Some(b'p'), Some(b'n')));
+        }
+
+        // The same rule at one more step: no ordering of a cycle has a free key
+        // to start from, so any sequential check rejects all three.
+        let (map, warn) = resolve_keymap(
+            None,
+            &[
+                ("focus-left".into(), "j".into()),
+                ("focus-down".into(), "k".into()),
+                ("focus-up".into(), "h".into()),
+            ],
+        );
+        assert!(warn.is_empty(), "a cycle is legal: {warn:?}");
+        assert_eq!(map.rebinds.len(), 3);
+
+        let map = resolve_prefix_change_with_rebinds("C-a", &[]).unwrap();
+        assert_eq!(map.prefix, 0x01);
+
+        let collision =
+            resolve_prefix_change_with_rebinds("Q", &[("detach".to_string(), b'Q')]).unwrap_err();
+        assert!(collision.contains("prefix"), "{collision}");
+
+        let digit = resolve_prefix_change_with_rebinds("3", &[]).unwrap_err();
+        assert!(digit.contains("1-9 select tabs"), "{digit}");
     }
 
     #[test]
-    fn resolve_keymap_refuses_rather_than_breaking_the_keyboard() {
+    fn resolve_keymap_refusal_rows() {
         // Each refusal keeps a keyboard that WORKS. Applying any of these would
         // shadow a binding or bind a chord that can never fire.
         let cases: [(&str, &str, &str); 4] = [
@@ -2116,6 +2208,51 @@ mod tests {
         let (map, warn) = resolve_keymap(Some("meta-q"), &[]);
         assert_eq!(map.prefix, DEFAULT_PREFIX);
         assert!(warn[0].0.contains("config.mux.prefix"));
+
+        // `chord()` matches the prefix byte BEFORE the table, so an action left
+        // on the prefix is unreachable while the key table still advertises it.
+        // The prefix loses, because refusing it keeps every chord while the
+        // alternative silently costs one.
+        let (map, warn) = resolve_keymap(Some("d"), &[]);
+        assert_eq!(map.prefix, DEFAULT_PREFIX);
+        assert!(
+            warn.iter().any(|w| w.0.contains("is already detach")),
+            "{warn:?}"
+        );
+        // Moving the action out of the way first makes the same prefix legal.
+        let (map, warn) = resolve_keymap(Some("d"), &[("detach".into(), "Q".into())]);
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(map.prefix, b'd');
+        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+        // And a REBIND onto the prefix loses instead, since the prefix is the
+        // more global choice.
+        let (map, warn) = resolve_keymap(Some("C-a"), &[("detach".into(), "C-a".into())]);
+        assert_eq!(map.prefix, 0x01);
+        assert!(map.rebinds.is_empty());
+        assert!(
+            warn.iter().any(|w| w.0.contains("is the prefix")),
+            "{warn:?}"
+        );
+
+        // The final-map collision check only sees NAMED bindings, so `3` looked
+        // free. It is not: `chord()` resolves the prefix before the structural
+        // `1-9` branch, so `prefix+3` would forward a literal `3` while the key
+        // modal went on advertising the whole range. A quietly missing tab is
+        // worse than a refusal, which at least says why.
+        for spec in ["1", "3", "9"] {
+            let (map, warn) = resolve_keymap(Some(spec), &[]);
+            assert_eq!(map.prefix, DEFAULT_PREFIX, "prefix={spec} must not apply");
+            assert!(
+                warn.iter().any(|w| w.0.contains("1-9 select tabs")),
+                "prefix={spec} should say why, said {warn:?}"
+            );
+        }
+        // Asserted on the resolver rather than through `chord()`, because
+        // `install` is process-global and first-call-wins: a test that installs
+        // a keymap decides the keyboard for whichever tests run after it.
+        //
+        // `0` is not in the tab range, so it stays a legal prefix.
+        assert_eq!(resolve_keymap(Some("0"), &[]).0.prefix, b'0');
     }
 
     #[test]
@@ -2202,108 +2339,6 @@ mod tests {
     }
 
     #[test]
-    fn a_digit_prefix_is_refused_like_a_digit_rebind() {
-        // The final-map collision check only sees NAMED bindings, so `3` looked
-        // free. It is not: `chord()` resolves the prefix before the structural
-        // `1-9` branch, so `prefix+3` would forward a literal `3` while the key
-        // modal went on advertising the whole range. A quietly missing tab is
-        // worse than a refusal, which at least says why.
-        for spec in ["1", "3", "9"] {
-            let (map, warn) = resolve_keymap(Some(spec), &[]);
-            assert_eq!(map.prefix, DEFAULT_PREFIX, "prefix={spec} must not apply");
-            assert!(
-                warn.iter().any(|w| w.0.contains("1-9 select tabs")),
-                "prefix={spec} should say why, said {warn:?}"
-            );
-        }
-        // Asserted on the resolver rather than through `chord()`, because
-        // `install` is process-global and first-call-wins: a test that installs
-        // a keymap decides the keyboard for whichever tests run after it.
-        //
-        // `0` is not in the tab range, so it stays a legal prefix.
-        assert_eq!(resolve_keymap(Some("0"), &[]).0.prefix, b'0');
-    }
-
-    #[test]
-    fn resolve_keymap_swaps_two_bound_keys() {
-        // A REAL exchange: `n` and `p` trade places, neither moving to a free
-        // key first. Checking entries one at a time against a half-applied map
-        // refuses both (whichever comes first sees the other still parked on its
-        // target), so this is the case that pins judging the FINAL assignment.
-        for order in [
-            vec![("next-tab", "p"), ("prev-tab", "n")],
-            vec![("prev-tab", "n"), ("next-tab", "p")],
-        ] {
-            let entries: Vec<(String, String)> = order
-                .iter()
-                .map(|(a, k)| ((*a).to_string(), (*k).to_string()))
-                .collect();
-            let (map, warn) = resolve_keymap(None, &entries);
-            assert!(warn.is_empty(), "a swap is legal: {warn:?}");
-            assert_eq!(map.rebinds.len(), 2, "both halves of the swap apply");
-            let key = |a: &str| map.rebinds.iter().find(|(x, _)| x == a).map(|(_, k)| *k);
-            assert_eq!((key("next-tab"), key("prev-tab")), (Some(b'p'), Some(b'n')));
-        }
-    }
-
-    #[test]
-    fn resolve_keymap_keeps_a_three_way_cycle() {
-        // The same rule at one more step: no ordering of a cycle has a free key
-        // to start from, so any sequential check rejects all three.
-        let (map, warn) = resolve_keymap(
-            None,
-            &[
-                ("focus-left".into(), "j".into()),
-                ("focus-down".into(), "k".into()),
-                ("focus-up".into(), "h".into()),
-            ],
-        );
-        assert!(warn.is_empty(), "a cycle is legal: {warn:?}");
-        assert_eq!(map.rebinds.len(), 3);
-    }
-
-    #[test]
-    fn resolve_keymap_refuses_a_prefix_that_shadows_a_chord() {
-        // `chord()` matches the prefix byte BEFORE the table, so an action left
-        // on the prefix is unreachable while the key table still advertises it.
-        // The prefix loses, because refusing it keeps every chord while the
-        // alternative silently costs one.
-        let (map, warn) = resolve_keymap(Some("d"), &[]);
-        assert_eq!(map.prefix, DEFAULT_PREFIX);
-        assert!(
-            warn.iter().any(|w| w.0.contains("is already detach")),
-            "{warn:?}"
-        );
-        // Moving the action out of the way first makes the same prefix legal.
-        let (map, warn) = resolve_keymap(Some("d"), &[("detach".into(), "Q".into())]);
-        assert!(warn.is_empty(), "{warn:?}");
-        assert_eq!(map.prefix, b'd');
-        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
-        // And a REBIND onto the prefix loses instead, since the prefix is the
-        // more global choice.
-        let (map, warn) = resolve_keymap(Some("C-a"), &[("detach".into(), "C-a".into())]);
-        assert_eq!(map.prefix, 0x01);
-        assert!(map.rebinds.is_empty());
-        assert!(
-            warn.iter().any(|w| w.0.contains("is the prefix")),
-            "{warn:?}"
-        );
-    }
-
-    #[test]
-    fn resolve_prefix_change_reuses_the_full_keymap_validator() {
-        let map = resolve_prefix_change_with_rebinds("C-a", &[]).unwrap();
-        assert_eq!(map.prefix, 0x01);
-
-        let collision =
-            resolve_prefix_change_with_rebinds("Q", &[("detach".to_string(), b'Q')]).unwrap_err();
-        assert!(collision.contains("prefix"), "{collision}");
-
-        let digit = resolve_prefix_change_with_rebinds("3", &[]).unwrap_err();
-        assert!(digit.contains("1-9 select tabs"), "{digit}");
-    }
-
-    #[test]
     fn meta_rows_name_the_live_prefix() {
         // The literal-prefix row is built from `prefix()`, so it cannot keep
         // advertising `C-b C-b` after the prefix moves. Asserted against the
@@ -2320,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn rebinding_moves_the_chord_and_its_help_together() {
+    fn rebinding_moves_the_chord_and_materializes_sentinel_rows() {
         // The key-table parity rule, carried onto rebinds: whatever the modal
         // prints is what the dispatcher runs. Applied to a LOCAL table copy -
         // `install` is process-global and one-shot, so a test must not take it.
@@ -2336,6 +2371,52 @@ mod tests {
         assert_eq!(detach.key, 0x11);
         assert_eq!(detach.disp, "C-q", "the key table prints the NEW key");
         assert_eq!(detach.event, Event::Detach);
+
+        // The two no-default split actions live in the table as sentinel
+        // rows (key 0). They resolve only under an explicit rebind, which
+        // materializes the row with its real key; the live table never
+        // carries a key-0 row, so the parity contract holds untouched.
+        let (map, warnings) = resolve_keymap(
+            None,
+            &[
+                ("split-left".into(), "G".into()),
+                ("split-up".into(), "u".into()),
+            ],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let rows = bindings_for(&map);
+        let left = rows
+            .iter()
+            .find(|kb| kb.action == "split-left")
+            .expect("materialized");
+        assert_eq!(left.key, b'G');
+        assert_eq!(left.disp, "G");
+        assert_eq!(left.event, Event::Cmd(Command::SplitDir(Dir::Left)));
+        let up = rows
+            .iter()
+            .find(|kb| kb.action == "split-up")
+            .expect("materialized");
+        assert_eq!(up.key, b'u');
+        assert_eq!(up.event, Event::Cmd(Command::SplitDir(Dir::Up)));
+        // No row ships key 0, and every row's key resolves to its own event:
+        // the parity shape, asserted on the local table.
+        for kb in &rows {
+            assert!(kb.key != 0, "sentinel row {} leaked", kb.action);
+            assert_eq!(
+                chord_for(&map, kb.key),
+                kb.event,
+                "chord diverged from row {}",
+                kb.action
+            );
+        }
+        // While unbound (the default map), the modal lists the action with
+        // its rebind door instead of a chord.
+        assert!(
+            meta_rows().iter().any(|(disp, label, _)| {
+                disp == "-" && label.contains("split up") && label.contains("split-up")
+            }),
+            "the unbound action is named in the reference"
+        );
     }
 
     #[test]
@@ -2373,6 +2454,11 @@ mod tests {
         // unreachable while the help still shows it.
         let mut seen = std::collections::HashSet::new();
         for kb in default_bindings() {
+            // Sentinel rows (key 0: bindable, no default chord) hold no
+            // chord, so the uniqueness rule does not apply to them.
+            if kb.key == 0 {
+                continue;
+            }
             assert!(
                 seen.insert(kb.key),
                 "key {} bound twice (second: {:?})",
@@ -2517,7 +2603,7 @@ mod tests {
             scan_all(&[b"\x1b\x02%"]),
             vec![
                 Event::Forward(b"\x1b".to_vec()),
-                Event::Cmd(Command::SplitH)
+                Event::Cmd(Command::SplitDir(Dir::Right))
             ]
         );
         // A near-miss CSI ahead of the prefix: same re-dispatch of the tail.
@@ -2525,7 +2611,7 @@ mod tests {
             scan_all(&[b"\x1b[1;3\x02%"]),
             vec![
                 Event::Forward(b"\x1b[1;3".to_vec()),
-                Event::Cmd(Command::SplitH)
+                Event::Cmd(Command::SplitDir(Dir::Right))
             ]
         );
     }
@@ -2546,7 +2632,10 @@ mod tests {
         assert!(s.chord_pending());
         assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b".to_vec())));
         assert!(!s.chord_pending());
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
         assert_eq!(s.flush_chord(), None, "nothing held: a no-op");
         // A partial multi-byte candidate flushes the same way.
         let mut s = Scanner::default();
@@ -2682,7 +2771,7 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_paste_passes_prefix_and_ctrl_backslash_verbatim() {
+    fn client_keys_paste_rows() {
         // AC5-HP: everything between the markers - prefix bytes, 0x1C -
         // forwards untouched, markers included; no chord, no detach.
         let mut input = Vec::new();
@@ -2691,10 +2780,7 @@ mod tests {
         input.extend_from_slice(PASTE_CLOSE);
         let events = scan_all(&[&input]);
         assert_eq!(forwarded_only(&events), input);
-    }
 
-    #[test]
-    fn client_keys_paste_markers_split_one_byte_per_read_still_engage() {
         // AC5-ERR: the whole paste arrives one byte per read.
         let mut input = Vec::new();
         input.extend_from_slice(PASTE_OPEN);
@@ -2709,11 +2795,11 @@ mod tests {
         for c in &chunks {
             s.scan(c, now);
         }
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
-    }
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
 
-    #[test]
-    fn client_keys_paste_open_during_pending_prefix_bells_then_pastes() {
         // AC5-EDGE: prefix pressed, then a paste-open arrives - the dangling
         // chord dies with one BEL, the marker forwards, paste mode engages
         // (the prefix byte inside the paste is inert).
@@ -2729,10 +2815,7 @@ mod tests {
         expect.extend_from_slice(b"\x02x");
         expect.extend_from_slice(PASTE_CLOSE);
         assert_eq!(forwarded_only(&events[1..]), expect);
-    }
 
-    #[test]
-    fn client_keys_unterminated_paste_keeps_forwarding_prefix_inert() {
         // AC5-FR: no close marker ever arrives. Bytes keep forwarding
         // verbatim (chords disabled, input never bricked).
         let now = Instant::now();
@@ -2745,10 +2828,7 @@ mod tests {
             vec![Event::Forward(b"\x02d more".to_vec())],
             "prefix stays inert until 201~ or reconnect"
         );
-    }
 
-    #[test]
-    fn client_keys_fizzled_marker_prefix_was_already_forwarded() {
         // ESC [ 2 J (clear screen, not a paste marker): every byte reaches
         // the pane and the scanner stays in Normal with chords live.
         let now = Instant::now();
@@ -2756,13 +2836,16 @@ mod tests {
         assert_eq!(events, vec![Event::Forward(b"\x1b[2J".to_vec())]);
         let mut s = Scanner::default();
         s.scan(b"\x1b[20", now);
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
     }
 
     const RESIZE_R: Event = Event::Cmd(Command::ResizeDir(Dir::Right));
 
     #[test]
-    fn repeat_window_holds_resize_without_prefix() {
+    fn repeat_window_rows() {
         // AC1-HP: prefix+L arms the window; bare L keeps resizing, each repeat
         // extending it. One prefix chord + N bare keys -> N+1 Resize events.
         let mut s = Scanner::default();
@@ -2778,10 +2861,7 @@ mod tests {
             t += Duration::from_millis(30);
             assert_eq!(s.scan(b"L", t), vec![RESIZE_R], "bare L repeats the resize");
         }
-    }
 
-    #[test]
-    fn repeat_window_extends_on_each_repeat() {
         // A bare L near the end of the window pushes the deadline out, so a
         // second bare L that would have missed the ORIGINAL window still lands.
         let mut s = Scanner::default();
@@ -2798,10 +2878,7 @@ mod tests {
             s.scan(b"L", t0 + Duration::from_millis(700)),
             vec![RESIZE_R]
         );
-    }
 
-    #[test]
-    fn repeat_window_lapses_after_the_window() {
         // AC2-HP: no input for >500ms lapses the window; the next bare resize
         // key takes its ordinary meaning (forwarded to the pane, no resize).
         let mut s = Scanner::default();
@@ -2812,10 +2889,7 @@ mod tests {
             vec![Event::Forward(b"J".to_vec())],
             "a bare J after the window forwards; it does not resize"
         );
-    }
 
-    #[test]
-    fn repeat_window_disarms_and_forwards_a_non_resize_byte() {
         // AC3-ERR: any non-resize byte during the window disarms it and reaches
         // the pane byte-identically, and a following resize key no longer repeats.
         let mut s = Scanner::default();
@@ -2831,10 +2905,7 @@ mod tests {
             vec![Event::Forward(b"L".to_vec())],
             "window is gone: bare L now forwards instead of resizing"
         );
-    }
 
-    #[test]
-    fn repeat_window_esc_disarms_immediately() {
         // AC5-FR: Esc is the explicit hatch - it disarms the window and no
         // resize fires from it. Since a lone ESC is also the first
         // byte of the global chord, so it is HELD until the next byte says
@@ -2853,10 +2924,7 @@ mod tests {
             vec![Event::Forward(b"\x1bK".to_vec())],
             "disarmed by Esc: the released ESC and the bare K forward, no resize"
         );
-    }
 
-    #[test]
-    fn repeat_window_prefix_disarms_then_chords_normally() {
         // Invariant: prefix inside the window disarms first, then the chord runs
         // as usual - a prefix+resize re-arms; a prefix+other does not.
         let mut s = Scanner::default();
@@ -2864,7 +2932,7 @@ mod tests {
         s.scan(b"\x02L", t0); // arm
         assert_eq!(
             s.scan(b"\x02%", t0 + Duration::from_millis(100)),
-            vec![Event::Cmd(Command::SplitH)],
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))],
             "prefix+% still splits inside the window"
         );
         // prefix+% is not a resize, so the window is now closed: bare L forwards.
@@ -2872,10 +2940,7 @@ mod tests {
             s.scan(b"L", t0 + Duration::from_millis(130)),
             vec![Event::Forward(b"L".to_vec())]
         );
-    }
 
-    #[test]
-    fn repeat_window_ctrl_arrow_resize_also_arms() {
         // A resize can arm from a Ctrl-arrow chord too (not just a letter); the
         // repeat set itself stays the letters (the muscle-memory hold path).
         let mut s = Scanner::default();
@@ -2890,10 +2955,7 @@ mod tests {
             vec![RESIZE_R],
             "the window it armed accepts a bare L"
         );
-    }
 
-    #[test]
-    fn repeat_window_never_arms_without_a_resize_chord() {
         // Today's behavior byte-for-byte when no resize has fired: a bare L is
         // just pane input. (scan_all uses a fixed clock and never resizes first.)
         assert_eq!(scan_all(&[b"L"]), vec![Event::Forward(b"L".to_vec())]);
@@ -2906,10 +2968,7 @@ mod tests {
             vec![Event::Forward(b"L".to_vec())],
             "focus chord does not open a resize repeat window"
         );
-    }
 
-    #[test]
-    fn repeat_window_public_arm_and_disarm_drive_the_window() {
         // arm_repeat opens a window a bare resize key repeats in (the modal
         // dispatch path uses this); disarm_repeat closes it (the mouse path).
         let mut s = Scanner::default();
@@ -2926,10 +2985,7 @@ mod tests {
             vec![Event::Forward(b"L".to_vec())],
             "disarm_repeat closes it: bare L forwards again"
         );
-    }
 
-    #[test]
-    fn repeat_window_flood_emits_one_resize_per_key() {
         // AC4-EDGE (scanner half): a flood of bare H within the window emits one
         // ResizeDir(Left) each - the MIN-size clamp is the server's job, tested
         // there; the scanner just keeps emitting without error.

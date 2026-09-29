@@ -116,6 +116,26 @@ fno config set config.review.peer_token_env GH_PEER_TOKEN --local
 
 Leaving all three empty keeps today's PR + CI-only behavior.
 
+## Step 2c: Test command and guardrail preset (what this project wants guarded)
+
+Ask for the project's own test command and write the existing key, then note whether `.github/workflows` exists (CI is the enforcement backstop either way):
+
+```bash
+fno config set worktree.test_command "<the command>" --local
+```
+
+Then offer the guardrail preset: how many of footnote's own incident guards this project inherits. One line each:
+
+> 1. **strict** - every gatable guard on, including the ones built from footnote fleet incidents (recursive grep, raw test runs, binary installs, background processes).
+> 2. **standard** (default) - keeps the two destructive-write guards (pipe exit-hiding, git protection) and turns the four fleet-incident guards off.
+> 3. **off** - none of the gatable guards; the state-integrity guards (graph write protection and friends) stay on in every preset.
+
+Write the answer to the project config (the reader prefers `FNO_GUARD_PRESET`, then this key):
+
+```bash
+fno config set guards.preset <strict|standard|off> --local
+```
+
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
 The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf, so it is not asked via `fno config setup plan`. When setting up a workspace, auto-detect the current project and confirm it:

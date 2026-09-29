@@ -170,6 +170,7 @@ pub mod gc_adopt;
 pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
+pub mod gc_open_pr_guard;
 pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
@@ -232,6 +233,7 @@ pub mod loops_pause;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
@@ -239,6 +241,7 @@ pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_close;
+pub mod merge_freeze;
 pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
@@ -251,6 +254,7 @@ pub mod model_env_scrub;
 pub mod model_family;
 pub mod naming;
 pub mod needs;
+pub mod node_branch;
 pub mod node_origin;
 pub mod node_reading;
 pub mod node_route;
@@ -371,6 +375,7 @@ pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_layout;
+pub mod state_layout_sqlite;
 pub mod state_path;
 pub mod state_root_drift;
 pub mod store_exec;
@@ -1456,7 +1461,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // even on outcome none, so a quiet run cannot be mistaken for a sweep
     // that never ran.
     "question_sweep",
-    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 10-minute
     // floor and un-parked open rows whose head moved or whose park passed
     // 24h, marking finished rows handled. Emitted even on a quiet or skipped
     // run, so a quiet run cannot be mistaken for a sweep that never ran.
@@ -1481,6 +1486,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_sent",
     "pr_nudge_escalated",
     "pr_nudge_paused",
+    // Open-PR reap guard (daemon-emitted): the retirement sweep refused to
+    // reap a driver row whose node PR is open with no recorded termination.
+    // Filed once per row, beside the reap-keep task it announces.
+    "worker_reap_refused",
     // Burn arm (daemon-emitted): a worker whose spend or node age grows on
     // a flat sample is woken; three unanswered wakes escalate as one fleet
     // task through the pr-nudge store.
@@ -1550,6 +1559,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // arm and `fno agents reap`). Python's attended `king done` emits the
     // same kind through the shared emitter.
     "agent_crown_vacated",
+    // A succession reverted: the reap sweep restored the predecessor's
+    // session after an heir died unbound past the window (crown_reap.rs;
+    // the daemon retire arm and `fno agents reap`).
+    "crown_succession_reverted",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

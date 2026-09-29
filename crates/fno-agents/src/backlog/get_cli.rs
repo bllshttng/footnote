@@ -150,9 +150,15 @@ pub fn run(tail: &[String]) -> i32 {
     1
 }
 
-/// The render ladder: field, grouped, or the pretty JSON default.
+/// The render ladder: field, grouped, or the pretty JSON default. `_branch`
+/// is a derived field: the node's branch from the one Rust mint/resolver,
+/// resolved against the stamped `_resolved_cwd`; `null` when the row has no
+/// id.
 fn render_out(row: &Value, render: &Render) -> String {
     if let Some(field) = &render.field {
+        if field == "_branch" {
+            return crate::node_branch::resolve(row).unwrap_or_else(|| "null".to_string());
+        }
         return render_field(row, field);
     }
     if render.grouped {
@@ -180,10 +186,10 @@ fn stamped_annotated(hit: &Value, archived: bool) -> Value {
     out.remove(0)
 }
 
-/// The store file the served read came from: the sqlite mirror when one
-/// exists beside the json path, else the json path itself.
+/// The store file the served read came from: the sqlite mirror the layout
+/// resolver names for this anchor, else the anchor itself.
 fn served_store_path(graph_path: &std::path::Path) -> std::path::PathBuf {
-    let db = graph_path.with_extension("db");
+    let db = super::database_path(graph_path);
     if db.exists() {
         db
     } else {
@@ -223,6 +229,17 @@ mod tests {
         assert_eq!(render_field(&row, "tags"), "[\"one\", \"two\"]");
         assert_eq!(render_field(&row, "missing"), "null");
         assert_eq!(render_field(&row, "gone"), "null");
+    }
+
+    #[test]
+    fn the_branch_field_renders_the_mint_for_a_row_without_a_repo() {
+        let row = json!({"id": "x-eeee", "type": "feature", "slug": "some-work", "_resolved_cwd": Value::Null});
+        let render = Render {
+            field: Some("_branch".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_out(&row, &render), "feature/x-eeee-some-work");
+        assert_eq!(render_out(&json!({"type": "feature"}), &render), "null");
     }
 
     #[test]

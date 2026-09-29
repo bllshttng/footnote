@@ -377,8 +377,11 @@ impl View {
             ctx: meta.and_then(|m| m.ctx.as_deref()),
         };
         let laid = crate::pane_border::edges(&fields, rect, has_grip);
+        // The focused edge reads t.border like every other border (the
+        // divider outline arm does the same): brand by default, so a named
+        // theme looks unchanged, and recolored by `mux.theme.border`.
         let (border_fg, border_flags) = if focused_pane {
-            (self.theme.brand, 0)
+            (self.theme.border, 0)
         } else {
             (Color::Default, cell_flags::DIM)
         };

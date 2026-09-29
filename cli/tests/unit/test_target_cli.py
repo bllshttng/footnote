@@ -995,12 +995,20 @@ def _init_env(tmp_path, monkeypatch):
     """Wire target init so the bash bootstrap is stubbed and observable."""
     ran = []
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     class _Result:
         returncode = 0
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
         if list(cmd)[:1] == ["bash"]:
             ran.append(dict(env or {}))
+            return _Result()
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False, env=env)
         return _Result()
 
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)

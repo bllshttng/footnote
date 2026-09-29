@@ -14,6 +14,7 @@ use super::*;
 use crate::backlog_model;
 use crate::backlog_model::{unavailable_features, Board, Lane};
 use crate::backlog_view::graph_path;
+use crate::chrome;
 use crate::store_client;
 use serde_json::Value;
 use std::time::Duration;
@@ -144,6 +145,104 @@ pub(crate) struct BoardView {
     pub(crate) doc: Option<PaneDoc>,
     /// The write verb queued for the run loop (one at a time).
     pub(crate) write_action: Option<WriteAction>,
+    /// Bumped whenever the gathered read (`inputs` + `body`) is replaced.
+    /// The paint memos key on it: a frame recompose must not re-derive.
+    body_gen: u64,
+    /// The board body's rendered lines, keyed on everything they depend on
+    /// (a streaming mux recomposes per pane frame, and each
+    /// recompose re-rendered every card line).
+    board_memo: std::cell::RefCell<Option<BodyMemo>>,
+    /// The detail pane's rendered lines, same discipline.
+    detail_memo: std::cell::RefCell<Option<DetailMemo>>,
+    /// The cheap reading: paint count/avg/max per open interval,
+    /// flushed to the client log so a paint-cost regression moves a line.
+    paint_stats: std::cell::RefCell<PaintStats>,
+}
+
+/// One memo slot: the key plus both rendered shapes (the raw lines for the
+/// unframed painter, the converted body for the framed overlay painter).
+struct BodyMemo {
+    key: BodyKey,
+    lines: Vec<BLine>,
+    body: Vec<chrome::BodyLine>,
+    follow: Option<usize>,
+}
+
+/// Everything the board body's rendered lines depend on.
+#[derive(PartialEq)]
+pub(crate) struct BodyKey {
+    pub(crate) gen: u64,
+    pub(crate) lane: usize,
+    pub(crate) col: usize,
+    pub(crate) row: usize,
+    pub(crate) w: usize,
+    pub(crate) list: bool,
+    pub(crate) query: Option<String>,
+    pub(crate) errors: usize,
+    pub(crate) columns: Vec<String>,
+}
+
+struct DetailMemo {
+    key: DetailKey,
+    lines: Vec<BLine>,
+    body: Vec<chrome::BodyLine>,
+    follow: Option<usize>,
+}
+
+/// Everything the detail pane's rendered lines depend on. The scroll offset
+/// is applied after the memo read (a skip), so it stays out of the key.
+#[derive(PartialEq)]
+pub(crate) struct DetailKey {
+    pub(crate) gen: u64,
+    pub(crate) node: String,
+    pub(crate) sel: Option<usize>,
+    pub(crate) w: usize,
+    /// The document read the lines render: node, path, mtime, error.
+    pub(crate) doc: Option<(String, String, Option<std::time::SystemTime>, String)>,
+}
+
+/// Paint durations for the cheap reading: count, total, max in the window.
+pub(crate) struct PaintStats {
+    pub(crate) count: u64,
+    total_micros: u128,
+    max_micros: u128,
+    window_started: std::time::Instant,
+}
+
+impl PaintStats {
+    pub(crate) fn new() -> Self {
+        Self {
+            count: 0,
+            total_micros: 0,
+            max_micros: 0,
+            window_started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn record(&mut self, micros: u128) {
+        self.count += 1;
+        self.total_micros += micros;
+        self.max_micros = self.max_micros.max(micros);
+    }
+
+    /// One line per 30s window, so an always-open board keeps reporting
+    /// without one line per frame.
+    pub(crate) fn due(&self) -> bool {
+        self.count > 0 && self.window_started.elapsed().as_secs() >= 30
+    }
+
+    pub(crate) fn take_line(&mut self) -> String {
+        let avg = self.total_micros / self.count.max(1) as u128;
+        let line = format!(
+            "backlog board paint: {} paints in {}s, avg {:.1}ms, max {:.1}ms",
+            self.count,
+            self.window_started.elapsed().as_secs(),
+            avg as f64 / 1000.0,
+            self.max_micros as f64 / 1000.0
+        );
+        *self = Self::new();
+        line
+    }
 }
 
 /// The `c` column picker's state.
@@ -245,7 +344,103 @@ impl BoardView {
             detail_esc: Vec::new(),
             doc: None,
             write_action: None,
+            body_gen: 0,
+            board_memo: std::cell::RefCell::new(None),
+            detail_memo: std::cell::RefCell::new(None),
+            paint_stats: std::cell::RefCell::new(PaintStats::new()),
         }
+    }
+
+    /// The board body's lines through the memo: a hit re-renders nothing,
+    /// a miss builds once and caches both rendered shapes.
+    pub(crate) fn board_body_cached(
+        &self,
+        key: BodyKey,
+        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
+    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        {
+            let mut slot = self.board_memo.borrow_mut();
+            if slot.as_ref().is_none_or(|m| m.key != key) {
+                let (lines, body, follow) = build();
+                *slot = Some(BodyMemo {
+                    key,
+                    lines,
+                    body,
+                    follow,
+                });
+            }
+        }
+        let slot = self.board_memo.borrow();
+        let follow = slot.as_ref().and_then(|m| m.follow);
+        let body = std::cell::Ref::map(slot, |s| match s {
+            Some(m) => m.body.as_slice(),
+            None => &[],
+        });
+        (body, follow)
+    }
+
+    /// The detail pane's lines through the memo. Same contract as
+    /// [`BoardView::board_body_cached`].
+    pub(crate) fn detail_lines_cached(
+        &self,
+        key: DetailKey,
+        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
+    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        {
+            let mut slot = self.detail_memo.borrow_mut();
+            if slot.as_ref().is_none_or(|m| m.key != key) {
+                let (lines, body, follow) = build();
+                *slot = Some(DetailMemo {
+                    key,
+                    lines,
+                    body,
+                    follow,
+                });
+            }
+        }
+        let slot = self.detail_memo.borrow();
+        let follow = slot.as_ref().and_then(|m| m.follow);
+        let body = std::cell::Ref::map(slot, |s| match s {
+            Some(m) => m.body.as_slice(),
+            None => &[],
+        });
+        (body, follow)
+    }
+
+    /// The raw cached lines, for the unframed painter that reads BLine.
+    pub(crate) fn board_lines_cached(&self) -> Vec<BLine> {
+        self.board_memo
+            .borrow()
+            .as_ref()
+            .map(|m| m.lines.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn detail_lines_raw(&self) -> Vec<BLine> {
+        self.detail_memo
+            .borrow()
+            .as_ref()
+            .map(|m| m.lines.clone())
+            .unwrap_or_default()
+    }
+
+    /// The cheap reading: one duration in, one log line out per
+    /// 30s window while the board paints. Lives in
+    /// `<mux dir>/client-warnings.log`.
+    pub(crate) fn record_paint(&self, micros: u128) {
+        self.paint_stats.borrow_mut().record(micros);
+    }
+
+    /// Flush a due paint-stats window to `<mux dir>/client-warnings.log`.
+    /// Called each run-loop pass while the board is open.
+    pub(crate) fn flush_paint_stats(&self) {
+        let due = self.paint_stats.borrow().due();
+        if !due {
+            return;
+        }
+        let line = self.paint_stats.borrow_mut().take_line();
+        let path = crate::proto::mux_dir().join("client-warnings.log");
+        super::client_log_append(&path, &line);
     }
 }
 
@@ -257,6 +452,10 @@ pub(crate) use crate::view_store::BoardLayout;
 /// (the feed fold's discipline). Runs each run-loop turn beside
 /// `feed_view::maybe_kick`.
 pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
+    // The paint reading flushes on its own 30s window while the board runs.
+    if let Some(b) = view.backlog_board.as_ref() {
+        b.flush_paint_stats();
+    }
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
@@ -328,6 +527,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
             // board empty; a filter matching nothing (empty errors) does.
             if !board.lanes.is_empty() || board.errors.is_empty() || b.body.is_none() {
                 b.body = Some(board);
+                b.body_gen += 1;
             }
             focus_card(b, focus.as_deref());
         }

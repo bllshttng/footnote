@@ -112,7 +112,7 @@ fn open_seeds_project_candidates_and_kicks_the_catalog_probe() {
 }
 
 #[test]
-fn one_lone_esc_byte_closes_the_dock() {
+fn dock_lifecycle_rows() {
     // The unit twin of the pty repro: the scanner flushes [0x1b] into
     // launcher_keys after its quiet window, and the dock's own carry must
     // release a trailing lone ESC as a bare Esc press, not re-buffer it.
@@ -127,6 +127,38 @@ fn one_lone_esc_byte_closes_the_dock() {
     assert!(
         v.launcher_closed.is_some(),
         "the draft is retained for reopen"
+    );
+
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    type_message(&mut v, "ship it");
+    let revision_before = v.launcher.as_ref().unwrap().draft.revision;
+    close(&mut v);
+    assert!(v.launcher.is_none(), "dock hidden");
+    assert!(v.launcher_closed.is_some(), "draft retained");
+    // Reopen: same draft, same revision, nothing lost.
+    open(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "ship it");
+    assert_eq!(l.draft.revision, revision_before);
+    assert_eq!(l.draft.harnesses, vec!["claude", "codex"]);
+
+    let mut v = view_with_launcher();
+    v.sideline_full = true;
+    type_message(&mut v, "keep me");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b ", &mut sock).await;
+    });
+    assert!(!v.sideline_full, "Esc leaves full-screen sideline");
+    assert!(v.launcher.is_none(), "composer closed");
+    assert_eq!(
+        v.launcher_closed.as_ref().unwrap().draft.message,
+        "keep me",
+        "draft retained"
     );
 }
 
@@ -159,25 +191,7 @@ fn arrow_reaches_the_dock_whole_or_scanner_rejoined() {
 }
 
 #[test]
-fn esc_hides_and_reopening_restores_the_draft() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
-    sync_catalog(&mut v);
-    type_message(&mut v, "ship it");
-    let revision_before = v.launcher.as_ref().unwrap().draft.revision;
-    close(&mut v);
-    assert!(v.launcher.is_none(), "dock hidden");
-    assert!(v.launcher_closed.is_some(), "draft retained");
-    // Reopen: same draft, same revision, nothing lost.
-    open(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    assert_eq!(l.draft.message, "ship it");
-    assert_eq!(l.draft.revision, revision_before);
-    assert_eq!(l.draft.harnesses, vec!["claude", "codex"]);
-}
-
-#[test]
-fn tab_walks_the_chip_row_and_wraps() {
+fn chip_walk_rows() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
@@ -210,10 +224,7 @@ fn tab_walks_the_chip_row_and_wraps() {
         Focus::Message,
         "the chip cycle wraps"
     );
-}
 
-#[test]
-fn the_effort_chip_drops_when_the_harness_has_no_effort_surface() {
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
     if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
@@ -255,7 +266,7 @@ fn enter_inserts_newline_in_message_and_never_submits() {
 }
 
 #[test]
-fn bracketed_paste_is_data_even_with_selector_shaped_bytes() {
+fn paste_rows() {
     let mut v = view_with_launcher();
     type_message(&mut v, "");
     // A paste whose payload looks like an arrow sequence must land as text.
@@ -267,10 +278,7 @@ fn bracketed_paste_is_data_even_with_selector_shaped_bytes() {
         "pasted bytes are data: {}",
         l.draft.message
     );
-}
 
-#[test]
-fn split_utf8_sequence_across_chunks_is_not_wedged() {
     let mut esc = LauncherEsc::default();
     // The emoji U+1F600 is four bytes; split after the first.
     let full = "\u{1f600}".as_bytes();
@@ -281,7 +289,7 @@ fn split_utf8_sequence_across_chunks_is_not_wedged() {
 }
 
 #[test]
-fn submit_refuses_unavailable_harness_pre_wire_with_draft_intact() {
+fn submit_refusal_rows() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[
         ("claude", true, true),
@@ -319,45 +327,7 @@ fn submit_refuses_unavailable_harness_pre_wire_with_draft_intact() {
     }
     assert_eq!(l.draft.message, "", "draft untouched");
     assert!(sock.is_empty(), "nothing went on the wire");
-}
 
-#[test]
-fn stale_update_cannot_overwrite_a_newer_draft() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    // Arm request 1, then edit the draft (a newer revision).
-    if let Some(l) = v.launcher.as_mut() {
-        l.armed = Some(1);
-        l.phase = Phase::Submitting { request_id: 1 };
-    }
-    let update = AgentLaunchUpdate {
-        request_id: 1,
-        state: LaunchState::Refused {
-            reason: "capacity".into(),
-        },
-    };
-    apply_launch_update(&mut v, update);
-    assert!(matches!(
-        v.launcher.as_ref().unwrap().phase,
-        Phase::Refused { .. }
-    ));
-    // A STALE id (2 never armed by this dock) applies nowhere: the dock's
-    // newer draft state survives.
-    let stale = AgentLaunchUpdate {
-        request_id: 2,
-        state: LaunchState::Refused {
-            reason: "bogus".into(),
-        },
-    };
-    apply_launch_update(&mut v, stale);
-    if let Some(l) = v.launcher.as_ref() {
-        assert!(matches!(l.phase, Phase::Refused { ref reason, .. } if reason == "capacity"));
-    }
-}
-
-#[test]
-fn unknown_outcome_blocks_retry_until_dismiss() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
@@ -389,6 +359,99 @@ fn unknown_outcome_blocks_retry_until_dismiss() {
     });
     assert!(matches!(v.launcher.as_ref().unwrap().phase, Phase::Editing));
     assert!(v.launcher.is_some(), "the canceling Esc does not close");
+
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+        l.phase = Phase::Submitting { request_id: 1 };
+    }
+    apply_launch_update(
+        &mut v,
+        AgentLaunchUpdate {
+            request_id: 1,
+            state: LaunchState::Unknown {
+                reason: "launch timed out".into(),
+            },
+        },
+    );
+    // Arm-released Unknown: the exact state the old gate leaked through.
+    assert_eq!(v.launcher.as_ref().unwrap().armed, None);
+    // ^j (the launch key) is inert until the operator cancels explicitly.
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\n", &mut sock).await;
+    });
+    assert!(matches!(
+        v.launcher.as_ref().unwrap().phase,
+        Phase::Unknown { .. }
+    ));
+    assert!(sock.is_empty(), "nothing went on the wire: {sock:?}");
+}
+
+#[test]
+fn draft_staleness_rows() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    // Arm request 1, then edit the draft (a newer revision).
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+        l.phase = Phase::Submitting { request_id: 1 };
+    }
+    let update = AgentLaunchUpdate {
+        request_id: 1,
+        state: LaunchState::Refused {
+            reason: "capacity".into(),
+        },
+    };
+    apply_launch_update(&mut v, update);
+    assert!(matches!(
+        v.launcher.as_ref().unwrap().phase,
+        Phase::Refused { .. }
+    ));
+    // A STALE id (2 never armed by this dock) applies nowhere: the dock's
+    // newer draft state survives.
+    let stale = AgentLaunchUpdate {
+        request_id: 2,
+        state: LaunchState::Refused {
+            reason: "bogus".into(),
+        },
+    };
+    apply_launch_update(&mut v, stale);
+    if let Some(l) = v.launcher.as_ref() {
+        assert!(matches!(l.phase, Phase::Refused { ref reason, .. } if reason == "capacity"));
+    }
+
+    // AC9-EDGE: the binding rides only while the message's second word
+    // (sentence punctuation trimmed) still names the node. A retarget, a
+    // prose rewrite or an erasure never binds a stale node; appended
+    // prose after the same id keeps it.
+    let mut v = plain_view();
+    open(&mut v);
+    super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
+        .expect("a fresh draft yields");
+    let cases: &[(&str, Option<&str>)] = &[
+        ("/fno:target x-2", None),
+        ("fix the flake", None),
+        ("", None),
+        ("/fno:target x-1 focus on the flake", Some("x-1")),
+        ("/fno:target x-1.", Some("x-1")),
+    ];
+    for (message, want) in cases {
+        if let Some(l) = v.launcher.as_mut() {
+            l.draft.message = message.to_string();
+        }
+        let req = v.launcher.as_ref().unwrap().draft.request(1);
+        assert_eq!(
+            req.node.as_deref(),
+            *want,
+            "message {message:?} binds {want:?}"
+        );
+    }
 }
 
 #[test]
@@ -447,7 +510,7 @@ fn footer_names_the_lifecycle_and_the_refusal_reason() {
 }
 
 #[test]
-fn wrap_message_hard_wraps_by_display_width() {
+fn wrap_rows() {
     let chunks = super::agent_launcher::wrap_message("abcdefghij", 4);
     let got: Vec<(usize, &str)> = chunks.iter().map(|(o, s)| (*o, s.as_str())).collect();
     assert_eq!(
@@ -472,50 +535,13 @@ fn wrap_message_hard_wraps_by_display_width() {
             <= 2),
         "no chunk wider than 2 columns"
     );
-}
 
-#[test]
-fn wrapped_cursor_lands_on_the_row_holding_the_char() {
     let (r, c) = super::agent_launcher::wrapped_cursor("abcdefghij", 9, 4);
     assert_eq!((r, c), (2, 1), "cursor 9 at width 4 is row 2 col 1");
     let (r, c) = super::agent_launcher::wrapped_cursor("ab\ncd", 2, 10);
     assert_eq!((r, c), (0, 2), "cursor on the newline ends its row");
     let (r, c) = super::agent_launcher::wrapped_cursor("abcdefgh", 8, 4);
     assert_eq!((r, c), (1, 4), "cursor at the very end");
-}
-
-#[test]
-fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    if let Some(l) = v.launcher.as_mut() {
-        l.armed = Some(1);
-        l.phase = Phase::Submitting { request_id: 1 };
-    }
-    apply_launch_update(
-        &mut v,
-        AgentLaunchUpdate {
-            request_id: 1,
-            state: LaunchState::Unknown {
-                reason: "launch timed out".into(),
-            },
-        },
-    );
-    // Arm-released Unknown: the exact state the old gate leaked through.
-    assert_eq!(v.launcher.as_ref().unwrap().armed, None);
-    // ^j (the launch key) is inert until the operator cancels explicitly.
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\n", &mut sock).await;
-    });
-    assert!(matches!(
-        v.launcher.as_ref().unwrap().phase,
-        Phase::Unknown { .. }
-    ));
-    assert!(sock.is_empty(), "nothing went on the wire: {sock:?}");
 }
 
 /// A Starting attempt whose update is lost must stay escapable: Esc during
@@ -542,16 +568,9 @@ fn submitting_sheet_offers_cancel_and_recovers_to_editing() {
 
 /// A degraded catalog re-probes on the next open instead of sticking for
 /// the session.
-#[test]
-fn degraded_catalog_reprobes_on_reopen() {
-    let mut v = plain_view();
-    v.launcher_catalog = Some(CatalogOutcome::Degraded("probe failed".into()));
-    open(&mut v);
-    assert!(v.catalog_want, "a degraded read re-arms the probe");
-}
 
 #[test]
-fn launcher_click_on_a_chip_focuses_it_and_opens_its_picker() {
+fn click_rows() {
     // AC2-HP, mouse half: a press on a chip focuses it and drops that
     // axis's picker one row under the chip.
     let mut v = view_with_launcher();
@@ -583,6 +602,97 @@ fn launcher_click_on_a_chip_focuses_it_and_opens_its_picker() {
     assert_eq!(l.focus, Focus::Project, "the click landed on the chip");
     let picker = l.picker.as_ref().expect("the click opened the picker");
     assert_eq!(picker.field, Focus::Project);
+
+    // AC3-CLICK: the chip is a real target in the picker's mouse path - the
+    // click reads exactly as pressing Esc (Main list closes the picker).
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    type_message(&mut v, "keep me");
+    // Drop the Project picker directly: the opener's key choreography is the
+    // chip-click test's subject, not this one's.
+    {
+        let l = v.launcher.as_mut().unwrap();
+        let opened = super::agent_launcher::open_picker_at(
+            l,
+            &v.launcher_catalog,
+            &v.backlog,
+            Some((4, 6)),
+            Focus::Project,
+        );
+        assert!(opened, "the Project picker opened");
+    }
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let l = v.launcher.as_ref().unwrap();
+    let picker = l.picker.as_ref().expect("the picker is open");
+    let r = picker.popup.render((v.term.0, v.term.1));
+    // The chip's click span on the framed title border.
+    let (hit_row, hit_col) = r
+        .lines
+        .iter()
+        .enumerate()
+        .find_map(|(i, line)| {
+            line.hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, off, len)| {
+                    (
+                        r.origin.0 as u16 + i as u16,
+                        r.origin.1 as u16 + (off + len / 2) as u16,
+                    )
+                })
+        })
+        .expect("the picker's esc chip carries a hit span");
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: hit_row,
+        col: hit_col,
+        shift: false,
+    };
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click on the picker's esc chip is consumed");
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "the chip click closed the picker");
+    assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
+
+    // AC3-CLICK: the composer's keybar esc word is the chip; the click is
+    // the Esc key's gesture (hide + retain at rest).
+    let mut v = view_with_launcher();
+    type_message(&mut v, "keep me");
+    let l = v.launcher.as_ref().unwrap();
+    let sl = l.sheet_layout(&v).unwrap();
+    let r = sl.esc_rect.expect("the keybar names an esc word");
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: sl.origin.0 + 1 + r.y,
+        col: sl.origin.1 + 1 + r.x + 2,
+        shift: false,
+    };
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click on the sheet's esc word is consumed");
+    });
+    assert!(v.launcher.is_none(), "the esc word closed the sheet");
+    assert_eq!(
+        v.launcher_closed
+            .as_ref()
+            .expect("hidden with retain")
+            .draft
+            .message,
+        "keep me",
+        "the draft is retained"
+    );
 }
 
 #[test]
@@ -671,124 +781,7 @@ fn motion_over_the_project_chip_shows_the_cwd_line_and_a_press_outside_closes_th
 }
 
 #[test]
-fn a_click_on_the_picker_esc_chip_closes_the_picker() {
-    // AC3-CLICK: the chip is a real target in the picker's mouse path - the
-    // click reads exactly as pressing Esc (Main list closes the picker).
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    type_message(&mut v, "keep me");
-    // Drop the Project picker directly: the opener's key choreography is the
-    // chip-click test's subject, not this one's.
-    {
-        let l = v.launcher.as_mut().unwrap();
-        let opened = super::agent_launcher::open_picker_at(
-            l,
-            &v.launcher_catalog,
-            &v.backlog,
-            Some((4, 6)),
-            Focus::Project,
-        );
-        assert!(opened, "the Project picker opened");
-    }
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let l = v.launcher.as_ref().unwrap();
-    let picker = l.picker.as_ref().expect("the picker is open");
-    let r = picker.popup.render((v.term.0, v.term.1));
-    // The chip's click span on the framed title border.
-    let (hit_row, hit_col) = r
-        .lines
-        .iter()
-        .enumerate()
-        .find_map(|(i, line)| {
-            line.hits
-                .iter()
-                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
-                .map(|(_, off, len)| {
-                    (
-                        r.origin.0 as u16 + i as u16,
-                        r.origin.1 as u16 + (off + len / 2) as u16,
-                    )
-                })
-        })
-        .expect("the picker's esc chip carries a hit span");
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: hit_row,
-        col: hit_col,
-        shift: false,
-    };
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(consumed, "a click on the picker's esc chip is consumed");
-    });
-    let l = v.launcher.as_ref().unwrap();
-    assert!(l.picker.is_none(), "the chip click closed the picker");
-    assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
-}
-
-#[test]
-fn a_click_on_the_sheet_esc_word_closes_the_sheet() {
-    // AC3-CLICK: the composer's keybar esc word is the chip; the click is
-    // the Esc key's gesture (hide + retain at rest).
-    let mut v = view_with_launcher();
-    type_message(&mut v, "keep me");
-    let l = v.launcher.as_ref().unwrap();
-    let sl = l.sheet_layout(&v).unwrap();
-    let r = sl.esc_rect.expect("the keybar names an esc word");
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: sl.origin.0 + 1 + r.y,
-        col: sl.origin.1 + 1 + r.x + 2,
-        shift: false,
-    };
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(consumed, "a click on the sheet's esc word is consumed");
-    });
-    assert!(v.launcher.is_none(), "the esc word closed the sheet");
-    assert_eq!(
-        v.launcher_closed
-            .as_ref()
-            .expect("hidden with retain")
-            .draft
-            .message,
-        "keep me",
-        "the draft is retained"
-    );
-}
-
-#[test]
-fn esc_leaves_full_screen_and_retains_the_draft() {
-    let mut v = view_with_launcher();
-    v.sideline_full = true;
-    type_message(&mut v, "keep me");
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b ", &mut sock).await;
-    });
-    assert!(!v.sideline_full, "Esc leaves full-screen sideline");
-    assert!(v.launcher.is_none(), "composer closed");
-    assert_eq!(
-        v.launcher_closed.as_ref().unwrap().draft.message,
-        "keep me",
-        "draft retained"
-    );
-}
-
-#[test]
-fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
+fn chip_paint_rows() {
     let area = RtRect::new(0, 0, 6, 1);
     let mut buf = RtBuffer::empty(area);
     let style = RtStyle::new();
@@ -801,10 +794,7 @@ fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
         painted.ends_with('\u{2026}'),
         "truncated chip elides: {painted}"
     );
-}
 
-#[test]
-fn caret_survives_chip_truncation() {
     // AC2-EDGE: a chip rect narrower than its label ellipsizes the label and
     // keeps the caret visible - truncate the text, never the caret.
     let area = RtRect::new(0, 0, 5, 1);
@@ -843,7 +833,7 @@ fn chips_carry_values_not_axis_names() {
 }
 
 #[test]
-fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
+fn model_picker_rows() {
     // The Model picker lists the current harness default and that harness's
     // configured rows; committing a row pins its model, provider and route
     // together.
@@ -917,10 +907,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     assert!(body.iter().any(
         |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "qwen3-coder")
     ));
-}
 
-#[test]
-fn provider_and_model_choices_come_from_configured_rows() {
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("opencode", true, true)]).unwrap();
     if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
@@ -964,10 +951,7 @@ fn provider_and_model_choices_come_from_configured_rows() {
         request.model.as_deref(),
         Some("openrouter/qwen/qwen3-coder")
     );
-}
 
-#[test]
-fn account_rows_supply_model_and_provider_options() {
     let configured = r#"{"value":[
       {"id":"anthropic-main","harness":"claude","model_name":"sonnet"},
       {"id":"openrouter-main","harness":"claude","route_provider_id":"openrouter","model_name":"qwen/qwen3-coder"},
@@ -992,11 +976,11 @@ fn account_rows_supply_model_and_provider_options() {
     );
 
     let mut v = view_with_launcher();
-    let mut catalog = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, _, _) = &mut catalog {
+    let mut pinned = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, _, _) = &mut pinned {
         rows[0].models = claude.clone();
     }
-    v.launcher_catalog = Some(catalog);
+    v.launcher_catalog = Some(pinned);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
     let sl = l.sheet_layout(&v).unwrap();
@@ -1011,6 +995,25 @@ fn account_rows_supply_model_and_provider_options() {
             .map(|(f, _)| l.chip_label(*f, &v.launcher_catalog))
             .collect::<Vec<_>>()
     );
+
+    // The regression behind the old tab rewrite: the unavailable row's
+    // LABEL must never be ellipsized to fit the long error hint. The label
+    // stays whole in the picker rows; the hint truncates instead.
+    let mut v = view_with_launcher();
+    let mut choices = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, models_err, _) = &mut choices {
+        *models_err =
+            Some("account records unavailable: Usage: fno-py config get [OPTIONS] {key}".into());
+        let _ = rows;
+    }
+    v.launcher_catalog = Some(choices);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let (rows, _) =
+        super::agent_launcher::picker_rows(&l, Focus::Model, &v.launcher_catalog, &v.backlog);
+    assert!(rows.iter().any(
+        |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "model list unavailable")
+    ));
 }
 
 /// The regression behind the model-floor contract: a claude account with no
@@ -1019,7 +1022,7 @@ fn account_rows_supply_model_and_provider_options() {
 /// opencode solely from account records. The capability table now floors
 /// each harness's list with its own measured model ids.
 #[test]
-fn the_capability_table_floors_claude_and_codex_model_lists() {
+fn model_floor_rows() {
     let parsed: toml::Value = toml::from_str(super::agent_launcher::CAPABILITY_TOML).unwrap();
     let floor = |harness: &str| -> Vec<String> {
         parsed["harness"][harness]["models"]
@@ -1047,10 +1050,7 @@ fn the_capability_table_floors_claude_and_codex_model_lists() {
         parsed["harness"]["opencode"].get("models").is_none(),
         "opencode owns its list through its model command; no floor"
     );
-}
 
-#[test]
-fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
     let cache = r#"{"models":[
         {"slug":"gpt-6-luna","visibility":"list"},
         {"slug":"gpt-reserve","visibility":"hide"},
@@ -1084,10 +1084,7 @@ fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
         super::agent_launcher::parse_codex_models("{}").0.is_empty(),
         "a cache without a models list is the same floor-stands case"
     );
-}
 
-#[test]
-fn account_pins_merge_over_the_model_floor_without_duplicates() {
     let floor = vec![super::agent_launcher::ModelChoice {
         name: "opus".into(),
         model: "opus".into(),
@@ -1117,30 +1114,9 @@ fn account_pins_merge_over_the_model_floor_without_duplicates() {
 /// used to be ellipsized to fit the long error hint, so "model list
 /// unavailable" never reached the screen in CI. Labels stay whole; the
 /// hint truncates instead; the selection spans the full inner width.
-#[test]
-fn model_picker_label_survives_a_long_error_hint() {
-    // The regression behind the old tab rewrite: the unavailable row's
-    // LABEL must never be ellipsized to fit the long error hint. The label
-    // stays whole in the picker rows; the hint truncates instead.
-    let mut v = view_with_launcher();
-    let mut choices = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, models_err, _) = &mut choices {
-        *models_err =
-            Some("account records unavailable: Usage: fno-py config get [OPTIONS] {key}".into());
-        let _ = rows;
-    }
-    v.launcher_catalog = Some(choices);
-    sync_catalog(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    let (rows, _) =
-        super::agent_launcher::picker_rows(&l, Focus::Model, &v.launcher_catalog, &v.backlog);
-    assert!(rows.iter().any(
-        |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "model list unavailable")
-    ));
-}
 
 #[test]
-fn degraded_inventory_names_the_failure_and_keeps_defaults() {
+fn degraded_inventory_rows() {
     // When the inventory read fails, the model list shows a disabled entry
     // carrying the reason and the harness default stays launchable;
     // No model row is fabricated when the configured inventory is absent.
@@ -1203,14 +1179,25 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
         !v.launcher.as_ref().unwrap().draft.harnesses.is_empty(),
         "harness choices survive the degraded model list"
     );
+
+    let mut v = plain_view();
+    v.launcher_catalog = Some(CatalogOutcome::Degraded("probe failed".into()));
+    open(&mut v);
+    assert!(v.catalog_want, "a degraded read re-arms the probe");
 }
 
 /// A claude catalog with a captured flags list and the facts row the
 /// worktree resolve wants; the sidecar answers at the worktree generation.
 fn pill_harness_view() -> (View, std::sync::MutexGuard<'static, ()>, WireVersionFixture) {
     // One shared FNO_STATE_DIR lock with the model_catalog tests, held for
-    // the whole body.
+    // the whole body. Merged tests that already hold the guard call
+    // pill_view directly so the non-reentrant lock is taken exactly once.
     let guard = crate::model_catalog::state_env_lock();
+    let (v, fx) = pill_view(&guard);
+    (v, guard, fx)
+}
+
+fn pill_view(_guard: &std::sync::MutexGuard<'static, ()>) -> (View, WireVersionFixture) {
     let mut v = view_with_launcher();
     let (session, _wire_fixture) = wire_fixture_at(95);
     v.session = session;
@@ -1237,7 +1224,7 @@ fn pill_harness_view() -> (View, std::sync::MutexGuard<'static, ()>, WireVersion
         }],
     ));
     sync_catalog(&mut v);
-    (v, guard, _wire_fixture)
+    (v, _wire_fixture)
 }
 
 fn launch_argv(v: &mut View, keys: &[u8]) -> Vec<String> {
@@ -1257,7 +1244,7 @@ fn launch_argv(v: &mut View, keys: &[u8]) -> Vec<String> {
 }
 
 #[test]
-fn an_unlisted_typed_flag_rides_the_argv_verbatim() {
+fn pill_rows() {
     // AC11-HP: `--foo bar` typed and committed launches --foo and bar as
     // argv, and the message excludes them.
     let (mut v, _lock, _fx) = pill_harness_view();
@@ -1270,13 +1257,10 @@ fn an_unlisted_typed_flag_rides_the_argv_verbatim() {
         !draft.message.contains("--foo"),
         "the message excludes the flag"
     );
-}
 
-#[test]
-fn chip_pin_model_sets_the_chip_and_holds_no_pill() {
     // AC10-EDGE: `--model x` committed reads the model chip x and stores no
     // pill; the argv carries no --model element.
-    let (mut v, _lock, _fx) = pill_harness_view();
+    let (mut v, _fx) = pill_view(&_lock);
     let argv = launch_argv(&mut v, b"--model x\r");
     assert!(
         argv.is_empty(),
@@ -1288,11 +1272,8 @@ fn chip_pin_model_sets_the_chip_and_holds_no_pill() {
         l.draft.pills.is_empty(),
         "no pill stores for a chip-owned flag"
     );
-}
 
-#[test]
-fn backspace_at_an_empty_message_removes_the_last_pill() {
-    let (mut v, _lock, _fx) = pill_harness_view();
+    let (mut v, _fx) = pill_view(&_lock);
     v.launcher.as_mut().unwrap().draft.pill_value_capture = false;
     v.launcher
         .as_mut()
@@ -1308,6 +1289,19 @@ fn backspace_at_an_empty_message_removes_the_last_pill() {
     });
     let l = v.launcher.as_ref().unwrap();
     assert!(l.draft.pills.is_empty(), "the pill is gone");
+
+    let (mut v, _fx) = pill_view(&_lock);
+    // `--` opens the picker; "ag" narrows to --agent; Enter picks it; the
+    // trailing Space ends the empty value capture; Enter launches. The flag
+    // takes a value and nothing follows: it stores valueless.
+    let argv = launch_argv(&mut v, b"--ag\r \r");
+    assert_eq!(argv, vec!["--agent"]);
+    let draft = &v.launcher.as_ref().unwrap().draft;
+    assert!(
+        !draft.message.contains("--"),
+        "the typed dashes left the message"
+    );
+    assert_eq!(draft.pills.len(), 1, "the pill stores");
 }
 
 #[test]
@@ -1353,22 +1347,6 @@ fn the_flags_picker_lists_the_harness_launch_flags() {
 }
 
 #[test]
-fn a_picked_flag_adds_the_pill_and_drops_the_typed_word() {
-    let (mut v, _lock, _fx) = pill_harness_view();
-    // `--` opens the picker; "ag" narrows to --agent; Enter picks it; the
-    // trailing Space ends the empty value capture; Enter launches. The flag
-    // takes a value and nothing follows: it stores valueless.
-    let argv = launch_argv(&mut v, b"--ag\r \r");
-    assert_eq!(argv, vec!["--agent"]);
-    let draft = &v.launcher.as_ref().unwrap().draft;
-    assert!(
-        !draft.message.contains("--"),
-        "the typed dashes left the message"
-    );
-    assert_eq!(draft.pills.len(), 1, "the pill stores");
-}
-
-#[test]
 fn a_chip_owned_typed_flag_still_refuses_at_submit() {
     // AC11-ERR: `--cwd /x` committed verbatim refuses at submit, naming the
     // composer chip that owns it.
@@ -1394,19 +1372,6 @@ fn a_chip_owned_typed_flag_still_refuses_at_submit() {
         }
         other => panic!("expected the chip refusal, got {other:?}"),
     }
-}
-
-#[test]
-fn launch_extra_axes_require_a_stamped_compatible_server() {
-    use super::agent_launcher::{version_at_least, LAUNCH_EXTRA_AXES_PROTO, LAUNCH_WORKTREE_PROTO};
-    assert!(!version_at_least(None, LAUNCH_EXTRA_AXES_PROTO));
-    assert!(!version_at_least(Some(90), LAUNCH_EXTRA_AXES_PROTO));
-    assert!(version_at_least(Some(91), LAUNCH_EXTRA_AXES_PROTO));
-    assert!(version_at_least(Some(92), LAUNCH_EXTRA_AXES_PROTO));
-    // The worktree gate sits one generation later than the launch extras.
-    assert!(!version_at_least(Some(93), LAUNCH_WORKTREE_PROTO));
-    assert!(!version_at_least(Some(94), LAUNCH_WORKTREE_PROTO));
-    assert!(version_at_least(Some(95), LAUNCH_WORKTREE_PROTO));
 }
 
 #[test]
@@ -1514,7 +1479,7 @@ fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
 }
 
 #[test]
-fn typing_in_the_harness_picker_filters_the_rows() {
+fn picker_filter_rows() {
     // AC2-HP: Enter on a chip opens its picker; typing narrows the rows in
     // place; Backspace widens again; the chip's own value is untouched.
     let mut v = view_with_launcher();
@@ -1569,10 +1534,7 @@ fn typing_in_the_harness_picker_filters_the_rows() {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
     });
     assert_eq!(read(&v).len(), 2, "widened");
-}
 
-#[test]
-fn enter_commits_the_highlighted_row_under_an_active_filter() {
     // Filtering keeps the target/action mapping on the actual harness row.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
@@ -1687,7 +1649,7 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
 }
 
 #[test]
-fn open_with_binds_message_project_and_node() {
+fn open_with_rows() {
     // AC6-HP: the board prefill lands the message, the cursor at its end,
     // the node's project (appended when it was not a candidate) and the
     // node binding; the wire request carries the node. The phase resets to
@@ -1710,10 +1672,7 @@ fn open_with_binds_message_project_and_node() {
     assert_eq!(l.draft.request(9).node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
     assert_eq!(l.focus, Focus::Message);
-}
 
-#[test]
-fn open_with_keeps_a_retained_nonempty_draft() {
     // AC7-EDGE: a kept draft with typed text is never overwritten; the
     // error names the way out and the draft is unchanged.
     let mut v = plain_view();
@@ -1736,10 +1695,7 @@ fn open_with_keeps_a_retained_nonempty_draft() {
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.message, "fix the flake");
     assert_eq!(l.draft.node, None);
-}
 
-#[test]
-fn open_with_keeps_the_draft_while_an_attempt_is_in_flight() {
     // The in-flight guard: even an EMPTY draft does not yield while an
     // owned attempt is Starting. A seedless launch's outcome must fold
     // onto the dock it belongs to, never onto a fresh board prefill.
@@ -1762,10 +1718,7 @@ fn open_with_keeps_the_draft_while_an_attempt_is_in_flight() {
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.phase, Phase::Submitting { request_id: 1 });
     assert_eq!(l.draft.node, None);
-}
 
-#[test]
-fn open_with_replaces_after_a_launched_attempt() {
     // AC8-EDGE: a terminal `Launched` attempt makes way for another node's
     // prefill; the phase is Editing again.
     let mut v = plain_view();
@@ -1791,36 +1744,6 @@ fn open_with_replaces_after_a_launched_attempt() {
     assert_eq!(l.draft.message, "/fno:target x-1");
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
-}
-
-#[test]
-fn request_drops_a_stale_node_binding_when_the_message_moves() {
-    // AC9-EDGE: the binding rides only while the message's second word
-    // (sentence punctuation trimmed) still names the node. A retarget, a
-    // prose rewrite or an erasure never binds a stale node; appended
-    // prose after the same id keeps it.
-    let mut v = plain_view();
-    open(&mut v);
-    super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
-        .expect("a fresh draft yields");
-    let cases: &[(&str, Option<&str>)] = &[
-        ("/fno:target x-2", None),
-        ("fix the flake", None),
-        ("", None),
-        ("/fno:target x-1 focus on the flake", Some("x-1")),
-        ("/fno:target x-1.", Some("x-1")),
-    ];
-    for (message, want) in cases {
-        if let Some(l) = v.launcher.as_mut() {
-            l.draft.message = message.to_string();
-        }
-        let req = v.launcher.as_ref().unwrap().draft.request(1);
-        assert_eq!(
-            req.node.as_deref(),
-            *want,
-            "message {message:?} binds {want:?}"
-        );
-    }
 }
 
 #[test]
@@ -1968,7 +1891,7 @@ fn fresh_state_dir() -> std::path::PathBuf {
 }
 
 #[test]
-fn the_sheet_paints_the_chip_row_not_a_tab_strip() {
+fn sheet_paint_rows() {
     // AC1-HP: no tab strip and no values strip; a chip row above the input
     // and the bottom row (`mode` left, harness/model/effort right). The
     // `+` chip left the row: typed flags are pills now.
@@ -2001,10 +1924,7 @@ fn the_sheet_paints_the_chip_row_not_a_tab_strip() {
             .any(|text| text.contains(tab));
         assert!(!seen, "no tab strip: {tab:?} never paints");
     }
-}
 
-#[test]
-fn the_right_chip_group_wraps_to_its_own_row_when_narrow() {
     // AC1-EDGE: a narrow sheet wraps the right group (harness/model/effort)
     // to its own row instead of truncating a value.
     let mut v = plain_view();
@@ -2038,10 +1958,7 @@ fn the_right_chip_group_wraps_to_its_own_row_when_narrow() {
             r.width
         );
     }
-}
 
-#[test]
-fn the_cwd_line_shows_while_project_is_focused_or_hovered() {
     // AC3-HP: the line above the chips reads `Working directory` (bold) and
     // the full cwd (regular), only while Project holds focus or the mouse.
     let mut v = view_with_launcher();
@@ -2083,10 +2000,7 @@ fn the_cwd_line_shows_while_project_is_focused_or_hovered() {
         line.contains("Working directory") && line.contains(head.as_str()),
         "the cwd-line assert derives from the real cwd, never a host shape"
     );
-}
 
-#[test]
-fn a_narrow_sheet_clamps_chips_instead_of_overflowing() {
     // 40 cols: inner 30, the right group alone is wider. The sheet lays out
     // without overflowing a chip past the row, and paint stays in bounds.
     let mut v = plain_view();
@@ -2257,7 +2171,7 @@ fn the_box_defaults_to_the_policy_and_never_greys_out() {
 }
 
 #[test]
-fn unread_facts_refuse_the_launch_instead_of_guessing() {
+fn git_policy_refusal_rows() {
     // AC6-EDGE: with the facts unread and no explicit pick, the box reads
     // `worktree ?` and the submit refuses with its reason; toggling the box
     // resolves the state and the launch proceeds.
@@ -2311,10 +2225,7 @@ fn unread_facts_refuse_the_launch_instead_of_guessing() {
         "[x] worktree",
         "the explicit pick clears the ? state"
     );
-}
 
-#[test]
-fn a_failed_policy_read_refuses_like_an_unread_one() {
     // AC6-EDGE covers the failed read as well as the missing one: a facts
     // row whose policy read failed paints `worktree ?` and refuses the
     // launch with its reason instead of guessing a checked default.
@@ -2352,6 +2263,41 @@ fn a_failed_policy_read_refuses_like_an_unread_one() {
             "the refusal names the unread policy: {reason}"
         ),
         other => panic!("expected a pre-wire refusal, got {other:?}"),
+    }
+
+    use super::agent_launcher::{version_at_least, LAUNCH_EXTRA_AXES_PROTO, LAUNCH_WORKTREE_PROTO};
+    assert!(!version_at_least(None, LAUNCH_EXTRA_AXES_PROTO));
+    assert!(!version_at_least(Some(90), LAUNCH_EXTRA_AXES_PROTO));
+    assert!(version_at_least(Some(91), LAUNCH_EXTRA_AXES_PROTO));
+    assert!(version_at_least(Some(92), LAUNCH_EXTRA_AXES_PROTO));
+    // The worktree gate sits one generation later than the launch extras.
+    assert!(!version_at_least(Some(93), LAUNCH_WORKTREE_PROTO));
+    assert!(!version_at_least(Some(94), LAUNCH_WORKTREE_PROTO));
+    assert!(version_at_least(Some(95), LAUNCH_WORKTREE_PROTO));
+
+    // AC9-HP: under a wire-91 sidecar a checked box refuses before the wire
+    // with the reconnect reason; the same draft on wire 94 submits.
+    let mut v = view_with_launcher();
+    let mut ext = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(_, _, facts) = &mut ext {
+        *facts = git_facts("external");
+    }
+    v.launcher_catalog = Some(ext);
+    sync_catalog(&mut v);
+    let (session, _wire_fixture) = wire_fixture_at(91);
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    match &v.launcher.as_ref().unwrap().phase {
+        Phase::Refused { reason, .. } => assert!(
+            reason.contains("does not support worktree launches"),
+            "the refusal names the reconnect: {reason}"
+        ),
+        other => panic!("expected the wire refusal, got {other:?}"),
     }
 }
 
@@ -2409,34 +2355,6 @@ fn picking_a_non_current_branch_checks_the_box() {
         "feature/x",
         "the chip shows the picked branch"
     );
-}
-
-#[test]
-fn worktree_launches_need_the_worktree_wire_generation() {
-    // AC9-HP: under a wire-91 sidecar a checked box refuses before the wire
-    // with the reconnect reason; the same draft on wire 94 submits.
-    let mut v = view_with_launcher();
-    let mut ext = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(_, _, facts) = &mut ext {
-        *facts = git_facts("external");
-    }
-    v.launcher_catalog = Some(ext);
-    sync_catalog(&mut v);
-    let (session, _wire_fixture) = wire_fixture_at(91);
-    v.session = session;
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
-    });
-    match &v.launcher.as_ref().unwrap().phase {
-        Phase::Refused { reason, .. } => assert!(
-            reason.contains("does not support worktree launches"),
-            "the refusal names the reconnect: {reason}"
-        ),
-        other => panic!("expected the wire refusal, got {other:?}"),
-    }
 }
 
 #[test]

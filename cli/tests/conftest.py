@@ -172,8 +172,24 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
         (
-            "tests/agents/test_spawn_pane.py::"
+            "tests/agents/test_pane_journeys.py::"
             "test_late_codex_identity_composes_across_every_peer_surface"
+        ),
+        (
+            "tests/agents/test_pane_journeys.py::"
+            "test_codex_autonomous_pane_journey_completes_without_operator_input"
+        ),
+        (
+            "tests/agents/test_harness_capability_parity.py::"
+            "test_resolved_rows_match_between_readers"
+        ),
+        (
+            "tests/agents/test_send.py::"
+            "test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery"
+        ),
+        (
+            "tests/unit/test_graph_read_race.py::"
+            "test_ac3fr_no_false_negative_under_concurrent_writes"
         ),
     }
 )
@@ -283,6 +299,14 @@ def _dev_build_absent() -> bool:
 
         _dev_build_absent_cache = find_dev_binary() is None
     return _dev_build_absent_cache
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Show slow tests on smoke shards to measure the per-test ceiling."""
+    if os.environ.get("FNO_PYTEST_SHARD") and config.option.durations is None:
+        config.option.durations = 15
+        config.option.durations_min = 30.0
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -785,6 +809,42 @@ def harness_session_id() -> str:
     the name unset.
     """
     return _HARNESS_SESSION_ID
+
+
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_hold_verdict(tmp_path, monkeypatch):
+    """The hold verdict answers from the graph on disk (one fno-agents
+    receipt). These tests build in-memory graphs; the adapter ships each
+    call's rows IN the payload so the reader answers from them. A test that
+    stubs the verdict itself overrides this."""
+
+    import json as _json
+
+    from fno.graph import ladder
+    from fno.rust_binary import call_binary_json as _real_call
+
+    real = ladder.dispatch_hold_verdict
+
+    def patched(entry, by_id):
+        rows = list(by_id.values())
+        if isinstance(entry, dict) and entry not in rows:
+            rows = rows + [entry]
+        rows = [e for e in rows if isinstance(e, dict) and e.get("id")]
+
+        def seeded_call(verb, args, *, timeout=None):
+            payload = _json.loads(args[0])
+            payload["entries"] = rows
+            return _real_call(verb, [_json.dumps(payload)], timeout=15)
+
+        monkeypatch.setattr("fno.rust_binary.call_binary_json", seeded_call)
+        if not isinstance(entry, dict) or not entry.get("id"):
+            # A row the graph cannot carry: read as unheld, as before.
+            return None
+        return real(entry, by_id)
+
+    monkeypatch.setattr(ladder, "dispatch_hold_verdict", patched)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -1305,18 +1365,37 @@ def _door_binary_from_this_checkout(monkeypatch):
     on a dev checkout the installed one lags the worktree source: a store
     verb then refuses against rows only the worktree build can see. Pin the
     door to this checkout's build when one exists; an operator override
-    through $FNO_AGENTS_BIN always wins."""
+    through $FNO_AGENTS_BIN always wins. The store WORKER pins the same way:
+    the projection reads live through whichever worker binary serves the
+    read, and a newer installed build without this branch's projection
+    serves pre-projection rows that fail claims tests intermittently."""
     import os
 
-    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
-    if pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK):
-        return
     root = Path(__file__).resolve().parents[2]
+    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
+    if not (pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK)):
+        for profile in ("debug", "release"):
+            candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+                break
+    pinned_worker = (os.environ.get("FNO_AGENTS_WORKER") or "").strip()
+    if pinned_worker and Path(pinned_worker).is_file():
+        return
     for profile in ("debug", "release"):
-        candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        candidate = (
+            root / "crates" / "fno-agents" / "target" / profile / "fno-agents-worker"
+        )
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+            monkeypatch.setenv("FNO_AGENTS_WORKER", str(candidate))
             return
+    # The worker lag warning rides the same decision: no local build means
+    # every store read resolves the installed binary.
+    if not (Path(os.environ.get("FNO_AGENTS_BIN") or "")).is_file():
+        _warn_no_local_door_binary()
+
+
+def _warn_no_local_door_binary() -> None:
     # No local build: the door silently resolved the installed binary and
     # store-door tests fail with refusals that look like product bugs.
     # Measured 2026-09-18: a swept target dir cost a store suite an hour of

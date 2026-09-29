@@ -2830,8 +2830,10 @@ def _under_codex_worktrees(cwd: Path) -> bool:
 
 
 def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
-    """Attach an app-created detached worktree to this target's feature branch."""
-    branch = f"feature/{_wt_name(node)}"
+    """Attach an app-created detached worktree to this target's node branch."""
+    from fno.worktree_cli.cli import _node_branch
+
+    branch = _node_branch(_wt_name(node))
     base = _remote_base_ref(cwd, fetch=True)
     current = _git_out(cwd, "branch", "--show-current") or ""
     if current == branch:
