@@ -36,7 +36,12 @@ def test_graph_json_allows_a_resolved_path_inside_the_sandbox(
     monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
     monkeypatch.setattr(paths, "_settings", lambda: _settings(str(inside)))
 
-    assert paths.graph_json() == inside / "graph.json"
+    # The fence contract: a configured state_dir inside the sandbox resolves,
+    # never the ambient fallback. The db/ family folder rides the resolution
+    # ladder; only containment and the anchor name are pinned here.
+    result = paths.graph_json()
+    assert result.name == "graph.json"
+    assert result.is_relative_to(inside)
 
 
 def test_locks_dir_remains_home_anchored_under_the_fence(monkeypatch):

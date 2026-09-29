@@ -1278,7 +1278,7 @@ def test_rescope_refusal_names_the_ways_out_and_never_force(
 
     assert result.exit_code == 2
     assert "incumbent" in result.output
-    assert "fno agents crown incumbent --scope" in result.output
+    assert "fno agents org promote incumbent --scope" in result.output
     assert "reconcile" in result.output
     assert "stop" in result.output
     assert "--force" not in result.output
@@ -2447,7 +2447,7 @@ def test_in_place_crown_mails_the_reign_verb_and_names_the_delivery(
     assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
     # AC28: the holder receives the plugin-qualified verb by raw mail,
     # addressed by the full session id (the ADDRESS, never the spawn label).
-    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:reign alpha")]
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:lead alpha")]
 
 
 def test_in_place_crown_renders_the_reign_verb_for_codex(
@@ -2471,7 +2471,7 @@ def test_in_place_crown_renders_the_reign_verb_for_codex(
     receipt = promote_existing_session("worker", ["alpha"])
 
     assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
-    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "$fno:reign alpha")]
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "$fno:lead alpha")]
 
 
 def test_reign_verb_send_failure_is_named_not_silent(

@@ -67,7 +67,7 @@ fn portal_pick_view() -> View {
         tail: None,
         crown_level: None,
         crown_scope: None,
-        crown_name: None,
+        crown_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,

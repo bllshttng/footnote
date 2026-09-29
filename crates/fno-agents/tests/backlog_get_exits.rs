@@ -66,7 +66,7 @@ fn a_clean_miss_is_exit_1_naming_the_served_store_without_read_diagnostics() {
         combined.contains("No node matching 'x-zzzz9999' (id/slug/bare-hex)"),
         "{combined}"
     );
-    let db = graph.with_extension("db");
+    let db = fno_agents::backlog::database_path(&graph);
     assert!(combined.contains(&db.display().to_string()), "{combined}");
     assert!(
         !combined.to_lowercase().contains("unreadable"),
@@ -87,7 +87,7 @@ fn an_empty_store_is_a_clean_miss_not_an_unreadable_one() {
 #[test]
 fn an_unreadable_store_is_the_distinct_exit_3_naming_the_failure_never_absence() {
     let (_dir, config, graph) = sandbox();
-    let db = graph.with_extension("db");
+    let db = fno_agents::backlog::database_path(&graph);
     seed(
         &graph,
         &[serde_json::json!({"id": "x-aaaa1111", "title": "n"})],
