@@ -20,3 +20,9 @@ cli/tests/unit/test_update.py::assert line.index("uv tool install") < line.index
 # command. The run line carries --compile-bytecode hoisted where the gate sees
 # it; the reinstall/refresh form flags live in uv_args at the call sites.
 tests/ci/test_reinstall_window_narrow.sh::[[ "$install_rc" -eq 0 ]] || fail "uv tool install failed:
+
+# The channel matrix runs the USER'S real command verbatim; --compile-bytecode is the
+# installer's own concern, proven by the release smokes (fno_sh_smoke.sh) not the matrix.
+.github/workflows/install-channels.yml::readme: ['uv tool install fno']
+cli/tests/smoke/channel_matrix_smoke.sh::run_capture uv tool install "fno==$version"
+cli/tests/smoke/channel_matrix_smoke.sh::run_capture uv tool install fno
