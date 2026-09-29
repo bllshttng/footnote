@@ -1865,15 +1865,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_with_no_state_file_reports_done() {
+    fn stop_state_rows() {
         let dir = temp_state_dir("none");
         let socket = dir.join("t.sock");
         assert_eq!(stop_web("t", &socket), 0);
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn stop_removes_a_corpse_state_file() {
         let dir = temp_state_dir("corpse");
         let socket = dir.join("t.sock");
         // A pid proven dead: spawned, reaped, gone.
@@ -1890,10 +1887,7 @@ mod tests {
         assert_eq!(stop_web("t", &socket), 0);
         assert!(!state.exists(), "the corpse file is gone");
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn stop_refuses_to_signal_a_recycled_pid() {
         let dir = temp_state_dir("recycled");
         let socket = dir.join("t.sock");
         // pid names THIS live test process, but the recorded start token is
@@ -1913,10 +1907,7 @@ mod tests {
         .unwrap();
         assert_eq!(stop_web("t", &socket), 0);
         assert!(!state.exists(), "the stale file is gone");
-    }
 
-    #[test]
-    fn state_file_records_the_pid_start_token() {
         let dir = temp_state_dir("token");
         let socket = dir.join("t.sock");
         let guard = WebStateFile::write(&socket, "127.0.0.1", 8722, "tok").unwrap();
@@ -1933,7 +1924,32 @@ mod tests {
             "Drop removes the file"
         );
         let _ = std::fs::remove_dir_all(&dir);
+
+        // The record answers "who started this and how old is its build":
+        // binary path, build rev, wall-clock start, launcher session.
+        let dir = temp_state_dir("own");
+        let socket = dir.join("t.sock");
+        let guard = WebStateFile::write(&socket, "127.0.0.1", 8944, "tok").expect("wrote state");
+        let raw = std::fs::read_to_string(web_state_path(&socket).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["port"], 8944);
+        assert_eq!(v["pid"], u64::from(std::process::id()));
+        assert_eq!(v["rev"], env!("FNO_MUX_CRATES_REV"));
+        assert_eq!(v["bin"], std::env::current_exe().unwrap().to_str().unwrap());
+        assert!(v["started_at"].as_u64().unwrap() > 0);
+        match launching_session_id() {
+            Some(id) => assert_eq!(v["session"], id),
+            None => assert!(
+                v["session"].is_null(),
+                "no launcher id -> the field is null"
+            ),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
+
+
+
 
     #[test]
     fn bridge_status_is_valid_json_the_browser_keys_on() {
@@ -1948,7 +1964,7 @@ mod tests {
     /// Anchored on the meta line itself, so a page that lost the tag entirely
     /// fails here rather than passing on an absence.
     #[test]
-    fn served_page_leaves_pinch_zoom_enabled() {
+    fn served_page_rows() {
         let meta = PAGE
             .lines()
             .find(|l| l.contains(r#"name="viewport""#))
@@ -1965,6 +1981,40 @@ mod tests {
             !meta.contains("user-scalable"),
             "user-scalable=no disables pinch-zoom on iOS: {meta}"
         );
+
+        let note = PAGE
+            .lines()
+            .find(|l| l.contains("const KEPT_NOTE ="))
+            .expect("the page names the retained region");
+        assert!(
+            note.contains("not terminal scrollback"),
+            "the retained region disclaims scrollback: {note}"
+        );
+
+        assert!(
+            PAGE.contains("new WebSocket("),
+            "the page still opens the read-only socket"
+        );
+        assert!(
+            !PAGE.contains(".send("),
+            "the page sends nothing upstream at all (Locked Decision 5)"
+        );
+        assert!(
+            !PAGE.contains(r#""Resize""#),
+            "the page never names the Resize message: a passive observer must not drive PTY geometry"
+        );
+        assert!(
+            !PAGE.contains("ClientMsg"),
+            "the page never builds an upstream message of any kind"
+        );
+
+        assert!(!PAGE.contains("\"/backlog?t="));
+        assert!(!PAGE.contains("\"/crown?t="));
+        assert!(!PAGE.contains("\"/fleet?t="));
+        assert!(!PAGE.contains("${location.host}/ws"));
+        assert!(PAGE.contains("<!--fno-nav-->"));
+        assert!(PAGE.contains("const base = document.querySelector(\"nav.fno-nav\").dataset.base;"));
+        assert!(PAGE.contains("${location.host}${base}ws?t="));
     }
 
     /// Lift one top-level `function <name>(` body out of the served page.
@@ -2115,17 +2165,6 @@ console.log("evictedRowCount: 18 cases ok");
     /// The page must keep calling retention what it is. A protocol
     /// history request is unreachable while `writer.forget()` stands, so the
     /// visible label must not promise scrollback the wire never carries.
-    #[test]
-    fn served_page_does_not_advertise_scrollback_to_the_operator() {
-        let note = PAGE
-            .lines()
-            .find(|l| l.contains("const KEPT_NOTE ="))
-            .expect("the page names the retained region");
-        assert!(
-            note.contains("not terminal scrollback"),
-            "the retained region disclaims scrollback: {note}"
-        );
-    }
 
     /// Fit-to-width is client-side only. The bridge attaches passive
     /// with rows==0/cols==0 so it never shrinks a PTY, and `writer.forget()`
@@ -2137,40 +2176,19 @@ console.log("evictedRowCount: 18 cases ok");
     /// API and the right way to refit when the screen box changes without a
     /// window resize event - the guard would have refused it with a message
     /// about PTY geometry it has nothing to do with.
-    #[test]
-    fn served_page_never_asks_for_a_resize() {
-        assert!(
-            PAGE.contains("new WebSocket("),
-            "the page still opens the read-only socket"
-        );
-        assert!(
-            !PAGE.contains(".send("),
-            "the page sends nothing upstream at all (Locked Decision 5)"
-        );
-        assert!(
-            !PAGE.contains(r#""Resize""#),
-            "the page never names the Resize message: a passive observer must not drive PTY geometry"
-        );
-        assert!(
-            !PAGE.contains("ClientMsg"),
-            "the page never builds an upstream message of any kind"
-        );
-    }
 
     #[test]
-    fn bind_addr_brackets_ipv6_only() {
+    fn bind_rows() {
         assert_eq!(bind_addr("127.0.0.1", 8722), "127.0.0.1:8722");
         assert_eq!(bind_addr("0.0.0.0", 80), "0.0.0.0:80");
         assert_eq!(bind_addr("::1", 8722), "[::1]:8722");
         assert_eq!(bind_addr("::", 8722), "[::]:8722");
-    }
 
-    #[test]
-    fn default_web_args_bind_loopback() {
         let a = WebArgs::default();
         assert_eq!(a.bind, "127.0.0.1");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
     }
+
 
     /// The route serves the vendored page behind the token, from a state
     /// root with no graph.html in it: the page is built in, so no render
@@ -2325,19 +2343,9 @@ console.log("backlog page helpers: 12 cases ok");
         }
     }
 
-    #[test]
-    fn page_serves_the_shared_nav_not_absolute_links() {
-        assert!(!PAGE.contains("\"/backlog?t="));
-        assert!(!PAGE.contains("\"/crown?t="));
-        assert!(!PAGE.contains("\"/fleet?t="));
-        assert!(!PAGE.contains("${location.host}/ws"));
-        assert!(PAGE.contains("<!--fno-nav-->"));
-        assert!(PAGE.contains("const base = document.querySelector(\"nav.fno-nav\").dataset.base;"));
-        assert!(PAGE.contains("${location.host}${base}ws?t="));
-    }
 
     #[test]
-    fn nav_fragment_marks_one_current_page_and_carries_the_query_parts() {
+    fn nav_fragment_rows() {
         for (page, name) in [
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
@@ -2354,10 +2362,7 @@ console.log("backlog page helpers: 12 cases ok");
             assert!(frag.contains("encodeURIComponent(t)"));
             assert!(frag.contains("encodeURIComponent(pj)"));
         }
-    }
 
-    #[test]
-    fn with_nav_inserts_after_the_body_tag() {
         let out = with_nav(
             "<html><body data-local=\"true\"><p>x</p></body></html>",
             NavPage::Backlog,
@@ -2367,15 +2372,14 @@ console.log("backlog page helpers: 12 cases ok");
         assert!(out.contains("<BODY><nav class=\"fno-nav\""));
         let out = with_nav("<p>no body</p>", NavPage::Live);
         assert!(out.starts_with("<nav class=\"fno-nav\""));
-    }
 
-    #[test]
-    fn only_the_backlog_nav_offsets_the_controls_bar() {
         assert!(nav_fragment(NavPage::Backlog).contains(".controls{top:var(--fno-nav-h)}"));
         assert!(!nav_fragment(NavPage::Live).contains(".controls"));
         assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
         assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
+
+
 
     #[tokio::test]
     async fn crown_requires_token_and_serves_private_file_without_cache() {
@@ -2626,7 +2630,7 @@ console.log("backlog page helpers: 12 cases ok");
     }
 
     #[test]
-    fn forward_drops_a_malformed_frame() {
+    fn snapshot_rows() {
         let (tx, _rx) = broadcast::channel::<String>(16);
         let snap = Arc::new(Mutex::new(Snapshot::default()));
         // rows*cols == 4 but only one cell: geometry_ok() is false.
@@ -2648,10 +2652,7 @@ console.log("backlog page helpers: 12 cases ok");
             snap.lock().unwrap().frames.is_empty(),
             "a geometry-inconsistent frame is dropped, never stored"
         );
-    }
 
-    #[test]
-    fn snapshot_bounds_to_the_cap_evicting_stalest() {
         let snap = Arc::new(Mutex::new(Snapshot::default()));
         for pid in 0..(MAX_SNAPSHOT_PANES as u64 + 5) {
             feed(&snap, pid);
@@ -2663,10 +2664,7 @@ console.log("backlog page helpers: 12 cases ok");
             s.frames.contains_key(&(MAX_SNAPSHOT_PANES as u64 + 4)),
             "the newest pane is retained"
         );
-    }
 
-    #[test]
-    fn snapshot_retains_a_pane_that_keeps_updating() {
         let snap = Arc::new(Mutex::new(Snapshot::default()));
         feed(&snap, 0);
         for pid in 1..(MAX_SNAPSHOT_PANES as u64) {
@@ -2682,30 +2680,8 @@ console.log("backlog page helpers: 12 cases ok");
         );
     }
 
-    #[test]
-    fn state_file_carries_the_ownership_fields() {
-        // The record answers "who started this and how old is its build":
-        // binary path, build rev, wall-clock start, launcher session.
-        let dir = temp_state_dir("own");
-        let socket = dir.join("t.sock");
-        let guard = WebStateFile::write(&socket, "127.0.0.1", 8944, "tok").expect("wrote state");
-        let raw = std::fs::read_to_string(web_state_path(&socket).unwrap()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["port"], 8944);
-        assert_eq!(v["pid"], u64::from(std::process::id()));
-        assert_eq!(v["rev"], env!("FNO_MUX_CRATES_REV"));
-        assert_eq!(v["bin"], std::env::current_exe().unwrap().to_str().unwrap());
-        assert!(v["started_at"].as_u64().unwrap() > 0);
-        match launching_session_id() {
-            Some(id) => assert_eq!(v["session"], id),
-            None => assert!(
-                v["session"].is_null(),
-                "no launcher id -> the field is null"
-            ),
-        }
-        drop(guard);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+
+
 
     #[test]
     fn rev_is_stale_only_flags_known_different_revs() {

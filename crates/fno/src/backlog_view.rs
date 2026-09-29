@@ -1182,7 +1182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sweep_log_gate_holds_the_first_line_until_failures_persist() {
+    fn sweep_log_gate_rows() {
         let mut gate = SweepLogGate::default();
         assert!(!gate.failure(), "first failure is silent");
         assert!(!gate.failure(), "second failure is silent");
@@ -1190,10 +1190,7 @@ mod tests {
         assert!(!gate.failure(), "already logged: no second failure line");
         assert!(gate.success(), "recovery after a LOGGED failure logs");
         assert!(!gate.success(), "a second success is silent");
-    }
 
-    #[test]
-    fn sweep_log_gate_ignores_flapping() {
         // The shape that filled a third of one server log: intermittent
         // failures that never persist long enough to be an outage.
         let mut gate = SweepLogGate::default();
@@ -1202,10 +1199,7 @@ mod tests {
             assert!(!gate.failure());
             assert!(!gate.success(), "nothing was logged, no recovery line");
         }
-    }
 
-    #[test]
-    fn sweep_log_gate_resets_the_threshold_after_recovery() {
         let mut gate = SweepLogGate::default();
         for _ in 0..3 {
             gate.failure();
@@ -1217,12 +1211,14 @@ mod tests {
         assert!(gate.failure());
     }
 
+
+
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
     }
 
     #[test]
-    fn done_sessions_collect_from_done_merged_and_completed_nodes() {
+    fn done_sessions_rows() {
         // AC1-HP: the three terminal spellings all contribute, and a
         // live node contributes none.
         let doc = graph(
@@ -1246,10 +1242,7 @@ mod tests {
         }
         assert!(!done.contains(&("codex".into(), "s4".into())));
         assert!(done.contains(&("agy".into(), "s5".into())));
-    }
 
-    #[test]
-    fn done_sessions_fail_open_on_bad_shapes() {
         // AC2-EDGE: a torn document, a missing graph, a node without
         // sessions, a string session - all read as EMPTY, never as a partial
         // truth restore would act on.
@@ -1264,6 +1257,7 @@ mod tests {
         ))
         .is_empty());
     }
+
 
     /// The graph as five projects' work plus one unscoped node, the shape the
     /// operator actually reads.
@@ -1287,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn board_scope_keeps_one_project_and_never_hides_the_unscoped_lane() {
+    fn board_scope_semantics_rows() {
         // AC1-HP: scoped to fno, only fno's card and the unscoped lane render.
         // AC1-EDGE: `project` absent AND `project` whitespace both count as
         // unscoped and survive every scope - a node with no project is not
@@ -1296,26 +1290,10 @@ mod tests {
         let mut ids = scoped_ids(&scope);
         ids.sort();
         assert_eq!(ids, vec!["x-fno", "x-non", "x-pad"]);
-    }
 
-    #[test]
-    fn board_scope_all_is_the_historical_whole_graph_board() {
         assert_eq!(scoped_ids(&BoardScope::All).len(), 5);
         assert_eq!(scoped_ids(&BoardScope::default()).len(), 5);
-    }
 
-    #[test]
-    fn an_unresolvable_scope_narrows_to_unscoped_rather_than_widening() {
-        // The refusal: an empty project set shows the unscoped lane only. The
-        // failure this exists to prevent is the opposite one - a selector that
-        // could not resolve falling back to every project's work.
-        let mut ids = scoped_ids(&BoardScope::Projects(HashSet::new()));
-        ids.sort();
-        assert_eq!(ids, vec!["x-non", "x-pad"]);
-    }
-
-    #[test]
-    fn board_scope_filters_before_the_render_cap() {
         // A cap applied to the GLOBAL order and filtered afterwards would starve
         // a scoped board: here 60 foreign cards sort ahead of the one this
         // project cares about, so a post-cap filter renders nothing at all.
@@ -1335,10 +1313,7 @@ mod tests {
         let cards = derive_queue(&raw, None, &scope).unwrap().cards;
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].id, "x-mine");
-    }
 
-    #[test]
-    fn board_scope_lane_counts_are_scoped_too() {
         // The lane counts are computed over every QUEUE node, uncapped, so a
         // filter applied only to the card list would leave the mini-kanban
         // counting five projects' work under a one-project board.
@@ -1347,8 +1322,12 @@ mod tests {
         assert_eq!(q.total(), 3);
     }
 
+
+
+
+
     #[test]
-    fn the_server_reads_only_what_the_client_latched() {
+    fn scope_wire_rows() {
         // Same process-global env var as the resolve tests above: serialize
         // against them (this test set_var/remove_var's the var directly).
         let _env_lock = lock_board_scope_env();
@@ -1377,10 +1356,7 @@ mod tests {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-    }
 
-    #[test]
-    fn the_wire_round_trips_what_the_client_resolved() {
         // What the client latches is what the server reads, or the scope the
         // operator configured is not the board they get.
         for scope in [
@@ -1396,10 +1372,7 @@ mod tests {
         // the refusal with its remedy.
         let refused = BoardScope::Projects(HashSet::new());
         assert_eq!(board_scope_wire(&refused), "");
-    }
 
-    #[test]
-    fn parse_board_scope_reads_the_wire_value() {
         assert_eq!(parse_board_scope("all"), BoardScope::All);
         assert_eq!(parse_board_scope("  all "), BoardScope::All);
         assert_eq!(
@@ -1410,6 +1383,8 @@ mod tests {
         // lane renders.
         assert_eq!(parse_board_scope(""), BoardScope::Projects(HashSet::new()));
     }
+
+
 
     #[test]
     fn workspace_projects_reads_the_config_block_or_refuses() {
@@ -1488,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_board_scope_defaults_to_the_repo_project() {
+    fn board_scope_refusal_rows() {
         let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let (scope, why) = resolve_board_scope(|k| match k {
@@ -1501,11 +1476,8 @@ mod tests {
             BoardScope::Projects(HashSet::from(["fno".to_string()]))
         );
         assert!(why.contains("fno"), "{why}");
-    }
 
-    #[test]
-    fn resolve_board_scope_expands_a_workspace_and_refuses_an_empty_one() {
-        let _env_lock = lock_board_scope_env();
+        // env guard already held by this merged test
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let ws = r#"{"projects":[{"name":"web"},{"name":"etl"},{"name":"fno"}]}"#;
         let (scope, _) = resolve_board_scope(|k| match k {
@@ -1529,11 +1501,8 @@ mod tests {
         });
         assert_eq!(scope, BoardScope::Projects(HashSet::new()));
         assert!(why.contains("work.workspaces.typo"), "{why}");
-    }
 
-    #[test]
-    fn resolve_board_scope_refuses_rather_than_widening() {
-        let _env_lock = lock_board_scope_env();
+        // env guard already held by this merged test
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         // No project.id resolves (a cwd outside any repo): resolve to the empty
         // set, and SAY which board that produces.
@@ -1545,7 +1514,22 @@ mod tests {
             resolve_board_scope(|k| (k == "mux.board_scope").then(|| "everything".to_string()));
         assert_eq!(scope, BoardScope::Projects(HashSet::new()));
         assert!(why.contains("repo|all|workspace:<name>"), "{why}");
+
+        // env guard already held by this merged test
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
+        let (scope, _) =
+            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "all".to_string()));
+        assert_eq!(scope, BoardScope::All);
+
+        // The refusal: an empty project set shows the unscoped lane only. The
+        // failure this exists to prevent is the opposite one - a selector that
+        // could not resolve falling back to every project's work.
+        let mut ids = scoped_ids(&BoardScope::Projects(HashSet::new()));
+        ids.sort();
+        assert_eq!(ids, vec!["x-non", "x-pad"]);
     }
+
+
 
     #[test]
     fn every_refusal_reason_names_the_board_it_actually_produces() {
@@ -1594,14 +1578,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_board_scope_honors_all() {
-        let _env_lock = lock_board_scope_env();
-        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
-        let (scope, _) =
-            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "all".to_string()));
-        assert_eq!(scope, BoardScope::All);
-    }
 
     #[test]
     fn external_backend_selected_follows_the_python_resolution() {
@@ -1718,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn only_queue_states_survive_classification() {
+    fn classification_rows() {
         let raw = graph(
             r#"{"id":"a","slug":"ready-one","priority":"p1","status":"ready"},
                {"id":"b","slug":"blocked-one","priority":"p2","status":"blocked"},
@@ -1736,10 +1712,7 @@ mod tests {
         assert_eq!(cards[0].state, CardState::InFlight);
         assert_eq!(cards[1].state, CardState::Ready);
         assert_eq!(cards[2].state, CardState::Blocked);
-    }
 
-    #[test]
-    fn open_blocked_by_overrides_a_persisted_ready_status() {
         // The Python write path no longer persists `status: "blocked"` - it is
         // a read-time-only overlay now - so a real graph.json carries a
         // dependency-blocked node as `status: "ready"`/"idea"/etc with a
@@ -1767,10 +1740,7 @@ mod tests {
             "a completed blocker must not hold the dependent as blocked"
         );
         assert_eq!(by_id("open"), Some(CardState::Ready));
-    }
 
-    #[test]
-    fn a_completed_node_stays_done_despite_an_open_blocked_by() {
         // Terminal statuses are direct facts about the node itself and
         // outrank the blocked overlay, exactly as in the Python overlay.
         let raw = graph(
@@ -1784,8 +1754,10 @@ mod tests {
         );
     }
 
+
+
     #[test]
-    fn board_order_project_then_rank_then_priority() {
+    fn board_order_rows() {
         // fno before (unscoped); within fno, ranked before unranked; then prio.
         let raw = graph(
             r#"{"id":"unscoped","slug":"u","priority":"p0","status":"ready"},
@@ -1800,10 +1772,7 @@ mod tests {
         // fno lane first: ranked (band 0) beats the higher-priority unranked one,
         // then the unscoped card last.
         assert_eq!(ids, ["fno-ranked", "fno-unranked", "unscoped"]);
-    }
 
-    #[test]
-    fn empty_or_whitespace_project_sorts_as_unscoped_last() {
         // A `""`/whitespace project must land in the unscoped lane (last), not
         // sort as a named lane before real projects (gemini/codex P2).
         let raw = graph(
@@ -1821,6 +1790,7 @@ mod tests {
             "named lane first; blank-project last"
         );
     }
+
 
     #[test]
     fn malformed_document_is_none_not_empty() {
@@ -1972,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn head_is_the_first_ready_card_only() {
+    fn head_marker_rows() {
         // AC1-HP: exactly one `next`, on the first READY card in board order -
         // an in-flight card ahead of it never takes the marker.
         let raw = graph(
@@ -1987,10 +1957,7 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(marked, ["x-r1"], "one on-deck card, the first ready one");
-    }
 
-    #[test]
-    fn claiming_the_head_card_hands_the_marker_down() {
         // The overlay can flip on-deck to InFlight; the section must then point
         // at the next card that is genuinely up for grabs, not at work already
         // running.
@@ -2009,6 +1976,7 @@ mod tests {
             "the marker moves to the next ready card"
         );
     }
+
 
     #[test]
     fn lanes_render_in_canonical_board_order() {
@@ -2062,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_failed_reads_marks_stale_and_recovery_clears_it() {
+    fn stale_rows() {
         // AC7-FR: a failing read keeps the last-known cards (never a blank
         // section) but stops presenting them as current - and a read that lands
         // again clears the marker with no restart. One torn read is a normal
@@ -2093,10 +2061,7 @@ mod tests {
 
         let fresh = st.tick(bump(9), || Some(raw.clone()), None).unwrap().0;
         assert!(!fresh.stale, "a landed read clears the marker in place");
-    }
 
-    #[test]
-    fn a_graph_that_reads_but_will_not_parse_also_goes_stale() {
         // A corrupt graph lands bytes and commits a stamp, so "the read landed"
         // is not the same question as "we can derive current state". Treating a
         // committed stamp as success left a persistently corrupt graph showing
@@ -2122,13 +2087,28 @@ mod tests {
         // A parseable read clears it in place.
         let ok = Some((0, 999));
         assert!(!st.tick(ok, || Some(good.clone()), None).unwrap().0.stale);
+
+        reset_derive_queue_calls();
+        let mut st = ReaderState::default();
+        let garbage = "{ not json";
+        let s = Some((0, garbage.len() as u64));
+        st.tick(s, || Some(garbage.to_string()), None);
+        for _ in 1..STALE_AFTER_FAILED_READS {
+            st.tick(s, || panic!("must not re-read"), None);
+        }
+        let held = st.last_sent.clone().unwrap();
+        assert!(
+            held.stale,
+            "the memoized None still counts as a failed read every tick"
+        );
     }
+
 
     /// AC4-HP: an unchanged stamp AND an unchanged claim overlay derive
     /// nothing - three ticks, one derivation. This is the test that failed
     /// before the derivation memoized on its inputs.
     #[test]
-    fn an_unchanged_stamp_and_overlay_derives_nothing() {
+    fn memo_rows() {
         reset_derive_queue_calls();
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
@@ -2156,53 +2136,7 @@ mod tests {
             1,
             "the memo serves the later ticks: no re-parse of the cached document"
         );
-    }
 
-    /// AC4-EDGE, publish half: a claim appearing under an unchanged stamp
-    /// still derives and republishes - the memo never holds a changed
-    /// overlay hostage.
-    #[test]
-    fn an_overlay_change_still_republishes_over_the_memo() {
-        reset_derive_queue_calls();
-        let mut st = ReaderState::default();
-        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s = Some((0, raw.len() as u64));
-        let no_claims = live(&[]);
-        let claimed = live(&[("x-a", "target-session:abc")]);
-        assert!(st.tick(s, || Some(raw.clone()), Some(&no_claims)).is_some());
-        let flipped = st
-            .tick(s, || panic!("must not re-read"), Some(&claimed))
-            .unwrap()
-            .0;
-        assert_eq!(
-            flipped.cards[0].state,
-            CardState::InFlight,
-            "the overlay change derived through the memo"
-        );
-    }
-
-    /// AC4-EDGE, failure half: a corrupt cached document memoizes the failed
-    /// derivation, and the memoized failure still increments the counter
-    /// every tick, so the stale marker arrives after STALE_AFTER_FAILED_READS.
-    #[test]
-    fn a_memoized_corrupt_document_still_earns_the_stale_marker() {
-        reset_derive_queue_calls();
-        let mut st = ReaderState::default();
-        let garbage = "{ not json";
-        let s = Some((0, garbage.len() as u64));
-        st.tick(s, || Some(garbage.to_string()), None);
-        for _ in 1..STALE_AFTER_FAILED_READS {
-            st.tick(s, || panic!("must not re-read"), None);
-        }
-        let held = st.last_sent.clone().unwrap();
-        assert!(
-            held.stale,
-            "the memoized None still counts as a failed read every tick"
-        );
-    }
-
-    #[test]
-    fn derive_pr_map_takes_only_u64_pr_numbers() {
         // node id -> pr_number, skipping a missing / non-u64 value
         // (matching AgentRow.pr: Option<u64>). Keyed by node id, not unique pr.
         let raw = graph(
@@ -2217,23 +2151,15 @@ mod tests {
         assert!(derive_pr_map("not json").is_empty());
     }
 
-    #[test]
-    fn pr_only_change_republishes() {
-        // US8: a node gaining a pr_number (same card set + holders) must
-        // republish so the PR label is not stale until an unrelated flip.
-        let mut st = ReaderState::default();
-        let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
-        let s0 = Some((0, raw0.len() as u64));
-        assert!(st.tick(s0, || Some(raw0.clone()), None).is_some());
-        // Same claimed card, now with a pr_number: a new stamp (mtime bumped),
-        // same card state -> still republishes because the pr map changed.
-        let raw1 =
-            graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed","pr_number":42}"#);
-        let s1 = Some((0, raw1.len() as u64));
-        let out = st.tick(s1, || Some(raw1.clone()), None);
-        assert!(out.is_some(), "pr-only change republishes");
-        assert_eq!(out.unwrap().1.get("x-a"), Some(&42));
-    }
+    /// AC4-EDGE, publish half: a claim appearing under an unchanged stamp
+    /// still derives and republishes - the memo never holds a changed
+    /// overlay hostage.
+
+    /// AC4-EDGE, failure half: a corrupt cached document memoizes the failed
+    /// derivation, and the memoized failure still increments the counter
+    /// every tick, so the stale marker arrives after STALE_AFTER_FAILED_READS.
+
+
 
     // ---- claims overlay -----------------------------------------
 
@@ -2244,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_flips_ready_and_blocked_to_in_flight() {
+    fn overlay_rows() {
         // AC1-HP: ready + live claim renders InFlight. AC2-EDGE: overlay
         // beats Blocked. Ids not in the live map are untouched; live ids not
         // in the card set are ignored (no phantom cards).
@@ -2269,10 +2195,7 @@ mod tests {
         assert_eq!(by_id("x-blk"), CardState::InFlight);
         assert_eq!(by_id("x-free"), CardState::Ready);
         assert_eq!(cards.len(), 3, "no phantom card for x-ghost");
-    }
 
-    #[test]
-    fn overlay_change_republishes_without_graph_change() {
         // AC1-HP/AC1-EDGE: a claim appearing (and later releasing) flips the
         // card within a tick even though the graph stamp never moves.
         let mut st = ReaderState::default();
@@ -2290,10 +2213,39 @@ mod tests {
         let released = live(&[]);
         let reverted = st.tick(s, || None, Some(&released)).unwrap().0;
         assert_eq!(reverted.cards[0].state, CardState::Ready);
-    }
 
-    #[test]
-    fn holder_only_change_republishes_and_retention_does_not_churn() {
+        // US8: a node gaining a pr_number (same card set + holders) must
+        // republish so the PR label is not stale until an unrelated flip.
+        let mut st = ReaderState::default();
+        let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
+        let s0 = Some((0, raw0.len() as u64));
+        assert!(st.tick(s0, || Some(raw0.clone()), None).is_some());
+        // Same claimed card, now with a pr_number: a new stamp (mtime bumped),
+        // same card state -> still republishes because the pr map changed.
+        let raw1 =
+            graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed","pr_number":42}"#);
+        let s1 = Some((0, raw1.len() as u64));
+        let out = st.tick(s1, || Some(raw1.clone()), None);
+        assert!(out.is_some(), "pr-only change republishes");
+        assert_eq!(out.unwrap().1.get("x-a"), Some(&42));
+
+        reset_derive_queue_calls();
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
+        let s = Some((0, raw.len() as u64));
+        let no_claims = live(&[]);
+        let claimed = live(&[("x-a", "target-session:abc")]);
+        assert!(st.tick(s, || Some(raw.clone()), Some(&no_claims)).is_some());
+        let flipped = st
+            .tick(s, || panic!("must not re-read"), Some(&claimed))
+            .unwrap()
+            .0;
+        assert_eq!(
+            flipped.cards[0].state,
+            CardState::InFlight,
+            "the overlay change derived through the memo"
+        );
+
         // Codex peer review: holders feed the publish-time where_hint join, so
         // a holder-only change (same card states - here a graph-native
         // in-flight card) must republish; a `None` tick (no sweep yet /
@@ -2321,6 +2273,8 @@ mod tests {
         assert!(st.tick(s, || None, Some(&b)).is_none());
         assert!(st.tick(s, || None, None).is_none());
     }
+
+
 
     #[test]
     fn sweep_parse_takes_only_live_node_and_dispatch_claims() {
