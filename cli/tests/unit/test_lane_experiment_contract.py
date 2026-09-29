@@ -11,8 +11,6 @@ from pathlib import Path
 import pytest
 
 from fno.evals.bank import BankError, LaneError, discover_bank, resolve_lane
-from fno.evals.runner import _lane_evidence
-from fno.route_resolve import InventoryRow
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BANK_DIR = REPO_ROOT / "evals" / "bank"
@@ -57,17 +55,12 @@ def test_bank_task_load_is_never_a_bare_ok_grade() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# identity mismatch, unavailable lane, and malformed input all say so
-# explicitly - never a graded claim built on unrun or misattributed work.
+# identity mismatch now reads back natively: the substituted contract is
+# guarded by the observe door's own test (eval_attempt::tests_observe), so
+# only the refusal shapes stay here - unavailable lane, and malformed input
+# say so explicitly, never a graded claim built on unrun or misattributed
+# work.
 # --------------------------------------------------------------------------- #
-
-def test_identity_mismatch_is_substituted_not_folded_into_the_requested_lane() -> None:
-    lane = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
-    observed = {"harness": "claude", "model": "claude-sonnet-5", "effort": "medium"}
-    evidence = _lane_evidence(lane, observed)
-    assert evidence["substituted"] is True
-    assert evidence["lane_status"] == "substituted"
-
 
 def test_unavailable_model_profile_refuses_by_name() -> None:
     with pytest.raises(LaneError, match="unknown lane"):

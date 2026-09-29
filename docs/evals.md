@@ -106,16 +106,23 @@ The report never lets a plumbing failure dilute the headline. A modern task's `p
 
 A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account). `agents.profiles.*.lanes` already references these same rows. This is never a second model/effort enum. An unknown lane name refuses and lists the declared lanes. A lane that config never declared cannot be requested.
 
-`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider`, since a lane is a complete coordinate. Every history row from the run records:
+`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task by the `config.routing.models` inventory row (harness, model, effort, route, account). Every history row from the run records:
 
 - `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
-- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: read back once, right after the worker spawns, never re-derived. When the agent registry still holds a lookupable row for the spawned worker, these fields carry its answer.
-- `lane_status`: `ok`, `substituted`, `unavailable`, `not-applicable`, or `unverified`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`. The default spawn (`--substrate headless`) never leaves a lookupable registry row. Claude's one-shot path never writes one, and codex tears its own down on success. A run that succeeded with no row left to check reads `unverified`, distinct from `unavailable`. The run is real. Only its identity stays unconfirmed.
-- `experiment_id`: the `--cohort` id, a join key for a future comparison.
+- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: read back once from the attempt's own transcript store, after the worker finishes, never re-derived. The native observe door (`evals-attempt` stdin `op: observe`) finds the attempt's transcript by its unique workdir: claude in `~/.claude/projects`, opencode in its sqlite session store. It returns the observed fields plus `usage` (input, output, cache read, cache write, summed over the attempt) and `usage_source`. `observed_effort` and `observed_model_basis` stay null today (no store carries them for a headless attempt).
+- `usage` / `usage_source`: token usage summed over the attempt from the same transcript. Null (never zero) when the store has no readable transcript (AC10-EDGE).
+- `lane_status`: `ok`, `substituted`, `unavailable`, `not-applicable`, or `unverified`. When the transcript shows a different harness or model than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`. When the store holds no transcript for the attempt workdir, or the harness has no reader yet (pi, zcode), the run reads `unverified`: the run is real, only its identity stays unconfirmed.
+- `experiment_id`: the `--cohort` id, the join key the cohort report folds by.
 
-Treat `unverified` as "probably ran as requested but not independently checked", not as a failure. Only `ok` and `substituted` carry a checked identity today.
+Treat `unverified` as "probably ran as requested but not independently checked", not as a failure. Only `ok` and `substituted` carry a checked identity.
 
-A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score. Folding these rows into a cohort comparison (reliability, duration, cost, review evidence per cohort, a promotion recommendation) is not yet built. For now, read the raw history rows for a `--cohort` id directly to compare lanes.
+## The cohort comparison report
+
+`fno doctor evals report --by-cohort [--prices <manifest.json's table>]` folds the history by `experiment_id`. One row per cohort: attempts, graded, accepted (graded and passed), pass rate with a deterministic 95% bootstrap interval, `lane_status` counts, exclusions counted by reason (substituted, unavailable, infrastructure, ungraded, contaminated via the row's `excluded_reason`), median wall time, tokens, and dollars per accepted change. Cost reads `unmeasured` unless EVERY scored row carries usage and a price line for its model; it never prints a partial sum. `--json` prints the same fold. Rows without lane evidence count under `(no cohort)` and can never join a scored cohort.
+
+## Legacy attribution note
+
+A row missing `experiment_id` or `requested_lane` is legacy/unattributed. It folds under `(no cohort)` in the cohort report, never into a scored cohort.
 
 ## Run cadence and demand
 
