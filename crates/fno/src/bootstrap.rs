@@ -2075,12 +2075,15 @@ mod tests {
         // file a writer holds open); macOS does not enforce that, so there
         // this degrades to a happy-path run.
         let held = uv.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let writer = thread::spawn(move || {
             let f = fs::OpenOptions::new().write(true).open(&held).unwrap();
+            ready_tx.send(()).unwrap();
             thread::sleep(Duration::from_millis(200));
             drop(f);
         });
 
+        ready_rx.recv().unwrap();
         install_wheel(&uv, "fno").expect("a busy-at-exec uv is retried, not fatal");
         assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
         writer.join().unwrap();
