@@ -1252,6 +1252,10 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("territory", r_territory(ctx));
     take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
+    take(
+        "machine",
+        crate::king_checkin_machine::newest_reading(&ctx.events_paths),
+    );
     let workers_payload = crate::king_answers::fetch_workers_payload();
     take(
         "workers",
@@ -1601,6 +1605,14 @@ fn render_lines(
     let by_name = |name: &str| readings.iter().find(|r| r.name == name);
     let failed = |name: &str| readings.iter().find(|r| r.name == name && !r.ok);
     let mut lines: Vec<String> = Vec::new();
+
+    if let Some(r) = by_name("machine") {
+        if r.ok {
+            lines.push(crate::king_checkin_machine::beat_line(&r.value));
+        } else {
+            lines.push(format!("READER FAILED machine: {}", r.error));
+        }
+    }
 
     match by_name("user_notes") {
         Some(r) if r.ok && !r.value.is_null() => {
