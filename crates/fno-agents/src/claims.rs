@@ -3547,35 +3547,32 @@ mod tests {
     }
 
     #[test]
-    fn absent_session_frees_an_expired_task_claim_like_a_node_claim() {
+    fn absent_session_frees_a_task_claim_like_a_node_claim() {
         // The fast absent-session stale is for node keys; a dead thread
         // holder's task claim read Suspect until the lease plus grace ran
-        // out. task: keys take the same arm.
+        // out. task: keys take the same arm, expired WITH a recorded pid and
+        // in-window pid-less alike.
         let now = now_ms();
-        let mut rec = session_record(dead_pid() as i32, now - 1, Some(now - 1));
-        rec.key = "task:x-t1:1.1".into();
         let witness: SessionWitness = &|_| SessionLiveness::Absent;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Stale, basis::SESSION_ABSENT)
-        );
-    }
-
-    #[test]
-    fn absent_session_frees_an_in_window_task_claim_like_a_node_claim() {
-        // Same widening on the in-window arm: a thread holder that died
-        // inside its 2h lease is stale at once instead of suspect for the
-        // rest of the lease.
-        let now = now_ms();
-        let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
-        rec.key = "task:x-t1:1.1".into();
-        rec.pid = None;
-        rec.pid_unavailable = true;
-        let witness: SessionWitness = &|_| SessionLiveness::Absent;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Stale, basis::SESSION_ABSENT)
-        );
+        let mut expired = session_record(dead_pid() as i32, now - 1, Some(now - 1));
+        expired.key = "task:x-t1:1.1".into();
+        let mut in_window = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
+        in_window.key = "task:x-t1:1.1".into();
+        in_window.pid = None;
+        in_window.pid_unavailable = true;
+        for rec in [expired, in_window] {
+            assert_eq!(
+                classify_with_basis_and_exclusivity(
+                    &rec,
+                    Some(now),
+                    &probe_pid,
+                    None,
+                    Some(witness)
+                ),
+                (ClaimState::Stale, basis::SESSION_ABSENT),
+                "{rec:?}"
+            );
+        }
     }
 
     #[test]
