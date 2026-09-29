@@ -193,11 +193,13 @@ pub fn state_dir() -> Option<PathBuf> {
         .map(|h| h.join(".fno"))
 }
 
-/// The graph file the porcelain reads serve: `<state_dir>/graph.json`.
+/// The graph file the porcelain reads serve: `<state_dir>/graph.json`,
+/// resolved through the layout table so a migrated root reads the `db/` twin.
 pub fn graph_path() -> PathBuf {
-    state_dir()
-        .map(|d| d.join("graph.json"))
-        .unwrap_or_else(|| PathBuf::from(".fno").join("graph.json"))
+    match state_dir() {
+        Some(d) => crate::state_layout::place(&d, "graph.json"),
+        None => crate::state_layout::place(&PathBuf::from(".fno"), "graph.json"),
+    }
 }
 
 /// The configured dispatch-verb extension: `(allowed_verbs, verb_registry

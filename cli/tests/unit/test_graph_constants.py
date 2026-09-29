@@ -74,7 +74,8 @@ def test_graph_json_constant_uses_state_dir_even_with_retired_override(
 
     from fno.graph import _constants
     result = _constants.GRAPH_JSON
-    assert result == state / "graph.json", (
+    # A fresh state dir holds no store, so the ladder answers db/.
+    assert result == state / "db" / "graph.json", (
         f"GRAPH_JSON should use the fixed state-dir anchor, got {result}"
     )
 
