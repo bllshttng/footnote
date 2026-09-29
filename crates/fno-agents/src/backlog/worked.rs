@@ -357,11 +357,15 @@ fn ledger_nodes_map() -> BTreeMap<String, String> {
         else {
             continue;
         };
-        let raw = e.get("sessions").cloned().unwrap_or_else(|| {
-            e.get("session_id")
+        // `sessions or session_id or []`: an EMPTY sessions list falls
+        // through to the scalar spelling, exactly as python's `or` reads it.
+        let raw = match e.get("sessions") {
+            Some(Value::Array(rows)) if !rows.is_empty() => Value::Array(rows.clone()),
+            _ => e
+                .get("session_id")
                 .cloned()
-                .unwrap_or(Value::Array(Vec::new()))
-        });
+                .unwrap_or(Value::Array(Vec::new())),
+        };
         for sid in raw.as_str().into_iter().chain(
             raw.as_array()
                 .into_iter()
@@ -512,11 +516,17 @@ fn record_epoch(record: &Value) -> Option<f64> {
 fn tail_facts(session_id: &str, cwd: &str, agent: &str, listing: &[Hit]) -> Option<TailFacts> {
     let path = resolve_transcript(agent, session_id, cwd, listing)?;
     let size = std::fs::metadata(&path).ok()?.len();
-    let bytes = std::fs::read(&path).ok()?;
-    let start = usize::try_from(size.saturating_sub(TICK_TAIL_BYTES)).unwrap_or(0);
+    // Read only the trailing window: transcripts grow without bound and the
+    // classifier asks about the last turn, so the whole file is never wanted.
+    let start = size.saturating_sub(TICK_TAIL_BYTES);
+    let mut file = std::fs::File::open(&path).ok()?;
+    use std::io::{Read as _, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(TICK_TAIL_BYTES).read_to_end(&mut bytes).ok()?;
     let start = if start > 0 {
         // A mid-file seek lands inside a line; drop the partial head.
-        let mut s = start;
+        let mut s = 0usize;
         while s < bytes.len() && bytes[s] != b'\n' {
             s += 1;
         }
@@ -969,7 +979,9 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let graph = super::settings::graph_path();
-    let Ok(entries) = crate::graph_store::read_rows(&graph) else {
+    // Strict, like the python twin's read_graph_strict: a corrupt graph is
+    // an unreadable authority (exit 1), never an empty fleet.
+    let Ok(entries) = crate::graph_store::read_rows_strict(&graph) else {
         eprintln!("Error: worked authority unavailable: the graph is unreadable");
         return 1;
     };
