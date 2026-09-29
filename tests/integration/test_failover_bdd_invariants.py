@@ -138,9 +138,12 @@ def test_invariant_2_single_swap_persists_new_active(settings_path: Path, tmp_pa
 
     assert r.decision is SwapDecision.SWAPPED
     final = yaml.safe_load(settings_path.read_text())
-    # Active flipped to second provider per priority order
-    assert final["config"]["providers"]["active"] == r.new_provider_id
-    assert final["config"]["providers"]["active"] != "claude-anthropic"
+    # Active flipped to second provider per priority order. The first swap
+    # migrates the legacy config.providers wrapper to the canonical top-level
+    # accounts block, so the active reads from wherever the migration left it.
+    block = final.get("accounts") or final["config"]["providers"]
+    assert block["active"] == r.new_provider_id
+    assert block["active"] != "claude-anthropic"
 
 
 # ---------------------------------------------------------------------------

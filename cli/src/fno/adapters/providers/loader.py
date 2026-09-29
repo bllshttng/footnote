@@ -931,6 +931,13 @@ def atomic_mutate_settings(
     settings_path = Path(settings_path)
     lock_path = _settings_lock_path(settings_path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
+    # Write where the read resolved: config.toml wins over its settings.yaml
+    # sibling, and a mutation aimed at the sibling must not fork the config or
+    # land TOML bytes in a .yaml file.
+    target = next(
+        (c for c in _read_candidates(settings_path) if c.is_file()),
+        settings_path,
+    )
 
     # Open in "a" mode so the lock file is created on demand without
     # truncating any existing content, and the fd has write semantics so
@@ -946,20 +953,23 @@ def atomic_mutate_settings(
                     "atomic_mutate_settings: mutator must return a dict, "
                     f"got {type(updated).__name__}"
                 )
-            content = tomli_w.dumps(_strip_none(_flatten_config(updated)))
+            if target.suffix == ".toml":
+                content = tomli_w.dumps(_strip_none(_flatten_config(updated)))
+            else:
+                content = yaml.safe_dump(_strip_none(updated), sort_keys=False)
             tmp_path: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(
                     mode="w",
-                    dir=settings_path.parent,
-                    prefix=f".{settings_path.name}.",
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
                     suffix=".tmp",
                     delete=False,
                     encoding="utf-8",
                 ) as tmp:
                     tmp.write(content)
                     tmp_path = Path(tmp.name)
-                os.replace(tmp_path, settings_path)
+                os.replace(tmp_path, target)
                 tmp_path = None
             finally:
                 if tmp_path is not None and tmp_path.exists():
