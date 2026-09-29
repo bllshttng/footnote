@@ -773,9 +773,21 @@ def locks_dir() -> Path:
     return Path.home() / ".fno" / "locks"
 
 
+def place_anchor(root: Path) -> Path:
+    """Mirror the Rust state_layout::place ladder for a graph anchor: the db
+    twin's presence picks between the db/ spelling and the legacy one, so a
+    root mid-migration and a root already moved both answer the store they
+    actually hold."""
+    if (root / "db" / "graph.db").exists():
+        return root / "db" / "graph.json"
+    if (root / "graph.db").exists():
+        return root / "graph.json"
+    return root / "db" / "graph.json"
+
+
 def graph_json() -> Path:
     """Return the path to graph.json (the anchor; its store is the db sibling)."""
-    return state_dir() / "db" / "graph.json"
+    return place_anchor(state_dir())
 
 
 def graph_archive_json() -> Path:

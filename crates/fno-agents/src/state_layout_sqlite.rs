@@ -23,6 +23,19 @@ pub fn fence_path(root: &Path) -> PathBuf {
     root.join("db").join(FENCE_NAME)
 }
 
+/// The fence names its writer's pid; only that writer removes it. A
+/// concurrent pass that lost the write race must never strip the winner's
+/// fence out from under a move still running.
+fn clear_own_fence(fence: &Path, pid: u32) {
+    let owns = std::fs::read_to_string(fence)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        == Some(pid);
+    if owns {
+        let _ = std::fs::remove_file(fence);
+    }
+}
+
 /// Block until the fence clears. A fence naming a dead pid (or an unreadable
 /// one past a bounded grace) is a crashed run's residue and clears here. A
 /// live fence holds the caller at most [`FENCE_WAIT`]; after that the opener
@@ -49,8 +62,12 @@ pub fn wait_for_fence(root: &Path) {
 }
 
 fn is_pid_alive(pid: u32) -> bool {
-    // kill 0 probes liveness without signalling.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    // kill 0 probes liveness without signalling; EPERM means the process
+    // exists but belongs to another user, which is still alive.
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 /// The census gate: a live store-keeper older than the running build would
@@ -296,10 +313,10 @@ struct Drain {
 }
 
 impl Drain {
-    fn fail(self, guard: &Connection, why: String) -> Status {
+    fn fail(self, guard: &Connection, pid: u32, why: String) -> Status {
         let _ = guard.execute_batch("ROLLBACK;");
         let _ = std::fs::remove_file(&self.migrating);
-        let _ = std::fs::remove_file(&self.fence);
+        clear_own_fence(&self.fence, pid);
         Status::Refused(why)
     }
 }
@@ -325,9 +342,27 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
         if alive {
             return Status::Pending("migration fence live".to_string());
         }
+        // A dead writer's residue: clear it so the create below can win.
+        let _ = std::fs::remove_file(&fence);
     }
-    if std::fs::write(&fence, std::process::id().to_string()).is_err() {
-        return Status::Refused("cannot write the fence".to_string());
+    let pid = std::process::id();
+    // The fence is claimed atomically: create_new means exactly one writer
+    // owns the move, the loser reads pending, and clear_own_fence can never
+    // strip the winner's fence.
+    let claimed = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&fence)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(pid.to_string().as_bytes())
+        });
+    match claimed {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Status::Pending("migration fence live".to_string());
+        }
+        Err(_) => return Status::Refused("cannot write the fence".to_string()),
+        Ok(()) => {}
     }
     // The drain transaction lives on its own guard connection: an open
     // write transaction on the copy SOURCE turns every backup step Busy
@@ -343,13 +378,13 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
     let guard = match Connection::open_with_flags(legacy, no_create) {
         Ok(c) => c,
         Err(e) => {
-            let _ = std::fs::remove_file(&fence);
+            clear_own_fence(&fence, pid);
             return Status::Refused(format!("cannot open the legacy store: {e}"));
         }
     };
     let _ = guard.busy_timeout(Duration::from_millis(DRAIN_BUSY_TIMEOUT_MS));
     if let Err(e) = guard.execute_batch("BEGIN IMMEDIATE") {
-        let _ = std::fs::remove_file(&fence);
+        clear_own_fence(&fence, pid);
         return Status::Pending(format!(
             "a writer holds the legacy store past the busy timeout ({e})"
         ));
@@ -362,12 +397,12 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
     // Copy through the SQLite backup API into db/<name>.migrating.
     let src = match Connection::open_with_flags(legacy, no_create) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&guard, format!("cannot open the copy source: {e}")),
+        Err(e) => return drain.fail(&guard, pid, format!("cannot open the copy source: {e}")),
     };
     let _ = std::fs::remove_file(&migrating);
     let mut dst = match Connection::open(&migrating) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&guard, format!("cannot create the copy target: {e}")),
+        Err(e) => return drain.fail(&guard, pid, format!("cannot create the copy target: {e}")),
     };
     let backup = rusqlite::backup::Backup::new(&src, &mut dst)
         .map_err(|e| e.to_string())
@@ -377,6 +412,16 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
                 match b.step(5) {
                     Ok(rusqlite::backup::StepResult::More) => {}
                     Ok(rusqlite::backup::StepResult::Done) => return Ok(()),
+                    // Busy and Locked arrive as Ok variants; they retry to
+                    // the ceiling like the Err arm, then refuse.
+                    Ok(
+                        rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked,
+                    ) => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err("backup stayed busy past the budget".to_string());
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     Ok(other) => return Err(format!("backup step read {other:?}")),
                     Err(e) => {
                         if std::time::Instant::now() >= deadline {
@@ -388,54 +433,58 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
             }
         });
     if let Err(e) = backup {
-        return drain.fail(&guard, format!("backup copy failed: {e}"));
+        return drain.fail(&guard, pid, format!("backup copy failed: {e}"));
     }
     let counts = match table_counts(&src) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&guard, format!("cannot count the legacy store: {e}")),
+        Err(e) => return drain.fail(&guard, pid, format!("cannot count the legacy store: {e}")),
     };
     let integrity: String = match dst.query_row("PRAGMA integrity_check;", [], |r| r.get(0)) {
         Ok(v) => v,
-        Err(e) => return drain.fail(&guard, format!("integrity check failed: {e}")),
+        Err(e) => return drain.fail(&guard, pid, format!("integrity check failed: {e}")),
     };
     if integrity != "ok" {
-        return drain.fail(&guard, format!("integrity_check read {integrity}"));
+        return drain.fail(&guard, pid, format!("integrity_check read {integrity}"));
     }
     let dst_counts = match table_counts(&dst) {
         Ok(c) => c,
-        Err(e) => return drain.fail(&guard, format!("cannot count the copy: {e}")),
+        Err(e) => return drain.fail(&guard, pid, format!("cannot count the copy: {e}")),
     };
     if counts != dst_counts {
-        return drain.fail(&guard, "row counts diverge between the copies".to_string());
+        return drain.fail(
+            &guard,
+            pid,
+            "row counts diverge between the copies".to_string(),
+        );
     }
     // Publish: fsync the copy file, then rename it over db/<name>.
     if std::fs::File::open(&migrating)
         .and_then(|f| f.sync_all())
         .is_err()
     {
-        return drain.fail(&guard, "cannot fsync the copy".to_string());
+        return drain.fail(&guard, pid, "cannot fsync the copy".to_string());
     }
     drop(dst);
     if std::fs::rename(&migrating, new).is_err() {
-        return drain.fail(&guard, "cannot publish the copy".to_string());
+        return drain.fail(&guard, pid, "cannot publish the copy".to_string());
     }
     // Park the legacy trio, record the verify counts, close the drain.
     let dir = backup_dir(root, stamp);
     if std::fs::create_dir_all(&dir).is_err() {
-        return drain.fail(&guard, "cannot create the backup folder".to_string());
+        return drain.fail(&guard, pid, "cannot create the backup folder".to_string());
     }
     for suffix in ["", "-wal", "-shm"] {
         let name = format!("{}{suffix}", row.legacy);
         let p = root.join(&name);
         if p.exists() && std::fs::rename(&p, dir.join(&name)).is_err() {
-            return drain.fail(&guard, format!("cannot park {name}"));
+            return drain.fail(&guard, pid, format!("cannot park {name}"));
         }
     }
     let _ = write_verify_record(&dir, &counts);
     let _ = guard.execute_batch("ROLLBACK;");
     drop(src);
     drop(guard);
-    let _ = std::fs::remove_file(&fence);
+    clear_own_fence(&fence, pid);
     Status::Moved
 }
 

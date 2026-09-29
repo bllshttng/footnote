@@ -66,10 +66,7 @@ fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let space = crate::paths::space_dir(&cwd);
     crate::state_layout_sqlite::wait_for_fence(&space);
-    open_paths(
-        crate::state_layout::place(&space, "graph.json").with_extension("db"),
-        space.join("claims"),
-    )
+    open_paths(database_path_at(&space), space.join("claims"))
 }
 
 fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {

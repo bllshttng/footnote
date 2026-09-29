@@ -840,20 +840,19 @@ mod tests {
         let conn = rusqlite::Connection::open(&legacy).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             CREATE TABLE nodes (id TEXT PRIMARY KEY, title TEXT);
-             INSERT INTO nodes VALUES ('x-1','one');",
+             CREATE TABLE layout_nodes (id TEXT PRIMARY KEY, title TEXT);
+             INSERT INTO layout_nodes VALUES ('x-1','one');",
         )
         .unwrap();
         let row = parse_table("graph.db\tdb/graph.db\tsqlite\tdaemon\n")
             .unwrap()
             .remove(0);
-        let status =
-            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-wal");
+        let status = crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-wal");
         assert!(matches!(status, Status::Moved), "{status:?}");
         let new_db = root.join("db").join("graph.db");
         let c = rusqlite::Connection::open(&new_db).unwrap();
         let n: i64 = c
-            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM layout_nodes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "the committed row moved");
         assert!(!legacy.exists(), "the legacy file parked");
@@ -873,8 +872,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
             .unwrap();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
-        let status =
-            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-busy");
+        let status = crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-busy");
         assert!(
             matches!(status, Status::Pending(_)),
             "expected pending, got {status:?}"
@@ -897,8 +895,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (2);")
             .unwrap();
         drop(conn);
-        let status =
-            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-both");
+        let status = crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-both");
         assert!(matches!(status, Status::Refused(_)), "{status:?}");
         assert!(legacy.exists() && new_db.exists(), "both copies stay");
         clean(&root);
@@ -916,8 +913,7 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE z (a);")
             .unwrap();
-        let status =
-            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-empty");
+        let status = crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-empty");
         assert!(matches!(status, Status::Moved), "{status:?}");
         let c = rusqlite::Connection::open(&new_db).unwrap();
         let n: i64 = c
@@ -933,10 +929,14 @@ mod tests {
             .join("state-root-migration")
             .join("ow-empty")
             .join("verify.tsv");
-        let f = std::fs::OpenOptions::new().write(true).open(&record).unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
-        ))
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&record)
+            .unwrap();
+        f.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60)),
+        )
         .unwrap();
         drop(f);
         let swept = crate::state_layout_sqlite::verify_sweep(&root, "ow-later");

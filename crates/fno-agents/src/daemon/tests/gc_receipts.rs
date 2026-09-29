@@ -3914,6 +3914,9 @@ fn an_unidentified_do_row_is_not_open() {
 fn a_settle_that_cannot_read_is_named_and_changes_nothing() {
     let (dir, home) = staged_graph_home();
     // An unimported malformed anchor makes the read refuse, never write.
+    // The anchor probe resolves through the layout ladder, so the legacy
+    // db twin must exist for the root spelling to be the one it reads.
+    std::fs::write(dir.path().join("graph.db"), b"SQLite format 3\0").unwrap();
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
 
     let (settled, refused) = gc_sweep::settle_stale_do_rows(&home);
@@ -4074,7 +4077,9 @@ fn an_unreadable_staging_graph_holds_the_row_in_both_modes_without_effects() {
 
     let (dir, home) = staged_graph_home();
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    // The corrupt graph: the staging re-read returns None on it.
+    // The corrupt graph: the staging re-read returns None on it. The ladder
+    // needs the legacy db twin for the root spelling to be the one read.
+    std::fs::write(dir.path().join("graph.db"), b"SQLite format 3\0").unwrap();
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
     crate::state::update_registry(&home.registry_json(), |r| {
         let mut e = state::RegistryEntry::default();
