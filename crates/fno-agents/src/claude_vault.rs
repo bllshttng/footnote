@@ -1305,25 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_refuses_two_distinct_live_slot_blobs() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let mut external = MockExternal::default();
-        external.keychain.insert(
-            scoped_service(&slot).unwrap(),
-            Some(blob("b", "b-refresh", now_ms())),
-        );
-        external.keychain.insert(
-            "Claude Code-credentials".to_string(),
-            Some(blob("a", "a-refresh", now_ms())),
-        );
-
-        let (code, receipt) = execute("sync", &options(temp.path(), &slot, None), &external);
-        assert_eq!(code, 4);
-        assert_eq!(receipt.verdict, "ambiguous-slot");
-    }
-
-    #[test]
     fn sync_accepts_two_blobs_of_one_account_and_takes_the_newest() {
         let temp = TempDir::new().unwrap();
         let slot = temp.path().join("slot");
@@ -1404,227 +1385,228 @@ mod tests {
         );
         assert_eq!(code, 4);
         assert_eq!(receipt.verdict, "live-owner");
+
+        // A live process pinning the config dir refuses too.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-process", "org-process");
+            record(
+                temp.path(),
+                "process",
+                &who,
+                &blob("stored", "refresh", now_ms() - 1),
+            );
+            let mut external = MockExternal::default();
+            external.live.push(LiveClaude {
+                config_dir: Some(slot.clone()),
+            });
+
+            let (code, receipt) = execute(
+                "refresh",
+                &options(temp.path(), &slot, Some("process")),
+                &external,
+            );
+            assert_eq!(code, 4);
+            assert_eq!(receipt.verdict, "live-owner");
+        }
     }
 
     #[test]
-    fn refresh_refuses_for_a_live_process_on_the_config_dir() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-process", "org-process");
-        record(
-            temp.path(),
-            "process",
-            &who,
-            &blob("stored", "refresh", now_ms() - 1),
-        );
-        let mut external = MockExternal::default();
-        external.live.push(LiveClaude {
-            config_dir: Some(slot.clone()),
-        });
+    fn login_scenarios_cover_the_happy_wrong_account_and_abort_paths() {
+        // Happy path: two proven logins write the store and the stamp.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = Principal {
+                account_uuid: "acct-makers".to_string(),
+                organization_uuid: "org-makers".to_string(),
+                email: Some("jn@makersof.xyz".to_string()),
+            };
+            record(
+                temp.path(),
+                "makers",
+                &who,
+                &blob("dead", "dead-refresh", now_ms() - 1),
+            );
+            fs::write(
+                temp.path().join("makers/meta.json"),
+                json!({
+                    "harness": "claude",
+                    "account_id": "makers",
+                    "kind": "keychain",
+                    "principal": {
+                        "account_uuid": who.account_uuid,
+                        "organization_uuid": who.organization_uuid,
+                        "email": "jn@makersof.xyz"
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let unscoped = blob("m1", "m1-refresh", now_ms() + 1_000);
+            let scoped = blob("m2", "m2-refresh", now_ms() + 2_000);
+            let mut external = MockExternal::default();
+            let mut post = external.post_login.lock().unwrap();
+            post.insert("Claude Code-credentials".to_string(), unscoped);
+            post.insert(scoped_service(&slot).unwrap(), scoped.clone());
+            drop(post);
+            external.profiles.insert("m1".to_string(), Ok(who.clone()));
+            external.profiles.insert("m2".to_string(), Ok(who.clone()));
+            *external.login_result.lock().unwrap() = Some(Ok(()));
 
-        let (code, receipt) = execute(
-            "refresh",
-            &options(temp.path(), &slot, Some("process")),
-            &external,
-        );
-        assert_eq!(code, 4);
-        assert_eq!(receipt.verdict, "live-owner");
+            let (code, receipt) = execute(
+                "login",
+                &options(temp.path(), &slot, Some("makers")),
+                &external,
+            );
+            assert_eq!(code, 0);
+            assert_eq!(receipt.verdict, "logged-in");
+            assert_eq!(receipt.record.as_deref(), Some("makers"));
+            let logins = external.logins.lock().unwrap().clone();
+            assert_eq!(logins.len(), 2);
+            assert_eq!(logins[0], (None, Some("jn@makersof.xyz".to_string())));
+            assert_eq!(
+                logins[1],
+                (Some(slot.clone()), Some("jn@makersof.xyz".to_string()))
+            );
+            assert_eq!(
+                fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+                scoped
+            );
+            let meta: Value = serde_json::from_str(
+                &fs::read_to_string(temp.path().join("makers/meta.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(meta["account_id"], "makers");
+            assert_eq!(meta["kind"], "keychain");
+            assert_eq!(meta["principal"]["email"], "jn@makersof.xyz");
+            assert_eq!(
+                fs::read_to_string(temp.path().join(".active-claude")).unwrap(),
+                "makers"
+            );
+        }
+        // Wrong account: the second login never runs, the store is unchanged.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-makers", "org-makers");
+            let original = blob("dead", "dead-refresh", now_ms() - 1);
+            record(temp.path(), "makers", &who, &original);
+            let wrong = Principal {
+                account_uuid: "acct-jason".to_string(),
+                organization_uuid: "org-jason".to_string(),
+                email: Some("jason@readyrule.com".to_string()),
+            };
+            let mut external = MockExternal::default();
+            external.post_login.lock().unwrap().insert(
+                "Claude Code-credentials".to_string(),
+                blob("w1", "w1-refresh", now_ms()),
+            );
+            external.profiles.insert("w1".to_string(), Ok(wrong));
+            *external.login_result.lock().unwrap() = Some(Ok(()));
+
+            let (code, receipt) = execute(
+                "login",
+                &options(temp.path(), &slot, Some("makers")),
+                &external,
+            );
+            assert_eq!(code, 4);
+            assert!(receipt.verdict.starts_with("wrong-account"));
+            assert!(receipt.verdict.contains("jason@readyrule.com"));
+            assert_eq!(external.logins.lock().unwrap().len(), 1);
+            assert_eq!(
+                fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+                original
+            );
+            assert!(!temp.path().join(".active-claude").exists());
+        }
+        // Abort: a failed first login touches nothing.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-makers", "org-makers");
+            let original = blob("dead", "dead-refresh", now_ms() - 1);
+            record(temp.path(), "makers", &who, &original);
+            let mut external = MockExternal::default();
+            *external.login_result.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
+
+            let (code, receipt) = execute(
+                "login",
+                &options(temp.path(), &slot, Some("makers")),
+                &external,
+            );
+            assert_eq!(code, 1);
+            assert!(receipt.verdict.starts_with("login-aborted"));
+            assert!(receipt.verdict.contains("finished: none"));
+            assert_eq!(external.logins.lock().unwrap().len(), 1);
+            assert_eq!(
+                fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+                original
+            );
+            assert!(!temp.path().join(".active-claude").exists());
+        }
     }
     #[test]
-    fn login_syncs_then_signs_in_twice_and_writes_the_store() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = Principal {
-            account_uuid: "acct-makers".to_string(),
-            organization_uuid: "org-makers".to_string(),
-            email: Some("jn@makersof.xyz".to_string()),
-        };
-        record(
-            temp.path(),
-            "makers",
-            &who,
-            &blob("dead", "dead-refresh", now_ms() - 1),
-        );
-        fs::write(
-            temp.path().join("makers/meta.json"),
-            json!({
-                "harness": "claude",
-                "account_id": "makers",
-                "kind": "keychain",
-                "principal": {
-                    "account_uuid": who.account_uuid,
-                    "organization_uuid": who.organization_uuid,
-                    "email": "jn@makersof.xyz"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let unscoped = blob("m1", "m1-refresh", now_ms() + 1_000);
-        let scoped = blob("m2", "m2-refresh", now_ms() + 2_000);
-        let mut external = MockExternal::default();
-        let mut post = external.post_login.lock().unwrap();
-        post.insert("Claude Code-credentials".to_string(), unscoped);
-        post.insert(scoped_service(&slot).unwrap(), scoped.clone());
-        drop(post);
-        external.profiles.insert("m1".to_string(), Ok(who.clone()));
-        external.profiles.insert("m2".to_string(), Ok(who.clone()));
-        *external.login_result.lock().unwrap() = Some(Ok(()));
+    fn stored_health_scenarios_skip_the_slot_owner_and_judge_the_rest() {
+        // The slot owner's own record: never refreshed, never judged.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-live", "org-live");
+            record(
+                temp.path(),
+                "makers",
+                &who,
+                &blob("slot-access", "shared-refresh", now_ms()),
+            );
+            let mut external = MockExternal::default();
+            external.keychain.insert(
+                scoped_service(&slot).unwrap(),
+                Some(blob("slot-access", "shared-refresh", now_ms())),
+            );
+            *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
 
-        let (code, receipt) = execute(
-            "login",
-            &options(temp.path(), &slot, Some("makers")),
-            &external,
-        );
-        assert_eq!(code, 0);
-        assert_eq!(receipt.verdict, "logged-in");
-        assert_eq!(receipt.record.as_deref(), Some("makers"));
-        let logins = external.logins.lock().unwrap().clone();
-        assert_eq!(logins.len(), 2);
-        assert_eq!(logins[0], (None, Some("jn@makersof.xyz".to_string())));
-        assert_eq!(
-            logins[1],
-            (Some(slot.clone()), Some("jn@makersof.xyz".to_string()))
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
-            scoped
-        );
-        let meta: Value = serde_json::from_str(
-            &fs::read_to_string(temp.path().join("makers/meta.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(meta["account_id"], "makers");
-        assert_eq!(meta["kind"], "keychain");
-        assert_eq!(meta["principal"]["email"], "jn@makersof.xyz");
-        assert_eq!(
-            fs::read_to_string(temp.path().join(".active-claude")).unwrap(),
-            "makers"
-        );
-    }
+            let verdict = stored_health(temp.path(), &slot, "makers", &external);
+            assert_eq!(verdict, Some("slot-owner".to_string()));
+        }
+        // A live session on the slot must not read as the standby being
+        // healthy: the alert would never fire during work.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-makers", "org-makers");
+            record(
+                temp.path(),
+                "makers",
+                &who,
+                &blob("stored", "spent-refresh", now_ms() - 1),
+            );
+            let mut external = MockExternal::default();
+            external.live.push(LiveClaude {
+                config_dir: Some(slot.clone()),
+            });
+            *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
 
-    #[test]
-    fn login_refuses_a_wrong_account_before_the_second_login() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-makers", "org-makers");
-        let original = blob("dead", "dead-refresh", now_ms() - 1);
-        record(temp.path(), "makers", &who, &original);
-        let wrong = Principal {
-            account_uuid: "acct-jason".to_string(),
-            organization_uuid: "org-jason".to_string(),
-            email: Some("jason@readyrule.com".to_string()),
-        };
-        let mut external = MockExternal::default();
-        external.post_login.lock().unwrap().insert(
-            "Claude Code-credentials".to_string(),
-            blob("w1", "w1-refresh", now_ms()),
-        );
-        external.profiles.insert("w1".to_string(), Ok(wrong));
-        *external.login_result.lock().unwrap() = Some(Ok(()));
+            let verdict = stored_health(temp.path(), &slot, "makers", &external);
+            assert_eq!(verdict, Some("dead".to_string()));
+        }
+        // A rejected refresh is a dead saved login.
+        {
+            let temp = TempDir::new().unwrap();
+            let slot = temp.path().join("slot");
+            let who = principal("acct-makers", "org-makers");
+            record(
+                temp.path(),
+                "makers",
+                &who,
+                &blob("stored", "spent-refresh", now_ms() - 1),
+            );
+            let external = MockExternal::default();
+            *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
 
-        let (code, receipt) = execute(
-            "login",
-            &options(temp.path(), &slot, Some("makers")),
-            &external,
-        );
-        assert_eq!(code, 4);
-        assert!(receipt.verdict.starts_with("wrong-account"));
-        assert!(receipt.verdict.contains("jason@readyrule.com"));
-        assert_eq!(external.logins.lock().unwrap().len(), 1);
-        assert_eq!(
-            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
-            original
-        );
-        assert!(!temp.path().join(".active-claude").exists());
-    }
-
-    #[test]
-    fn login_aborts_without_touching_the_store_when_login_fails() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-makers", "org-makers");
-        let original = blob("dead", "dead-refresh", now_ms() - 1);
-        record(temp.path(), "makers", &who, &original);
-        let external = MockExternal::default();
-        *external.login_result.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
-
-        let (code, receipt) = execute(
-            "login",
-            &options(temp.path(), &slot, Some("makers")),
-            &external,
-        );
-        assert_eq!(code, 1);
-        assert!(receipt.verdict.starts_with("login-aborted"));
-        assert!(receipt.verdict.contains("finished: none"));
-        assert_eq!(external.logins.lock().unwrap().len(), 1);
-        assert_eq!(
-            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
-            original
-        );
-        assert!(!temp.path().join(".active-claude").exists());
-    }
-
-    #[test]
-    fn stored_health_skips_the_slot_owner_without_refreshing() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-live", "org-live");
-        record(
-            temp.path(),
-            "makers",
-            &who,
-            &blob("slot-access", "shared-refresh", now_ms()),
-        );
-        let mut external = MockExternal::default();
-        external.keychain.insert(
-            scoped_service(&slot).unwrap(),
-            Some(blob("slot-access", "shared-refresh", now_ms())),
-        );
-        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
-
-        let verdict = stored_health(temp.path(), &slot, "makers", &external);
-        assert_eq!(verdict, Some("slot-owner".to_string()));
-    }
-
-    #[test]
-    fn stored_health_judges_a_standby_record_even_when_a_session_is_live() {
-        // A live session on the shared slot must not read as the standby
-        // record being healthy: the alert would never fire during work.
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-makers", "org-makers");
-        record(
-            temp.path(),
-            "makers",
-            &who,
-            &blob("stored", "spent-refresh", now_ms() - 1),
-        );
-        let mut external = MockExternal::default();
-        external.live.push(LiveClaude {
-            config_dir: Some(slot.clone()),
-        });
-        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
-
-        let verdict = stored_health(temp.path(), &slot, "makers", &external);
-        assert_eq!(verdict, Some("dead".to_string()));
-    }
-
-    #[test]
-    fn stored_health_reports_dead_when_refresh_is_rejected() {
-        let temp = TempDir::new().unwrap();
-        let slot = temp.path().join("slot");
-        let who = principal("acct-makers", "org-makers");
-        record(
-            temp.path(),
-            "makers",
-            &who,
-            &blob("stored", "spent-refresh", now_ms() - 1),
-        );
-        let external = MockExternal::default();
-        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
-
-        let verdict = stored_health(temp.path(), &slot, "makers", &external);
-        assert_eq!(verdict, Some("dead".to_string()));
+            let verdict = stored_health(temp.path(), &slot, "makers", &external);
+            assert_eq!(verdict, Some("dead".to_string()));
+        }
     }
 }

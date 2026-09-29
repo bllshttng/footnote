@@ -590,25 +590,25 @@ mod tests {
                 to: "makers".into()
             }
         );
-    }
 
-    #[test]
-    fn an_exhausted_slot_cuts_over_at_any_threshold() {
-        let usage = json!({
-            "readyrule": {"probed_at": 1000, "partial": false,
-                "windows": [{"label": "session", "used_pct": 50.0, "resets_at": null}]}
-        })
-        .as_object()
-        .cloned();
-        let mut cap = capacity("window", "mismatch");
-        cap["accounts"]["readyrule"] = json!("exhausted");
-        assert_eq!(
-            super::decide(&cap, &records(), None, 1000, usage.as_ref(), 99.0),
-            super::Decision::Cutover {
-                from: "readyrule".into(),
-                to: "makers".into()
-            }
-        );
+        // Exhausted cuts over at any operator threshold.
+        {
+            let usage = json!({
+                "readyrule": {"probed_at": 1000, "partial": false,
+                    "windows": [{"label": "session", "used_pct": 50.0, "resets_at": null}]}
+            })
+            .as_object()
+            .cloned();
+            let mut cap = capacity("window", "mismatch");
+            cap["accounts"]["readyrule"] = json!("exhausted");
+            assert_eq!(
+                super::decide(&cap, &records(), None, 1000, usage.as_ref(), 99.0),
+                super::Decision::Cutover {
+                    from: "readyrule".into(),
+                    to: "makers".into()
+                }
+            );
+        }
     }
 
     #[test]
@@ -790,46 +790,45 @@ mod tests {
         // dead again: one more notice (good -> bad).
         run_health_tick(&home, dir.path(), &health, &notify);
         assert_eq!(notices.lock().unwrap().len(), 2);
-    }
 
-    #[test]
-    fn health_ignores_unavailable_and_none() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config.toml");
-        std::fs::write(&config, "[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\nglobal = true\n").unwrap();
-        let global = dir.path().join("global");
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(global.join("config.toml"), "schema_version = 1\n").unwrap();
-        let usage = dir.path().join("usage.json");
-        std::fs::write(&usage, "{}").unwrap();
-        let stub = crate::write_exec_stub(dir.path(), "fno-stub.sh", "#!/bin/sh\nexit 1\n");
-        let _env = SavedEnv::set(&config, &usage, &stub, &global.join("config.toml"));
-        let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
-        let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&notices);
-        let notify = move |title: &str, body: &str| {
-            sink.lock().unwrap().push(format!("{title}: {body}"));
-        };
-        // None (lock held / slot unreadable) and "unavailable" both change nothing.
-        let health_none = |id: &str| -> Option<String> {
-            assert_eq!(id, "makers");
-            None
-        };
-        run_health_tick(&home, dir.path(), &health_none, &notify);
-        let health_unavailable = |id: &str| -> Option<String> {
-            assert_eq!(id, "makers");
-            Some("unavailable".to_string())
-        };
-        run_health_tick(&home, dir.path(), &health_unavailable, &notify);
-        assert!(notices.lock().unwrap().is_empty());
-        assert!(!home.root().join("slot-login-health.json").exists());
-        let journal = crate::events::committed_journal_text(&home.events_jsonl());
-        let event: serde_json::Value =
-            serde_json::from_str(journal.lines().next().unwrap()).unwrap();
-        assert_eq!(event["data"]["arm"], "slot_login_health");
-        assert_eq!(event["data"]["skip_reason"], "nothing_checked");
+        // None (lock held, slot unreadable) and "unavailable" change
+        // nothing: no notice, no state file, one quiet tick row.
+        {
+            // The host fn already holds the env lock.
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.toml");
+            std::fs::write(&config, "[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\nglobal = true\n").unwrap();
+            let global = dir.path().join("global");
+            std::fs::create_dir_all(&global).unwrap();
+            std::fs::write(global.join("config.toml"), "schema_version = 1\n").unwrap();
+            let usage = dir.path().join("usage.json");
+            std::fs::write(&usage, "{}").unwrap();
+            let stub = crate::write_exec_stub(dir.path(), "fno-stub.sh", "#!/bin/sh\nexit 1\n");
+            let _env = SavedEnv::set(&config, &usage, &stub, &global.join("config.toml"));
+            let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
+            let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&notices);
+            let notify = move |title: &str, body: &str| {
+                sink.lock().unwrap().push(format!("{title}: {body}"));
+            };
+            // None (lock held / slot unreadable) and "unavailable" both change nothing.
+            let health_none = |id: &str| -> Option<String> {
+                assert_eq!(id, "makers");
+                None
+            };
+            run_health_tick(&home, dir.path(), &health_none, &notify);
+            let health_unavailable = |id: &str| -> Option<String> {
+                assert_eq!(id, "makers");
+                Some("unavailable".to_string())
+            };
+            run_health_tick(&home, dir.path(), &health_unavailable, &notify);
+            assert!(notices.lock().unwrap().is_empty());
+            assert!(!home.root().join("slot-login-health.json").exists());
+            let journal = crate::events::committed_journal_text(&home.events_jsonl());
+            let event: serde_json::Value =
+                serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+            assert_eq!(event["data"]["arm"], "slot_login_health");
+            assert_eq!(event["data"]["skip_reason"], "nothing_checked");
+        }
     }
 }
