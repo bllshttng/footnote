@@ -5408,7 +5408,7 @@ event_types:
           description: "Who un-parked it: 'manual' (fno-agents pr-park unpark) or 'sweep'."
 
   - name: park_sweep
-    description: "The daemon's park sweep on its 6h floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
+    description: "The daemon's park sweep on its 10-minute floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
     sources: [daemon]
     data:
       required: [outcome]
