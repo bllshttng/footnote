@@ -40,102 +40,44 @@ pub(super) fn list_response(
     )
 }
 
-/// The reaped and retired sessions `--all` shows: every receipt in the
-/// reap-receipt store, newest first, with the newest recorded cause from the
-/// event store joined by session id. A reaped row leaves the registry, so a
+/// The reaped and REMOVED sessions `--all` shows: every removal the shared
+/// fold recovers, newest first. A reaped row leaves the registry, so a
 /// wrongful reap is invisible without this lane; the receipt is the record
-/// that the row existed, and the event names WHY it left. A receipt the
-/// event store cannot explain still shows, with the cause honestly absent.
+/// that the row existed, and the event names WHY it left. A receipt-less
+/// removal (a never-bound row the receipt builder refused) shows from its
+/// `registry_row_removed` event, with `state: "removed"` and honestly null
+/// session/resume.
 pub(super) fn retired_rows(home: &AgentsHome) -> Vec<Value> {
-    let mut out = Vec::new();
-    let dir = home.root().join("reap-receipts");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    let mut receipts: Vec<(std::path::PathBuf, crate::receipt::ReapReceipt)> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-        .filter_map(|p| crate::receipt::read_reap_receipt(&p).ok().map(|r| (p, r)))
+    let (removals, _notes) = crate::removals::read(home, None);
+    let mut out: Vec<Value> = removals
+        .into_iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "harness": r.harness,
+                "session_id": r.session_id,
+                "short_id": r.short_id,
+                "cwd": r.cwd,
+                "state": if r.receipt.is_some() { "reaped" } else { "removed" },
+                "reaped_at": r.ts,
+                "cause": r.cause.unwrap_or_else(|| "not recorded".into()),
+                "cause_at": r.cause_at.unwrap_or_else(|| "not recorded".into()),
+                "basis": r.reason.unwrap_or_else(|| "not recorded".into()),
+                "node": r.node,
+                "resume": r.resume,
+                "receipt": r.receipt.map(|p| p.display().to_string()),
+            })
+        })
         .collect();
-    receipts.sort_by(|a, b| b.1.reaped_at.cmp(&a.1.reaped_at));
-    let causes = newest_reap_causes(home);
-    for (path, receipt) in receipts {
-        let cause = causes.get(&receipt.harness_session_id);
-        let (cause, cause_at, basis) = match cause {
-            Some((kind, ts, why)) => (kind.clone(), ts.clone(), why.clone()),
-            None => (
-                "not recorded".to_string(),
-                "not recorded".to_string(),
-                "not recorded".to_string(),
-            ),
+    out.sort_by(|a, b| {
+        let key = |v: &Value| {
+            v.get("reaped_at")
+                .and_then(Value::as_str)
+                .map(crate::feed::ts_key)
+                .unwrap_or((0, 0))
         };
-        let ledger_node = receipt
-            .ledger
-            .as_ref()
-            .and_then(|l| l.get("graph_node_id").or_else(|| l.get("node")))
-            .and_then(Value::as_str)
-            .map(String::from);
-        out.push(json!({
-            "name": receipt.row_name,
-            "harness": receipt.harness,
-            "session_id": receipt.harness_session_id,
-            "short_id": receipt.short_id,
-            "cwd": receipt.cwd,
-            "state": "reaped",
-            "reaped_at": receipt.reaped_at,
-            "cause": cause,
-            "cause_at": cause_at,
-            "basis": basis,
-            "node": ledger_node,
-            "resume": receipt.resume,
-            "receipt": path.display().to_string(),
-        }));
-    }
-    out
-}
-
-/// The newest reaped/removed/vacated event per session id: `(type, ts,
-/// basis)`. Commit order means the last line for a sid is the newest; a
-/// later removal over an earlier one is the reading that names why the row
-/// is gone NOW.
-fn newest_reap_causes(
-    home: &AgentsHome,
-) -> std::collections::HashMap<String, (String, String, String)> {
-    let mut out: std::collections::HashMap<String, (String, String, String)> =
-        std::collections::HashMap::new();
-    let raw = match crate::event_store::journal_text_checked(
-        &home.events_jsonl(),
-        &crate::event_store::EventQuery::of_types(&[
-            "agent_row_reaped",
-            "registry_row_removed",
-            "agent_crown_vacated",
-        ]),
-    ) {
-        Ok(raw) => raw,
-        Err(_) => return out,
-    };
-    for line in raw.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-        let ts = event.get("ts").and_then(Value::as_str).unwrap_or("");
-        let data = event.get("data").cloned().unwrap_or(Value::Null);
-        let sid = data
-            .get("harness_session_id")
-            .or_else(|| data.get("session_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if sid.is_empty() {
-            continue;
-        }
-        let basis = data.get("basis").and_then(Value::as_str).unwrap_or("");
-        out.insert(
-            sid.to_string(),
-            (kind.to_string(), ts.to_string(), basis.to_string()),
-        );
-    }
+        key(b).cmp(&key(a))
+    });
     out
 }
 
@@ -1048,6 +990,32 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["name"], "warden", "newest reaped_at first");
         assert_eq!(rows[1]["cause"], "not recorded");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC3-EDGE: a never-bound removal (the receipt builder refused it, so no
+    /// receipt exists) still shows in the retired lane, from its
+    /// `registry_row_removed` event, with state "removed" and honestly null
+    /// session/resume.
+    #[test]
+    fn a_never_bound_removal_shows_in_the_all_lane_without_a_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(temp.path().join("agents"));
+        std::fs::create_dir_all(home.root().join("reap-receipts")).unwrap();
+        std::fs::write(
+            home.events_jsonl(),
+            concat!(
+                r#"{"ts":"2026-09-28T16:48:49Z","type":"registry_row_removed","source":"python","data":{"harness":"codex","harness_session_id":"","name":"jolly-finch","pid":40417,"reason":"row 'jolly-finch': missing harness session identity","receipt_staged":false,"remover":"fno-py"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let rows = retired_rows(&home);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["name"], "jolly-finch");
+        assert_eq!(rows[0]["state"], "removed");
+        assert!(rows[0]["session_id"].is_null());
+        assert!(rows[0]["resume"].is_null());
         std::fs::remove_dir_all(home.root()).ok();
     }
 }

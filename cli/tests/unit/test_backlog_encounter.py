@@ -112,7 +112,7 @@ def probe(tmp_path: Path):
         )
 
     run.graph = graph  # type: ignore[attr-defined]
-    run.md = state / "graph.md"  # type: ignore[attr-defined]
+    run.md = state / "pages" / "graph.md"  # type: ignore[attr-defined]
     run.settings = settings  # type: ignore[attr-defined]
     run.state = state  # type: ignore[attr-defined]
     return run
