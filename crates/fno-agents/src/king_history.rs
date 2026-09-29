@@ -2254,7 +2254,7 @@ mod tests {
                     "content": [{"type": "text", "text": "crates/fno-agents/src/king_history.rs:40 owns the reading."}]
                 }
             }),
-            claude_tool("Bash", json!({"command":"fno agents court --json"})),
+            claude_tool("Bash", json!({"command":"fno agents org --json"})),
             claude_tool("Bash", json!({"command":"fno do pr watch status"})),
             claude_tool("Bash", json!({"command":"fno whoami context"})),
             claude_tool("Bash", json!({"command":"fno agents spawn worker"})),

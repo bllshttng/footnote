@@ -219,18 +219,18 @@ pub(crate) fn detail_fields(
             },
         ),
         (
-            "king",
+            "lead",
             match row.and_then(|a| a.crown_scope.as_deref()) {
-                Some(scope) => match row.and_then(|a| a.crown_level) {
-                    Some(level) => match row.and_then(|a| a.crown_name.as_deref()) {
-                        Some(name) => format!("L{level} {scope} ({name})"),
-                        None => format!("L{level} {scope}"),
+                Some(scope) => match row.and_then(|a| a.crown_title.as_deref()) {
+                    Some(title) => title.to_string(),
+                    None => match row.and_then(|a| a.crown_level) {
+                        Some(level) => format!("L{level} {scope}"),
+                        None => scope.to_string(),
                     },
-                    None => scope.to_string(),
                 },
-                // A worker row rolling up to a named crown carries the name.
+                // A worker row rolling up to a titled lead carries the title.
                 None => row
-                    .and_then(|a| a.crown_name.as_deref())
+                    .and_then(|a| a.crown_title.as_deref())
                     .unwrap_or(NOT_RECORDED)
                     .to_string(),
             },

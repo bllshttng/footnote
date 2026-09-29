@@ -15,6 +15,7 @@ pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;
 pub mod stop;
+pub mod subagent_worktree_guard;
 pub mod test_run_guard;
 
 use serde_json::json;
@@ -34,9 +35,10 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("prompt") => prompt::run(&args[1..]),
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
+        Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }

@@ -263,6 +263,7 @@ pub mod node_seed;
 pub mod nudge;
 pub mod occupancy_login;
 pub mod opencode_ask;
+pub mod opencode_config;
 pub mod opencode_install;
 pub mod opencode_serve;
 pub mod opencode_transcript;

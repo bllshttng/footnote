@@ -215,8 +215,8 @@ pub(crate) fn gate<F: Fn(&str, &str, i64, u64) -> (i32, String)>(
 fn gate_reading_and_message(reading: &TermReading, scope: &str) -> Option<(String, String)> {
     let scope = if scope.is_empty() { "<scope>" } else { scope };
     let handoff = format!(
-        "Hand off: fno agents spawn --crown {scope} --succeed. Or extend with a written \
-         reason: fno agents king term <spec> --reason \"...\"."
+        "Hand off: fno agents spawn --promote {scope} --succeed. Or extend with a written \
+         reason: fno agents org term <spec> --reason \"...\"."
     );
     match &reading.state {
         TermState::Within { .. } => None,

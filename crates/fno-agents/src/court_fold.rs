@@ -748,6 +748,11 @@ pub fn court_fold(
                 fold["name"] = names.get(scope).map(|n| json!(n)).unwrap_or(Value::Null);
             }
         }
+        if let Ok(titles) = crate::crown_names::live_titles(&store, registry_path) {
+            for (scope, fold) in folds.iter_mut() {
+                fold["title"] = titles.get(scope).map(|t| json!(t)).unwrap_or(Value::Null);
+            }
+        }
     }
     // The whole owner read, node id -> canonical owning scope, exposed once
     // so a dispatch reader (the blueprint starts list) drops another crown's
