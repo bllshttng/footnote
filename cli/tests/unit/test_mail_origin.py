@@ -282,7 +282,7 @@ def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
     )
     assert rendered.startswith(
         '<fno_mail from="session-king" harness="codex" '
-        'from_rank="L1 fno" from_name="king">'
+        'from_rank="Head of fno" from_name="king">'
     )
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 
@@ -315,7 +315,7 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
         "hi", from_="folio-short", from_session="session-folio", harness="claude"
     )
     assert 'from_name="folio"' in rendered
-    assert 'from_rank="L1 epic"' in rendered
+    assert 'from_rank="Head of epic"' in rendered
 
 
 def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
@@ -354,7 +354,7 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
         from_="peer",
         to_session="session-king",
     )
-    assert 'to_rank="L1 fno"' in crowned
+    assert 'to_rank="Head of fno"' in crowned
 
 
 def test_unreadable_registry_does_not_claim_recipient_rank(tmp_path, monkeypatch):
