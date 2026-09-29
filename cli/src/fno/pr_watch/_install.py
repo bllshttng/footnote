@@ -660,7 +660,9 @@ def ensure_activated(
             interval=interval,
         )
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        (Path.home() / ".fno" / "logs").mkdir(parents=True, exist_ok=True)
+        from fno.paths import state_dir
+
+        (state_dir() / "logs").mkdir(parents=True, exist_ok=True)
         plist_path.write_text(plist_text, encoding="utf-8")
     except OSError:
         return "write-failed"
