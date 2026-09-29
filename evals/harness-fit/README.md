@@ -66,6 +66,14 @@ A grade-only dry run checked every replay task before Run 1. The hidden tests mu
 - The replacement rule: a bad task gives way to the next unsampled entry after it in merge order. That entry's grade must pass the dry run, and its hidden tests must run, not skip.
 - A task whose node the graph cannot resolve is bad, because its prompt cannot come from the node. Three of x-632f's tasks carried a one-sentence prompt written by hand, and all three are replaced.
 
+## Amendment 4 (2026-09-29, attempts that never started, before any results commit)
+
+Two infrastructure stops hit the runs while they were in flight. This amendment lands after those rows exist and before any results commit. It changes no grade and no rule. It says only what happens to an attempt that never started.
+
+- Docker. OrbStack was quit at 23:06:42Z. After that, 68 pi trials failed in `docker compose` before the agent ran. The claude-code, opencode and Terminus 2 jobs ran no trial. A trial whose environment never started is an infrastructure exclusion. When Docker answers again, `harbor jobs resume -f RuntimeError` reruns those pi trials in place. The other arms then run in the same seeded order.
+- Provider cap. When the fleet already holds every zai lane, the spawn gate refuses a Run 1 worker (`provider_cap`). The row reads `unavailable` and the worker never runs. After the lanes finish, a top-up pass reruns missing graded attempts. It stops at 3 graded attempts per task, or after 3 passes. Each refusal stays in history and is counted by reason.
+- Neither rerun touches a trial or attempt that started. A started attempt that fails is scored as it stands.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
