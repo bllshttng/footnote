@@ -1559,6 +1559,10 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, CensusFailure> {
 
 #[cfg(test)]
 mod tests {
+    /// The brake tests drive the process-global FNO_MACHINE_BRAKE path; the
+    /// suite runs two threads, so both tests hold this lock end to end.
+    static BRAKE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     /// ESRCH means the pid exited between the listing and the read, so the
@@ -2006,6 +2010,7 @@ mod tests {
 
     #[test]
     fn an_unexpired_brake_refuses_the_fleet_and_names_the_group() {
+        let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
         std::fs::write(
@@ -2041,6 +2046,7 @@ mod tests {
 
     #[test]
     fn no_brake_file_leaves_admission_untouched() {
+        let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
         let permit = admit_fleet();

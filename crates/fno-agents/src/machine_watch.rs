@@ -182,9 +182,10 @@ pub fn tick_machine_watch(
                 "machine_watch: box runaway",
                 &mut notify,
             );
-            if outcome.acted > 0 {
-                brake(sample, &reason);
-            }
+            // The brake refreshes on every runaway tick, notice sent or not:
+            // the 30m hold must outlive the notice throttle, or a sustained
+            // runaway reopens the gate mid-fire.
+            brake(sample, &reason);
             outcome
         }
         "hot" => {
@@ -560,6 +561,21 @@ mod tests {
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 1);
         assert!(outcome.detail.contains("runaway"), "{}", outcome.detail);
+        // A throttled second tick still refreshes the brake: the hold must
+        // outlive the notice throttle on a sustained runaway.
+        let outcome = tick_machine_watch(
+            &mut state,
+            Ok(&s),
+            |_, _| {
+                notify_calls += 1;
+                true
+            },
+            Instant::now(),
+            |_, _| brake_calls += 1,
+        );
+        assert_eq!(outcome.acted, 0, "second notice is throttled");
+        assert_eq!(notify_calls, 1);
+        assert_eq!(brake_calls, 2);
     }
 
     #[test]
