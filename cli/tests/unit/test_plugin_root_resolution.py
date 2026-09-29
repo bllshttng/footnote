@@ -168,4 +168,3 @@ def test_canonical_fails_open_on_subprocess_error(tmp_path, monkeypatch):
         returncode = 0
     monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: _NoStdout())
     assert paths._canonical_plugin_root(plugin) == plugin
-
