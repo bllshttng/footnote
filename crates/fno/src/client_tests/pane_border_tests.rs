@@ -214,6 +214,90 @@ fn pane_border_press_route_names_the_ring() {
 }
 
 #[test]
+fn pane_border_recolors_the_focused_edge_with_theme_border() {
+    // `mux.theme.border` overrides the focused framed edge like every other
+    // border: the corner and rule wear t.border, the name label keeps brand.
+    let mut v = framed_pair();
+    v.theme.border = Color::Rgb(0xff, 0xff, 0xff);
+    let frame = v.compose();
+    let ch_at = |c: usize| frame.cells[frame.cols as usize + c].c;
+    let fg_at = |c: usize| frame.cells[frame.cols as usize + c].fg;
+    assert_eq!(ch_at(64), '╭');
+    assert_eq!(
+        fg_at(64),
+        Color::Rgb(0xff, 0xff, 0xff),
+        "the focused corner reads t.border"
+    );
+    assert_eq!(
+        fg_at(65),
+        Color::Rgb(0xff, 0xff, 0xff),
+        "the focused rule reads t.border"
+    );
+    let brand = v.theme.brand;
+    let name_col = (64..99)
+        .find(|&c| ch_at(c) == 'p')
+        .expect("name label present");
+    assert_eq!(fg_at(name_col), brand, "the name label keeps the brand");
+}
+
+#[test]
+fn the_focused_edge_reads_theme_border_under_both_footnote_themes() {
+    // The PR capture: the real composed frame under both footnote themes.
+    // Asserts the focused edge wears the theme's own border field (the fix
+    // this PR pins), and drops the TSV cell dump in the ambient temp dir
+    // (the one env the test wrapper leaves through) for the PNG conversion.
+    let mut dump = String::new();
+    for name in ["footnote-superscript", "footnote-paper"] {
+        let mut v = framed_pair();
+        v.theme = Theme::from_name(name).0;
+        let (border, base, text) = (v.theme.border, v.theme.base, v.theme.title);
+        let frame = v.compose();
+        let ch_at = |c: usize| frame.cells[frame.cols as usize + c].c;
+        let fg_at = |c: usize| frame.cells[frame.cols as usize + c].fg;
+        assert_eq!(
+            fg_at(64),
+            border,
+            "{name}: the focused corner reads t.border"
+        );
+        assert_eq!(fg_at(65), border, "{name}: the focused rule reads t.border");
+        assert_eq!(ch_at(64), '╭', "{name}");
+        let color_tag = |c: Color| match c {
+            Color::Default => "D".to_string(),
+            Color::Indexed(n) => format!("i{n}"),
+            Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        };
+        let mut out = format!(
+            "THEME\t{}\t{}\t{}\t{}\t{}\n",
+            name,
+            frame.cols,
+            frame.rows,
+            color_tag(text),
+            color_tag(base)
+        );
+        for r in 0..frame.rows as usize {
+            for c in 0..frame.cols as usize {
+                let cell = frame.cells[r * frame.cols as usize + c];
+                if cell.c == ' ' && cell.fg == Color::Default && cell.bg == Color::Default {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    r,
+                    c,
+                    cell.c,
+                    color_tag(cell.fg),
+                    color_tag(cell.bg),
+                    cell.flags
+                ));
+            }
+        }
+        dump.push_str(&out);
+    }
+    let path = std::env::temp_dir().join("fno-theme-border-capture.tsv");
+    std::fs::write(&path, &dump).expect("write the capture TSV");
+}
+
+#[test]
 fn pane_border_renders_before_after_dumps() {
     // The PR body's render proof: the branch's framed render of framed_pair,
     // plus one edge layout per drop step (AC2-EDGE).
