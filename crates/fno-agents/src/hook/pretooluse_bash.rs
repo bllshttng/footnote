@@ -28,7 +28,11 @@ pub fn run(_args: &[String]) -> i32 {
         .or_else(crate::provider::plugin_root);
     let mut refusals = Vec::new();
 
-    if crate::agents_config::guard_enabled(&cwd, "bg-process") {
+    // One config resolution for the whole chain: guard_enabled re-walks the
+    // config candidates per call, and this hook runs on every Bash turn.
+    let preset = crate::agents_config::guard_preset(&cwd);
+
+    if crate::agents_config::preset_runs(preset, "bg-process") {
         if let Some(root) = plugin_root.as_deref() {
             if let Some(reason) = run_python_guard(&root, "bg-process-guard.py", &raw) {
                 refusals.push(reason);
@@ -38,13 +42,13 @@ pub fn run(_args: &[String]) -> i32 {
         }
     }
 
-    if crate::agents_config::guard_enabled(&cwd, "bin-install") {
+    if crate::agents_config::preset_runs(preset, "bin-install") {
         let bin_refusal = super::bin_install_guard::judge(&payload);
         super::emit_guard_decision(&cwd, "bin-install-guard", "Bash", bin_refusal.is_some());
         refusals.extend(bin_refusal);
     }
 
-    if crate::agents_config::guard_enabled(&cwd, "git-protection") {
+    if crate::agents_config::preset_runs(preset, "git-protection") {
         if let Some(root) = plugin_root.as_deref() {
             if let Some(reason) = run_python_guard(&root, "git-protection.py", &raw) {
                 refusals.push(reason);
@@ -54,13 +58,13 @@ pub fn run(_args: &[String]) -> i32 {
         }
     }
 
-    if crate::agents_config::guard_enabled(&cwd, "pipe") {
+    if crate::agents_config::preset_runs(preset, "pipe") {
         let pipe_refusal = super::pipe_guard::judge(&payload);
         super::emit_guard_decision(&cwd, "pipe-guard", "Bash", pipe_refusal.is_some());
         refusals.extend(pipe_refusal);
     }
 
-    if crate::agents_config::guard_enabled(&cwd, "recursive-grep") {
+    if crate::agents_config::preset_runs(preset, "recursive-grep") {
         if let Some(root) = plugin_root.as_deref() {
             if let Some(reason) = run_python_guard(&root, "recursive-grep-guard.py", &raw) {
                 refusals.push(reason);
@@ -70,7 +74,7 @@ pub fn run(_args: &[String]) -> i32 {
         }
     }
 
-    let test = if crate::agents_config::guard_enabled(&cwd, "test-run") {
+    let test = if crate::agents_config::preset_runs(preset, "test-run") {
         super::test_run_guard::evaluate(&payload)
     } else {
         super::test_run_guard::Evaluation {

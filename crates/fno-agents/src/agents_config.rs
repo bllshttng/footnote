@@ -221,7 +221,13 @@ pub(crate) fn guard_preset(cwd: &Path) -> &'static str {
 /// bg-process, git-protection. The state-integrity guards (graph write
 /// protection and friends) never gate here.
 pub(crate) fn guard_enabled(cwd: &Path, guard: &str) -> bool {
-    match guard_preset(cwd) {
+    preset_runs(guard_preset(cwd), guard)
+}
+
+/// The same verdict from an already-resolved preset, so a caller gating
+/// several guards resolves the config once, not once per guard.
+pub(crate) fn preset_runs(preset: &str, guard: &str) -> bool {
+    match preset {
         "strict" => true,
         "off" => false,
         _ => !matches!(
