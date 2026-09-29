@@ -3335,20 +3335,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            2094,
-            Ok(crate::merge_gates::StaleOverlap {
-                ci_base_sha: "abcdef123456".to_string(),
-                landed: 4,
-                shared: Vec::new(),
-            }),
-        );
-        assert_eq!(outcome, ProbeOutcome::Clear);
-    }
-
-    #[test]
     fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
@@ -3418,25 +3404,27 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        let mut req = request(Effect::Arm);
-        req.require_checks = true;
-        assert_eq!(run(&fake, &req).word(), "armed");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
-    }
-
-    #[test]
-    fn a_merge_without_required_checks_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        assert_eq!(run(&fake, &request(Effect::Merge)).word(), "merged");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    fn an_arm_or_unchecked_merge_skips_ci_base_freshness() {
+        // One table test, two rows: the effect that owes no freshness probe
+        // skips it, whatever its arm spelling.
+        for (effect, require_checks) in [(Effect::Arm, true), (Effect::Merge, false)] {
+            let fake = Fake {
+                ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+                ..clean()
+            };
+            let mut req = request(effect);
+            req.require_checks = require_checks;
+            assert_eq!(
+                run(&fake, &req).word(),
+                if effect == Effect::Arm {
+                    "armed"
+                } else {
+                    "merged"
+                },
+                "{effect:?} require_checks={require_checks}"
+            );
+            assert_eq!(*fake.ci_base_calls.borrow(), 0);
+        }
     }
 
     #[test]
@@ -4019,6 +4007,13 @@ mod tests {
         let line = "e".repeat(198) + &"é".repeat(20);
         let cut = first_line(&line);
         assert_eq!(cut.chars().count(), 200);
+        // The fallback table row: an stderr of only config warnings still
+        // reports its first line instead of collapsing to "no error output".
+        let out = "fno config: guards.preset is not a modeled config key; ignored\n";
+        assert_eq!(
+            first_line(out),
+            "fno config: guards.preset is not a modeled config key; ignored"
+        );
     }
 
     #[test]
@@ -4067,16 +4062,6 @@ mod tests {
         assert_eq!(outcome.word(), "failed");
         assert!(outcome.detail().contains("unknown flag: --squash"));
         assert!(!outcome.detail().contains("guards.preset"));
-    }
-
-    #[test]
-    fn a_stderr_of_only_config_warnings_still_reports_its_first_line() {
-        // An all-noise stderr must not collapse to "no error output".
-        let out = "fno config: guards.preset is not a modeled config key; ignored\n";
-        assert_eq!(
-            first_line(out),
-            "fno config: guards.preset is not a modeled config key; ignored"
-        );
     }
 
     #[test]
