@@ -1242,6 +1242,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("territory", r_territory(ctx));
     take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
+    take("machine", r_machine(&ctx.events_paths));
     let workers_payload = crate::king_answers::fetch_workers_payload();
     take(
         "workers",
@@ -1570,6 +1571,47 @@ fn finish_change(derived: String, model: Option<&str>, data: &mut Map<String, Va
 }
 
 // ---------------------------------------------------------------------------
+// machine reading
+
+/// The newest machine_sample row across the check-in's event journals: the
+/// machine state a king sees at every beat. Absent or stale-beyond-an-hour
+/// reads `unmeasured`, never an old number dressed as current.
+fn r_machine(events_paths: &[PathBuf]) -> Result<Value, String> {
+    let mut newest: Option<(String, Value)> = None;
+    for path in events_paths {
+        if let Some((id, data)) = crate::machine_sample::newest(path) {
+            let ts = data.get("_ts").and_then(Value::as_str).unwrap_or("");
+            let best = newest
+                .as_ref()
+                .map(|(_, d)| d.get("_ts").and_then(Value::as_str).unwrap_or(""))
+                .unwrap_or("");
+            if newest.is_none() || ts > best {
+                newest = Some((id, data));
+            }
+        }
+    }
+    let Some((_, data)) = newest else {
+        return Ok(json!({"state": "unmeasured"}));
+    };
+    let age = data
+        .get("_ts")
+        .and_then(Value::as_str)
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|then| (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_seconds())
+        .unwrap_or(i64::MAX);
+    if age > 3600 {
+        return Ok(json!({"state": "unmeasured", "age_s": age}));
+    }
+    Ok(json!({
+        "state": "measured",
+        "processes": data.get("processes"),
+        "swap_used_gb": data.get("swap_used_gb"),
+        "swap_total_gb": data.get("swap_total_gb"),
+        "age_s": age,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // render
 
 pub(crate) fn dash(v: Option<&Value>) -> String {
@@ -1591,6 +1633,41 @@ fn render_lines(
     let by_name = |name: &str| readings.iter().find(|r| r.name == name);
     let failed = |name: &str| readings.iter().find(|r| r.name == name && !r.ok);
     let mut lines: Vec<String> = Vec::new();
+
+    match by_name("machine") {
+        Some(r) if r.ok => {
+            let state = r
+                .value
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unmeasured");
+            if state != "measured" {
+                lines.push("machine: unmeasured".into());
+            } else {
+                let num = |key: &str| {
+                    r.value
+                        .get(key)
+                        .and_then(Value::as_f64)
+                        .map(|v| format!("{v:.1}"))
+                        .unwrap_or_else(|| "unmeasured".into())
+                };
+                let count = r
+                    .value
+                    .get("processes")
+                    .and_then(Value::as_u64)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unmeasured".into());
+                let age = r.value.get("age_s").and_then(Value::as_i64).unwrap_or(0);
+                lines.push(format!(
+                    "machine: {count} processes, swap {} of {} GB ({age}s old)",
+                    num("swap_used_gb"),
+                    num("swap_total_gb"),
+                ));
+            }
+        }
+        Some(r) => lines.push(format!("READER FAILED machine: {}", r.error)),
+        None => {}
+    }
 
     match by_name("user_notes") {
         Some(r) if r.ok && !r.value.is_null() => {
@@ -4974,5 +5051,76 @@ mod tests {
         assert_eq!(level, None);
         assert_eq!(board_state, None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn machine_reading_folds_the_newest_sample_from_the_journals() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let new = now.to_rfc3339();
+        let rows = [
+            serde_json::json!({"ts": old, "type": "machine_sample", "source": "daemon",
+                "data": {"processes": 1005, "swap_used_gb": 2.0, "swap_total_gb": 95.0}}),
+            serde_json::json!({"ts": new, "type": "machine_sample", "source": "daemon",
+                "data": {"processes": 144, "swap_used_gb": 15.7, "swap_total_gb": 95.0}}),
+        ];
+        let body: String = rows.iter().map(|r| r.to_string() + "\n").collect();
+        std::fs::write(&journal, body).unwrap();
+        let reading = r_machine(&[journal]).unwrap();
+        assert_eq!(reading["state"], "measured");
+        assert_eq!(reading["processes"], 144);
+        assert_eq!(reading["swap_used_gb"], 15.7);
+        let age = reading["age_s"].as_i64().unwrap();
+        assert!(age >= 0, "age reads from the row timestamp");
+    }
+
+    #[test]
+    fn machine_reading_reports_unmeasured_when_no_row_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("absent.jsonl");
+        let reading = r_machine(&[journal]).unwrap();
+        assert_eq!(reading["state"], "unmeasured");
+    }
+
+    #[test]
+    fn the_machine_line_renders_before_the_rest_of_the_beat() {
+        let reading = Reading::took(
+            "machine",
+            serde_json::json!({
+                "state": "measured",
+                "processes": 144,
+                "swap_used_gb": 15.7,
+                "swap_total_gb": 95.0,
+                "age_s": 42,
+            }),
+        );
+        let lines = render_lines(
+            "scope",
+            &[reading],
+            &serde_json::Map::new(),
+            &None,
+            "",
+            "no change",
+        );
+        assert_eq!(
+            lines[0],
+            "machine: 144 processes, swap 15.7 of 95.0 GB (42s old)"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_machine_reading_renders_as_unmeasured() {
+        let reading = Reading::took("machine", serde_json::json!({"state": "unmeasured"}));
+        let lines = render_lines(
+            "scope",
+            &[reading],
+            &serde_json::Map::new(),
+            &None,
+            "",
+            "no change",
+        );
+        assert_eq!(lines[0], "machine: unmeasured");
     }
 }
