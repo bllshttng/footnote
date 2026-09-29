@@ -7,7 +7,8 @@
 //! beside zcode.cjs), so there is no keeper child and no pane lane; the row
 //! is an identity row, not a liveness claim.
 
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -138,7 +139,7 @@ fn run_turn(
 
     let pid = child.id();
     let _sigint_guard = crate::subprocess_ask::SigintForwarder::install(pid);
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
     let stderr_pipe = child.stderr.take().expect("stderr piped");
 
     // stdout: tee every line as it arrives (live view), capture for parse.
@@ -356,7 +357,7 @@ pub fn dispatch_zcode_once(
             ("stage", "dispatch".into()),
             ("name", name.into()),
             ("provider", "zcode".into()),
-            ("session_id", session_id.into()),
+            ("session_id", session_id.clone().into()),
             ("posture", "yolo".into()),
         ],
     );

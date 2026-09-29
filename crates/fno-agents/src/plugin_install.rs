@@ -1723,7 +1723,7 @@ fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, Stri
     }
     let dirs = dirs.as_array_mut().expect("checked array");
     if !dirs.iter().any(|d| d.as_str() == Some(stage_str.as_str())) {
-        dirs.push(serde_json::Value::String(stage_str));
+        dirs.push(serde_json::Value::String(stage_str.clone()));
     }
     let written = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("cannot serialize {}: {e}", config_path.display()))?;
@@ -1973,9 +1973,18 @@ pub(crate) fn loop_install_probe(
             })
         }
         "zcode" => {
-            let config_path = zcode_config_path()?;
-            let root = repo_root(&std::env::current_dir().unwrap_or_default())?;
-            let stage = build_stage(&root, &state_root().join("plugin-stage"))?.0;
+            let config_path = match zcode_config_path() {
+                Ok(path) => path,
+                Err(reason) => return Some(Err(reason)),
+            };
+            let root = match repo_root(&std::env::current_dir().unwrap_or_default()) {
+                Ok(root) => root,
+                Err(reason) => return Some(Err(reason)),
+            };
+            let stage = match build_stage(&root, &state_root().join("plugin-stage")) {
+                Ok(stage) => stage.0,
+                Err(reason) => return Some(Err(reason)),
+            };
             let text = match std::fs::read_to_string(&config_path) {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1986,8 +1995,15 @@ pub(crate) fn loop_install_probe(
                 }
                 Err(e) => return Some(Err(format!("cannot read {}: {e}", config_path.display()))),
             };
-            let parsed: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("{} does not parse: {e}", config_path.display()))?;
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return Some(Err(format!(
+                        "{} does not parse: {e}",
+                        config_path.display()
+                    )))
+                }
+            };
             let listed = parsed
                 .get("plugins")
                 .and_then(|p| p.get("dirs"))

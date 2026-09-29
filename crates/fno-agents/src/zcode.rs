@@ -92,12 +92,11 @@ fn tail_text(stderr_tail: &str) -> String {
         .collect()
 }
 
-
-use crate::provider::Provider;
 use crate::provider::CreateContext;
+use crate::provider::Provider;
+use crate::provider::ReachabilityProbeError;
 use crate::provider::ResumeContext;
 use crate::ParsedEvent;
-use crate::provider::ReachabilityProbeError;
 use std::time::Duration;
 
 pub struct ZcodeProvider;
@@ -108,12 +107,8 @@ impl Provider for ZcodeProvider {
     }
 
     fn create_argv(&self, _ctx: &CreateContext) -> Vec<String> {
-        crate::harness_capabilities::render_session_argv(
-            "zcode",
-            "headless_create",
-            None,
-        )
-        .expect("embedded zcode headless-create capability")
+        crate::harness_capabilities::render_session_argv("zcode", "headless_create", None)
+            .expect("embedded zcode headless-create capability")
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
@@ -123,10 +118,13 @@ impl Provider for ZcodeProvider {
             Some(&ctx.session_id),
         )
         .expect("embedded zcode headless-resume capability")
+    }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(chunk.trim()) else {
-            return ParsedEvent::Unknown { raw: chunk.to_string() };
+            return ParsedEvent::Unknown {
+                raw: chunk.to_string(),
+            };
         };
         if event.get("type").and_then(|v| v.as_str()) == Some("result") {
             if let Some(text) = event.get("response").and_then(|v| v.as_str()) {
@@ -136,7 +134,9 @@ impl Provider for ZcodeProvider {
                 };
             }
         }
-        ParsedEvent::Unknown { raw: chunk.to_string() }
+        ParsedEvent::Unknown {
+            raw: chunk.to_string(),
+        }
     }
 
     fn reachability(
@@ -150,8 +150,6 @@ impl Provider for ZcodeProvider {
         ))
     }
 }
-
-    }
 
 #[cfg(test)]
 mod tests {
@@ -231,13 +229,17 @@ mod tests {
             yolo: true,
         };
         let argv = ZcodeProvider.resume_argv(&rctx);
-        let at = argv.iter().position(|a| a == "--resume").expect("resume flag");
+        let at = argv
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("resume flag");
         assert_eq!(argv[at + 1], ID);
     }
 
     #[test]
     fn the_provider_maps_result_lines_and_refuses_nothing() {
-        let result_line = format!("{{\"type\":\"result\",\"sessionId\":\"{ID}\",\"response\":\"PONG\"}}");
+        let result_line =
+            format!("{{\"type\":\"result\",\"sessionId\":\"{ID}\",\"response\":\"PONG\"}}");
         match ZcodeProvider.parse_stream_event(&result_line) {
             ParsedEvent::ReplyComplete { text, .. } => assert_eq!(text, "PONG"),
             other => panic!("want ReplyComplete, got {other:?}"),
