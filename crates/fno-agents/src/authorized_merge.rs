@@ -1295,11 +1295,20 @@ fn checkout_refused(output: &str) -> bool {
     lower.contains("is already used by worktree") || lower.contains("already checked out")
 }
 
+/// The fno gh proxy prefixes its own stderr with `fno config:` when it warns
+/// about an unmodeled config key. That text is never gh's verdict.
+fn is_config_warning(line: &str) -> bool {
+    line.trim_start().starts_with("fno config:")
+}
+
 /// The first non-blank line of a command's output, capped for a receipt.
+/// Leading `fno config:` warning lines are skipped so the reason names the
+/// real gh error; a stderr of only warnings still reports its first line.
 fn first_line(output: &str) -> String {
     let line = output
         .lines()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| !line.trim().is_empty() && !is_config_warning(line))
+        .or_else(|| output.lines().find(|line| !line.trim().is_empty()))
         .unwrap_or("no error output");
     // Truncate by CHARACTER. A byte slice panics when the cut lands inside a
     // multi-byte character, and gh output carries them (a PR title, a branch
@@ -1309,6 +1318,19 @@ fn first_line(output: &str) -> String {
 
 fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
     let lower = output.to_lowercase();
+    if lower.contains("secondary rate limit") {
+        // A burst (a fleet undrafting many PRs at once) trips GitHub's
+        // secondary limiter. The same command succeeds after the backoff, so
+        // it holds like any other retryable state - never a merge-method
+        // fault.
+        return Outcome::Held {
+            reason: format!(
+                "GitHub secondary rate limit; wait out the backoff, then retry the {}: {}",
+                effect.word(),
+                first_line(output)
+            ),
+        };
+    }
     let reason = if lower.contains("fno/review-coverage") {
         // This verb published that status itself moments ago. GitHub has not
         // observed it yet, so the refusal clears on a retry.
@@ -3997,6 +4019,64 @@ mod tests {
         let line = "e".repeat(198) + &"é".repeat(20);
         let cut = first_line(&line);
         assert_eq!(cut.chars().count(), 200);
+    }
+
+    #[test]
+    fn a_secondary_rate_limit_behind_a_config_warning_reads_retryable_not_merge_method() {
+        // Specimen 2026-09-29: the fno gh proxy printed its config warning on
+        // stderr first, so the real gh error - a secondary rate limit - read
+        // as a merge-method fault and the worker burned three tries on it.
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: You have exceeded a secondary rate limit. Please wait a bit \
+                        before you try again."
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "held");
+        let detail = outcome.detail();
+        assert!(detail.contains("secondary rate limit"), "{detail}");
+        assert!(!detail.contains("merge method"), "{detail}");
+        assert!(!detail.contains("guards.preset"), "{detail}");
+    }
+
+    #[test]
+    fn the_failure_reason_names_the_real_gh_error_past_a_config_warning() {
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: unknown flag: --squash"
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "failed");
+        assert!(outcome.detail().contains("unknown flag: --squash"));
+        assert!(!outcome.detail().contains("guards.preset"));
+    }
+
+    #[test]
+    fn a_stderr_of_only_config_warnings_still_reports_its_first_line() {
+        // An all-noise stderr must not collapse to "no error output".
+        let out = "fno config: guards.preset is not a modeled config key; ignored\n";
+        assert_eq!(
+            first_line(out),
+            "fno config: guards.preset is not a modeled config key; ignored"
+        );
     }
 
     #[test]
