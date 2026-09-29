@@ -332,38 +332,6 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
     Ok(read_board(&opts))
 }
 
-/// Apply `--name` / `--keep-name-from` before the beat runs. A refusal
-/// (duplicate live name, already-named crown, wrong holder) names the
-/// holder; the caller prints it and exits 2 with no beat journalled.
-fn apply_crown_naming(
-    name: Option<&str>,
-    keep_from: Option<&str>,
-    home: &crate::paths::AgentsHome,
-    scope: &str,
-) -> Result<(), String> {
-    let store = home.crown_names_json();
-    let registry = home.registry_json();
-    match (name, keep_from) {
-        (Some(_), Some(_)) => Err("use one of --name or --keep-name-from, not both".into()),
-        (Some(n), None) => crate::crown_names::name_crown(&store, &registry, scope, n).map(|_| ()),
-        (None, Some(old)) => crate::crown_names::keep_from(&store, &registry, old, scope),
-        (None, None) => Ok(()),
-    }?;
-    if !crate::crown_names::ensure_named_crown(&store, &registry, scope)? {
-        return Err("every live crown needs a name; check in with --name <name>".into());
-    }
-    Ok(())
-}
-
-/// The first line of every beat: the crown's identity, then the facts.
-/// Unnamed crowns get the once-only instruction instead of a name.
-fn crown_line_text(name: Option<&str>, level_txt: &str, scope: &str) -> String {
-    match name {
-        Some(name) => format!("crown: {name} ({level_txt} {scope})"),
-        None => "crown: unnamed - name it once: fno agents king checkin --name <name>".to_string(),
-    }
-}
-
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     let crowns = vec![json!({"scope": ctx.scope, "level": ctx.level})];
     let payload = court_fold(
@@ -2371,6 +2339,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut as_json = false;
     let mut model_change: Option<String> = None;
     let mut crown_name: Option<String> = None;
+    let mut theme: Option<String> = None;
     let mut keep_name_from: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -2383,6 +2352,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             i += 2;
         } else if flag("--name") {
             crown_name = Some(args[i + 1].clone());
+            i += 2;
+        } else if flag("--theme") {
+            theme = Some(args[i + 1].clone());
             i += 2;
         } else if flag("--keep-name-from") {
             keep_name_from = Some(args[i + 1].clone());
@@ -2423,7 +2395,8 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
                 "fno-agents king-checkin: --scope SCOPE --events-path PATH \
                  [--events-path ...] --graph PATH --handoffs-dir PATH \
                  [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] \
-                 [--change TEXT] [--name NAME] [--keep-name-from OLD-SCOPE] \
+                 [--change TEXT] [--name NAME] [--theme THEME] \
+                 [--keep-name-from OLD-SCOPE] \
                  [--no-emit] [--json]"
             );
             return 2;
@@ -2450,10 +2423,14 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let ts = iso_now();
-    if let Err(e) = apply_crown_naming(
+    let home = crate::paths::AgentsHome::from_env();
+    if let Err(e) = crate::crown_names::apply_crown_naming(
+        &home.crown_names_json(),
+        &home.registry_json(),
         crown_name.as_deref(),
         keep_name_from.as_deref(),
-        &crate::paths::AgentsHome::from_env(),
+        theme.as_deref(),
+        ctx.level,
         &ctx.scope,
     ) {
         eprintln!("fno-agents king-checkin: {e}");
@@ -2500,9 +2477,14 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         .level
         .map(|l| format!("L{l}"))
         .unwrap_or_else(|| "L?".to_string());
+    let title_txt = crate::crown_names::stored_title(
+        &crate::paths::AgentsHome::from_env().crown_names_json(),
+        &ctx.scope,
+    )
+    .unwrap_or_else(|| format!("{level_txt} {}", ctx.scope));
     lines.insert(
         0,
-        crown_line_text(fold_name.as_deref(), &level_txt, &ctx.scope),
+        crate::crown_names::crown_line_text(fold_name.as_deref(), &title_txt, &ctx.scope),
     );
     // Bind an unbound record to the live holder's session and refresh the
     // node list from this beat's fold. A store write failure is a stated
@@ -2701,127 +2683,6 @@ mod tests {
             "agents": agents,
         });
         std::fs::write(home.registry_json(), doc.to_string()).unwrap();
-    }
-
-    #[test]
-    fn an_unnamed_live_crown_cannot_complete_checkin() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-a", "status": "live", "crown_scope": "fno",
-                "crown_level": 1, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-a", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-
-        let err = apply_crown_naming(None, None, &home, "fno").unwrap_err();
-
-        assert!(err.contains("every live crown needs a name"), "{err}");
-    }
-
-    #[test]
-    fn a_successor_checkin_carries_the_name_into_its_registry_label() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-old", "status": "live", "crown_scope": "x-aaaa",
-                "crown_level": 2, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-old", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-        crate::crown_names::name_crown(
-            &home.crown_names_json(),
-            &home.registry_json(),
-            "x-aaaa",
-            "barnaby",
-        )
-        .unwrap();
-        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa").unwrap();
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-heir", "status": "live", "crown_scope": "x-aaaa",
-                "crown_level": 2, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-heir", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-
-        apply_crown_naming(None, None, &home, "x-aaaa").unwrap();
-
-        let registry = crate::state::load_registry(&home.registry_json()).unwrap();
-        assert_eq!(registry.entries[0].name, "barnaby");
-    }
-
-    #[test]
-    fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        let reg = home.registry_json();
-        let agents = serde_json::json!([
-            {"name": "king-a", "status": "live", "crown_scope": "x-aaaa",
-             "crown_level": 2, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-a",
-             "created_at": "2026-09-23T20:00:00Z"},
-            {"name": "king-b", "status": "live", "crown_scope": "fno",
-             "crown_level": 1, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-b",
-             "created_at": "2026-09-23T20:00:00Z"}
-        ]);
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": agents,
-        });
-        std::fs::write(&reg, doc.to_string()).unwrap();
-        apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
-        let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("barnaby"), "{err}");
-    }
-
-    #[test]
-    fn naming_an_already_named_crown_refuses() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        let reg = home.registry_json();
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": [
-                {"name": "king-b", "status": "live", "crown_scope": "fno",
-                 "crown_level": 1, "cwd": "/repo", "harness": "claude",
-                 "harness_session_id": "sess-b",
-                 "created_at": "2026-09-23T20:00:00Z"}
-            ]
-        });
-        std::fs::write(&reg, doc.to_string()).unwrap();
-        apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap();
-        let err = apply_crown_naming(Some("ernest"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("already named"), "{err}");
-    }
-
-    #[test]
-    fn combining_the_two_naming_flags_refuses() {
-        assert!(apply_crown_naming(
-            Some("a"),
-            Some("old"),
-            &crate::paths::AgentsHome::at("/tmp"),
-            "fno"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
-        assert_eq!(
-            crown_line_text(Some("Barnaby II"), "L1", "fno"),
-            "crown: Barnaby II (L1 fno)"
-        );
-        assert_eq!(
-            crown_line_text(None, "L1", "fno"),
-            "crown: unnamed - name it once: fno agents king checkin --name <name>"
-        );
     }
 
     #[test]
