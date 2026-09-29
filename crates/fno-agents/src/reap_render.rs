@@ -808,7 +808,7 @@ mod tests {
             unread: None,
             names_pruned: Vec::new(),
             successions_reverted: vec![crate::crown_names::RevertedSuccession {
-                scope: "x-dead".to_string(),
+                scope: "x-gone".to_string(),
                 heir_name: "gone-heir".to_string(),
                 predecessor_name: "king-old".to_string(),
                 predecessor_session: Some("sess-old".to_string()),
@@ -829,7 +829,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "reverted succession on x-dead (heir gone-heir heir row removed: predecessor session restored)",
+                "reverted succession on x-gone (heir gone-heir heir row removed: predecessor session restored)",
             ),
             "{text}"
         );
@@ -868,7 +868,7 @@ mod tests {
             unread: None,
             names_pruned: Vec::new(),
             successions_reverted: vec![crate::crown_names::RevertedSuccession {
-                scope: "x-dead".to_string(),
+                scope: "x-gone".to_string(),
                 heir_name: "gone-heir".to_string(),
                 predecessor_name: "king-old".to_string(),
                 predecessor_session: Some("sess-old".to_string()),
