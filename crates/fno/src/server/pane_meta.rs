@@ -54,6 +54,26 @@ pub(crate) fn pane_meta(
     }
 }
 
+/// The registry row's CURRENT label for one pane, joined the same way
+/// [`pane_ctx`] joins: the row whose `mux` names this session and pane. A
+/// rename rewrites only this row (the pane's `FNO_AGENT_SELF` is env, frozen
+/// at spawn), so the frame and tab chrome read it at layout time and fall
+/// back to the spawn-captured name.
+pub(crate) fn pane_registry_name(
+    agents: &[crate::agents_view::RegistryAgent],
+    session_name: &str,
+    pid: u64,
+) -> Option<String> {
+    let mux_row = |a: &&crate::agents_view::RegistryAgent| matches!(&a.mux, Some((s, p)) if s == session_name && *p == pid);
+    // A recycled pane id can leave an exited row on the same (session, pane);
+    // the live row is the one still hosting the pane.
+    agents
+        .iter()
+        .find(|a| mux_row(a) && !a.exited)
+        .or_else(|| agents.iter().find(|a| mux_row(a)))
+        .map(|a| a.name.clone())
+}
+
 /// The context reading for one pane, joined through the registry row that
 /// hosts it: the row whose `mux` names this session and pane, keyed by the
 /// same transcript identity the tail pass reads. `None` reads as "no
@@ -78,6 +98,7 @@ pub(crate) fn pane_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents_view::RegistryAgent;
 
     // AC6-HP: the builder carries the label chain plus the new fields.
     #[test]
@@ -103,5 +124,33 @@ mod tests {
         let m = pane_meta(4, None, None, "/home/u/proj", None, None, None);
         assert_eq!(m.label, "proj");
         assert_eq!((m.node, m.branch, m.ctx), (None, None, None));
+    }
+
+    // x-8f59: a rename rewrites the registry row; the pane's FNO_AGENT_SELF
+    // env is frozen at spawn. The chrome reads the row (live row first), and
+    // an unhosted pane falls back to the spawn-captured name.
+    #[test]
+    fn registry_name_beats_the_spawn_captured_self() {
+        let agents = vec![
+            agent("kestrel-heir", Some(("mux0", 7)), true),
+            agent("bob", Some(("mux0", 7)), false),
+        ];
+        let got = pane_registry_name(&agents, "mux0", 7);
+        assert_eq!(got.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn unhosted_pane_falls_back_to_the_spawn_captured_name() {
+        let agents = vec![agent("other", Some(("mux0", 9)), false)];
+        assert_eq!(pane_registry_name(&agents, "mux0", 7), None);
+    }
+
+    fn agent(name: &str, mux: Option<(&str, u64)>, exited: bool) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            mux: mux.map(|(s, p)| (s.to_string(), p)),
+            exited,
+            ..Default::default()
+        }
     }
 }
