@@ -12,6 +12,7 @@ pub mod bin_install_guard;
 pub mod edit_integrity;
 pub mod king_guard;
 pub mod pipe_guard;
+pub mod pretooluse_bash;
 pub mod prompt;
 pub mod stop;
 pub mod test_run_guard;
@@ -28,12 +29,13 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("king-guard") => king_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
+        Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, king-guard, pipe-guard, prompt, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, king-guard, pipe-guard, pretooluse-bash, prompt, test-run-guard or stop"
             );
             2
         }
@@ -71,7 +73,8 @@ pub(crate) fn emit_allow() -> i32 {
 /// `emit_to_both` uses, shared by every native guard so the rows stay
 /// byte-identical (as `hooks/lib/guard-mark.sh` did).
 pub(crate) fn emit_guard_decision(cwd: &Path, guard: &str, tool: &str, denied: bool) {
-    let path = crate::paths::events_path(cwd);
+    let path =
+        crate::state_path::resolve("events", cwd).unwrap_or_else(|| crate::paths::events_path(cwd));
     let event = json!({
         "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "type": "guard_decision",

@@ -121,24 +121,31 @@ enum Kind {
     WholeDoor,
 }
 
-/// Entry: read the payload once, decide, print, always exit 0.
-pub fn run(_args: &[String]) -> i32 {
-    let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
-    let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
-    let allow = |stage: &str| -> i32 {
-        if trace {
-            eprintln!("test-run-guard: allow at {stage}");
-        }
-        super::emit_allow()
-    };
+pub(super) struct Evaluation {
+    pub should_log: bool,
+    pub refusal: Option<String>,
+    pub stage: &'static str,
+}
 
+/// Evaluate the same payload the standalone hook reads, without emitting a
+/// response or event. The Bash dispatcher uses this to keep the predicate and
+/// event decision shared with the standalone entry.
+pub(super) fn evaluate(payload: &Value) -> Evaluation {
     // 1. Empty or unparseable payload: not a refusal.
     if payload.is_null() {
-        return allow("payload-null");
+        return Evaluation {
+            should_log: false,
+            refusal: None,
+            stage: "payload-null",
+        };
     }
     // 2. Only Bash is judged.
     if payload.get("tool_name").and_then(Value::as_str) != Some("Bash") {
-        return allow("tool-not-judged");
+        return Evaluation {
+            should_log: false,
+            refusal: None,
+            stage: "tool-not-judged",
+        };
     }
     // 3. A call with no command has nothing to judge.
     let Some(cmd) = payload
@@ -147,13 +154,20 @@ pub fn run(_args: &[String]) -> i32 {
         .and_then(Value::as_str)
         .filter(|c| !c.trim().is_empty())
     else {
-        return allow("no-command");
+        return Evaluation {
+            should_log: false,
+            refusal: None,
+            stage: "no-command",
+        };
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(root) = repo_root(&cwd) else {
-        super::emit_guard_decision(&cwd, "test-run-guard", "Bash", false);
-        return allow("no-repo");
+        return Evaluation {
+            should_log: true,
+            refusal: None,
+            stage: "no-repo",
+        };
     };
 
     // A background call never blocks its turn, so the whole-default-suite
@@ -165,15 +179,33 @@ pub fn run(_args: &[String]) -> i32 {
         .and_then(Value::as_bool)
         != Some(true);
 
-    match decide_at_bg(cmd, Some(&root), foreground) {
-        Some(reason) => {
-            super::emit_guard_decision(&cwd, "test-run-guard", "Bash", true);
-            super::emit_block(&reason)
-        }
-        None => {
-            super::emit_guard_decision(&cwd, "test-run-guard", "Bash", false);
-            allow("no-raw-run")
-        }
+    let refusal = decide_at_bg(cmd, Some(&root), foreground);
+    Evaluation {
+        should_log: true,
+        stage: if refusal.is_some() {
+            "refused"
+        } else {
+            "no-raw-run"
+        },
+        refusal,
+    }
+}
+
+/// Entry: read the payload once, decide, print, always exit 0.
+pub fn run(_args: &[String]) -> i32 {
+    let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+    let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
+    let evaluation = evaluate(&payload);
+    if evaluation.should_log {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        super::emit_guard_decision(&cwd, "test-run-guard", "Bash", evaluation.refusal.is_some());
+    }
+    if trace && evaluation.refusal.is_none() {
+        eprintln!("test-run-guard: allow at {}", evaluation.stage);
+    }
+    match evaluation.refusal {
+        Some(reason) => super::emit_block(&reason),
+        None => super::emit_allow(),
     }
 }
 

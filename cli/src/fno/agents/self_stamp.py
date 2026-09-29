@@ -24,6 +24,13 @@ class IdentityAmbiguousError(RuntimeError):
     """The ambient markers disagree and no process-tree proof is available."""
 
 
+def runtime_identity_witness(harness: str) -> frozenset:
+    """codex rollout fd ids plus the caller's own spawn row; the row is the claude family's only id witness (name_only stamp, no ancestor carries the id)."""
+    from fno.agents.codex_rollout import codex_rollout_witness
+    from fno.agents.registry import spawn_row_session_ids
+    return codex_rollout_witness(harness) | spawn_row_session_ids(harness)
+
+
 def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     """Resolve owned identity with the runtime registry collision witness."""
     def collide(
@@ -36,11 +43,8 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         # self-blind exactly where nothing proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
-    # Same injection seam as collide; claims cannot import agents.
-    from fno.agents.codex_rollout import codex_rollout_witness
-
     return _resolve_self_identity(
-        env, collide=collide, witness=codex_rollout_witness
+        env, collide=collide, witness=runtime_identity_witness
     )
 
 
