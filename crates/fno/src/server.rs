@@ -1178,66 +1178,11 @@ mod argv_facts;
 
 use argv_facts::*;
 
-/// A tab's display label, from spawn-time facts only - no I/O, no
-/// subprocess on the layout path (squad.rs's origin-freeze discipline).
-/// Chain: explicit rename > registered name (`FNO_AGENT_SELF`) >
-/// `FNO_NODE` provenance > spawn-cwd basename when it differs from the squad's
-/// > command basename > the bare 1-based index (so a plain shell tab renders
-/// unchanged). `pane` is the focused pane's `(name, node, cwd, cmd)`; `None`
-/// (a reaped pane racing tree cleanup) falls through to the index - the
-/// derivation never panics on a missing pane.
-#[allow(clippy::type_complexity)]
-fn tab_label(
-    rename: Option<&str>,
-    pane: Option<(Option<&str>, Option<&str>, &str, Option<&str>)>,
-    squad_cwd: &str,
-    i: usize,
-) -> String {
-    if let Some(name) = rename {
-        return name.to_string();
-    }
-    if let Some((name, node, cwd, cmd)) = pane {
-        // Every derived candidate is sanitized like a rename (codex peer
-        // review): FNO_NODE values, dir names, and argv all admit control
-        // bytes, and these strings land in chrome cells. A candidate that
-        // sanitizes to empty (e.g. whitespace-only) falls through to the
-        // next source instead of rendering a blank label.
-        if let Some(name) = name {
-            let clean = sanitize_tab_name(name);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(node) = node {
-            let clean = sanitize_tab_name(node);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        fn base(p: &str) -> &str {
-            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
-        }
-        let cwd_base = base(cwd);
-        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
-            let clean = sanitize_tab_name(cwd_base);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(cmd) = cmd {
-            let clean = sanitize_tab_name(cmd);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-    }
-    (i + 1).to_string()
-}
-
 /// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
 /// (file-budget ratchet); re-imported so callers and tests resolve.
-use pane_meta::pane_label;
+use pane_meta::{pane_label, tab_label};
 
+mod osc_reply;
 mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
@@ -3200,13 +3145,28 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
+        let theme = self.mux_theme();
         let mut spawn_argv = argv.clone();
         if let Some(worker) = worker.as_deref() {
             if agent_self_from_argv(&spawn_argv).is_none() {
-                let mut wrapped = vec!["env".to_string(), format!("FNO_AGENT_SELF={worker}")];
+                let mut wrapped = vec![
+                    "env".to_string(),
+                    format!("COLORFGBG={}", osc_reply::colorfgbg(&theme)),
+                    format!("FNO_AGENT_SELF={worker}"),
+                ];
                 wrapped.extend(spawn_argv);
                 spawn_argv = wrapped;
             }
+        }
+        // A claude pane on a light ground launches with the plugin's shipped
+        // footnote-paper theme: the OSC 11 answer resolves `auto` to light,
+        // and the custom theme keeps the dark prompt band the stock light
+        // theme loses. `--settings` is per-session; settings.json is never
+        // touched. Appended last: claude's parser takes flags after any
+        // positional, and the spawn argv is never a shell string.
+        if argv_runs_claude(&spawn_argv) && crate::theme::is_light(&theme) {
+            spawn_argv.push("--settings".to_string());
+            spawn_argv.push("{\"theme\":\"custom:footnote:footnote-paper\"}".to_string());
         }
         // Every spawned pane takes the keeper road in production, worker or
         // not; unit fixtures keep today's split (short-lived fixtures can
@@ -12740,6 +12700,10 @@ fn drain_pty_output(
                             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         touched.insert(pid);
                     }
+                    // x-8f59: a pane nobody focuses gets no terminal to
+                    // answer its palette probes; the mux does, from the
+                    // active theme. Focused panes ride the client loopback.
+                    core.answer_color_queries(pid, &bytes);
                 }
                 PaneChunk::Resized(rows, cols) => {
                     // The keeper's resize round trip landed: apply the VT

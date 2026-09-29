@@ -66,6 +66,18 @@ pub(super) fn agent_self_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_AGENT_SELF=")
 }
 
+/// Whether the spawned command is claude: any command-shaped token past the
+/// `env` wrapper whose basename is `claude` (a QoS wrapper around it does not
+/// hide it). ponytail: a claude NAMED IN AN ARGUMENT of some other command
+/// also matches - only the spawn-path theme flag consumes this, and that
+/// false positive costs a harmless extra flag.
+pub(super) fn argv_runs_claude(argv: &[String]) -> bool {
+    let start = env_assignments_start(argv).unwrap_or(0);
+    argv[start..]
+        .iter()
+        .any(|a| !a.contains('=') && a.rsplit('/').next() == Some("claude"))
+}
+
 /// The argv index where the `env(1)` `NAME=VALUE` assignment run begins:
 /// past `env` itself and its option run. `_mesh_env_wrapper` emits an auth-var
 /// scrub (`-u VAR`) BEFORE the assignments on an `--account` spawn, so
