@@ -258,7 +258,9 @@ def test_name_only_claude_spawn_row_witness(tmp_path, monkeypatch):
     canonically when the named row holds the marker id, a stale name export
     (the row under that name holds a different live id) fails closed and
     names the true holder, and the reader keys on FNO_AGENT_SELF with a
-    FNO_WORKER_NAME fallback, empty on any harness mismatch."""
+    FNO_WORKER_NAME fallback, empty on any harness mismatch. The name ground
+    also answers with the walk silent: a thread worker whose
+    ancestry hides the harness process keeps its spawn-row proof."""
     from fno.agents.registry import register_existing_session, spawn_row_session_ids
     from fno.paths_testing import use_tmpdir
 
@@ -279,6 +281,19 @@ def test_name_only_claude_spawn_row_witness(tmp_path, monkeypatch):
     assert fields["DISPOSITION"] == "canonical"
     assert fields["COLLISION"] == ""
 
+    # The same name ground with the walk silent: resolution must not depend
+    # on an ancestry read a thread worker cannot supply.
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: None
+    )
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "single"
+    assert fields["COLLISION"] == ""
+
     # The reader seam behind the witness, keyed by the spawn-minted name.
     assert spawn_row_session_ids("claude") == frozenset({mine})
     monkeypatch.delenv("FNO_AGENT_SELF")
@@ -296,4 +311,67 @@ def test_name_only_claude_spawn_row_witness(tmp_path, monkeypatch):
     fields = _fields(result)
     assert fields["DISPOSITION"] == "ambiguous"
     assert fields["COLLISION"] == row.name
+    assert fields["COLLISION_ID"] == mine
+
+
+def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
+    """A re-dispatched spawn reaches init with a name_only stamp and
+    NO spawn-minted name in its env, so the name ground is empty. The
+    cwd-keyed spawn record - the one live thread row the spawn flow wrote at
+    the worker's cwd - is the remaining non-circular ground, and a marker
+    naming its id resolves instead of reading the worker's own fresh row as
+    contention. A second live thread row on the same cwd restores the
+    refusal: the exactly-one contract is the bystander guard."""
+    import json
+    import os
+
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+    from fno.paths import agents_registry_path
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    sibling = "019cc082-1111-7283-97cc-751c46742a08"
+    row = {
+        "name": "w-x1a5a",
+        "status": "live",
+        "substrate": "thread",
+        "harness": "claude",
+        "harness_session_id": mine,
+        "cwd": os.path.realpath(str(tmp_path)),
+        "log_path": str(tmp_path / "w.log"),
+    }
+    path = agents_registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema_version": 37, "agents": [row]}))
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: None
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (mine, "env_only"),
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == mine
+    assert fields["COLLISION"] == ""
+
+    # Bystander guard: two live thread rows on one cwd answer nothing, so the
+    # marker is refused and names the holder again.
+    sibling_row = dict(row, name="w-x1a5a-sibling", harness_session_id=sibling)
+    path.write_text(
+        json.dumps({"schema_version": 37, "agents": [row, sibling_row]}))
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == "w-x1a5a"
     assert fields["COLLISION_ID"] == mine
