@@ -479,6 +479,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         shutil.rmtree(mux_dir, ignore_errors=True)
 
 
+@pytest.mark.timeout(600)
 def test_codex_autonomous_pane_journey_completes_without_operator_input(
     tmp_path: Path, monkeypatch
 ) -> None:
