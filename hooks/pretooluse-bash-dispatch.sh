@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - shared Bash guard dispatcher
 # PreToolUse: run the ordered Bash guard chain with one hook command.
 # Guard policy stays in the Rust hook module and existing Python guards.
 stdin=$(cat)
