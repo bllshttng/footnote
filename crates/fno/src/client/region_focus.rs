@@ -680,10 +680,16 @@ pub(super) async fn mouse_pre_pass(
             }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
-            // A content click focuses the pane too; only the press moves the
-            // owner, so motion during a selection never steals typing.
+            // A content click is an explicit pane focus: only the press moves
+            // the owner (motion during a selection never steals typing), and
+            // the press refocuses the server the way a border click does, so
+            // the clicked pane receives typing without waiting on the
+            // hover-settle the human path usually supplies first.
             if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
                 view.region_owner = RegionOwner::Pane;
+                write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
+                    .await
+                    .map_err(|e| format!("focus send failed: {e}"))?;
             }
             write_msg(
                 sock_w,
