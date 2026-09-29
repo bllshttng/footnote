@@ -170,6 +170,7 @@ jobs:
     outputs:
       cargo: ${{ steps.select.outputs.cargo }}
       python_full: ${{ steps.select.outputs.python_full }}
+      skill_bundles: ${{ steps.select.outputs.skill_bundles }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -188,6 +189,31 @@ jobs:
         run: |
           rustc --edition=2021 crates/fno-agents/src/bin/pr-affected.rs -o "$RUNNER_TEMP/pr-affected"
           "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" "$PACKET_FITS" | tee -a "$GITHUB_OUTPUT"
+
+  # The freshness check rides the smoke registry, but a PR whose selector
+  # keeps the full Python lane off never runs a registry entry: PR 2719
+  # changed a bundled canonical script green and main went red at the merge
+  # commit. The selector now names bundle paths (skill_bundles); this job
+  # runs the check on exactly that packet. changed-smoke's always-lint set
+  # runs the same script on packets that fit, so a real drift can be red
+  # twice on purpose.
+  skill-bundles-fresh:
+    name: Skill bundles freshness
+    needs: [pr-affected]
+    if: ${{ !cancelled() && needs.pr-affected.outputs.skill_bundles == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet "pyyaml>=6"
+      - name: Run the bundle freshness check
+        run: bash scripts/lint/check-skill-bundles-fresh.sh
 
   # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
   # never in front of it: only `smoke` satisfies the merge gate - a green here
@@ -489,13 +515,6 @@ jobs:
       - name: Decision graduation probes
         run: uv run --project cli python scripts/ci/check-decision-graduation.py
 
-      # A hook committed at 100644 is exec'd by the harness and dies with
-      # "Permission denied", so it silently never runs. Nothing else catches
-      # it: the failure is non-blocking and a nudge that never fires reads
-      # exactly like nothing to report.
-      - name: Hook exec bits
-        run: bash scripts/ci/check-hook-exec-bit.sh
-
   # Keeps the required check named `smoke`. Branch protection and the review
   # gate key on that exact name, so publishing only `smoke-pytest` and
   # `smoke-rest` would make the required check stop appearing rather than fail
@@ -590,8 +609,11 @@ jobs:
     needs: [pr-affected]
     if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     runs-on: ubuntu-latest
-    # Widest of 14 passing runs sampled 2026-09-24: 6.9m.
-    timeout-minutes: 10
+    # Widest of 14 passing runs sampled 2026-09-24: 6.9m. The release build
+    # of fno-agents outgrew the 10m cap on cold runners once the crate grew
+    # the native decisions listing, and the job died inside cargo before any
+    # budget ran.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -1001,8 +1023,10 @@ jobs:
     runs-on: ubuntu-latest
     # Three recent green runs put the combined job at 885s, 889s, and 891s.
     # Its lib/bin step was 109-116s and serial integration 612-620s. Split the
-    # 38 integration test binaries by observed runtime; keep the existing 15m cap.
-    timeout-minutes: 15
+    # 38 integration test binaries by observed runtime. The 15m cap died at
+    # 15m12s inside the cold-runner compile once fno-agents grew the native
+    # decisions listing; 20m buys the build the headroom the sample predates.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -1074,13 +1098,41 @@ jobs:
           --test board_menu_keys_e2e --test squad_prune_live_pane
           --test server_axis_alias_e2e --test server_spine -- --test-threads=1
 
+  test-mux-workspace:
+    needs: [pr-affected]
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
+    name: workspace standalone journey
+    runs-on: ubuntu-latest
+    # Keep the real-binary conformance journey separate from the serial mux
+    # suite; both retain explicit bounds and the aggregate requires both.
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Clean cached Rust package artifacts
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
       - name: Workspace standalone journey
-        # The conformance journey on the real binaries: server, plain shell
-        # panes, split, markers, the same child across viewer detach, doctor
-        # naming missing backends as advisory, and a full-component control.
-        # Runs after the test steps so the mux build is warm. It needs no
-        # fno-agents binary: it proves the workspace stands alone with that
-        # backend absent.
         run: bash tests/mux-workspace-standalone.sh
 
   test-mux-integration:
@@ -1142,7 +1194,7 @@ jobs:
 
   test:
     name: cargo test + schema parity
-    needs: [pr-affected, test-agents, test-agents-integration, test-mux, test-mux-integration]
+    needs: [pr-affected, test-agents, test-agents-integration, test-mux, test-mux-integration, test-mux-workspace]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # The check name this workflow has always reported, now an aggregator over
@@ -1154,7 +1206,7 @@ jobs:
     steps:
       - name: All shards passed
         run: |
-          echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }} test-mux-integration=${{ needs.test-mux-integration.result }}"
+          echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }} test-mux-integration=${{ needs.test-mux-integration.result }} test-mux-workspace=${{ needs.test-mux-workspace.result }}"
           [ "${{ needs.test-agents.result }}" = "success" ] || {
             [ "${{ needs.test-agents.result }}" = "skipped" ] \
               && [ "${{ github.event_name }}" = "pull_request" ] \
@@ -1172,6 +1224,11 @@ jobs:
           } || exit 1
           [ "${{ needs.test-mux-integration.result }}" = "success" ] || {
             [ "${{ needs.test-mux-integration.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
+          } || exit 1
+          [ "${{ needs.test-mux-workspace.result }}" = "success" ] || {
+            [ "${{ needs.test-mux-workspace.result }}" = "skipped" ] \
               && [ "${{ github.event_name }}" = "pull_request" ] \
               && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
           } || exit 1

@@ -72,7 +72,7 @@ fn run_page(config_cwd: &Path) -> Result<String, String> {
         &["backlog", "page_reload_s"],
     ));
     let body = render(&report, &Utc::now().to_rfc3339(), reload_s);
-    write_page(&state_dir.join("fleet.html"), &body)?;
+    write_page(&crate::state_layout::place(&state_dir, "fleet.html"), &body)?;
     Ok(format!(
         "fleet.html rendered: {} readings, {} transcripts read, {} pending",
         report.coverage.readings.rows,

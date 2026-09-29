@@ -77,8 +77,8 @@ def group_for(entry: dict) -> str:
 # can never drift into disagreeing about what counts as a leak.
 LEAK_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
-    # Dashed-only on purpose: in prose a compact id is indistinguishable from a CSS hex color.
-    ("node-id", re.compile(r"\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b", re.I)),
+    # Generic compact prefixes can resemble CSS hex colors; legacy compact x ids cannot.
+    ("node-id", re.compile(r"\b(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})\b", re.I)),
     ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
     (
         "session-id",
@@ -165,7 +165,7 @@ def _load_obsidian_vault() -> str | None:
     and stops at the first match: when a backlog mutation fires from a project
     whose own ``.fno/settings.yaml`` lacks an obsidian block, the
     project-local file shadows the global one and the auto-render writes
-    ``~/.fno/graph.html`` (a global artifact) with vault=None, zeroing out
+    ``~/.fno/pages/graph.html`` (a global artifact) with vault=None, zeroing out
     every Obsidian deep link.
 
     Vault is a global concept (which vault holds the plan files) and graph.html

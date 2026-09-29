@@ -77,12 +77,7 @@ def render_pr_closure_trailer(
 # Produce: the trailer a PR-creation path owes its own branch.
 # ---------------------------------------------------------------------------
 
-# Delimiter-bounded candidates from a head ref, the producer half of the set
-# `scripts/ci/check-pr-node-closure.sh` demands. Non-overlapping left-to-right
-# scanning is what makes the two agree on a ref like "feature/x-cccc-1234":
-# once "x-cccc" is consumed the scan resumes at "-1234", which is not
-# letter-led, so the bogus "cdef-1234" candidate the gate's skip-both-segments
-# step exists to prevent is never produced on this side either.
+# Non-overlapping, delimiter-bounded candidates; consume each id before scanning its suffix.
 _BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({NODE_ID_BODY})(?=$|[/-])")
 
 

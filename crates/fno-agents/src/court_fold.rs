@@ -749,7 +749,21 @@ pub fn court_fold(
             }
         }
     }
-    Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
+    // The whole owner read, node id -> canonical owning scope, exposed once
+    // so a dispatch reader (the blueprint starts list) drops another crown's
+    // nodes with the same instrument the owned counts answer from, never a
+    // second owner read that could disagree. Null when the read failed; the
+    // folds' owned_reason names why.
+    let owned_scopes = match &owners {
+        Ok((map, _)) => json!(map),
+        Err(_) => Value::Null,
+    };
+    Ok(json!({
+        "scope_nodes": folds,
+        "stuck": stuck,
+        "stuck_line": line,
+        "owned_scopes": owned_scopes,
+    }))
 }
 
 /// `fno-agents court-fold`: print the fold JSON, exit 0.
@@ -1558,6 +1572,33 @@ mod tests {
         e1_owned.sort();
         assert_eq!(owned_ids("p"), ["b"]);
         assert_eq!(e1_owned, ["a", "e-1"]);
+    }
+
+    /// The payload exposes the whole owner read, node -> owning scope, so a
+    /// dispatch reader filters with the fold's one instrument. An L2 crown's
+    /// children map to the L2 scope, not the L1's.
+    #[test]
+    fn owned_scopes_expose_the_owner_read_for_dispatch_filters() {
+        let (_dir, _reg, fold) = fold_with_registry(
+            &[
+                json!({"id": "e-1", "type": "epic", "project": "p", "status": "idea"}),
+                json!({"id": "a", "parent": "e-1", "project": "p", "status": "idea"}),
+                json!({"id": "b", "project": "p", "status": "idea"}),
+            ],
+            &[
+                crown_row("king-p", "p", 1, "live"),
+                crown_row("king-1", "e-1", 2, "live"),
+            ],
+            &[
+                json!({"scope": "p", "level": 1}),
+                json!({"scope": "e-1", "level": 2}),
+            ],
+        );
+        assert_eq!(
+            fold["owned_scopes"],
+            json!({"a": "e-1", "e-1": "e-1", "b": "p"}),
+            "{fold}"
+        );
     }
 
     /// AC9-EDGE: the e-1 registry row exited but the crown is still passed,

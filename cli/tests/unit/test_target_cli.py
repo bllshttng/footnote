@@ -1221,6 +1221,22 @@ def test_redirect_helper_ignores_non_contained_and_malformed_input():
 # ---------------------------------------------------------------------------
 
 
+def test_dispatch_node_resolves_dashless_literal_id():
+    """A dash-less literal id binds at the claim boundary like its dashed kin.
+
+    A config prefix with no separator once minted bare "<prefix><4hex>"
+    literals; resolution is format-agnostic everywhere else, so the dispatch
+    token shape must admit the literal and match it against the graph. An
+    all-hex-shaped token matches too (a letter-led prefix makes one); the
+    graph lookup, not the shape, decides identity.
+    """
+    assert target_cli._TARGET_NODE_TOKEN_RE.fullmatch("x4d12")
+    assert target_cli._TARGET_NODE_TOKEN_RE.fullmatch("a3f9c1d2")
+    assert not target_cli._TARGET_NODE_TOKEN_RE.fullmatch("4d12")  # digit-led stays out
+    entry = {"id": "x4d12", "title": "legacy id"}
+    assert target_cli._resolve_dispatch_node("x4d12", None, entries=[entry]) == entry
+
+
 def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
     """A plan held by a unit and its contained children is legal, not ambiguous.
 

@@ -129,7 +129,6 @@ make_init_sandbox() {
 
   # .fno dir
   mkdir -p "$sbx/.fno"
-  mkdir -p "$sbx/home/.fno"
 
   # Stub fno binary
   mkdir -p "$sbx/stub-bin"
@@ -139,6 +138,12 @@ CALL_LOG="${CALL_LOG:-/dev/null}"
 ACQUIRE_RC_FILE="${ACQUIRE_RC_FILE:-}"
 ACQUIRE_RC_COUNTER_FILE="${ACQUIRE_RC_COUNTER_FILE:-}"
 echo "fno $*" >> "$CALL_LOG"
+
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
+  printf 'HARNESS=claude\nSESSION_ID=%s\nDISPOSITION=proven\nCOLLISION=\n' \
+    "${CLAUDE_CODE_SESSION_ID:-}"
+  exit 0
+fi
 
 subcmd1="${1:-}"
 subcmd2="${2:-}"
@@ -170,21 +175,13 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    node="${3:-unknown}"
-    [[ "$node" == "--strict" ]] && node="${4:-unknown}"
-    field=""; previous=""
-    for arg in "$@"; do
-      [[ "$previous" == "--field" ]] && field="$arg"
-      previous="$arg"
-    done
-    case "$field" in
-      _archived) printf 'null\n' ;;
-      id) printf '%s\n' "$node" ;;
-      status) printf 'ready\n' ;;
-      pr_number) printf 'null\n' ;;
-      *) printf '{"status":"ready","id":"%s"}\n' "$node" ;;
+    case " $* " in
+      *" --field _archived"*) printf 'null\n'; exit 0 ;;
+      *" --field id"*)        printf '%s\n' "${3:-unknown}"; exit 0 ;;
+      *" --field status"*)    printf 'ready\n'; exit 0 ;;
+      *" --field pr_number"*) printf '4242\n'; exit 0 ;;
     esac
-    exit 0
+    exit 1
     ;;
   *)
     exit 0
@@ -217,8 +214,6 @@ run_init() {
         CLAUDE_CODE_SESSION_ID="${session_id}" \
         TARGET_TRANSCRIPT_ID="${session_id}" \
         CLAUDE_PLUGIN_ROOT="$REPO_ROOT" \
-        HOME="$sbx/home" \
-        FNO_HOME="$sbx/home/.fno" \
         PATH="$sbx/stub-bin:$PATH" \
         FNO_TEST_SPACE="$sbx/space" \
         CALL_LOG="$sbx/call-log" \

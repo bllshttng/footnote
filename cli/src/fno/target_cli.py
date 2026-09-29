@@ -101,7 +101,7 @@ def _resolve_init_script() -> Path:
       4. ``resolve_repo_root()`` - last resort (running inside fno repo).
     """
     # Delegates to the shared resolver (env hint -> package-relative ->
-    # persisted ~/.fno/plugin-root pointer -> repo) so `fno do target init`
+    # persisted ~/.fno/install/plugin-root pointer -> repo) so `fno do target init`
     # finds the script from any project without a hand-set FNO_REPO_ROOT.
     return resolve_plugin_script(_INIT_RELPATH)
 

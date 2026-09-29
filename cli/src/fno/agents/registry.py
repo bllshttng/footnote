@@ -1329,9 +1329,10 @@ class RegistryWriteRefused(RuntimeError):
 
 
 def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:
-    # This resolver is config-free and does not import pydantic; Rust interop
-    # calls it from plain python3 while the runtime home may be overridden.
-    sh = paths.agents_runtime_registry_path().resolve()
+    # The ambient home, never the config chain: the Rust interop runs plain
+    # python3 (no pydantic), and the declared-home branch is the same first
+    # resolution the interop fixtures seed through.
+    sh = (paths.agents_home_dir() / "registry.json").resolve()
     if sh != target.resolve() or sh.is_relative_to(Path(tempfile.gettempdir()).resolve()):
         return  # another target is the caller's own store; a sandboxed HOME has no real registry
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":

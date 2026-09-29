@@ -29,6 +29,7 @@ pass() { printf '[reconcile-ss] PASS: %s\n' "$*"; }
 command -v jq >/dev/null 2>&1 || fail "jq required for these tests"
 
 WORK=$(mktemp -d -t reconcile-ss-XXXXXX)
+git -C "$WORK" init -q
 trap 'rm -rf "$WORK"' EXIT
 
 # --- Fake `fno` on PATH: records its args and emits a reconcile-shaped JSON. ---
@@ -57,13 +58,6 @@ source "$THROTTLE_LIB"
 
 now_epoch() { date +%s; }
 
-make_repo() {
-    local root="$1" with_state="${2:-yes}"
-    mkdir -p "$root"
-    git init -q "$root"
-    [[ "$with_state" == "no" ]] || mkdir -p "$root/.fno"
-}
-
 # Poll for a file to appear (bg reconcile is detached), up to ~4s.
 wait_for_file() {
     local f="$1" tries=40
@@ -89,7 +83,7 @@ wait_for_log_line() {
 # AC: fire when no stamp exists; MUTATE mode (no --dry-run); stamp written.
 # ============================================================================
 log "fire: absent stamp -> reconcile fires in mutate mode"
-REPO1="$WORK/repo1"; make_repo "$REPO1"
+REPO1="$WORK/repo1"; mkdir -p "$REPO1/.fno"
 RESULT1="$REPO1/.fno/.reconcile-result.json"
 STAMP1="$REPO1/.fno/.reconcile-stamp"
 : > "$FNO_CALL_LOG"
@@ -122,7 +116,7 @@ pass "chain: retro run fires after reconcile in the same throttled job"
 # only ever touches a project already initialized with footnote.
 # ============================================================================
 log "gate: no .fno -> no fire, no .fno created"
-REPO_VIRGIN="$WORK/virgin"; make_repo "$REPO_VIRGIN" no   # deliberately NO .fno
+REPO_VIRGIN="$WORK/virgin"; mkdir -p "$REPO_VIRGIN"   # deliberately NO .fno
 : > "$FNO_CALL_LOG"
 RECONCILE_THROTTLE_SECONDS=900 reconcile_maybe_fire "$REPO_VIRGIN"
 sleep 0.3
@@ -136,7 +130,7 @@ pass "gate: virgin directory is left untouched"
 # AC: throttle — a fresh stamp suppresses a second fire.
 # ============================================================================
 log "throttle: fresh stamp -> no second fire"
-REPO2="$WORK/repo2"; make_repo "$REPO2"
+REPO2="$WORK/repo2"; mkdir -p "$REPO2/.fno"
 STAMP2="$REPO2/.fno/.reconcile-stamp"
 touch "$STAMP2"   # brand new stamp
 : > "$FNO_CALL_LOG"
@@ -150,7 +144,7 @@ pass "throttle: fresh stamp within window suppresses fire"
 # AC: throttle expiry — a stale stamp (older than the window) re-fires.
 # ============================================================================
 log "throttle: stale stamp -> re-fires"
-REPO3="$WORK/repo3"; make_repo "$REPO3"
+REPO3="$WORK/repo3"; mkdir -p "$REPO3/.fno"
 STAMP3="$REPO3/.fno/.reconcile-stamp"
 RESULT3="$REPO3/.fno/.reconcile-result.json"
 touch "$STAMP3"
@@ -164,7 +158,8 @@ pass "throttle: stamp older than window re-fires"
 # AC: render — prior sweep with closed nodes surfaces a reminder, once.
 # ============================================================================
 log "render: closed nodes -> reminder emitted and result consumed"
-REPO4="$WORK/repo4"; make_repo "$REPO4"
+REPO4="$WORK/repo4"; mkdir -p "$REPO4/.fno"
+git -C "$REPO4" init -q
 RESULT4="$REPO4/.fno/.reconcile-result.json"
 # Pin a fresh stamp so the hook does NOT fire a reconcile during the render test.
 touch "$REPO4/.fno/.reconcile-stamp"
@@ -184,7 +179,8 @@ pass "render: closed-node reminder emitted; result consumed once"
 # AC: render — empty sweep is silent (no node closed => no reminder noise).
 # ============================================================================
 log "render: empty sweep -> silent, still consumed"
-REPO5="$WORK/repo5"; make_repo "$REPO5"
+REPO5="$WORK/repo5"; mkdir -p "$REPO5/.fno"
+git -C "$REPO5" init -q
 RESULT5="$REPO5/.fno/.reconcile-result.json"
 touch "$REPO5/.fno/.reconcile-stamp"
 cat > "$RESULT5" <<'JSON'
@@ -202,7 +198,7 @@ pass "render: empty sweep is silent and consumed"
 # .promise_unmet too, ahead of the consume-after-show move.
 # ============================================================================
 log "render: promise_unmet nodes -> held-open reminder emitted"
-REPO_PM="$WORK/repo-pm"; make_repo "$REPO_PM"
+REPO_PM="$WORK/repo-pm"; mkdir -p "$REPO_PM/.fno"
 RESULT_PM="$REPO_PM/.fno/.reconcile-result.json"
 touch "$REPO_PM/.fno/.reconcile-stamp"
 cat > "$RESULT_PM" <<'JSON'
@@ -223,7 +219,7 @@ pass "render: promise-gate held-open reminder emitted; result consumed"
 # shape this file exists to refuse.
 # ============================================================================
 log "render: promise_unknown nodes -> held-open reminder emitted"
-REPO_PU="$WORK/repo-pu"; make_repo "$REPO_PU"
+REPO_PU="$WORK/repo-pu"; mkdir -p "$REPO_PU/.fno"
 RESULT_PU="$REPO_PU/.fno/.reconcile-result.json"
 touch "$REPO_PU/.fno/.reconcile-stamp"
 cat > "$RESULT_PU" <<'JSON'
@@ -246,7 +242,7 @@ pass "render: retryable-unknown nodes get their own line and no --force advice"
 # naming every bound id, then the file is consumed to .shown.
 # ============================================================================
 log "orphan: bound_now rows -> one bound line, consumed"
-REPO_OP="$WORK/repo-orphan-bound"; make_repo "$REPO_OP"
+REPO_OP="$WORK/repo-orphan-bound"; mkdir -p "$REPO_OP/.fno"
 RESULT_OP="$REPO_OP/.fno/.orphan-plans-result.json"
 touch "$REPO_OP/.fno/.reconcile-stamp"
 cat > "$RESULT_OP" <<'JSON'
@@ -264,7 +260,7 @@ pass "orphan: bound_now rows render one line and are consumed"
 # healthy history never surfaces).
 # ============================================================================
 log "orphan: terminal + settling rows -> silent, still consumed"
-REPO_OQ="$WORK/repo-orphan-quiet"; make_repo "$REPO_OQ"
+REPO_OQ="$WORK/repo-orphan-quiet"; mkdir -p "$REPO_OQ/.fno"
 RESULT_OQ="$REPO_OQ/.fno/.orphan-plans-result.json"
 touch "$REPO_OQ/.fno/.reconcile-stamp"
 cat > "$RESULT_OQ" <<'JSON'
@@ -281,7 +277,7 @@ pass "orphan: terminal + settling rows stay silent and are consumed"
 # is cosmetic, so the run still reaches reconcile_maybe_fire and exits 0.
 # ============================================================================
 log "orphan: non-JSON result -> hook survives and still fires"
-REPO_OB="$WORK/repo-orphan-bad"; make_repo "$REPO_OB"
+REPO_OB="$WORK/repo-orphan-bad"; mkdir -p "$REPO_OB/.fno"
 RESULT_OB="$REPO_OB/.fno/.orphan-plans-result.json"
 cat > "$RESULT_OB" <<'TEXT'
 not json at all
@@ -303,7 +299,7 @@ pass "orphan: non-JSON result survives and the reconcile still fires"
 # is gone, and the hook is now the only place that says so.
 # ============================================================================
 log "render: stale-and-fresh catchup -> reminder emitted"
-REPO_CS="$WORK/repo-catchup-stale"; make_repo "$REPO_CS"
+REPO_CS="$WORK/repo-catchup-stale"; mkdir -p "$REPO_CS/.fno"
 RESULT_CS="$REPO_CS/.fno/.reconcile-result.json"
 touch "$REPO_CS/.fno/.reconcile-stamp"
 cat > "$RESULT_CS" <<'JSON'
@@ -321,7 +317,7 @@ pass "render: proven-stale catchup surfaces the reminder"
 # type error the legacy case above documents.
 # ============================================================================
 log "render: pre-stale catchup result -> silent, trigger intact"
-REPO_PC="$WORK/repo-prestale"; make_repo "$REPO_PC"
+REPO_PC="$WORK/repo-prestale"; mkdir -p "$REPO_PC/.fno"
 RESULT_PC="$REPO_PC/.fno/.reconcile-result.json"
 cat > "$RESULT_PC" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [], "failures": [], "sync_catchup": {"outcome": "fresh", "pr_number": null, "swept": 0, "detail": "x"}}
@@ -348,7 +344,7 @@ pass "render: pre-stale result is silent and the reconcile still fires"
 # firing again on that repo. Pins the trigger, which nothing else covered.
 # ============================================================================
 log "render: result predating sync_catchup -> still consumed, still fires"
-REPO_LEGACY="$WORK/repo-legacy"; make_repo "$REPO_LEGACY"
+REPO_LEGACY="$WORK/repo-legacy"; mkdir -p "$REPO_LEGACY/.fno"
 RESULT_LEGACY="$REPO_LEGACY/.fno/.reconcile-result.json"
 cat > "$RESULT_LEGACY" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [{"node_id":"ab-ccc333","pr_number":12}], "failures": []}
@@ -429,7 +425,7 @@ pass "mtime: digits on the native stat"
 # AC: non-blocking — the hook always exits 0.
 # ============================================================================
 log "non-blocking: hook exits 0 even with no prior result"
-REPO6="$WORK/repo6"; make_repo "$REPO6"
+REPO6="$WORK/repo6"; mkdir -p "$REPO6/.fno"
 touch "$REPO6/.fno/.reconcile-stamp"   # suppress fire for determinism
 CLAUDE_PROJECT_DIR="$REPO6" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" >/dev/null 2>&1 \
     || fail "non-blocking: hook returned non-zero"
@@ -441,7 +437,7 @@ pass "non-blocking: hook exits 0 with no prior result"
 # failure is retro run's own contract; here we prove the chain's isolation.)
 # ============================================================================
 log "chain: retro run failure does not sink the job"
-REPO_RF="$WORK/repo-retrofail"; make_repo "$REPO_RF"
+REPO_RF="$WORK/repo-retrofail"; mkdir -p "$REPO_RF/.fno"
 RESULT_RF="$REPO_RF/.fno/.reconcile-result.json"
 : > "$FNO_CALL_LOG"
 FNO_RETRO_FAIL=1 RECONCILE_THROTTLE_SECONDS=0 reconcile_maybe_fire "$REPO_RF"
@@ -460,7 +456,7 @@ pass "chain: failed retro run is isolated; reconcile publish + tidy still run"
 # the real ~/.fno; a fresh stamp suppresses a fire during the render assertion.
 # ============================================================================
 log "advisory: pending sentinels render a count line"
-REPO_ADV="$WORK/repo-adv"; make_repo "$REPO_ADV"
+REPO_ADV="$WORK/repo-adv"; mkdir -p "$REPO_ADV/.fno"
 touch "$REPO_ADV/.fno/.reconcile-stamp"
 PENDING_DIR="$WORK/pending-adv"; mkdir -p "$PENDING_DIR"
 printf '{"node_id":"x-1111","pr_url":"https://github.com/o/r/pull/1"}' > "$PENDING_DIR/x-1111.json"
@@ -472,7 +468,7 @@ grep -q "retro: 2 sentinel(s) pending harvest" <<<"$OUT" \
 pass "advisory: pending count line renders"
 
 log "advisory: zero sentinels is silent"
-REPO_ADV0="$WORK/repo-adv0"; make_repo "$REPO_ADV0"
+REPO_ADV0="$WORK/repo-adv0"; mkdir -p "$REPO_ADV0/.fno"
 touch "$REPO_ADV0/.fno/.reconcile-stamp"
 EMPTY_DIR="$WORK/pending-empty"; mkdir -p "$EMPTY_DIR"
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_ADV0" RETRO_PENDING_DIR="$EMPTY_DIR" \

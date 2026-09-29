@@ -383,7 +383,11 @@ fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
         let reason = s_str(&mine, "reason").unwrap_or("the fold did not run");
         return Err(format!("scope fold unreadable: {reason}"));
     }
-    Ok(json!({"fold": mine, "stuck": payload.get("stuck").cloned().unwrap_or(Value::Null)}))
+    Ok(json!({
+        "fold": mine,
+        "stuck": payload.get("stuck").cloned().unwrap_or(Value::Null),
+        "owned_scopes": payload.get("owned_scopes").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 fn r_board(
@@ -914,35 +918,73 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
+/// Per-workflow verdict inputs: (name, newest run, newest completed run).
+/// Row position is never trusted - the branch listing has served stale rows
+/// first - `created_at` alone picks the newest of each.
+fn fold_page<'a>(
+    acc: &mut Vec<(&'a str, &'a Value, Option<&'a Value>)>,
+    runs: impl Iterator<Item = &'a Value>,
+) {
+    for run in runs {
+        let name = run.get("name").and_then(Value::as_str).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let created = run.get("created_at").and_then(Value::as_str).unwrap_or("");
+        let completed = run.get("status").and_then(Value::as_str) == Some("completed");
+        match acc.iter_mut().find(|(seen, _, _)| *seen == name) {
+            None => acc.push((name, run, completed.then_some(run))),
+            Some((_, newest, newest_completed)) => {
+                if created
+                    > newest
+                        .get("created_at")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                {
+                    *newest = run;
+                }
+                if completed {
+                    let is_newest = match *newest_completed {
+                        Some(c) => {
+                            created > c.get("created_at").and_then(Value::as_str).unwrap_or("")
+                        }
+                        None => true,
+                    };
+                    if is_newest {
+                        *newest_completed = Some(run);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// One verdict token for the check-in line, from the workflow-run history on
 /// main, not the tip's check runs: a tip that fires no run of a workflow must
 /// not read green while that workflow's newest completed main run failed.
-/// Per workflow the newest COMPLETED run decides - red on fail or cancel,
-/// naming the workflow and the sha it ran on; a workflow whose newest run is
-/// still in flight reads pending; empty history reads pending, never green.
-fn main_ci_token_from_runs(runs: &[Value]) -> Value {
-    // GitHub answers newest-first, so each workflow's first sighting is its
-    // newest run and its first completed sighting its newest result.
-    let mut order: Vec<(&str, &Value)> = Vec::new();
-    let mut newest: Vec<(&str, &Value)> = Vec::new();
-    for run in runs {
-        let name = run.get("name").and_then(Value::as_str).unwrap_or("");
-        if name.is_empty() || newest.iter().any(|(n, _)| *n == name) {
-            continue;
-        }
-        newest.push((name, run));
-    }
-    for (name, _) in &newest {
-        if let Some(completed) = runs.iter().find(|run| {
-            run.get("name").and_then(Value::as_str) == Some(name)
-                && run.get("status").and_then(Value::as_str) == Some("completed")
-        }) {
-            order.push((name, completed));
-        }
-    }
-    if let Some((_, run)) = order
+/// `at_sha` carries the push runs at main's current head; a workflow run
+/// there is judged there - an in-flight head run reads pending rather than
+/// falling back - and only a workflow the head never fired is judged from
+/// the branch history page. Per workflow the newest COMPLETED run decides -
+/// red on fail or cancel, naming the workflow and the sha it ran on; a
+/// workflow whose newest run is still in flight reads pending; empty
+/// history reads pending, never green.
+fn main_ci_token_from_pages<'a>(at_sha: &'a [Value], on_main: &'a [Value]) -> Value {
+    let mut workflows: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
+    fold_page(&mut workflows, at_sha.iter());
+    let judged: Vec<&str> = workflows.iter().map(|(name, _, _)| *name).collect();
+    fold_page(
+        &mut workflows,
+        on_main.iter().filter(|run| {
+            let name = run.get("name").and_then(Value::as_str).unwrap_or("");
+            !judged.contains(&name)
+        }),
+    );
+    if let Some(run) = workflows
         .iter()
-        .find(|(_, run)| matches!(crate::pr_push::rest_bucket(run), "fail" | "cancel"))
+        .filter_map(|(_, _, completed)| *completed)
+        .filter(|run| matches!(crate::pr_push::rest_bucket(run), "fail" | "cancel"))
+        .max_by_key(|run| run.get("created_at").and_then(Value::as_str).unwrap_or(""))
     {
         let field = |k: &str| run.get(k).and_then(Value::as_str).unwrap_or("unknown");
         return json!({
@@ -951,10 +993,10 @@ fn main_ci_token_from_runs(runs: &[Value]) -> Value {
             "sha": field("head_sha"),
         });
     }
-    let inflight = newest
+    let inflight = workflows
         .iter()
-        .any(|(_, run)| run.get("status").and_then(Value::as_str) != Some("completed"));
-    Value::String(if runs.is_empty() || inflight {
+        .any(|(_, newest, _)| newest.get("status").and_then(Value::as_str) != Some("completed"));
+    Value::String(if workflows.is_empty() || inflight {
         "pending".into()
     } else {
         "green".into()
@@ -980,24 +1022,38 @@ fn main_ci_render(v: Option<&Value>) -> String {
 
 fn r_main_ci() -> Result<Value, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    // One un-paginated page: the listing grows with the repo's age, and a
-    // paginated read would walk its whole history on every check-in beat.
-    // A workflow absent from the 100 newest main runs has nothing newer
-    // than what this page already carries.
-    let raw = crate::pr_push::gh_api(
-        "gh",
-        &cwd,
-        "repos/{owner}/{repo}/actions/runs?branch=main&per_page=100",
-        &[],
-    )
-    .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
-    let mut runs: Vec<Value> = Vec::new();
-    if let Ok(page) = serde_json::from_str::<Value>(&raw) {
-        if let Some(list) = page.get("workflow_runs").and_then(Value::as_array) {
-            runs = list.clone();
-        }
-    }
-    Ok(main_ci_token_from_runs(&runs))
+    // Judge at main's current head: the branch listing has served rows from
+    // five days before the head while newer runs existed, so the head's own
+    // push runs are read directly and only a workflow the head never fired
+    // falls back to the branch history page.
+    let head_raw = crate::pr_push::gh_api("gh", &cwd, "repos/{owner}/{repo}/branches/main", &[])
+        .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
+    let head_sha = serde_json::from_str::<Value>(&head_raw)
+        .ok()
+        .and_then(|page| {
+            page.pointer("/commit/sha")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| "gh api branches/main returned no head sha".to_string())?;
+    // One un-paginated page per read: the listings grow with the repo's age,
+    // and a paginated read would walk the whole history on every beat. The
+    // branch page only backfills workflows the head sha page never carried.
+    let read_runs = |query: &str| -> Result<Vec<Value>, String> {
+        let raw = crate::pr_push::gh_api("gh", &cwd, query, &[])
+            .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
+        let runs = serde_json::from_str::<Value>(&raw)
+            .ok()
+            .and_then(|page| page.get("workflow_runs").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        Ok(runs)
+    };
+    let at_sha = read_runs(&format!(
+        "repos/{{owner}}/{{repo}}/actions/runs?head_sha={head_sha}&event=push&per_page=100"
+    ))?;
+    let on_main = read_runs("repos/{owner}/{repo}/actions/runs?branch=main&per_page=100")?;
+    Ok(main_ci_token_from_pages(&at_sha, &on_main))
 }
 
 /// The control plane's own verdict: every arm failing past the notify
@@ -1163,6 +1219,8 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         let floor = crate::agents_config::config_lookup(&ctx.cwd, &["dispatch", "blueprint_floor"])
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| crate::backlog_ready::DEFAULT_BLUEPRINT_FLOOR.to_string());
+        let other_owned =
+            crate::king_checkin_blueprint::other_owned_scopes(&beat.folded, &ctx.scope);
         crate::king_checkin_blueprint::r_blueprint(
             &beat.board,
             &ctx.cwd,
@@ -1170,6 +1228,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             claims,
             slots,
             &floor,
+            &other_owned,
         )
     });
     take(
@@ -2982,8 +3041,8 @@ mod tests {
         assert!(!is_user_placeholder(""));
     }
 
-    /// The workflow-run rows a `/actions/runs?branch=main` page carries,
-    /// newest first, in the fields the reducer reads.
+    /// The workflow-run rows an `/actions/runs` page carries, in the fields
+    /// the reducer reads; row order is free.
     fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
         serde_json::json!({
             "name": name, "head_sha": sha, "status": status,
@@ -3010,7 +3069,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_runs(&runs),
+            main_ci_token_from_pages(&runs, &[]),
             Value::String("green".into())
         );
     }
@@ -3044,7 +3103,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_runs(&runs),
+            main_ci_token_from_pages(&runs, &[]),
             serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
         );
     }
@@ -3064,7 +3123,7 @@ mod tests {
             wf_run("cli-ci", "b2", "in_progress", "", "2026-09-12T04:00:00Z"),
         ];
         assert_eq!(
-            main_ci_token_from_runs(&runs),
+            main_ci_token_from_pages(&runs, &[]),
             Value::String("pending".into())
         );
     }
@@ -3084,7 +3143,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_runs(&runs),
+            main_ci_token_from_pages(&runs, &[]),
             serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
         );
     }
@@ -3092,8 +3151,110 @@ mod tests {
     #[test]
     fn main_ci_reads_pending_on_no_runs() {
         assert_eq!(
-            main_ci_token_from_runs(&[]),
+            main_ci_token_from_pages(&[], &[]),
             Value::String("pending".into())
+        );
+    }
+
+    /// The filed bug's shape: the branch page led with a stale green from
+    /// five days before the head while the newer cli-ci run had failed.
+    /// Row position is never trusted, so the stale-first page still reads
+    /// red; the position-trusting reader read green here.
+    #[test]
+    fn main_ci_reads_red_when_the_branch_page_leads_with_a_stale_green() {
+        let on_main = vec![
+            wf_run(
+                "cli-ci",
+                "stale",
+                "completed",
+                "success",
+                "2026-09-23T05:52:00Z",
+            ),
+            wf_run(
+                "guards",
+                "stale",
+                "completed",
+                "success",
+                "2026-09-23T05:52:00Z",
+            ),
+            wf_run(
+                "cli-ci",
+                "fresh",
+                "completed",
+                "failure",
+                "2026-09-28T07:30:00Z",
+            ),
+        ];
+        assert_eq!(
+            main_ci_token_from_pages(&[], &on_main),
+            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "fresh"})
+        );
+    }
+
+    /// A workflow run at the head sha is judged there even mid-flight - a
+    /// pending head run beats the branch page's older green - and only a
+    /// workflow the head never fired falls back to the branch page.
+    #[test]
+    fn main_ci_judges_head_sha_runs_first_and_falls_back_only_for_absent_workflows() {
+        let at_sha = vec![wf_run(
+            "cli-ci",
+            "head",
+            "in_progress",
+            "",
+            "2026-09-28T08:00:00Z",
+        )];
+        let on_main = vec![
+            wf_run(
+                "cli-ci",
+                "stale",
+                "completed",
+                "success",
+                "2026-09-23T05:52:00Z",
+            ),
+            wf_run(
+                "guards",
+                "head",
+                "completed",
+                "success",
+                "2026-09-28T08:00:00Z",
+            ),
+        ];
+        assert_eq!(
+            main_ci_token_from_pages(&at_sha, &on_main),
+            Value::String("pending".into())
+        );
+    }
+
+    /// A workflow the head never fired is judged from the branch page's
+    /// newest completed run.
+    #[test]
+    fn main_ci_falls_back_to_the_branch_pages_newest_completed_run() {
+        let at_sha = vec![wf_run(
+            "guards",
+            "head",
+            "completed",
+            "success",
+            "2026-09-28T08:00:00Z",
+        )];
+        let on_main = vec![
+            wf_run(
+                "cli-ci",
+                "stale",
+                "completed",
+                "success",
+                "2026-09-23T05:52:00Z",
+            ),
+            wf_run(
+                "cli-ci",
+                "gone",
+                "completed",
+                "failure",
+                "2026-09-26T03:35:00Z",
+            ),
+        ];
+        assert_eq!(
+            main_ci_token_from_pages(&at_sha, &on_main),
+            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "gone"})
         );
     }
 

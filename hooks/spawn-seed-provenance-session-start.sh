@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - spawn seed provenance session start
 # SessionStart hook: attribute the spawn seed (node).
 #
 # The seed is the one message that defines a worker's entire task, and it was

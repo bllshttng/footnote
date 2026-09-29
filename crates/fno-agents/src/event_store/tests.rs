@@ -836,5 +836,102 @@ fn journal_text_checked_window_does_not_readd_filtered_live_rows() {
     );
 }
 
+#[test]
+fn journal_text_checked_cursor_fast_path_matches_the_full_scan() {
+    // AC1-HP: a fresh cursor means the committed prefix is probed never; the
+    // text equals committed rows plus the un-ingested tail, exactly what a
+    // full scan returns.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "row-a");
+    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "row-b");
+    append(&live, &[a, b]);
+    sync(&live).unwrap();
+    append(
+        &live,
+        &[checkin("2026-09-17T12:02:00Z", "x-aaaa", "raw-tail")],
+    );
+    let text = journal_text_checked(&live, &EventQuery::of_types(&[])).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "A, B, C: {text}");
+    assert!(
+        lines[0].contains("\"row-a\"")
+            && lines[1].contains("\"row-b\"")
+            && lines[2].contains("\"raw-tail\""),
+        "committed rows then the tail, no dupes: {text}"
+    );
+}
+
+#[test]
+fn journal_text_checked_stale_cursor_falls_back_to_the_full_scan() {
+    // AC1-EDGE: the head line changed under the cursor, so the prefix is not
+    // committed knowledge and the full scan must run.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonline");
+    append(&live, &[checkin("2026-09-17T12:00:00Z", "x-aaaa", "row-a")]);
+    sync(&live).unwrap();
+    // Rewrite the same inode with different content: head hash no longer
+    // matches, so the cursor is stale.
+    let stale = checkin("2026-09-17T12:00:00Z", "x-bbbb", "row-x");
+    std::fs::write(&live, format!("{stale}\n")).unwrap();
+    append(&live, &[checkin("2026-09-17T12:01:00Z", "x-aaaa", "row-y")]);
+    let text = journal_text_checked(&live, &EventQuery::of_types(&[])).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // The store is authoritative: the committed row-a survives the live-file
+    // rewrite; the stale-cursor fallback appends the two unseen lines.
+    assert_eq!(lines.len(), 3, "committed A, then X, Y: {text}");
+    assert!(
+        lines[0].contains("\"row-a\"")
+            && lines[1].contains("\"row-x\"")
+            && lines[2].contains("\"row-y\""),
+        "stale cursor still reads correctly: {text}"
+    );
+}
+
+#[test]
+fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
+    // The perf guard: a cursor-current journal reads in bounded time because
+    // the probe loop sees the tail alone; a regression to the full scan pays
+    // 200k hash+EXISTS rounds and blows the bound.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "row-a");
+    append(&live, &[a]);
+    sync(&live).unwrap();
+    let filler = checkin("2026-09-17T12:01:00Z", "x-aaaa", "filler");
+    {
+        let mut fh = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&live)
+            .unwrap();
+        for i in 0..200_000 {
+            let mut row = filler.clone();
+            row["data"]["change"] = json!(format!("filler-{i}"));
+            writeln!(fh, "{row}").unwrap();
+        }
+    }
+    // Ingest everything so the cursor sits at the true file end: the probe
+    // loop then sees the one tail line alone. A regression to the full scan
+    // pays 200k hash+EXISTS rounds and blows the bound.
+    sync(&live).unwrap();
+    append(
+        &live,
+        &[checkin("2026-09-17T12:02:00Z", "x-aaaa", "raw-tail")],
+    );
+    let started = std::time::Instant::now();
+    let text = journal_text_checked(&live, &EventQuery::of_types(&[])).unwrap();
+    let elapsed = started.elapsed();
+    let n = text.lines().count();
+    assert!(
+        n >= 200_002,
+        "every committed row plus the tail still reads: {n} lines"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the cursor fast path keeps the read bounded: {elapsed:?}"
+    );
+}
+
 mod coverage;
 mod observation;

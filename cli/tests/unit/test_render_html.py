@@ -463,7 +463,7 @@ def test_public_document_carries_no_leak_class_the_gate_names(tmp_path: Path):
 
 
 def test_default_local_path_renders_the_canonical_dashboard(tmp_path: Path, monkeypatch):
-    """The surface the operator names: ~/.fno/graph.html, path resolved by default.
+    """The surface the operator names: ~/.fno/pages/graph.html, path resolved by default.
 
     Every other test passes an explicit path, so none of them covers the
     lazily-resolved GRAPH_HTML default that the auto-render hook actually

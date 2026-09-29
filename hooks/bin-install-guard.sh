@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - bin install guard
 # PreToolUse: refuse a Bash call that copies a locally built fno-agents or
 # fno-agents-worker onto the deployed copy in the cargo bin dir (policy:
 # crates/fno-agents/src/hook/bin_install_guard.rs). Never

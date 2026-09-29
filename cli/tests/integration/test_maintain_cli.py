@@ -680,12 +680,19 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
             _ready("ab-depE2E", blocked_by=["ab-blkE2E"]),
         ],
     )
-    r = runner.invoke(
-        app,
-        ["backlog", "done", "ab-blkE2E", "--force", "--reason", "e2e recovery test"],
-        catch_exceptions=False,
-    )
-    assert r.exit_code == 0, r.output
+    # The close is native now; the wheel spelling names the door. This test's
+    # subject is the blocked_by resolution, so arrange the done state through
+    # the store and let the same mutation pipeline recompute the dependent.
+    from fno.graph.store import commit_rows_via_store
+
+    def stamp_done(rows):
+        for e in rows:
+            if e["id"] == "ab-blkE2E":
+                e["status"] = "done"
+                e["completed_at"] = "2026-04-01T00:00:00+00:00"
+        return rows
+
+    commit_rows_via_store(tmp_graph, stamp_done)
     by_id = {e["id"]: e for e in _read(tmp_graph)}
     assert by_id["ab-blkE2E"]["status"] == "done"
     assert by_id["ab-depE2E"]["status"] == "ready"  # auto-unblocked

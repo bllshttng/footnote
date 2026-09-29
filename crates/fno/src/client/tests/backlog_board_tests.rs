@@ -519,7 +519,11 @@ fn backlog_panel_cells_carry_distinct_attributes() {
     let band_row = text
         .lines()
         .enumerate()
-        .find(|(_, l)| l.starts_with("│ ▸●") && l.contains("x-2"))
+        .find(|(_, l)| {
+            // Pad-width agnostic: the frame's side padding may grow.
+            let body = l.trim_start_matches('│').trim_start();
+            body.starts_with("▸●") && l.contains("x-2")
+        })
         .expect("cursor card row")
         .0;
     let head_row = band_row - 1;

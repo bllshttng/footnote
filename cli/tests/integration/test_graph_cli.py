@@ -119,14 +119,23 @@ class _NativeResult:
 
 
 def _native_verb(verb: str, *args: str) -> _NativeResult:
-    """The add/idea door: the create verbs are native; this execs the binary
-    against the same store the fixture wired through FNO_CONFIG."""
+    """The native backlog door: execs the binary against the same store the
+    fixture wired through FNO_CONFIG. The difficulty default rides only the
+    create verbs, where the retired add shim auto-appended it."""
     from tests._native_door import run_native
 
     argv = list(args)
-    if "--difficulty" not in argv:
+    if verb in ("add", "idea") and "--difficulty" not in argv:
         argv.extend(["--difficulty", "medium"])
     code, out, err = run_native("backlog", verb, *argv)
+    return _NativeResult(code, out, err)
+
+
+def _native_session(*args: str) -> _NativeResult:
+    """The Rust-owned session lifecycle door, migrated out of the Python app."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "session", *args)
     return _NativeResult(code, out, err)
 
 
@@ -136,6 +145,100 @@ def _read_graph(g: Path) -> list[dict]:
     from fno.graph.store import read_graph_strict
 
     return read_graph_strict(g)
+
+
+def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
+    """AC3: observer reap fills the exact open row and reads it back.
+
+    Seeded in_progress with nothing else open: the settle rolls the node off
+    in_progress (the x-9657 red), so status_after reads idea."""
+    _seed_graph_text(tmp_graph, json.dumps({
+        "entries": [{
+            "id": "x-reap0001",
+            "title": "Reap me",
+            "status": "in_progress",
+            "sessions": [{
+                "phase": "execute",
+                "harness": "codex",
+                "session_id": "dead-session",
+                "started_at": "2026-08-20T00:00:00Z",
+            }],
+        }]
+    }) + "\n")
+
+    result = _native_session(
+        "reap-open", "x-reap0001",
+        "--harness", "codex", "--session-id", "dead-session", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["settled"] is True
+    assert receipt["row_removed"] is False
+    assert receipt["row_closed"] is True
+    assert receipt["status_after"] == "idea"
+    assert receipt["remaining_open_do"] == 0
+    saved = _read_graph(tmp_graph)[0]
+    assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
+    assert saved["status"] == "idea"
+
+
+def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
+    """The death-cascade form: no node named, every node with an open row
+    for the identity settles and node_ids names them all."""
+    _seed_graph_text(tmp_graph, json.dumps({
+        "entries": [
+            {
+                "id": "x-reap0002",
+                "title": "First holder",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0003",
+                "title": "Second holder",
+                "sessions": [{
+                    "phase": "review",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0004",
+                "title": "Other session",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "alive-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+        ]
+    }) + "\n")
+
+    result = _native_session(
+        "reap-open",
+        "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["settled"] is True
+    assert sorted(receipt["node_ids"]) == ["x-reap0002", "x-reap0003"]
+    assert receipt["row_closed"] is True
+    saved = {e["id"]: e for e in _read_graph(tmp_graph)}
+    assert all(
+        row.get("ended_at")
+        for node in ("x-reap0002", "x-reap0003")
+        for row in saved[node]["sessions"]
+    )
+    # Store rows normalize an open session to ended_at=None; open is a value now, not a missing key.
+    assert saved["x-reap0004"]["sessions"][0].get("ended_at") is None
 
 
 def test_configured_prefix_mint_and_resolve(tmp_graph, monkeypatch):
@@ -355,7 +458,8 @@ def test_done_clears_queued_state(tmp_graph):
         "queued-state fixture"
     )
     _seed_graph_text(tmp_graph, json.dumps(data))
-    _invoke("backlog", "done", nid)
+    # The bare close is native; the queued-ghost clear is its mutation.
+    _native_verb("done", nid)
     data = json.loads(_native_get(nid))
     assert data.get("queued_at") is None
     assert data["completed_at"] is not None
@@ -1445,8 +1549,8 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-clast002")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-clast002")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-clast002"]["completed_at"]               # child closed
     assert nodes["ab-epic0000"]["completed_at"]                # epic auto-closed
@@ -1466,8 +1570,8 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-cdone001")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-cdone001")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-cdone001"]["completed_at"]
     assert not nodes["ab-epic0000"].get("completed_at")        # epic stays open
@@ -1486,8 +1590,8 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-leaf0002")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-leaf0002")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-leaf0002"]["completed_at"]
     assert nodes["ab-sub00001"]["completed_at"]               # sub-epic closed
@@ -1506,8 +1610,8 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-leaf0001")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-leaf0001")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-epic0000"]["completed_at"]                # closed despite diff project
 

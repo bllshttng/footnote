@@ -32,6 +32,20 @@ pub fn classify_inbox_law(args: &[OsString]) -> Option<Vec<OsString>> {
     }
 }
 
+/// Classify `fno inbox decisions ...` for the front door: the listing read
+/// runs natively through the same worker lane, `None` forwards to the
+/// Python CLI for the rest of the `inbox` tree.
+pub fn classify_inbox_decisions(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 2 {
+        return None;
+    }
+    if args[0].to_str() == Some("inbox") && args[1].to_str() == Some("decisions") {
+        Some(args[1..].to_vec())
+    } else {
+        None
+    }
+}
+
 /// Parse and run one native law subcommand; returns the exit code. `set`
 /// carries the door's exit contract (0 recorded, 1 recorded-but-index-failed,
 /// 3 refused) and prints the decision id alone; `stage` and `match` print one
@@ -115,6 +129,19 @@ pub fn run(args: &[OsString]) -> i32 {
             2
         }
     }
+}
+
+/// The `fno inbox decisions` entry: the listing ride through the worker's
+/// one-shot lane, unattended (a read takes no operator proof). Help rides
+/// argv too; the door's own usage answers it.
+pub fn run_decisions(args: &[OsString]) -> i32 {
+    let argv: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str().map(str::to_owned))
+        .collect();
+    let request = serde_json::json!({"mode": "decisions", "argv": argv}).to_string();
+    law_exec(&request, Attended::No)
 }
 
 /// Stdin is read only when the argv asks for it: `--decision-file` whose
@@ -244,5 +271,20 @@ mod tests {
         // Unknown subcommands still fall through to the Python group.
         assert!(classify_inbox_law(&mk(&["inbox", "law", "nope"])).is_none());
         assert!(classify_inbox_law(&mk(&["inbox", "law"])).is_none());
+    }
+
+    #[test]
+    fn classify_routes_the_decisions_listing() {
+        let mk = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        // The subcommand token itself plus the caller's flags.
+        assert_eq!(
+            classify_inbox_decisions(&mk(&["inbox", "decisions", "--json"])).map(|r| r.len()),
+            Some(2)
+        );
+        assert!(classify_inbox_decisions(&mk(&["inbox", "decisions"])).is_some());
+        // The rest of the inbox tree stays Python's.
+        assert!(classify_inbox_decisions(&mk(&["inbox", "law"])).is_none());
+        assert!(classify_inbox_decisions(&mk(&["inbox", "decide"])).is_none());
+        assert!(classify_inbox_decisions(&mk(&["inbox"])).is_none());
     }
 }

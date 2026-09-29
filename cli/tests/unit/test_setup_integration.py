@@ -472,7 +472,7 @@ def _fake_agy_adapter(tmp_path, monkeypatch):
     (independent of whether the test env can resolve the real plugin root).
     The crown adapter resolves to None for the same reason: no test may
     depend on what the machine's plugin stage happens to ship."""
-    adapter = tmp_path / "plugin" / "hooks" / "agy-target-stop-hook.sh"
+    adapter = tmp_path / "plugin" / "hooks" / "footnote-agy-target-stop-hook.sh"
     adapter.parent.mkdir(parents=True, exist_ok=True)
     adapter.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     monkeypatch.setattr(I, "_agy_adapter_path", lambda: adapter)

@@ -24,6 +24,9 @@ def fake_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point every state resolver at one existing tmp root."""
     state = tmp_path / "state"
     (state / "claims").mkdir(parents=True)
+    agents_home = state / "agents"
+    agents_home.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setattr("fno.paths.state_dir", lambda: state)
     monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: state)
     monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: state / "claims")

@@ -77,6 +77,7 @@ use overlay_paint::{
     draw_lines_overlay, draw_overlay_layout, draw_popup_overlay, layout_lines_overlay,
     OverlayAnchor, OverlayLayout,
 };
+use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
@@ -969,6 +970,9 @@ struct View {
     /// The questions command failed/timed out; same degrade contract as
     /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
+    /// Why the questions read failed, for the toggle toast; None when the
+    /// fold landed or never ran.
+    questions_degraded_reason: Option<String>,
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
@@ -1052,6 +1056,10 @@ struct View {
     /// `footnote-paper`, and `terminal` stays available as the no-op that
     /// inherits the emulator's own colors.
     theme: Theme,
+    /// The user's own themes, latched at startup (theme_ground::launch_theme).
+    user_themes: Vec<(String, Theme)>,
+    /// A staged theme-switch ground repaint; the run loop drains it.
+    pending_ground: Option<theme_ground::PendingGround>,
     /// The board's work-queue cards, verbatim off the wire Layout. The
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
@@ -1961,6 +1969,7 @@ mod node_detail;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
+mod theme_ground;
 mod update_menu;
 
 use config_set::spawn_config_set;
@@ -2127,6 +2136,7 @@ impl View {
             mine_acting: false,
             questions_fold: None,
             questions_degraded: false,
+            questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
             questions_block: questions::BlockPrefs::load(),
@@ -2155,6 +2165,8 @@ impl View {
             search_esc: Vec::new(),
             hover_focus: true,
             theme: Theme::default_theme(),
+            user_themes: Vec::new(),
+            pending_ground: None,
             backlog: Vec::new(),
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
@@ -5657,28 +5669,11 @@ impl View {
         }
     }
 
-    /// A centered, inverse-video name-entry modal for the create / rename /
-    /// recruit inputs. Those used to paint the bottom-left chrome row, where they
-    /// sat outside the operator's field of view and read as "nothing happened";
-    /// centering on a mid-screen inverse-video line puts the prompt where the
-    /// operator is looking and names its target. The bottom chrome row stays
-    /// blanked so a stale bottom row never shows under the modal.
-    ///
-    /// Reported as "I can barely see the prompt", and the fix is the BLOCK: a
-    /// one-row strip hugging its own glyphs is hard to find in busy pane
-    /// content, which is a different complaint from hard to read. It already
-    /// measured 9.9:1 on the reporter's scheme.
-    ///
-    /// It must not stack `BOLD` on the inversion: bold brightens the foreground,
-    /// which reverse has made the background. The shared framer handles that.
-    ///
-    /// It wears the SHARED chrome now, the same `Chrome` + `frame` +
-    /// `blit` path the settings, connections and catch-up modals take, with the
-    /// target as the title and the blank-clears rule as the footer. It used to
-    /// hand-paint a bare three-row inverse block with no border, no title bar
-    /// and no esc chip, which under a named theme read as a different
-    /// application dropped into the middle of the screen. That was the last
-    /// modal still inventing its own look.
+    /// The centered name-entry modal (create / rename / recruit), wearing the
+    /// shared `Chrome` + `frame` + `blit` path every other modal takes: the
+    /// target as the title, the blank-clears rule as the footer, the typed
+    /// name plus cursor as the body. The bottom chrome row stays blanked so a
+    /// stale row never shows under the modal.
     fn name_modal_layout(&self, label: &str, name: &str, hint: Option<&str>) -> OverlayLayout {
         let (origin, dims) = self.overlay_viewport();
         // The typed name plus its cursor IS the body; the target and the
@@ -5696,20 +5691,25 @@ impl View {
         // narrow terminal the operator types a name they cannot see - the one
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
-        // The frame hugs the chrome's own minimum (title + esc chip), and the
-        // body keeps one pad cell beside the text, so the window is that
-        // minimum minus the pad.
-        let body_w = chrome.min_inner_w().saturating_sub(1).max(1);
+        // Body width: the chrome minimum or the wider input floor, capped to
+        // the viewport so a narrow terminal still fits the frame.
+        let viewport_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS);
+        let body_w = chrome.min_inner_w().max(40).min(viewport_w).max(1);
+        // The framer paints the two pad cells inside `body_w` and sizes the
+        // frame to the widest line, so the line arrives pre-padded to `body_w`
+        // and the text capacity is that width minus the pad.
+        let capacity = body_w.saturating_sub(2).max(1);
         let text = format!("{name}_");
-        let text = if text.chars().count() > body_w {
-            let keep = body_w.saturating_sub(1);
+        let text = if text.chars().count() > capacity {
+            let keep = capacity.saturating_sub(1);
             let drop = text.chars().count() - keep;
             let kept: String = text.chars().skip(drop).collect();
             format!("…{kept}")
         } else {
             text
         };
-        layout_lines_overlay(origin, dims, &chrome, &[text], None, OverlayAnchor::Center)
+        let line = format!("{text:<body_w$}");
+        layout_lines_overlay(origin, dims, &chrome, &[line], None, OverlayAnchor::Center)
     }
 
     fn draw_name_modal(
@@ -8100,25 +8100,14 @@ async fn attach_and_run(
     // The chrome theme, same ladder. An unknown name falls back to
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
-    let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
     // The OSC ground: set + restore ride together through the kill switch,
-    // so an operator who opts out gets byte-for-byte the old launch. Computed
-    // here because `cwd` moves into the Attach below.
-    let paint = crate::digest_overlay::paint_background_enabled(Path::new(&cwd));
-    let ground = if paint {
-        crate::theme::ground_set(&theme)
-    } else {
-        None
-    };
-    let ground_color = if paint {
-        match theme.base {
-            Color::Default => None,
-            c => Some(c),
-        }
-    } else {
-        None
-    };
-    view.theme = theme;
+    // so an operator who opts out gets byte-for-byte the old launch.
+    let LaunchTheme {
+        theme,
+        theme_warn,
+        ground,
+        ground_color,
+    } = theme_ground::launch_theme(Path::new(&cwd), &mut view);
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
     // than silently running the shipped default: a keyboard that quietly ignores
@@ -8300,7 +8289,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(
+    let mut guard = launch::begin(
         &mut stdin_rx,
         &splash_tx,
         &theme,
@@ -8377,8 +8366,9 @@ async fn attach_and_run(
     // The questions block's fold channel: the 10s kick spawns the projection
     // read off the UI loop; the arm applies it under no gen guard (the block
     // always shows the latest fold).
-    let (questions_tx, mut questions_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Option<crate::needs_overlay::QuestionsFold>>();
+    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<crate::needs_overlay::QuestionsFold, String>,
+    >();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -8989,6 +8979,7 @@ async fn attach_and_run(
                             } else {
                                 None
                             };
+                            theme_ground::drain_pending_ground(&mut view, &mut compositor, &mut guard);
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -9114,16 +9105,7 @@ async fn attach_and_run(
                             view.mine_degraded = true;
                         }
                     }
-                    match outcome.questions {
-                        Some(fold) => {
-                            view.questions_fold = Some(fold);
-                            view.questions_degraded = false;
-                        }
-                        None => {
-                            view.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
-                            view.questions_degraded = true;
-                        }
-                    }
+                    view.apply_questions_fold(outcome.questions);
                     view.reanchor_answers(prev);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -10461,14 +10443,17 @@ async fn dispatch_event(
                 view.needs_degraded = false;
                 view.mine_degraded = false;
                 view.questions_degraded = false;
+                view.questions_degraded_reason = None;
             } else {
-                // Stale/first open: live-only until the refresh lands.
+                // Stale/reset: live-only until the refresh lands; the reason
+                // clears with the fold, never outlives its fold.
                 view.needs_fold = None;
                 view.needs_degraded = false;
                 view.mine_fold = None;
                 view.mine_degraded = false;
                 view.questions_fold = None;
                 view.questions_degraded = false;
+                view.questions_degraded_reason = None;
                 view.needs_want = true;
             }
         }
@@ -11695,28 +11680,7 @@ async fn execute_aux_action(
             settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
-            // Swap the in-memory theme first (immediate), then persist via the
-            // CLI - the mux never writes config itself, mirroring the rule that
-            // it never writes the graph. On a write failure the in-memory theme
-            // STAYS (applied this session) and the notice says so honestly,
-            // never claiming a persistence it did not achieve.
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let (theme, warn) = crate::digest_overlay::theme_role_overrides(
-                Path::new(&cwd),
-                Theme::from_name(&name),
-            );
-            view.theme = theme;
-            let notice = match spawn_config_set("mux.theme", &name).await {
-                Ok(()) => match warn {
-                    None => format!("theme: {name}"),
-                    Some(w) => w.0,
-                },
-                Err(_) => format!("theme {name} applied this session; save failed"),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
+            theme_ground::apply(view, &name).await?;
         }
         AuxAction::ApplyPrefix(spec) => {
             let notice = match crate::keys::resolve_prefix_change(&spec) {
@@ -13747,6 +13711,9 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+#[cfg(test)]
+#[path = "client_tests/theme_ground_tests.rs"]
+mod theme_ground_tests;
 
 #[cfg(test)]
 #[path = "client_tests/update_modal_tests.rs"]

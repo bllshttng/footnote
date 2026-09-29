@@ -196,9 +196,11 @@ def test_ac3_edge_done_is_idempotent(tmp_graph):
     add = run_native_create(tmp_graph, "add", "IdemTest", "--difficulty", "medium")
     node_id = json.loads(add.stdout)["id"]
     _invoke("backlog", "done", node_id, "--note", "idempotency fixture")
-    r2 = _invoke("backlog", "done", node_id)
-    assert r2.exit_code == 0, r2.output
-    assert "already" in r2.output.lower() or "done" in r2.output.lower()
+    # The bare close is native; the idempotent second close reads the binary's
+    # receipt over the same store.
+    r2 = run_native_create(tmp_graph, "done", node_id)
+    assert r2.exit_code == 0, r2.output + r2.stderr
+    assert "already" in r2.stderr.lower() or "done" in r2.stderr.lower()
 
 
 def test_ac4_err_done_rejects_invalid_id(tmp_graph):

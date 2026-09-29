@@ -2,18 +2,16 @@
 # test-backlog-aliases.sh - verify backlog sub-app stability.
 #
 # Covers ab-67de1b86 Phase 05 Task 5.2 scenarios:
-#   1. fno backlog --help succeeds and lists its advertised commands
+#   1. fno backlog --help succeeds and lists intake/done/next/ready/triage
 #   2. fno --help lists backlog (the graph top-level alias was removed)
 #   3. fno backlog intake <plan> creates a node
 #   4. fno backlog adopt <plan> creates a node + warns on stderr
 #   5. fno backlog done <id> marks the node complete
 #   6. fno backlog done <id> second time is a safe no-op
 #
-# Running this file directly is NOT hermetic: `bash tests/test-backlog-aliases.sh`
-# skips the runner that neutralises ambient state, so it reads your real HOME,
-# config chain and carve-out ledger - a pass proves nothing and a failure may be
-# your machine. Prefer `fno doctor test smoke --only 'backlog aliases'`. See
-# tests/README.md.
+# This script pins HOME, the state root, repo root and tracker backend below.
+# It uses the checkout's Python surface even when an unrelated installed `fno`
+# binary is on PATH, so direct runs exercise the same hermetic command shape.
 
 set -uo pipefail
 
@@ -26,6 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Path.home() / .fno resolves under $TMP. The real user graph
 # at ~/.fno/graph.json is never touched.
 export HOME="$TMP/home"
+unset FNO_CONFIG FNO_STATE_DIR FNO_SPACES_DIR FNO_CLAIMS_ROOT FNO_EVENTS_PATH FNO_TRACKER_BACKEND PYTHONPATH
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
 
@@ -42,6 +41,7 @@ GRAPH_JSON="$HOME/.fno/graph.json"
 # instead of climbing to the real checkout. Both are needed: the cd alone
 # leaves the fallback pointing at whatever ambient root it can find.
 export FNO_REPO_ROOT="$TMP/repo"
+export FNO_TRACKER_BACKEND=graph
 mkdir -p "$FNO_REPO_ROOT/.fno"
 cd "$TMP" || exit 1
 printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
@@ -51,8 +51,11 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Resolve the `fno` command from this checkout so a globally installed version
-# cannot change which help surface the test inspects.
+# Resolve the `fno` command: prefer the in-repo venv (the TREE's surface,
+# which the menu assertions below pin), fall back to an installed binary,
+# then to a bare python3. An installed fno can lag the tree by whole verb
+# generations, and a menu test against it would pin a surface this checkout
+# no longer ships.
 resolve_fno() {
     local venv_py="$REPO_ROOT/cli/.venv/bin/python"
     if [[ -x "$venv_py" ]]; then
@@ -189,7 +192,10 @@ else
     if [[ "$stamp_rc" -ne 0 ]]; then
         fail "native update could not stamp the completion record (rc=$stamp_rc)"
     fi
-    done_out=$(run_fno backlog done "$node_id" 2>&1)
+    # The close is native now: the wheel spelling tombstones, so the done
+    # scenarios drive the same binary the stamp rode (the deployed `fno` IS
+    # this binary; the wheel's refusal names it).
+    done_out=$("$native_fno" backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
     else
@@ -206,7 +212,7 @@ fi
 
 # --- Scenario 6: done is idempotent on re-run -------------------------------
 if [[ -n "$node_id" ]]; then
-    done_again=$(run_fno backlog done "$node_id" 2>&1)
+    done_again=$("$native_fno" backlog done "$node_id" 2>&1)
     rc=$?
     if [[ $rc -eq 0 ]]; then
         pass "done rerun exits 0 (idempotent)"

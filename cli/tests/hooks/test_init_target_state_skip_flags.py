@@ -118,6 +118,28 @@ def _space_state(tmpdir: Path) -> Path:
     return tmpdir / "space" / "target-state.md"
 
 
+def _ensure_feature_repo(root: Path) -> None:
+    if (root / ".git").exists():
+        return
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "fno@test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "fno"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "init"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "-q", "-b", "feature/init-test"],
+        check=True,
+    )
+
+
 def _run_init_script(
     tmpdir: Path, extra_env: dict[str, str], *, timeout_s: int = 900
 ) -> subprocess.CompletedProcess:
@@ -128,16 +150,15 @@ def _run_init_script(
     round-trips are startup-cost no-ops in this isolated env. With the stub a run
     is sub-second, so the timeout stops being load-sensitive.
     """
-    subprocess.run(
-        ["git", "init", "-q", "-b", "feature/init-test", str(tmpdir)],
-        check=True,
-    )
-    home_dir = tmpdir / "home"
-    home_dir.mkdir()
+    _ensure_feature_repo(tmpdir)
+
     plan_file = tmpdir / "plan.md"
     plan_file.write_text("# Test plan\n")
 
-    state_dir = home_dir / ".fno"
+    home_dir = tmpdir / "home"
+    home_dir.mkdir(exist_ok=True)
+    (home_dir / ".fno").mkdir(exist_ok=True)
+    state_dir = tmpdir / ".fno"
     state_dir.mkdir(parents=True, exist_ok=True)
 
     bin_dir = tmpdir / "bin"
@@ -380,13 +401,11 @@ def test_plan_path_env_lands_in_manifest_with_anchor(tmp_path):
 
 
 def _run_without_fno(tmp_path: Path, target_input: str) -> subprocess.CompletedProcess:
-    subprocess.run(
-        ["git", "init", "-q", "-b", "feature/init-test", str(tmp_path)],
-        check=True,
-    )
+    _ensure_feature_repo(tmp_path)
     (tmp_path / ".fno").mkdir(exist_ok=True)
     home_dir = tmp_path / "home"
     home_dir.mkdir(exist_ok=True)
+    (home_dir / ".fno").mkdir(exist_ok=True)
     env = {
         "HOME": str(home_dir),
         "PATH": "/usr/bin:/bin",
