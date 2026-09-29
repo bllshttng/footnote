@@ -1282,6 +1282,7 @@ def run_execute_queue(
 ) -> dict[str, int]:
     """Drain granted rows; executed, held, failed, skipped and budget sum to len(queue)."""
     from fno.pr import _merge
+    from fno.pr._review_hold import WORKTREE_DIRTY, WORKTREE_HEAD_MISMATCH
     from fno.pr_watch._state import WatermarkStore
 
     holder = f"pr-watch-merge:{os.getpid()}"
@@ -1362,14 +1363,18 @@ def run_execute_queue(
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
-                if bare.startswith("checks are red"):
+                if (park := "checks-red" if bare.startswith("checks are red") else next(
+                    (word for word in (WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)
+                     if bare.startswith(word)), None
+                )):
                     # A red hold never clears by retrying: the healer or the
-                    # worker owns the next push, so park with the why instead
-                    # of re-running the whole merge chain every tick. The park
-                    # sweep resumes the row on the next head change.
-                    entry["parked"] = "checks-red"
+                    # worker owns the next push; worktree holds wait for their
+                    # worker. Park with the reason and the held PR head so the
+                    # sweep resumes the row when that head moves.
+                    entry["parked"] = park
+                    entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
                     store.set(key, entry)
-                    emit("pr_watch_parked", {"pr": pr, "reason": "checks-red"})
+                    emit("pr_watch_parked", {"pr": pr, "reason": park})
                     _notify_parked_pr(
                         notify, pr, cand.repo_slug, prior_retries,
                         "durable-grant merge",
