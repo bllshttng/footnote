@@ -1363,13 +1363,16 @@ mod tests {
         (dir, graph)
     }
 
-    /// AC14: the anchor resolution ladder at the store path. Unmigrated
-    /// root: a `db/graph.json`-spelled anchor resolves the legacy `graph.db`
-    /// (the anchor kind probes the `.db` twin, so the legacy `graph.db` must
-    /// exist for the legacy arm to fire). Migrated root: an old-spelled
-    /// anchor answers with the moved store.
+    /// A first write that lands between an opener's unlocked row count and
+    /// its empty-store stamp keeps its version. The stamp used to reset it
+    /// to the empty hash, so the next writer's fence passed and its publish
+    /// deleted the write.
     #[test]
-    fn the_anchor_resolution_answers_unmigrated_and_migrated_roots() {
+    fn an_opener_never_restamps_the_empty_version_over_a_first_write() {
+        // The AC14 resolution ladder rides the same boundary: an unmigrated
+        // root answers a db-spelled anchor with the legacy store, a migrated
+        // root answers an old-spelled anchor with the moved store. The
+        // anchor kind probes the .db twin, so each arm seeds its own.
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("graph.json"), "{}").unwrap();
@@ -1385,14 +1388,6 @@ mod tests {
             root.join("db").join("graph.db"),
             "migrated: moved store"
         );
-    }
-
-    /// A first write that lands between an opener's unlocked row count and
-    /// its empty-store stamp keeps its version. The stamp used to reset it
-    /// to the empty hash, so the next writer's fence passed and its publish
-    /// deleted the write.
-    #[test]
-    fn an_opener_never_restamps_the_empty_version_over_a_first_write() {
         let (_dir, graph) = fixture("graph.json");
         drop(open(&graph).unwrap());
         let mut writer = open(&graph).unwrap();

@@ -832,6 +832,117 @@ mod tests {
         let _ = migrate(&root, true);
         assert_eq!(std::fs::read(&new_path).unwrap(), b"legacy");
         clean(&root);
+        // The sqlite kind rides the same move rules through the backup-API
+        // protocol (state_layout_sqlite). Branch: committed rows still in
+        // the -wal land in the published copy and the trio parks.
+        let root = tmp_root("ow-sq-wal");
+        let legacy = root.join("graph.db");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE nodes (id TEXT PRIMARY KEY, title TEXT);
+             INSERT INTO nodes VALUES ('x-1','one');",
+        )
+        .unwrap();
+        let row = parse_table("graph.db\tdb/graph.db\tsqlite\tdaemon\n")
+            .unwrap()
+            .remove(0);
+        let status =
+            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-wal");
+        assert!(matches!(status, Status::Moved), "{status:?}");
+        let new_db = root.join("db").join("graph.db");
+        let c = rusqlite::Connection::open(&new_db).unwrap();
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the committed row moved");
+        assert!(!legacy.exists(), "the legacy file parked");
+        assert!(root
+            .join("backups")
+            .join("state-root-migration")
+            .join("ow-wal")
+            .join("graph.db")
+            .exists());
+        drop(c);
+        clean(&root);
+        // Branch: a writer holding BEGIN IMMEDIATE past the busy timeout
+        // parks the row, leaves the trio untouched, and clears the fence.
+        let root = tmp_root("ow-sq-busy");
+        let legacy = root.join("graph.db");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
+            .unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let status =
+            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-busy");
+        assert!(
+            matches!(status, Status::Pending(_)),
+            "expected pending, got {status:?}"
+        );
+        assert!(legacy.exists(), "the legacy trio is untouched");
+        assert!(!crate::state_layout_sqlite::fence_path(&root).exists());
+        conn.execute_batch("ROLLBACK;").unwrap();
+        drop(conn);
+        clean(&root);
+        // Branch: rows on both sides refuse and keep both copies.
+        let root = tmp_root("ow-sq-both");
+        let legacy = root.join("graph.db");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
+            .unwrap();
+        drop(conn);
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        let new_db = root.join("db").join("graph.db");
+        let conn = rusqlite::Connection::open(&new_db).unwrap();
+        conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (2);")
+            .unwrap();
+        drop(conn);
+        let status =
+            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-both");
+        assert!(matches!(status, Status::Refused(_)), "{status:?}");
+        assert!(legacy.exists() && new_db.exists(), "both copies stay");
+        clean(&root);
+        // Branch: an empty new copy is a fresh-create race; it parks and the
+        // legacy rows win.
+        let root = tmp_root("ow-sq-empty");
+        let legacy = root.join("graph.db");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
+            .unwrap();
+        drop(conn);
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        let new_db = root.join("db").join("graph.db");
+        rusqlite::Connection::open(&new_db)
+            .unwrap()
+            .execute_batch("CREATE TABLE z (a);")
+            .unwrap();
+        let status =
+            crate::state_layout_sqlite::migrate_sqlite_row(&root, &row, true, "ow-empty");
+        assert!(matches!(status, Status::Moved), "{status:?}");
+        let c = rusqlite::Connection::open(&new_db).unwrap();
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the legacy rows won");
+        drop(c);
+        // Branch: the deferred verify compares a parked copy against its
+        // park-time counts once the record ages past the delay. Same root:
+        // the ow-empty stamp's record is still in place.
+        let record = root
+            .join("backups")
+            .join("state-root-migration")
+            .join("ow-empty")
+            .join("verify.tsv");
+        let f = std::fs::OpenOptions::new().write(true).open(&record).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        ))
+        .unwrap();
+        drop(f);
+        let swept = crate::state_layout_sqlite::verify_sweep(&root, "ow-later");
+        assert_eq!(swept.len(), 1, "{swept:?}");
+        assert!(matches!(swept[0].1, Status::Moved), "{swept:?}");
+        clean(&root);
     }
 
     fn set_mtime(p: &Path, t: std::time::SystemTime) {
