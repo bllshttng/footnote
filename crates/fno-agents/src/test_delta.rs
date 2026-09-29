@@ -81,8 +81,8 @@ fn over_cap(delta: &TestDelta, cap: i64) -> Option<i64> {
     (net > cap).then_some(net)
 }
 
-fn diff_range(dir: &Path, range: &str) -> Result<String, String> {
-    let output = Command::new("git")
+fn diff_range(git_bin: &str, dir: &Path, range: &str) -> Result<String, String> {
+    let output = Command::new(git_bin)
         .args(["diff", "--unified=0", range, "--", "*.py", "*.rs", "*.sh"])
         .current_dir(dir)
         .output()
@@ -108,10 +108,12 @@ pub enum ShrinkGate {
 
 /// The shrink-only gate the push path shares with CI (`--max-net 0`). The
 /// OverCap message carries the table so a worker fixes the delta locally
-/// instead of learning the cap from a red main one full round later.
-pub fn shrink_only_gate(dir: &Path, base: &str) -> Result<(), ShrinkGate> {
+/// instead of learning the cap from a red main one full round later. The
+/// caller's git binary rides in: the push path passes its configured
+/// `--git-bin`, so a stubbed environment stays coherent.
+pub fn shrink_only_gate(git_bin: &str, dir: &Path, base: &str) -> Result<(), ShrinkGate> {
     let range = format!("{base}...HEAD");
-    let diff = diff_range(dir, &range).map_err(ShrinkGate::Diff)?;
+    let diff = diff_range(git_bin, dir, &range).map_err(ShrinkGate::Diff)?;
     let delta = TestDelta::from_diff(&diff);
     if let Some(net) = over_cap(&delta, 0) {
         return Err(ShrinkGate::OverCap(format!(
@@ -149,7 +151,7 @@ pub fn run_test_delta(args: &[String]) -> i32 {
         None => None,
     };
     let range = format!("{base}...HEAD");
-    let diff = match diff_range(Path::new("."), &range) {
+    let diff = match diff_range("git", Path::new("."), &range) {
         Ok(diff) => diff,
         Err(msg) => {
             eprintln!("test-delta: {msg}");

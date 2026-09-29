@@ -1136,7 +1136,7 @@ pub fn run_push(argv: &[String]) -> i32 {
     // (5c) The shrink-only test cap, the same `--max-net 0` gate the guards
     // workflow runs in CI. Refusing here moves the fix one round earlier: a
     // breach used to surface as a red main only after both runs had spent.
-    if let Err(gate) = crate::test_delta::shrink_only_gate(&cwd, "origin/main") {
+    if let Err(gate) = crate::test_delta::shrink_only_gate(&git, &cwd, "origin/main") {
         match gate {
             crate::test_delta::ShrinkGate::OverCap(msg) => {
                 eprintln!("pr-push: refusing: {msg}");
@@ -1685,11 +1685,14 @@ exit 1
             "#[test]\nfn kept_case() {}\n",
             "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
         );
-        let err =
-            match crate::test_delta::shrink_only_gate(std::path::Path::new(&work), "origin/main") {
-                Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
-                other => panic!("expected an over-cap refusal: {other:?}"),
-            };
+        let err = match crate::test_delta::shrink_only_gate(
+            "git",
+            std::path::Path::new(&work),
+            "origin/main",
+        ) {
+            Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
+            other => panic!("expected an over-cap refusal: {other:?}"),
+        };
         assert!(err.contains("net +1 test declarations"), "{err}");
         assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
 
