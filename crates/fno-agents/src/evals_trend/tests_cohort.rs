@@ -41,7 +41,6 @@ fn fold_of(tmp: &TempDir, lines: &[String]) -> Value {
     cohort_fold(&rows, None)
 }
 
-#[test]
 fn two_cohorts_kept_apart() {
     let tmp = TempDir::new().unwrap();
     let fold = fold_of(
@@ -100,7 +99,6 @@ fn two_cohorts_kept_apart() {
     );
 }
 
-#[test]
 fn substituted_is_excluded_and_counted_never_scored() {
     let tmp = TempDir::new().unwrap();
     let fold = fold_of(
@@ -132,7 +130,6 @@ fn substituted_is_excluded_and_counted_never_scored() {
     assert_eq!(c["lane_status_counts"]["substituted"], 1);
 }
 
-#[test]
 fn unmeasured_when_any_scored_row_lacks_usage() {
     let tmp = TempDir::new().unwrap();
     let fold = fold_of(
@@ -157,7 +154,6 @@ fn unmeasured_when_any_scored_row_lacks_usage() {
     assert_eq!(c["tokens"]["input"], 0);
 }
 
-#[test]
 fn measured_cost_with_prices() {
     let tmp = TempDir::new().unwrap();
     let h = write_history(
@@ -205,4 +201,12 @@ fn measured_cost_with_prices() {
         "{not json".into(),
     ]);
     assert_eq!(bad, 2);
+}
+
+#[test]
+fn all_contracts_in_one_declaration() {
+    two_cohorts_kept_apart();
+    substituted_is_excluded_and_counted_never_scored();
+    unmeasured_when_any_scored_row_lacks_usage();
+    measured_cost_with_prices();
 }

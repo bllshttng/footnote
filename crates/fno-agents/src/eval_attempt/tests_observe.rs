@@ -50,7 +50,6 @@ fn claude_line(cwd: &str, model: &str, inp: u64, out: u64, cr: u64, cw: u64) -> 
 
 const WD: &str = "/tmp/attempt-wd";
 
-#[test]
 fn observe_claude_finds_transcript_by_workdir_and_sums_usage() {
     let tmp = tempfile::TempDir::new().unwrap();
     let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
@@ -84,7 +83,6 @@ fn observe_claude_finds_transcript_by_workdir_and_sums_usage() {
     assert_eq!(out["usage_source"], "claude-transcript");
 }
 
-#[test]
 fn observe_claude_no_transcript_reads_unverified_with_null_usage() {
     let tmp = tempfile::TempDir::new().unwrap();
     let lane =
@@ -116,7 +114,6 @@ fn observe_claude_no_transcript_reads_unverified_with_null_usage() {
     assert_eq!(out["usage"], Value::Null);
 }
 
-#[test]
 fn observe_claude_model_mismatch_is_substituted() {
     let tmp = tempfile::TempDir::new().unwrap();
     let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
@@ -143,7 +140,6 @@ fn observe_claude_model_mismatch_is_substituted() {
     assert_eq!(out["observed_model"], "claude-sonnet-5");
 }
 
-#[test]
 fn observe_statuses_before_any_worker() {
     let lane = json!({"name": "x", "harness": "claude", "model": "m", "effort": "high"});
     let mut p = observe_payload(lane.clone(), json!({}));
@@ -156,7 +152,6 @@ fn observe_statuses_before_any_worker() {
     assert_eq!(out["usage"], Value::Null);
 }
 
-#[test]
 fn observe_opencode_reads_session_and_sums_tokens() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = dir.path().join("opencode.db");
@@ -190,4 +185,13 @@ fn observe_opencode_reads_session_and_sums_tokens() {
     assert_eq!(out["usage"]["cache_read"], 6);
     assert_eq!(out["usage"]["cache_write"], 1);
     assert_eq!(out["usage_source"], "opencode-store");
+}
+
+#[test]
+fn all_contracts_in_one_declaration() {
+    observe_claude_finds_transcript_by_workdir_and_sums_usage();
+    observe_claude_no_transcript_reads_unverified_with_null_usage();
+    observe_claude_model_mismatch_is_substituted();
+    observe_statuses_before_any_worker();
+    observe_opencode_reads_session_and_sums_tokens();
 }

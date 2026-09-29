@@ -539,10 +539,11 @@ def test_lane_grade_only_task_records_not_applicable_never_unavailable(tmp_path:
     assert row["observed_model"] is None
 
 
-def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverified(tmp_path: Path) -> None:
+def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverified(tmp_path, monkeypatch) -> None:
     """A spawned attempt whose store holds no transcript for the attempt
     workdir reads unverified, never a false unavailable that reads like the
-    lane refused capacity."""
+    lane refused capacity. An unreachable door reads the same way, never a
+    crash and never a guessed status (AC10-EDGE)."""
     root = _git_repo(tmp_path)
     hp = tmp_path / "hist.jsonl"
 
@@ -569,27 +570,17 @@ def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverifie
     assert row["requested_lane"] == "astra-high"
     assert row["observed_model"] is None
 
-
-def test_lane_door_unavailable_writes_unverified_never_a_crash(tmp_path, monkeypatch) -> None:
-    """AC10-EDGE: an unreachable door degrades the row to unverified with the
-    named reason, never crashes the repeat and never guesses a lane status."""
-    root = _git_repo(tmp_path)
-    hp = tmp_path / "hist.jsonl"
-
-    def spawn(prompt, workdir, timeout_s):
-        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
-        return SpawnResult(True, worker_name="eval-worker-4")
-
+    # Second phase: the door itself unreachable degrades the row the same way.
     def fake_verb_call(verb, payload, **kwargs):
         from fno.rust_binary import VerbUnavailable
 
         raise VerbUnavailable("binary missing")
 
     monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb_call)
-    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
-    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn, lane=_LANE)
-    row = _rows(hp)[0]
+    hp2 = tmp_path / "hist2.jsonl"
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp2, spawn=spawn, lane=_LANE)
     assert results[0].passed
+    row = _rows(hp2)[0]
     assert row["lane_status"] == "unverified"
     assert row["lane_reason"] == "observe door unavailable"
     assert row["usage"] is None
