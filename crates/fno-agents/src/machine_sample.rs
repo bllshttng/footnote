@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn top_names_rank_groups_by_count_with_largest_parent() {
+    fn top_names_fold_ranks_by_count_folds_paths_and_skips_the_unnamed() {
         let row =
             |pid: u32, ppid: u32, command: &str| crate::census::test_proc_row(pid, ppid, command);
         let procs = vec![
@@ -538,28 +538,16 @@ mod tests {
             row(2, 100, "git diff"),
             row(3, 200, "git log"),
             row(4, 100, "ssh host"),
+            row(5, 1, "/usr/bin/rustc main.rs"),
+            row(6, 1, ""),
         ];
         let binding = top_name_rows(&procs);
         let rows = binding.as_array().unwrap();
         assert_eq!(rows[0]["name"], "git");
         assert_eq!(rows[0]["count"], 3);
-        assert_eq!(rows[0]["ppid"], 100);
+        assert_eq!(rows[0]["ppid"], 100, "largest parent sub-group wins");
         assert_eq!(rows[1]["name"], "ssh");
-        assert_eq!(rows[1]["count"], 1);
-    }
-
-    #[test]
-    fn top_names_fold_exec_paths_to_basenames_and_skip_the_unnamed() {
-        let row = |pid: u32, command: &str| crate::census::test_proc_row(pid, 1, command);
-        let procs = vec![
-            row(1, "/usr/bin/rustc main.rs"),
-            row(2, ""),
-            row(3, "git status"),
-        ];
-        let binding = top_name_rows(&procs);
-        let rows = binding.as_array().unwrap();
-        assert_eq!(rows[0]["name"], "git");
-        assert_eq!(rows[1]["name"], "rustc");
-        assert_eq!(rows.len(), 2, "an empty command names no group");
+        assert_eq!(rows[2]["name"], "rustc");
+        assert_eq!(rows.len(), 3, "an empty command names no group");
     }
 }

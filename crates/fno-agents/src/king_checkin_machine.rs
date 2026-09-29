@@ -75,60 +75,42 @@ pub(crate) fn beat_line(reading: &Value) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn machine_reading_folds_the_newest_sample_from_the_journals() {
+    fn journal_with(rows: &[serde_json::Value]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join("events.jsonl");
-        let now = chrono::Utc::now();
-        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
-        let new = now.to_rfc3339();
-        let rows = [
-            serde_json::json!({"ts": old, "type": "machine_sample", "source": "daemon",
-                "data": {"processes": 1005, "swap_used_gb": 2.0, "swap_total_gb": 95.0}}),
-            serde_json::json!({"ts": new, "type": "machine_sample", "source": "daemon",
-                "data": {"processes": 144, "swap_used_gb": 15.7, "swap_total_gb": 95.0}}),
-        ];
         let body: String = rows.iter().map(|r| r.to_string() + "\n").collect();
         std::fs::write(&journal, body).unwrap();
+        (dir, journal)
+    }
+
+    fn sample_row(ts: chrono::DateTime<chrono::Utc>, processes: u64) -> serde_json::Value {
+        serde_json::json!({"ts": ts.to_rfc3339(), "type": "machine_sample", "source": "daemon",
+            "data": {"processes": processes, "swap_used_gb": 15.7, "swap_total_gb": 95.0}})
+    }
+
+    #[test]
+    fn the_machine_line_folds_the_newest_fresh_sample_and_reads_unmeasured_otherwise() {
+        let now = chrono::Utc::now();
+        let (_dir, journal) = journal_with(&[
+            sample_row(now - chrono::Duration::hours(2), 1005),
+            sample_row(now, 144),
+        ]);
         let reading = newest_reading(&[journal]).unwrap();
         assert_eq!(reading["state"], "measured");
-        assert_eq!(reading["processes"], 144);
+        assert_eq!(reading["processes"], 144, "newest row wins");
         assert_eq!(reading["swap_used_gb"], 15.7);
         assert!(reading["age_s"].as_i64().unwrap() >= 0);
-    }
-
-    #[test]
-    fn machine_reading_reports_unmeasured_when_no_row_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let journal = dir.path().join("absent.jsonl");
-        let reading = newest_reading(&[journal]).unwrap();
-        assert_eq!(reading["state"], "unmeasured");
-    }
-
-    #[test]
-    fn a_stale_sample_reads_unmeasured_not_old_news() {
-        let dir = tempfile::tempdir().unwrap();
-        let journal = dir.path().join("events.jsonl");
-        let stale = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-        let row = serde_json::json!({"ts": stale, "type": "machine_sample", "source": "daemon",
-            "data": {"processes": 144, "swap_used_gb": 2.0, "swap_total_gb": 95.0}});
-        std::fs::write(&journal, row.to_string() + "\n").unwrap();
-        let reading = newest_reading(&[journal]).unwrap();
-        assert_eq!(reading["state"], "unmeasured");
-    }
-
-    #[test]
-    fn the_machine_line_renders_one_screen_line() {
-        let reading = json!({
-            "state": "measured",
-            "processes": 144,
-            "swap_used_gb": 15.7,
-            "swap_total_gb": 95.0,
-            "age_s": 42,
-        });
-        assert_eq!(
-            beat_line(&reading),
-            "machine: 144 processes, swap 15.7 of 95.0 GB (42s old)"
+        let line = beat_line(&reading);
+        assert!(
+            line.starts_with("machine: 144 processes, swap 15.7 of 95.0 GB ("),
+            "{line}"
         );
+        assert!(line.ends_with("s old)"), "{line}");
+        // Absent and stale branches read unmeasured, never old news.
+        let (_dir, absent) = journal_with(&[]);
+        assert_eq!(newest_reading(&[absent]).unwrap()["state"], "unmeasured");
+        let (_dir, stale) = journal_with(&[sample_row(now - chrono::Duration::hours(2), 144)]);
+        assert_eq!(newest_reading(&[stale]).unwrap()["state"], "unmeasured");
+        assert_eq!(beat_line(&serde_json::json!({"state": "unmeasured"})), "machine: unmeasured");
     }
 }

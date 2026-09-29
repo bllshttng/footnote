@@ -506,17 +506,13 @@ mod tests {
     }
 
     #[test]
-    fn swap_runaway_names_swap_and_fires_without_history() {
+    fn the_runaway_arms_fire_on_swap_and_on_an_armed_process_baseline() {
         let mut s = sample(None, None);
         s.swap_used_gb = Some(50.0);
         s.swap_total_gb = Some(95.0);
         let (verdict, reason) = decide(&s, 0.9, 10.0, None);
-        assert_eq!(verdict, "runaway");
+        assert_eq!(verdict, "runaway", "swap needs no history");
         assert!(reason.contains("swap"), "reason names the signal: {reason}");
-    }
-
-    #[test]
-    fn process_runaway_needs_an_armed_baseline() {
         let mut s = sample(None, None);
         s.processes = Some(2500);
         let (verdict, _) = decide(&s, 0.9, 10.0, None);
@@ -524,10 +520,6 @@ mod tests {
         let (verdict, reason) = decide(&s, 0.9, 10.0, Some(1200));
         assert_eq!(verdict, "runaway");
         assert!(reason.contains("baseline"), "{reason}");
-    }
-
-    #[test]
-    fn a_three_reading_window_never_fires_the_process_arm() {
         let now = Instant::now();
         let window: Vec<(Instant, u64)> = (0..3)
             .map(|i| (now - Duration::from_secs(300 * (i as u64 + 1)), 1000 + i))
@@ -540,11 +532,18 @@ mod tests {
     }
 
     #[test]
-    fn a_runaway_notifies_on_the_first_tick_and_writes_the_brake() {
+    fn a_runaway_ticks_page_immediately_and_the_brake_names_its_group() {
         let mut state = MachineWatchState::default();
         let mut s = sample(None, None);
         s.swap_used_gb = Some(50.0);
         s.swap_total_gb = Some(95.0);
+        s.processes = Some(9000);
+        s.top_names = Some(serde_json::json!([
+            {"name": "git", "count": 8000, "ppid": 42}
+        ]));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brake.json");
+        std::env::set_var("FNO_MACHINE_BRAKE", &path);
         let mut notify_calls = 0;
         let mut brake_calls = 0;
         let outcome = tick_machine_watch(
@@ -555,41 +554,15 @@ mod tests {
                 true
             },
             Instant::now(),
-            |_, _| brake_calls += 1,
+            |s, r| {
+                brake_calls += 1;
+                write_brake_file(s, r);
+            },
         );
         assert_eq!(outcome.acted, 1, "no debounce on a runaway");
         assert_eq!(notify_calls, 1);
-        assert_eq!(brake_calls, 1);
+        assert_eq!(brake_calls, 1, "the brake writes on the first tick");
         assert!(outcome.detail.contains("runaway"), "{}", outcome.detail);
-        // A throttled second tick still refreshes the brake: the hold must
-        // outlive the notice throttle on a sustained runaway.
-        let outcome = tick_machine_watch(
-            &mut state,
-            Ok(&s),
-            |_, _| {
-                notify_calls += 1;
-                true
-            },
-            Instant::now(),
-            |_, _| brake_calls += 1,
-        );
-        assert_eq!(outcome.acted, 0, "second notice is throttled");
-        assert_eq!(notify_calls, 1);
-        assert_eq!(brake_calls, 2);
-    }
-
-    #[test]
-    fn brake_is_written_with_group_reason_and_expiry() {
-        let mut s = sample(None, None);
-        s.processes = Some(9000);
-        s.top_names = Some(serde_json::json!([
-            {"name": "git", "count": 8000, "ppid": 42}
-        ]));
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("brake.json");
-        std::env::set_var("FNO_MACHINE_BRAKE", &path);
-        write_brake_file(&s, "machine runaway: test");
-        std::env::remove_var("FNO_MACHINE_BRAKE");
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(stored["group"]["name"], "git");
@@ -602,5 +575,21 @@ mod tests {
                     .as_secs()
         );
         assert!(stored["reason"].as_str().unwrap().contains("runaway"));
+        // A throttled second tick still refreshes the brake: the hold must
+        // outlive the notice throttle on a sustained runaway.
+        let outcome = tick_machine_watch(
+            &mut state,
+            Ok(&s),
+            |_, _| {
+                notify_calls += 1;
+                true
+            },
+            Instant::now(),
+            |_, _| brake_calls += 1,
+        );
+        std::env::remove_var("FNO_MACHINE_BRAKE");
+        assert_eq!(outcome.acted, 0, "second notice is throttled");
+        assert_eq!(notify_calls, 1);
+        assert_eq!(brake_calls, 2);
     }
 }

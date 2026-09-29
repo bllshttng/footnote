@@ -2009,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unexpired_brake_refuses_the_fleet_and_names_the_group() {
+    fn an_unexpired_brake_refuses_and_an_absent_one_admits_unchanged() {
         let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
@@ -2029,7 +2029,6 @@ mod tests {
         .unwrap();
         std::env::set_var("FNO_MACHINE_BRAKE", &path);
         let failure = admit_fleet().err().expect("brake refuses");
-        std::env::remove_var("FNO_MACHINE_BRAKE");
         match failure.decision() {
             AdmissionDecision::Refuse {
                 reason: AdmissionReason::MachineRunaway,
@@ -2042,12 +2041,7 @@ mod tests {
             "{}",
             failure
         );
-    }
-
-    #[test]
-    fn no_brake_file_leaves_admission_untouched() {
-        let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
+        // The absent-file branch: admission reads byte-for-byte as before.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
         let permit = admit_fleet();
         std::env::remove_var("FNO_MACHINE_BRAKE");
