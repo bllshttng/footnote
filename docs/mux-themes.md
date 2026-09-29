@@ -16,7 +16,7 @@ Mux themes set the colors for the fno interface. The terminal keeps its own colo
 | `dim` | Secondary interface text. |
 | `chip` | The Escape key hint. |
 
-Use an RGB hex value such as `#1e1e2e`, an indexed color such as `indexed(4)`, or an ANSI-16 name such as `blue` or `light_yellow` for a role value. ANSI names use the standard color names, with `light_` for the bright palette.
+Use `#rrggbb`, `indexed(n)`, or an ANSI-16 name for each role. Examples are `#1e1e2e`, `indexed(4)`, `blue`, and `light_yellow`.
 
 `inherit` names a built-in theme. The built-in `terminal` theme follows the terminal's own colors. Other built-ins provide a palette for any role that the user theme does not set.
 
@@ -45,7 +45,7 @@ Open **Settings > Theme** and choose **+ add own theme**. Enter a local file pat
 
 The importer reads fno theme files with `[mux.themes.<name>]` tables or top-level role keys. It also reads Ghostty theme files. It previews the result before it saves the theme to `<state root>/mux/themes/<name>.toml` and applies it.
 
-A file must be a regular file, no larger than 65,536 bytes, and valid UTF-8. A folder import reads regular, non-hidden files directly inside that folder; it does not scan subfolders. It accepts up to 32 files. It skips files that are not theme files. If a file has an invalid color, role, or `inherit` value, the preview shows the warning and disables save.
+A file must be a regular file, no larger than 65,536 bytes, and valid UTF-8. A folder import reads regular, non-hidden files directly inside that folder. It does not scan subfolders. It accepts up to 32 files. It skips files that are not theme files. If a file has an invalid color, role, or `inherit` value, the preview shows the warning and disables save.
 
 GitHub imports accept a file URL in one of these forms:
 
@@ -74,4 +74,4 @@ Ghostty theme files use `key = value` lines. The importer reads the following ke
 | `dim` | `palette = 8=<color>` |
 | `inherit` | `footnote-paper` when the background luminance is above 0.5; otherwise `footnote-superscript` |
 
-The importer accepts six hex digits with or without a leading `#`. A role is left unset when its Ghostty source value is missing, so the selected built-in supplies it.
+The importer accepts six hex digits with or without a leading `#`. When its Ghostty source value is missing, the importer leaves that role unset. The selected built-in supplies it.
