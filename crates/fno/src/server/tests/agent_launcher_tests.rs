@@ -12,6 +12,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         substrate: "pane".to_string(),
         model: None,
         provider: None,
+        route: None,
         model_names_harness: false,
         effort: None,
         permission_mode: None,
@@ -59,6 +60,21 @@ async fn agent_launch_accepts_empty_substrate_and_refuses_headless() {
             );
         }
         other => panic!("expected a substrate refusal, got {other:?}"),
+    }
+    // A route pin owns the model: a route beside a model (or a provider) is
+    // refused pre-wire so the ambiguous argv never reaches the door.
+    let mut both = launch_req(3, "/tmp/p3", "claude");
+    both.route = Some("zai/glm-5.3-flash[1m]".to_string());
+    both.model = Some("glm-5.3-flash[1m]".to_string());
+    core.agent_launch(1, both);
+    match core.launch_desk.settled_state(1, 3) {
+        Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
+            assert!(
+                reason.contains("route"),
+                "route+model refuses pre-wire: {reason}"
+            );
+        }
+        other => panic!("expected a route-exclusivity refusal, got {other:?}"),
     }
     drop(out_tx);
     drop(exit_tx);

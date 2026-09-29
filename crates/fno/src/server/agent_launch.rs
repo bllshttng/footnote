@@ -23,7 +23,6 @@ use crate::proto::ServerMsg;
 /// round-trip, so the budget is seconds, not the digest's 800ms; a hung
 /// dispatch still fails open to a notice rather than wedging.
 pub(crate) async fn run_dispatch_one(
-    session: &str,
     node: Option<&str>,
     account: Option<&str>,
     plan: bool,
@@ -62,15 +61,9 @@ pub(crate) async fn run_dispatch_one(
     // lane and the door renders the seed. A plan spawn pins the architect
     // sub-agent and the blueprint message on the SAME door flags.
     let argv = if plan {
-        crate::dispatch_launch::plan_spawn_argv(&fno, &node_id, session, account, parent.as_deref())
+        crate::dispatch_launch::plan_spawn_argv(&fno, &node_id, account, parent.as_deref())
     } else {
-        crate::dispatch_launch::dispatch_spawn_argv(
-            &fno,
-            &node_id,
-            session,
-            account,
-            parent.as_deref(),
-        )
+        crate::dispatch_launch::dispatch_spawn_argv(&fno, &node_id, account, parent.as_deref())
     };
     let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Step 4: the outcome maps to the operator's one-liner. Both streams are
@@ -183,6 +176,9 @@ impl LaunchDesk {
 /// authority on harness support, routing, capacity and permissions.
 fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
     crate::dispatch_launch::validate_extra_flags(&req.extra_flags)?;
+    if req.route.is_some() && (req.model.is_some() || req.provider.is_some()) {
+        return Err("a route pin owns the model; send route, model, or provider, never a route beside either".to_string());
+    }
     if req.provider.is_some() && req.model.is_none() {
         return Err("a provider pin requires a model".to_string());
     }
@@ -380,11 +376,9 @@ impl super::Core {
         account: Option<String>,
         plan: bool,
     ) {
-        let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice =
-                run_dispatch_one(&session, node.as_deref(), account.as_deref(), plan).await;
+            let notice = run_dispatch_one(node.as_deref(), account.as_deref(), plan).await;
             let _ = core_tx
                 .send(super::CoreMsg::DispatchResult { id, notice })
                 .await;
@@ -617,6 +611,7 @@ mod tests {
             substrate: "pane".to_string(),
             model: None,
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,

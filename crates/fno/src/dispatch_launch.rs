@@ -21,14 +21,14 @@ pub(crate) fn dispatch_timeout() -> Duration {
 
 /// The launch argv for a dispatch (change 3, step 3): pure so a unit
 /// test can pin it. The door is the ONE launcher and now the mux's
-/// direct target too - no `--harness`, `--model`, `--route` and no message
-/// ride, so the grid picks the lane while the axes are free and the door
-/// renders the seed; the door takes the family-2 guard, the spawn gate, and
-/// the placement lease.
+/// direct target too - no `--harness`, `--model`, `--route`, no message and
+/// no `--mux-session` ride (the flag is pane-only at the door, and a
+/// dispatch takes the thread lane), so the grid picks the lane while the
+/// axes are free and the door renders the seed; the door takes the
+/// family-2 guard, the spawn gate, and the placement lease.
 pub(crate) fn dispatch_spawn_argv(
     fno: &str,
     node_id: &str,
-    session: &str,
     account: Option<&str>,
     _parent: Option<&str>,
 ) -> Vec<String> {
@@ -42,8 +42,6 @@ pub(crate) fn dispatch_spawn_argv(
         // new spawn from the mux takes the thread lane where the harness
         // seats one. A dispatch child therefore shows as its own roster row
         // rather than opening under its epic's tab.
-        "--mux-session".to_string(),
-        session.to_string(),
         "--no-wait".to_string(),
     ]
     .to_vec();
@@ -62,17 +60,16 @@ pub(crate) fn dispatch_spawn_argv(
 /// unit test can pin it, the same rule [`dispatch_spawn_argv`] follows. The
 /// door is the ONE launcher; the spawn is pinned to the architect sub-agent
 /// and carries the blueprint message, and every dispatch flag (substrate,
-/// mux session, account, parent tab, `--no-wait`) rides exactly as a
-/// dispatch - so the door's family-2 guard, spawn gate, and placement lease
-/// all answer unchanged.
+/// account, parent tab, `--no-wait`) rides exactly as a dispatch - so the
+/// door's family-2 guard, spawn gate, and placement lease all answer
+/// unchanged.
 pub(crate) fn plan_spawn_argv(
     fno: &str,
     node_id: &str,
-    session: &str,
     account: Option<&str>,
     parent: Option<&str>,
 ) -> Vec<String> {
-    let mut argv = dispatch_spawn_argv(fno, node_id, session, account, parent);
+    let mut argv = dispatch_spawn_argv(fno, node_id, account, parent);
     argv.push("--agent".to_string());
     argv.push("fno:architect".to_string());
     argv.push(format!("/fno:blueprint {node_id}"));
@@ -165,12 +162,20 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
         argv.extend(["--substrate".to_string(), req.substrate.clone()]);
     }
     argv.extend([
-        "--mux-session".to_string(),
-        session.to_string(),
         // Fail immediately on a full spawn gate rather than queueing: a
         // popup launch that silently waits reads as a hung button.
         "--no-wait".to_string(),
     ]);
+    // The mux session anchors a PANE placement; the door refuses the flag on
+    // any other substrate, so a thread launch (the default) never sends it.
+    if req.substrate == "pane" {
+        argv.extend(["--mux-session".to_string(), session.to_string()]);
+    }
+    // A routing-row pick rides the row's route alone: a route owns the
+    // model, so the model+vendor pair (a route AND a model) never forms.
+    if let Some(r) = &req.route {
+        argv.extend(["--route".to_string(), r.clone()]);
+    }
     if let Some(m) = &req.model {
         argv.extend(["--model".to_string(), m.clone()]);
     }
@@ -341,9 +346,12 @@ const VERDICT_MARKER: &str = "spawn-gate: refused on ";
 const GATE_NOTE_PREFIX: &str = "spawn-gate note:";
 
 /// The door's own error line: the gate's verdict line when one is present,
-/// else the first non-empty stderr line that is not a passing note, else the
-/// first stdout line, cut at 160 chars. Shared by the notice mapping and the
-/// launcher decoder.
+/// else the LAST non-empty stderr line that is not a passing note, else the
+/// first stdout line, cut at 160 chars. The door prints preamble notes
+/// (route skips, applied slots) first and its fatal answer last, so the
+/// last line is the verdict the operator meant to read; the first line was
+/// often an informational note that read as the refusal. Shared by the
+/// notice mapping and the launcher decoder.
 pub(crate) fn refusal_detail(stderr: &str, stdout: &str) -> String {
     if let Some(verdict) = stderr
         .lines()
@@ -357,7 +365,8 @@ pub(crate) fn refusal_detail(stderr: &str, stdout: &str) -> String {
         .filter(|l| !l.trim_start().starts_with(GATE_NOTE_PREFIX))
         .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
         .map(|l| l.trim().to_string())
-        .find(|l| !l.is_empty())
+        .filter(|l| !l.is_empty())
+        .last()
         .unwrap_or_else(|| crate::server::first_line_or(stdout, ""));
     cut_160(&detail)
 }
@@ -672,38 +681,45 @@ mod tests {
             ),
             "grab work failed: Error: pane launch failed"
         );
+        // No verdict marker: the door's LAST line is the verdict (the door
+        // prints preamble notes first and its fatal answer last), so an
+        // informational preamble line never reads as the refusal.
+        assert_eq!(
+            dispatch_notice(
+                false,
+                "",
+                "fno agents spawn: applied slot=operator-pin-override (a typed \
+                 model/vendor/route outranks the lanes) (routing)\n\
+                 fno agents spawn: --mux-session is pane-only; substrate 'bg' \
+                 has no mux session to spawn into",
+                "x-1",
+                "feat"
+            ),
+            "grab work failed: fno agents spawn: --mux-session is pane-only; \
+             substrate 'bg' has no mux session to spawn into"
+        );
     }
 
     #[test]
     fn dispatch_spawn_argv_is_pinned() {
-        // Node + session + no-wait, and nothing else: no --substrate pin
-        // (the door's thread default decides), no --tab parent, no
+        // Node + no-wait, and nothing else: no --substrate pin (the door's
+        // thread default decides), no --mux-session (pane-only at the door
+        // and a dispatch takes the thread), no --tab parent, no
         // --harness/--model/--route and no message.
         assert_eq!(
-            dispatch_spawn_argv("fno", "x-1", "work", None, None),
-            vec![
-                "fno",
-                "agents",
-                "spawn",
-                "--node",
-                "x-1",
-                "--mux-session",
-                "work",
-                "--no-wait",
-            ]
+            dispatch_spawn_argv("fno", "x-1", None, None),
+            vec!["fno", "agents", "spawn", "--node", "x-1", "--no-wait",]
         );
         // The account rides only when present; the epic-tab parent is
         // retired (a thread has no tab to group under).
         assert_eq!(
-            dispatch_spawn_argv("fno", "x-1", "work", Some("acc"), Some("3")),
+            dispatch_spawn_argv("fno", "x-1", Some("acc"), Some("3")),
             vec![
                 "fno",
                 "agents",
                 "spawn",
                 "--node",
                 "x-1",
-                "--mux-session",
-                "work",
                 "--no-wait",
                 "--account",
                 "acc",
@@ -716,15 +732,13 @@ mod tests {
         // The Plan entry: the dispatch argv plus the architect pin and the
         // blueprint message - the door, gate and placement machinery shared.
         assert_eq!(
-            plan_spawn_argv("fno", "x-1", "work", None, None),
+            plan_spawn_argv("fno", "x-1", None, None),
             vec![
                 "fno",
                 "agents",
                 "spawn",
                 "--node",
                 "x-1",
-                "--mux-session",
-                "work",
                 "--no-wait",
                 "--agent",
                 "fno:architect",
@@ -733,7 +747,7 @@ mod tests {
         );
         // The account still rides when present.
         assert_eq!(
-            plan_spawn_argv("fno", "x-2", "work", Some("acc"), Some("3"))
+            plan_spawn_argv("fno", "x-2", Some("acc"), Some("3"))
                 .iter()
                 .filter(|a| *a == "--account" || *a == "acc")
                 .count(),
@@ -771,6 +785,7 @@ mod tests {
             substrate: "pane".into(),
             model: Some("gpt-5.6-luna".into()),
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: Some("high".into()),
             permission_mode: Some("workspace-write:on-request".into()),
@@ -818,6 +833,7 @@ mod tests {
             substrate: String::new(),
             model: Some("openrouter/qwen/qwen3-coder".into()),
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -840,8 +856,6 @@ mod tests {
                 "opencode",
                 "--cwd",
                 "/tmp/open-models",
-                "--mux-session",
-                "work",
                 "--no-wait",
                 "--model",
                 "openrouter/qwen/qwen3-coder",
@@ -864,6 +878,7 @@ mod tests {
             substrate: String::new(),
             model: None,
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -886,8 +901,6 @@ mod tests {
                 "claude",
                 "--cwd",
                 "/tmp/p2",
-                "--mux-session",
-                "s",
                 "--no-wait",
                 "--portal",
                 "1",
@@ -907,6 +920,7 @@ mod tests {
             substrate: "pane".into(),
             model: None,
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -952,6 +966,7 @@ mod tests {
             substrate: String::new(),
             model: Some("glm-5.3-flash[1m]".into()),
             provider: None,
+            route: None,
             model_names_harness: true,
             effort: None,
             permission_mode: None,
@@ -974,6 +989,42 @@ mod tests {
                 && argv.contains(&"glm-5.3-flash[1m]".to_string()),
             "the model id rides: {argv:?}"
         );
+        // The composer's routing-row pick rides the ROW'S ROUTE alone: a
+        // route owns the model, so --model and --provider never join it,
+        // and a thread launch carries no --mux-session.
+        let route_pinned = AgentLaunchRequest {
+            request_id: 7,
+            revision: 1,
+            cwd: "/tmp/p7".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: None,
+            provider: None,
+            route: Some("zai/glm-5.3-flash[1m]".into()),
+            model_names_harness: false,
+            effort: Some("high".into()),
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            node: None,
+            message: String::new(),
+            extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
+        };
+        let argv = launch_spawn_argv("fno", &route_pinned, "s");
+        assert!(
+            argv.contains(&"--route".to_string())
+                && argv.contains(&"zai/glm-5.3-flash[1m]".to_string()),
+            "the route rides: {argv:?}"
+        );
+        assert!(
+            !argv.contains(&"--model".to_string())
+                && !argv.contains(&"--provider".to_string())
+                && !argv.contains(&"--mux-session".to_string()),
+            "a route never joins model or provider, and a thread carries no mux session: {argv:?}"
+        );
         // Thread new tab: the explicit ask rides the argv like any
         // substrate; the spawn CLI opens the portal after the receipt.
         let new_tab = AgentLaunchRequest {
@@ -984,6 +1035,7 @@ mod tests {
             substrate: "thread".into(),
             model: None,
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -1008,8 +1060,6 @@ mod tests {
                 "/tmp/p4",
                 "--substrate",
                 "thread",
-                "--mux-session",
-                "s",
                 "--no-wait",
                 "--tab",
                 "new",
@@ -1034,6 +1084,7 @@ mod tests {
             substrate: String::new(),
             model: None,
             provider: None,
+            route: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -1058,8 +1109,6 @@ mod tests {
                 "/tmp/proj",
                 "--node",
                 "x-1",
-                "--mux-session",
-                "s",
                 "--no-wait",
                 "--prompt-file",
                 "-",

@@ -32,6 +32,11 @@ pub struct AgentLaunchRequest {
     /// Optional model provider pin from a configured routing row.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Explicit routing pin (`vendor/model`) from a picked routing row.
+    /// Exclusive with `model` and `provider`: a route owns the model, so a
+    /// row pick rides `--route` alone and never the model+vendor pair.
+    #[serde(default)]
+    pub route: Option<String>,
     /// True when the model came from a picked routing row: argv omits
     /// `--harness` so the door resolves that row's harness, route, account
     /// and effort itself. A typed model keeps the false default and the

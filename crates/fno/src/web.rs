@@ -1282,13 +1282,11 @@ fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (Statu
 /// the shared shell-out; a launch runs the mux's own dispatch door and
 /// carries its notice back. The launch arm's ok fact is `true`: the door
 /// reports refusals through its notice text.
-async fn run_planned(st: &AppState, id: &str, planned: Planned) -> (bool, String) {
+async fn run_planned(_st: &AppState, id: &str, planned: Planned) -> (bool, String) {
     match planned {
         Planned::Verb(argv) => crate::backlog_write::run_verb(&argv, None).await,
         Planned::Dispatch { plan } => {
-            let notice =
-                crate::server::agent_launch::run_dispatch_one(&st.session, Some(id), None, plan)
-                    .await;
+            let notice = crate::server::agent_launch::run_dispatch_one(Some(id), None, plan).await;
             (true, notice)
         }
     }
