@@ -1153,7 +1153,8 @@ mod tests {
 
     /// One temp root per test; env-mutating tests share the process, so the
     /// mutex keeps FNO_* pins from racing.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<&'static Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     struct Fixture {
         root: PathBuf,
