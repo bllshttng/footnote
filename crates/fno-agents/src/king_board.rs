@@ -2723,7 +2723,7 @@ mod tests {
     /// every other test in this binary reads HOME, so a concurrent reader can
     /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
     static HOME_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(crate::claims::test_env_lock);
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     /// Restores the env values a test pinned, whatever way the body ends.
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);

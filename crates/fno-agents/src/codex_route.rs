@@ -314,7 +314,7 @@ mod tests {
         // A global mutex keeps the env mutations below race-free; tests in
         // this module hold it for their whole body.
         static LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(crate::claims::test_env_lock);
+            std::sync::LazyLock::new(crate::claims::test_env_lock);
         let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "fno-codex-route-test-{}-{}",

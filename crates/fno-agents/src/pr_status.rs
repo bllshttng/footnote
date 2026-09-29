@@ -1025,7 +1025,7 @@ pub(crate) fn status_payload<P: GhProbe>(
 #[cfg(test)]
 pub(crate) fn cache_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(crate::claims::test_env_lock);
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
     LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 

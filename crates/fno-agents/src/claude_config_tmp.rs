@@ -280,7 +280,7 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(crate::claims::test_env_lock);
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     impl PinnedConfigDir {
         fn at(dir: &std::path::Path) -> Self {

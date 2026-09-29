@@ -1721,7 +1721,7 @@ mod tests {
         // The run path resolves the state root; point it at a tempdir for the
         // run and restore it after, under the process-wide env lock.
         static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(crate::claims::test_env_lock);
+            std::sync::LazyLock::new(crate::claims::test_env_lock);
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();
