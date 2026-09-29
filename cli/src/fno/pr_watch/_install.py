@@ -654,14 +654,14 @@ def ensure_activated(
     # the first fresh tick instead of a transient false "dead" (unless the
     # recent ends are a broken streak, which reads wedged).
     try:
+        from fno.paths import state_dir
+
         plist_text = render_plist(
             launch_agents_dir=launch_agents_dir,
             fno_binary=fno_binary,
             interval=interval,
         )
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        from fno.paths import state_dir
-
         (state_dir() / "logs").mkdir(parents=True, exist_ok=True)
         plist_path.write_text(plist_text, encoding="utf-8")
     except OSError:
