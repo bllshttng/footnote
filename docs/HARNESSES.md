@@ -34,7 +34,7 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 | A one-shot wrote outside its cwd | Headless yolo is unsandboxed (measured 2026-09-29) | Treat zcode workers as unsandboxed; scope the spawn cwd |
 | A looping dispatch is refused | The plugin Stop hook inside a `-p` turn is not yet measured | `fno config plugin install zcode` links the stage into `plugins.dirs`; the row flips after a live fire proves the hook |
 
-One-time setup: put a `zcode` launcher on PATH that execs `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"` and exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` for the built-in provider config; `~/.zcode/cli/config.json` names `model.main`; then `fno config plugin install zcode`.
+One-time setup: put a `zcode` launcher on PATH that execs `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"` and exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` for the built-in provider config. `~/.zcode/cli/config.json` names `model.main`. Then run `fno config plugin install zcode`.
 
 Other CLIs (Cursor's GUI editor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 
