@@ -943,13 +943,9 @@ mod tests {
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert_eq!(doc["crowns"]["x-aaaa"]["regnal"], json!(2));
         assert_eq!(doc["crowns"]["x-aaaa"]["holder_session"], json!(null));
-    }
 
-    #[test]
-    fn a_succeeded_plan_with_an_heir_writes_the_pending_record() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _reg = crown_registry(tmp.path(), agents_with_succession_rows());
-        named_record_fixture(tmp.path());
+        // A payload carrying the heir key pends the succession with the
+        // predecessor identity from the plan's holder_ids.
         let answer = resolve_at(
             &json!({
                 "kind": "crown-settle", "scope": "x-aaaa", "heir": "king-heir",
@@ -974,12 +970,8 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("king-old"));
         assert_eq!(pending["predecessor_session"], json!("sess-old"));
         assert!(pending["ts"].is_string());
-    }
-
-    #[test]
-    fn a_succeeded_plan_without_an_heir_key_keeps_todays_shape() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _reg = crown_registry(tmp.path(), agents_with_succession_rows());
+        // Without the heir key (an old caller) today's shape holds: no
+        // pending record is written.
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
@@ -990,8 +982,8 @@ mod tests {
                     "outcome": "succeeded", "vacate": ["king-old"],
                 },
                 "rows": [{
-                    "name": "king-old", "crown_succession": null, "crown_scope": "x-aaaa",
-                    "status": "busy", "harness_session_id": "sess-old",
+                    "name": "king-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "harness_session_id": "sess-old",
                 }],
             }),
             &crown_store(tmp.path()),

@@ -637,6 +637,12 @@ mod tests {
             .any(|alias| alias == "king-a"));
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["fno"]["regnal"], json!(1));
+        // The numeral table then the bare number.
+        assert_eq!(display("barnaby", 1), "Barnaby");
+        assert_eq!(display("barnaby", 2), "Barnaby II");
+        assert_eq!(display("barnaby", 3), "Barnaby III");
+        assert_eq!(display("barnaby", 20), "Barnaby XX");
+        assert_eq!(display("barnaby", 21), "Barnaby 21");
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-a"));
     }
 
@@ -811,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn carry_succession_bumps_regnal_and_unbinds_twice_for_two_successions() {
+    fn carry_succession_bumps_regnal_pends_the_predecessor_and_unbinds_twice() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
@@ -824,14 +830,37 @@ mod tests {
             "barnaby",
         )
         .unwrap();
+        // An unmarked carry (an old caller) keeps the frozen wire shape.
         carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(2));
         assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
+        let raw = std::fs::read_to_string(store_path(tmp.path())).unwrap();
+        assert!(
+            !raw.contains("pending_succession"),
+            "the frozen wire shape must not grow a null key: {raw}"
+        );
+        // A marked carry pends the succession for the reap sweep's revert.
+        carry_succession(
+            &store_path(tmp.path()),
+            "x-aaaa",
+            Some(PendingSuccession {
+                heir_name: "king-heir".into(),
+                predecessor_name: "king-a".into(),
+                predecessor_session: Some("sess-a".into()),
+                ts: now_stamp(),
+            }),
+        )
+        .unwrap();
         // A second succession before the heir checks in reads regnal 3.
-        carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(3));
+        assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
+        let pending = &dump["crowns"]["x-aaaa"]["pending_succession"];
+        assert_eq!(pending["heir_name"], json!("king-heir"));
+        assert_eq!(pending["predecessor_name"], json!("king-a"));
+        assert_eq!(pending["predecessor_session"], json!("sess-a"));
+        assert!(pending["ts"].is_string());
     }
 
     #[test]
@@ -848,7 +877,17 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
+        carry_succession(
+            &store_path(tmp.path()),
+            "x-aaaa",
+            Some(PendingSuccession {
+                heir_name: "king-heir".into(),
+                predecessor_name: "king-old".into(),
+                predecessor_session: Some("sess-old".into()),
+                ts: now_stamp(),
+            }),
+        )
+        .unwrap();
         bind_and_refresh(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
@@ -862,7 +901,9 @@ mod tests {
             json!("sess-heir")
         );
         assert_eq!(dump["crowns"]["x-aaaa"]["nodes"], json!(["x-bbbb"]));
-        // The carried record still counts while unbound (null session).
+        // The beat is the proof the succession waited for: the pending
+        // marker clears and the heir's session holds the name.
+        assert!(dump["crowns"]["x-aaaa"].get("pending_succession").is_none());
     }
 
     #[test]
@@ -968,16 +1009,7 @@ mod tests {
         assert!(live_names(&store_path(tmp.path()), &registry_path(tmp.path())).is_err());
     }
 
-    #[test]
-    fn display_uses_the_numeral_table_then_the_bare_number() {
-        assert_eq!(display("barnaby", 1), "Barnaby");
-        assert_eq!(display("barnaby", 2), "Barnaby II");
-        assert_eq!(display("barnaby", 3), "Barnaby III");
-        assert_eq!(display("barnaby", 20), "Barnaby XX");
-        assert_eq!(display("barnaby", 21), "Barnaby 21");
-    }
-
-    // -- pending succession: write, bind-clear, revert --
+    // -- pending succession: revert matrix --
 
     fn pending_record(heir: &str, pred: &str, session: Option<&str>, ts: &str) -> CrownNameRecord {
         CrownNameRecord {
@@ -1000,127 +1032,22 @@ mod tests {
     }
 
     #[test]
-    fn a_succession_writes_a_pending_record_with_the_predecessor_identity() {
+    fn a_stale_pending_succession_reverts_by_heir_evidence() {
         let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
-        let store = store_path(tmp.path());
-        name_crown(&store, &registry_path(tmp.path()), "fno", "barnaby").unwrap();
-        carry_succession(
-            &store,
-            "fno",
-            Some(PendingSuccession {
-                heir_name: "king-heir".into(),
-                predecessor_name: "king-a".into(),
-                predecessor_session: Some("sess-a".into()),
-                ts: now_stamp(),
-            }),
-        )
-        .unwrap();
-        let dump = snapshot(&store).unwrap();
-        assert_eq!(dump["crowns"]["fno"]["regnal"], json!(2));
-        assert_eq!(dump["crowns"]["fno"]["holder_session"], json!(null));
-        let pending = &dump["crowns"]["fno"]["pending_succession"];
-        assert_eq!(pending["heir_name"], json!("king-heir"));
-        assert_eq!(pending["predecessor_name"], json!("king-a"));
-        assert_eq!(pending["predecessor_session"], json!("sess-a"));
-    }
-
-    #[test]
-    fn a_record_without_pending_serializes_without_the_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
-        let store = store_path(tmp.path());
-        name_crown(&store, &registry_path(tmp.path()), "fno", "barnaby").unwrap();
-        let raw = std::fs::read_to_string(&store).unwrap();
-        assert!(
-            !raw.contains("pending_succession"),
-            "the frozen wire shape must not grow a null key: {raw}"
-        );
-    }
-
-    #[test]
-    fn an_heir_beat_clears_the_pending_marker() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(
-            tmp.path(),
-            json!([crown_row("king-heir", "fno", 1, "sess-heir")]),
-        );
-        let store = store_path(tmp.path());
-        write(
-            &store,
-            &Store {
-                version: 1,
-                crowns: BTreeMap::from([(
-                    "fno".into(),
-                    pending_record("king-heir", "king-old", Some("sess-old"), old_ts()),
-                )]),
-            },
-        )
-        .unwrap();
-        bind_and_refresh(
-            &store,
-            &registry_path(tmp.path()),
-            "fno",
-            vec!["x-1".into()],
-        )
-        .unwrap();
-        let dump = snapshot(&store).unwrap();
-        assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-heir"));
-        assert!(dump["crowns"]["fno"].get("pending_succession").is_none());
-    }
-
-    #[test]
-    fn a_removed_heir_row_reverts_the_succession_to_the_predecessor() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // The predecessor row survives (exited, resumable); the heir's row
-        // was REMOVED by the bind-window reaper, so no row names it.
-        write_registry(
-            tmp.path(),
-            json!([json!({
-                "name": "king-old", "status": "exited", "cwd": "/repo",
-                "harness": "claude", "harness_session_id": "sess-old",
-                "created_at": "2026-09-23T20:00:00Z",
-            })]),
-        );
-        let store = store_path(tmp.path());
-        write(
-            &store,
-            &Store {
-                version: 1,
-                crowns: BTreeMap::from([(
-                    "fno".into(),
-                    pending_record("jolly-finch", "king-old", Some("sess-old"), old_ts()),
-                )]),
-            },
-        )
-        .unwrap();
-        let (reverted, kept) = revert_stale_pending(
-            &store,
-            &registry_path(tmp.path()),
-            chrono::Utc::now(),
-            3_600,
-            true,
-        )
-        .unwrap();
-        assert_eq!(kept, Vec::<String>::new());
-        assert_eq!(reverted.len(), 1, "{reverted:?}");
-        assert_eq!(reverted[0].scope, "fno");
-        assert_eq!(reverted[0].heir_name, "jolly-finch");
-        assert_eq!(reverted[0].evidence, "heir row removed");
-        let dump = snapshot(&store).unwrap();
-        assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-old"));
-        assert!(dump["crowns"]["fno"].get("pending_succession").is_none());
-    }
-
-    #[test]
-    fn a_terminal_heir_row_reverts_and_a_live_heir_keeps() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        // The predecessor row survives (exited, resumable); one heir's row
+        // was REMOVED by the bind-window reaper, another went terminal, one
+        // heir is still live, one is inside the window.
         write_registry(
             tmp.path(),
             json!([
                 json!({
-                    "name": "heir-dead", "status": "exited", "cwd": "/repo",
-                    "harness": "claude", "harness_session_id": "sess-d",
+                    "name": "king-old", "status": "exited", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-old",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-terminal", "status": "exited", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-t",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 crown_row("heir-live", "other", 1, "sess-l"),
@@ -1134,11 +1061,19 @@ mod tests {
                 crowns: BTreeMap::from([
                     (
                         "fno".into(),
-                        pending_record("heir-dead", "king-old", Some("sess-old"), old_ts()),
+                        pending_record("jolly-finch", "king-old", Some("sess-old"), old_ts()),
                     ),
                     (
-                        "x-aaaa".into(),
-                        pending_record("heir-live", "king-two", Some("sess-two"), old_ts()),
+                        "x-tttt".into(),
+                        pending_record("heir-terminal", "king-two", Some("sess-two"), old_ts()),
+                    ),
+                    (
+                        "x-llll".into(),
+                        pending_record("heir-live", "king-three", Some("sess-3"), old_ts()),
+                    ),
+                    (
+                        "x-yyyy".into(),
+                        pending_record("young-heir", "king-four", Some("sess-4"), &now_stamp()),
                     ),
                 ]),
             },
@@ -1152,25 +1087,34 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert_eq!(reverted.len(), 2, "{reverted:?}");
         assert_eq!(reverted[0].scope, "fno");
+        assert_eq!(reverted[0].heir_name, "jolly-finch");
+        assert_eq!(reverted[0].evidence, "heir row removed");
+        assert_eq!(reverted[1].scope, "x-tttt");
+        assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
         assert_eq!(kept.len(), 1, "{kept:?}");
         assert!(kept[0].contains("heir-live"), "{kept:?}");
         let dump = snapshot(&store).unwrap();
+        // Reverted records name the predecessor again, marker gone.
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-old"));
-        // The live heir's record is untouched: pending stays, holder stays null.
-        assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
+        assert!(dump["crowns"]["fno"].get("pending_succession").is_none());
         assert_eq!(
-            dump["crowns"]["x-aaaa"]["pending_succession"]["heir_name"],
+            dump["crowns"]["x-tttt"]["holder_session"],
+            json!("sess-two")
+        );
+        // The live heir's record is untouched, and the young one keeps.
+        assert_eq!(dump["crowns"]["x-llll"]["holder_session"], json!(null));
+        assert_eq!(
+            dump["crowns"]["x-llll"]["pending_succession"]["heir_name"],
             json!("heir-live")
         );
-    }
+        assert_eq!(
+            dump["crowns"]["x-yyyy"]["pending_succession"]["heir_name"],
+            json!("young-heir")
+        );
 
-    #[test]
-    fn a_dry_run_reports_the_revert_without_writing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([]));
-        let store = store_path(tmp.path());
+        // The dry run reports the same revert and writes nothing.
         write(
             &store,
             &Store {
@@ -1196,36 +1140,6 @@ mod tests {
         assert_eq!(
             dump["crowns"]["fno"]["pending_succession"]["heir_name"],
             json!("gone-heir")
-        );
-    }
-
-    #[test]
-    fn a_pending_inside_the_window_and_a_forgotten_record_change_nothing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([]));
-        let store = store_path(tmp.path());
-        write(
-            &store,
-            &Store {
-                version: 1,
-                crowns: BTreeMap::from([(
-                    "fno".into(),
-                    pending_record("young-heir", "king-old", Some("sess-old"), &now_stamp()),
-                )]),
-            },
-        )
-        .unwrap();
-        let (reverted, kept) = revert_stale_pending(
-            &store,
-            &registry_path(tmp.path()),
-            chrono::Utc::now(),
-            3_600,
-            true,
-        )
-        .unwrap();
-        assert!(
-            reverted.is_empty() && kept.is_empty(),
-            "{reverted:?} {kept:?}"
         );
         // A forgotten record (a fresh grant) is a no-op for the revert.
         forget(&store, "fno").unwrap();

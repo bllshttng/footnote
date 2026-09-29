@@ -835,33 +835,13 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_transcript_keeps_the_crown() {
-        let (dir, manifest, registry, _session) =
-            dead_fixture("no-transcript", "dddd4444-0000-4000-8000-000000000004");
-        let emitter = events_of(&dir);
-        let out = sweep(
-            &dir,
-            &registry,
-            &dir,
-            &emitter,
-            true,
-            &empty_roster,
-            &transcript(None),
-            Utc::now(),
-        );
-        assert!(out.vacated.is_empty(), "{:?}", out.vacated);
-        assert_eq!(out.kept[0].reason, "transcript not found");
-        assert!(manifest.exists());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn a_fresh_transcript_or_a_young_manifest_keeps_the_crown() {
         let young_stamp = (Utc::now() - chrono::Duration::hours(1))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         for (name, age, created) in [
             ("fresh-transcript", Some(60), old_created().to_string()),
             ("young-manifest", Some(30 * 86_400), young_stamp),
+            ("no-transcript", None, old_created().to_string()),
         ] {
             let tag = format!("young-{name}");
             let dir = tmp(&tag);
@@ -887,6 +867,9 @@ mod tests {
             );
             assert!(out.vacated.is_empty(), "{name}: {:?}", out.vacated);
             assert_eq!(out.kept.len(), 1, "{name}");
+            if name == "no-transcript" {
+                assert_eq!(out.kept[0].reason, "transcript not found");
+            }
             assert!(manifest.exists());
             fs::remove_dir_all(&dir).ok();
         }
