@@ -1528,7 +1528,7 @@ mod tests {
             let who = principal("acct-makers", "org-makers");
             let original = blob("dead", "dead-refresh", now_ms() - 1);
             record(temp.path(), "makers", &who, &original);
-            let mut external = MockExternal::default();
+            let external = MockExternal::default();
             *external.login_result.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
 
             let (code, receipt) = execute(
