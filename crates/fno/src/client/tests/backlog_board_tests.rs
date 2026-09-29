@@ -994,3 +994,75 @@ fn tag_facet_hides_while_empty_and_shows_with_values() {
         .collect();
     assert!(names.contains(&"tag"), "a tagged row reveals the facet");
 }
+
+// The paint memos must rebuild only when their key moves. A build
+// counter makes the contract mechanical: same key, one build; any key
+// field, a rebuild.
+#[test]
+fn board_body_memo_rebuilds_only_when_the_key_moves() {
+    let b = board_with(board_inputs());
+    let builds = std::cell::Cell::new(0);
+    let key = |gen: u64, row: usize| crate::client::backlog_board::BodyKey {
+        gen,
+        lane: 0,
+        col: 0,
+        row,
+        w: 120,
+        list: false,
+        query: None,
+        errors: 0,
+        columns: vec!["ready".into()],
+    };
+    let build = |builds: &std::cell::Cell<usize>| {
+        builds.set(builds.get() + 1);
+        (Vec::new(), Vec::new(), None)
+    };
+    let _ = b.board_body_cached(key(0, 0), || build(&builds));
+    let _ = b.board_body_cached(key(0, 0), || build(&builds));
+    assert_eq!(builds.get(), 1, "same key reads the memo");
+    let _ = b.board_body_cached(key(0, 1), || build(&builds));
+    assert_eq!(builds.get(), 2, "a moved cursor rebuilds");
+    let _ = b.board_body_cached(key(1, 1), || build(&builds));
+    assert_eq!(builds.get(), 3, "a new read rebuilds");
+}
+
+// The detail memo keys on the document identity, so a doc re-read
+// (mtime or node move) must rebuild even with the same node and read.
+#[test]
+fn detail_memo_rebuilds_when_the_doc_identity_moves() {
+    let b = board_with(board_inputs());
+    let builds = std::cell::Cell::new(0);
+    let key = |mtime: Option<std::time::SystemTime>| crate::client::backlog_board::DetailKey {
+        gen: 1,
+        node: "x-1".into(),
+        sel: None,
+        w: 80,
+        doc: Some(("x-1".into(), "/plans/x-1.md".into(), mtime, String::new())),
+    };
+    let build = |builds: &std::cell::Cell<usize>| {
+        builds.set(builds.get() + 1);
+        (Vec::new(), Vec::new(), None)
+    };
+    let _ = b.detail_lines_cached(key(None), || build(&builds));
+    let _ = b.detail_lines_cached(key(None), || build(&builds));
+    assert_eq!(builds.get(), 1, "same identity reads the memo");
+    let later = std::time::SystemTime::now();
+    let _ = b.detail_lines_cached(key(Some(later)), || build(&builds));
+    assert_eq!(builds.get(), 2, "a re-read doc rebuilds");
+}
+
+// The cheap reading. The window flushes on 30s and the line names
+// count, avg and max, so a paint-cost regression moves a readable number.
+#[test]
+fn paint_stats_flush_reports_count_avg_max() {
+    let mut s = crate::client::backlog_board::PaintStats::new();
+    assert!(!s.due(), "an empty window never flushes");
+    s.record(1500);
+    s.record(2500);
+    assert!(!s.due(), "inside the window holds");
+    let line = s.take_line();
+    assert!(line.contains("2 paints"), "{line}");
+    assert!(line.contains("avg 2.0ms"), "{line}");
+    assert!(line.contains("max 2.5ms"), "{line}");
+    assert_eq!(s.count, 0, "take resets the window");
+}
