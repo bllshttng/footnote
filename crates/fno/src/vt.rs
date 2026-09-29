@@ -1883,7 +1883,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_spine_vt_renders_text_and_cursor() {
+    fn vt_render_rows() {
         let mut pane = Pane::new(24, 80);
         pane.feed(b"hello");
         let frame = pane.frame();
@@ -1892,10 +1892,62 @@ mod tests {
         assert_eq!(frame.cursor_col, 5);
         assert!(frame.cursor_visible);
         assert_eq!(frame.cells.len(), 24 * 80);
+
+        let mut pane = Pane::new(4, 20);
+        // Bold red fg on indexed-blue bg, then reset.
+        pane.feed(b"\x1b[1;31;44mX\x1b[0m");
+        let frame = pane.frame();
+        let x = &frame.cells[0];
+        assert_eq!(x.c, 'X');
+        assert_eq!(x.flags & cell_flags::BOLD, cell_flags::BOLD);
+        assert_eq!(x.fg, Color::Indexed(1));
+        assert_eq!(x.bg, Color::Indexed(4));
+
+        let mut pane = Pane::new(2, 10);
+        pane.feed(b"\x1b[38;2;10;20;30mZ");
+        let frame = pane.frame();
+        assert_eq!(frame.cells[0].fg, Color::Rgb(10, 20, 30));
+
+        let mut pane = Pane::new(4, 20);
+        pane.feed(b"main-screen");
+        // Enter the alternate screen (what vim does), draw, snapshot.
+        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[HALT");
+        let alt = pane.frame();
+        assert!(
+            frame_text(&alt).starts_with("ALT"),
+            "{:?}",
+            frame_text(&alt)
+        );
+        // Leave: the main screen content is restored.
+        pane.feed(b"\x1b[?1049l");
+        let main = pane.frame();
+        assert!(
+            frame_text(&main).contains("main-screen"),
+            "{:?}",
+            frame_text(&main)
+        );
+
+        let mut pane = Pane::new(4, 20);
+        pane.feed(b"\x1b[?25l");
+        assert!(!pane.frame().cursor_visible);
+        pane.feed(b"\x1b[?25h");
+        assert!(pane.frame().cursor_visible);
+
+        let mut pane = Pane::new(2, 10);
+        pane.feed("宽x".as_bytes());
+        let frame = pane.frame();
+        assert_eq!(frame.cells[0].c, '宽');
+        assert_eq!(
+            frame.cells[1].flags & cell_flags::WIDE_SPACER,
+            cell_flags::WIDE_SPACER,
+            "second cell of a wide glyph must be a flagged spacer"
+        );
+        // The text projection skips the spacer: 宽 then x, no phantom gap.
+        assert_eq!(frame_text(&frame), "宽x");
     }
 
     #[test]
-    fn link_at_finds_a_plain_text_url_only_under_its_own_cells() {
+    fn link_at_rows() {
         let mut pane = Pane::new(4, 40);
         pane.feed(b"see https://example.com/a now");
         // Column 4 is the 'h'; 25 is the trailing 'a'.
@@ -1909,10 +1961,7 @@ mod tests {
         assert_eq!(pane.link_at(0, 27), None);
         // Nor is an empty row.
         assert_eq!(pane.link_at(2, 5), None);
-    }
 
-    #[test]
-    fn link_at_joins_a_url_soft_wrapped_across_rows() {
         // 20 columns forces the URL to wrap mid-path; clicking either half must
         // yield the WHOLE url, not the fragment on the clicked row.
         let mut pane = Pane::new(4, 20);
@@ -1924,10 +1973,7 @@ mod tests {
             Some(url),
             "wrapped continuation"
         );
-    }
 
-    #[test]
-    fn link_at_returns_the_whole_url_not_a_prefix_when_it_wraps_past_the_old_cap() {
         // codex, PR 702. The cap was a fixed 8 rows, so a URL wrapping further
         // was cut WHILE STILL WRAPPING and find_urls treated the collected
         // prefix as a complete URL. is_openable accepts a prefix - it is a
@@ -1948,9 +1994,7 @@ mod tests {
             Some(url.as_str()),
             "a wrapped URL must resolve whole; a prefix is a different address"
         );
-    }
-    #[test]
-    fn link_at_reads_an_osc8_hyperlink_whose_text_is_not_a_url() {
+
         // OSC 8 with display text that looks nothing like a link: only the URI
         // carried in the escape can answer this, so it proves the OSC 8 path
         // rather than the linkifier.
@@ -1964,29 +2008,39 @@ mod tests {
         assert_eq!(pane.link_at(0, 20), None);
     }
 
+
+
     #[test]
-    fn link_at_refuses_an_osc8_uri_outside_the_scheme_allowlist() {
+    fn link_refusal_rows() {
         // A pane's output chooses this URI. `open(1)` would act on file:// and
         // on registered app schemes, so the grid walk must drop it.
         let mut pane = Pane::new(4, 40);
         pane.feed(b"\x1b]8;;file:///etc/passwd\x07innocent\x1b]8;;\x07");
         assert_eq!(pane.link_at(0, 2), None);
-    }
 
-    #[test]
-    fn link_at_survives_a_click_past_the_end_of_content() {
         // The click column is clamped into the grid; a click on padding finds
         // no link rather than panicking or reaching the previous row's URL.
         let mut pane = Pane::new(4, 20);
         pane.feed(b"https://example.com");
         assert_eq!(pane.link_at(3, 19), None);
         assert_eq!(pane.link_at(200, 200), None, "out-of-range click clamps");
+
+        // The allowlist applies to the span exactly as it does to the click.
+        // Positive control beside it: a safe anchor in the same pane resolves.
+        // Visible text: "bad good".
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"\x1b]8;;file:///etc/passwd\x07bad\x1b]8;;\x07 \x1b]8;;https://ok.example\x07good\x1b]8;;\x07");
+        assert!(pane.link_span(0, 2).is_none(), "file:// answers nothing");
+        let span = pane.link_span(0, 6).expect("the https anchor resolves");
+        assert_eq!(span.uri, "https://ok.example");
+        assert_eq!(span.cells, (4..8).map(|c| (0, c)).collect::<Vec<_>>());
     }
+
 
     // -- hover affordance: the shared span behind click and hover ---------------
 
     #[test]
-    fn link_span_covers_the_urls_own_cells_and_refuses_non_link_cells() {
+    fn link_span_rows() {
         // Plain text: the span is exactly the linkified URL's cells, so the
         // hover underline paints what a click would open - no more, no less.
         let mut pane = Pane::new(4, 40);
@@ -2012,10 +2066,7 @@ mod tests {
             pane.link_span(0, 10).is_some(),
             "control: the URL still does"
         );
-    }
 
-    #[test]
-    fn link_span_joins_a_soft_wrapped_url_into_both_rows() {
         // A URL soft-wrapped across rows is ONE link: querying either half
         // yields the whole URL and the cells of both halves, so the underline
         // reads as one link, not two fragments.
@@ -2032,10 +2083,7 @@ mod tests {
         );
         // Click and hover cannot disagree: the projection answers the same URI.
         assert_eq!(pane.link_at(0, 0).as_deref(), Some(url));
-    }
 
-    #[test]
-    fn link_span_reads_an_osc8_anchor_across_its_text_without_grouping_a_reused_uri() {
         // OSC 8: the span is the run of cells carrying the SAME anchor. A
         // second, separate anchor that happens to reuse the URI sits mid-row
         // after plain text: the contiguous walk must stop at the gap, never
@@ -2053,10 +2101,7 @@ mod tests {
         let second = pane.link_span(0, 13).expect("the second anchor's text");
         assert_eq!(second.uri, "https://example.com/pr/700");
         assert_eq!(second.cells, vec![(0, 12), (0, 13), (0, 14), (0, 15)]);
-    }
 
-    #[test]
-    fn link_span_covers_a_soft_wrapped_osc8_anchor_exactly_once() {
         // An OSC 8 anchor whose text wraps across three rows: hovering the
         // MIDDLE row returns every cell of the anchor exactly once. The two
         // extensions grow from the pointed row's own run in each direction,
@@ -2083,88 +2128,17 @@ mod tests {
         assert_eq!(top.cells.len(), 25);
     }
 
-    #[test]
-    fn link_span_refuses_a_disallowed_osc8_scheme_with_no_cells() {
-        // The allowlist applies to the span exactly as it does to the click.
-        // Positive control beside it: a safe anchor in the same pane resolves.
-        // Visible text: "bad good".
-        let mut pane = Pane::new(4, 60);
-        pane.feed(b"\x1b]8;;file:///etc/passwd\x07bad\x1b]8;;\x07 \x1b]8;;https://ok.example\x07good\x1b]8;;\x07");
-        assert!(pane.link_span(0, 2).is_none(), "file:// answers nothing");
-        let span = pane.link_span(0, 6).expect("the https anchor resolves");
-        assert_eq!(span.uri, "https://ok.example");
-        assert_eq!(span.cells, (4..8).map(|c| (0, c)).collect::<Vec<_>>());
-    }
+
+
+
+
+
+
+
+
 
     #[test]
-    fn server_spine_vt_styles_map_to_cell_flags_and_colors() {
-        let mut pane = Pane::new(4, 20);
-        // Bold red fg on indexed-blue bg, then reset.
-        pane.feed(b"\x1b[1;31;44mX\x1b[0m");
-        let frame = pane.frame();
-        let x = &frame.cells[0];
-        assert_eq!(x.c, 'X');
-        assert_eq!(x.flags & cell_flags::BOLD, cell_flags::BOLD);
-        assert_eq!(x.fg, Color::Indexed(1));
-        assert_eq!(x.bg, Color::Indexed(4));
-    }
-
-    #[test]
-    fn server_spine_vt_true_color_passes_through() {
-        let mut pane = Pane::new(2, 10);
-        pane.feed(b"\x1b[38;2;10;20;30mZ");
-        let frame = pane.frame();
-        assert_eq!(frame.cells[0].fg, Color::Rgb(10, 20, 30));
-    }
-
-    #[test]
-    fn server_spine_vt_alt_screen_swaps_and_restores() {
-        let mut pane = Pane::new(4, 20);
-        pane.feed(b"main-screen");
-        // Enter the alternate screen (what vim does), draw, snapshot.
-        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[HALT");
-        let alt = pane.frame();
-        assert!(
-            frame_text(&alt).starts_with("ALT"),
-            "{:?}",
-            frame_text(&alt)
-        );
-        // Leave: the main screen content is restored.
-        pane.feed(b"\x1b[?1049l");
-        let main = pane.frame();
-        assert!(
-            frame_text(&main).contains("main-screen"),
-            "{:?}",
-            frame_text(&main)
-        );
-    }
-
-    #[test]
-    fn server_spine_vt_cursor_visibility_tracks_dectcem() {
-        let mut pane = Pane::new(4, 20);
-        pane.feed(b"\x1b[?25l");
-        assert!(!pane.frame().cursor_visible);
-        pane.feed(b"\x1b[?25h");
-        assert!(pane.frame().cursor_visible);
-    }
-
-    #[test]
-    fn server_spine_vt_wide_glyph_spacer_is_flagged_and_skipped() {
-        let mut pane = Pane::new(2, 10);
-        pane.feed("宽x".as_bytes());
-        let frame = pane.frame();
-        assert_eq!(frame.cells[0].c, '宽');
-        assert_eq!(
-            frame.cells[1].flags & cell_flags::WIDE_SPACER,
-            cell_flags::WIDE_SPACER,
-            "second cell of a wide glyph must be a flagged spacer"
-        );
-        // The text projection skips the spacer: 宽 then x, no phantom gap.
-        assert_eq!(frame_text(&frame), "宽x");
-    }
-
-    #[test]
-    fn server_spine_vt_modes_track_dec_private_sets() {
+    fn vt_mode_rows() {
         let mut pane = Pane::new(4, 20);
         // alacritty's TermMode::default() ships ALTERNATE_SCROLL on, so a
         // fresh pane is NOT Modes::default() (= a raw client terminal). The
@@ -2187,10 +2161,7 @@ mod tests {
         let m = pane.modes();
         assert!(!m.mouse_motion && !m.bracketed_paste);
         assert!(m.sgr_mouse, "unrelated modes survive");
-    }
 
-    #[test]
-    fn server_spine_vt_mode_diff_emits_only_changes() {
         let plain = Modes::default();
         let vim = Modes {
             app_cursor: true,
@@ -2230,10 +2201,7 @@ mod tests {
         assert!(set.contains("\x1b[=11;1u"), "{set:?}");
         let clear = String::from_utf8(mode_diff(kitty, plain)).unwrap();
         assert!(clear.contains("\x1b[=0;1u"), "{clear:?}");
-    }
 
-    #[test]
-    fn server_spine_vt_resize_is_clamped_and_safe() {
         let mut pane = Pane::new(24, 80);
         pane.resize(0, 0);
         pane.feed(b"q");
@@ -2241,6 +2209,8 @@ mod tests {
         let frame = pane.frame();
         assert_eq!(frame.cells.len(), 1);
     }
+
+
 
     // -- OSC 133 scanner (Task 1.1) --------------------------------------------
 
@@ -2264,7 +2234,7 @@ mod tests {
     }
 
     #[test]
-    fn osc133_recognizes_finalterm_letters_and_exit() {
+    fn osc133_rows() {
         // A prompt, B command, C output-start, D;1 done-with-exit-1 (BEL-terminated).
         let (markers, pass) =
             scan(b"\x1b]133;A\x07$ \x1b]133;B\x07false\x1b]133;C\x07\x1b]133;D;1\x07");
@@ -2279,10 +2249,7 @@ mod tests {
         );
         // AC1-UI: no marker bytes survive in the passthrough - only real text.
         assert_eq!(pass, b"$ false");
-    }
 
-    #[test]
-    fn osc133_st_terminator_and_bare_d() {
         // ST (ESC \) terminator, and a bare `D` with no exit field.
         let (markers, pass) = scan(b"\x1b]133;C\x1b\\ok\x1b]133;D\x1b\\");
         assert_eq!(
@@ -2290,10 +2257,7 @@ mod tests {
             vec![Osc133::OutputStart, Osc133::CmdDone { exit: None }]
         );
         assert_eq!(pass, b"ok");
-    }
 
-    #[test]
-    fn osc133_splits_one_byte_per_feed_identically() {
         // AC1-EDGE: a marker split one byte per feed parses identically.
         let stream = b"a\x1b]133;C\x07b\x1b]133;D;0\x07c";
         let chunks: Vec<&[u8]> = stream.iter().map(std::slice::from_ref).collect();
@@ -2303,10 +2267,7 @@ mod tests {
             vec![Osc133::OutputStart, Osc133::CmdDone { exit: Some(0) }]
         );
         assert_eq!(pass, b"abc");
-    }
 
-    #[test]
-    fn osc133_non_133_osc_passes_through() {
         // A window-title OSC (`ESC ] 0; ...`) is not ours: passed through whole,
         // no marker (the Term consumes it as a title).
         let (markers, pass) = scan(b"\x1b]0;my title\x07hello");
@@ -2314,8 +2275,11 @@ mod tests {
         assert_eq!(pass, b"\x1b]0;my title\x07hello");
     }
 
+
+
+
     #[test]
-    fn osc133_hostile_payload_is_bounded_no_marker() {
+    fn osc133_guard_rows() {
         // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
         // records no phantom marker, does not panic or buffer unbounded.
         let mut hostile = b"\x1b]133;".to_vec();
@@ -2325,23 +2289,19 @@ mod tests {
         let (markers, pass) = scan(&hostile);
         assert!(markers.is_empty());
         assert!(pass.ends_with(b"tail"), "nothing swallowed after flush");
-    }
 
-    #[test]
-    fn osc133_unknown_subtype_is_stripped_without_marker() {
         // FinalTerm defines A/B/C/D; an unknown letter is stripped, no marker.
         let (markers, pass) = scan(b"x\x1b]133;Z;foo\x07y");
         assert!(markers.is_empty());
         assert_eq!(pass, b"xy");
-    }
 
-    #[test]
-    fn osc133_markers_never_reach_the_grid() {
         // Integration: feed markers through a Pane; the grid holds only real text.
         let mut pane = Pane::new(24, 80);
         pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07out\x1b]133;D;0\x07");
         assert_eq!(pane.text(), "$ out");
     }
+
+
 
     // -- OSC 133 block store (Task 1.2) ----------------------------------------
 
@@ -2354,7 +2314,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_capture_seq_and_exit_in_order() {
+    fn block_capture_rows() {
         // AC1-HP: two commands -> two blocks, correct seq order and exit codes.
         let mut pane = Pane::new(24, 80);
         run_command(&mut pane, "hello", 0);
@@ -2372,10 +2332,7 @@ mod tests {
 
         // AC2-HP: `Last` is the most recent completed block.
         assert_eq!(pane.read_block(BlockSel::Last).unwrap().seq, Some(1));
-    }
 
-    #[test]
-    fn markerless_pane_reads_one_implicit_block() {
         // AC2-ERR: no markers -> `Last` returns the whole output, flagged
         // implicit; a specific seq is BLOCK_UNAVAILABLE.
         let mut pane = Pane::new(24, 80);
@@ -2384,20 +2341,14 @@ mod tests {
         assert!(read.implicit && read.seq.is_none() && read.complete);
         assert_eq!(read.text, "just output\nline two");
         assert!(pane.read_block(BlockSel::Seq(5)).is_err());
-    }
 
-    #[test]
-    fn open_block_reads_live_and_incomplete() {
         // AC2-FR: a block mid-output (no D) reads the span so far, incomplete.
         let mut pane = Pane::new(24, 80);
         pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07partial");
         let read = pane.read_block(BlockSel::Last).unwrap();
         assert_eq!((read.seq, read.complete), (Some(0), false));
         assert_eq!(read.text, "partial");
-    }
 
-    #[test]
-    fn completed_block_survives_width_resize() {
         // AC2-EDGE flip (amendment): a completed block returns its CAPTURED text
         // after a width-changing resize, never BLOCK_UNAVAILABLE.
         let mut pane = Pane::new(24, 80);
@@ -2405,10 +2356,22 @@ mod tests {
         pane.resize(24, 40); // width change reflows the grid
         let read = pane.read_block(BlockSel::Seq(0)).unwrap();
         assert_eq!(read.text, "keepme");
+
+        // AC1-EDGE: a 200-char logical line to an 80-col pane is captured as one
+        // 200-char line (the grid path would have wrapped it to 3 rows).
+        let mut pane = Pane::new(24, 80);
+        let long = "x".repeat(200);
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07");
+        pane.feed(long.as_bytes());
+        pane.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(pane.read_block(BlockSel::Last).unwrap().text, long);
     }
 
+
+
+
     #[test]
-    fn evicted_block_reads_unavailable() {
+    fn block_bound_rows() {
         // AC1-FR: past the retained-block budget, the oldest evicts and reads
         // BLOCK_UNAVAILABLE; the newest still reads.
         let mut pane = Pane::new(24, 80);
@@ -2418,10 +2381,7 @@ mod tests {
         assert!(pane.read_block(BlockSel::Seq(0)).is_err(), "oldest evicted");
         let last = (MAX_BLOCKS + 3 - 1) as u64;
         assert!(pane.read_block(BlockSel::Seq(last)).is_ok(), "newest kept");
-    }
 
-    #[test]
-    fn block_truncated_flag_fires_at_per_block_byte_cap() {
         // Locked decision 4: `truncated` now means THIS block's head bytes were
         // dropped by the per-block byte cap, decoupled from the pane's scrollback
         // fullness. A block under the cap is exact; one over it is flagged.
@@ -2436,10 +2396,7 @@ mod tests {
             pane.read_block(BlockSel::Last).unwrap().truncated,
             "over the per-block cap: head dropped, flagged truncated"
         );
-    }
 
-    #[test]
-    fn block_capture_survives_scrollback_saturation() {
         // AC2-HP: fill a tiny scrollback well past its cap, THEN run a command
         // block. Its output is captured exactly - the pre-fix grid-anchor path
         // returned a wrong span here once `history_size()` saturated.
@@ -2454,10 +2411,7 @@ mod tests {
             "captured pre-grid, scroll-independent"
         );
         assert!(!read.truncated, "small block under the byte cap is exact");
-    }
 
-    #[test]
-    fn runaway_open_block_is_memory_bounded() {
         // AC1-FR: an open block (no `D`) fed more than `max_block_bytes` keeps only
         // the most-recent tail, flagged truncated - a never-closing command
         // (`tail -f`) cannot pin unbounded server memory.
@@ -2475,63 +2429,7 @@ mod tests {
             "keeps the most-recent tail: {:?}",
             read.text
         );
-    }
 
-    #[test]
-    fn block_captures_logical_not_wrapped_lines() {
-        // AC1-EDGE: a 200-char logical line to an 80-col pane is captured as one
-        // 200-char line (the grid path would have wrapped it to 3 rows).
-        let mut pane = Pane::new(24, 80);
-        let long = "x".repeat(200);
-        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07");
-        pane.feed(long.as_bytes());
-        pane.feed(b"\x1b]133;D;0\x07");
-        assert_eq!(pane.read_block(BlockSel::Last).unwrap().text, long);
-    }
-
-    #[test]
-    fn strip_ansi_removes_escapes_keeps_visible_text() {
-        // AC1-ERR: CSI color, a non-133 OSC title, a 2-byte escape, and invalid
-        // UTF-8 -> visible characters only, no ESC byte, no panic.
-        let out = strip_ansi(b"\x1b[31mred\x1b[0m\x1b]0;title\x07\x1b=text\xff!");
-        assert!(!out.contains('\x1b'), "no ESC survives: {out:?}");
-        assert!(out.starts_with("redtext"), "visible text kept: {out:?}");
-        assert!(out.ends_with('!'), "trailing text kept: {out:?}");
-        assert!(
-            out.contains('\u{fffd}'),
-            "bad UTF-8 -> replacement char: {out:?}"
-        );
-    }
-
-    #[test]
-    fn strip_ansi_drops_partial_trailing_escape() {
-        // An unterminated escape at the buffer end is dropped, not emitted raw
-        // (Errors: partial escape at an open block's end).
-        assert_eq!(strip_ansi(b"ok\x1b[3"), "ok"); // partial CSI
-        assert_eq!(strip_ansi(b"ok\x1b]0;unterminated"), "ok"); // partial OSC
-        assert_eq!(strip_ansi(b"ok\x1b"), "ok"); // bare ESC
-    }
-
-    #[test]
-    fn strip_ansi_keeps_newlines_tabs_and_cr() {
-        // Discretion 4: keep `\n`/`\r`/`\t` verbatim; drop only escape sequences.
-        assert_eq!(strip_ansi(b"a\tb\nc\rd"), "a\tb\nc\rd");
-    }
-
-    #[test]
-    fn strip_ansi_consumes_charset_designation_final_byte() {
-        // `ESC ( B` (designate US-ASCII into G0, common in `sgr0`/reset) is a
-        // 3-byte nF escape: the intermediate `(` AND the final `B` must both be
-        // dropped, not leak a stray `B` into captured text.
-        assert_eq!(strip_ansi(b"a\x1b(Bb"), "ab");
-        assert_eq!(strip_ansi(b"\x1b)0\x1b(Bx"), "x"); // ESC ) 0 then ESC ( B
-        assert_eq!(strip_ansi(b"red\x1b(B\x1b[mtext"), "redtext");
-        // Unterminated nF escape at the buffer end is dropped, not leaked.
-        assert_eq!(strip_ansi(b"ok\x1b("), "ok");
-    }
-
-    #[test]
-    fn block_text_is_bounded_by_byte_budgets() {
         // Tiny budgets: 10 bytes per block, 30 bytes total.
         let mut pane = Pane::with_limits(4, 80, 100, 10, 30);
 
@@ -2558,8 +2456,48 @@ mod tests {
         );
     }
 
+
+
+
+
     #[test]
-    fn read_tail_reaches_into_history() {
+    fn strip_ansi_rows() {
+        // AC1-ERR: CSI color, a non-133 OSC title, a 2-byte escape, and invalid
+        // UTF-8 -> visible characters only, no ESC byte, no panic.
+        let out = strip_ansi(b"\x1b[31mred\x1b[0m\x1b]0;title\x07\x1b=text\xff!");
+        assert!(!out.contains('\x1b'), "no ESC survives: {out:?}");
+        assert!(out.starts_with("redtext"), "visible text kept: {out:?}");
+        assert!(out.ends_with('!'), "trailing text kept: {out:?}");
+        assert!(
+            out.contains('\u{fffd}'),
+            "bad UTF-8 -> replacement char: {out:?}"
+        );
+
+        // An unterminated escape at the buffer end is dropped, not emitted raw
+        // (Errors: partial escape at an open block's end).
+        assert_eq!(strip_ansi(b"ok\x1b[3"), "ok"); // partial CSI
+        assert_eq!(strip_ansi(b"ok\x1b]0;unterminated"), "ok"); // partial OSC
+        assert_eq!(strip_ansi(b"ok\x1b"), "ok"); // bare ESC
+
+        // Discretion 4: keep `\n`/`\r`/`\t` verbatim; drop only escape sequences.
+        assert_eq!(strip_ansi(b"a\tb\nc\rd"), "a\tb\nc\rd");
+
+        // `ESC ( B` (designate US-ASCII into G0, common in `sgr0`/reset) is a
+        // 3-byte nF escape: the intermediate `(` AND the final `B` must both be
+        // dropped, not leak a stray `B` into captured text.
+        assert_eq!(strip_ansi(b"a\x1b(Bb"), "ab");
+        assert_eq!(strip_ansi(b"\x1b)0\x1b(Bx"), "x"); // ESC ) 0 then ESC ( B
+        assert_eq!(strip_ansi(b"red\x1b(B\x1b[mtext"), "redtext");
+        // Unterminated nF escape at the buffer end is dropped, not leaked.
+        assert_eq!(strip_ansi(b"ok\x1b("), "ok");
+    }
+
+
+
+
+
+    #[test]
+    fn scroll_rows() {
         // AC5-HP: output taller than the viewport; a large --lines reaches history.
         let mut pane = Pane::new(4, 20);
         for i in 0..20 {
@@ -2571,12 +2509,7 @@ mod tests {
         assert!(tail.contains("row11"), "reached into history: {tail:?}");
         // AC5-UI: a viewport-sized read matches the visible grid.
         assert_eq!(pane.read_tail(4), pane.text());
-    }
 
-    // -- US1 scroll ------------------------------------------------------------
-
-    #[test]
-    fn scroll_moves_view_into_history_and_back() {
         // AC1-HP: output taller than the viewport; scrolling up reveals history.
         let mut pane = Pane::new(4, 20);
         for i in 0..20 {
@@ -2597,10 +2530,7 @@ mod tests {
         pane.scroll_to_bottom();
         assert_eq!(pane.display_offset(), 0);
         assert!(pane.text().contains("row19"));
-    }
 
-    #[test]
-    fn scroll_clamps_at_history_top_without_panic() {
         // AC1-EDGE: scrolling past the oldest line clamps, never wraps/panics.
         let mut pane = Pane::new(4, 20);
         for i in 0..30 {
@@ -2610,10 +2540,7 @@ mod tests {
         assert!(off > 0, "scrolled up");
         // A second huge scroll is idempotent at the clamp.
         assert_eq!(pane.scroll(1_000_000), off, "clamped at history top");
-    }
 
-    #[test]
-    fn frame_hides_cursor_and_marks_indicator_when_scrolled() {
         // AC1-UI: the cursor is hidden off-live; offset is the indicator source.
         let mut pane = Pane::new(4, 20);
         for i in 0..20 {
@@ -2625,10 +2552,15 @@ mod tests {
         assert_ne!(pane.display_offset(), 0);
     }
 
+    // -- US1 scroll ------------------------------------------------------------
+
+
+
+
     // -- US2 selection ---------------------------------------------------------
 
     #[test]
-    fn selection_and_highlight_pin_to_the_press_cell() {
+    fn selection_rows() {
         // Regression: a drag anchored on the FIRST glyph must select and
         // highlight from that glyph, never N chars late. Repro that motivated
         // this: dragging '[' -> ']' over "[Image #4]" rendered "age #4]" (leading
@@ -2646,10 +2578,7 @@ mod tests {
             cell_flags::SELECTED,
             "leading '[' highlighted, not skipped",
         );
-    }
 
-    #[test]
-    fn selection_extracts_text_and_marks_cells() {
         // AC2-HP: a drag selects cells; the text and the SELECTED flags agree.
         let mut pane = Pane::new(2, 20);
         pane.feed(b"abcdefghij");
@@ -2674,10 +2603,7 @@ mod tests {
             0,
             "past selection"
         );
-    }
 
-    #[test]
-    fn selection_spans_history_lines() {
         // AC2-EDGE: a selection reaching scrolled-off rows extracts them.
         let mut pane = Pane::new(3, 20);
         for i in 0..10 {
@@ -2689,10 +2615,7 @@ mod tests {
         pane.selection_update(0, 5);
         let text = pane.selection_text().unwrap_or_default();
         assert!(text.starts_with("line"), "history row selected: {text:?}");
-    }
 
-    #[test]
-    fn resize_clears_selection() {
         // AC2-UI: reflow drops a stale selection rather than mis-highlight.
         let mut pane = Pane::new(2, 20);
         pane.feed(b"abcdefghij");
@@ -2702,6 +2625,9 @@ mod tests {
         pane.resize(2, 10);
         assert!(!pane.has_selection(), "selection cleared on resize");
     }
+
+
+
 
     // -- Block navigation ---------------------------------------------
 
@@ -2727,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn block_jump_walks_prev_then_next_across_blocks() {
+    fn block_jump_rows() {
         // AC1-HP (Change 1/2): from the live tail, prev lands on the newest
         // block, then steps older; next steps newer and returns to live.
         let mut pane = three_blocks();
@@ -2765,20 +2691,14 @@ mod tests {
         ));
         assert_eq!(pane.block_jump(BlockDir::Next), BlockJumpOutcome::AtLive);
         assert_eq!(pane.display_offset(), 0, "back at the live tail");
-    }
 
-    #[test]
-    fn block_jump_on_markerless_pane_reports_no_blocks() {
         // AC-ERR (Change 2): a pane that never emitted OSC 133 has no blocks; the
         // jump is a visible NoBlocks, never a crash or silent no-op.
         let mut pane = Pane::new(6, 40);
         pane.feed(b"plain shell output\r\nno markers here\r\n");
         assert_eq!(pane.block_jump(BlockDir::Prev), BlockJumpOutcome::NoBlocks);
         assert_eq!(pane.block_jump(BlockDir::Next), BlockJumpOutcome::NoBlocks);
-    }
 
-    #[test]
-    fn block_jump_clamps_when_oldest_blocks_evicted() {
         // AC1-EDGE: with a tiny retained-byte budget the oldest blocks front-drop;
         // walking prev past the retained window clamps on the oldest RETAINED
         // block (never a dropped/stale row), no panic.
@@ -2798,10 +2718,7 @@ mod tests {
         // one (all retained seqs are the highest few).
         let oldest = *seen.iter().min().unwrap();
         assert!(oldest >= 4, "evicted blocks are not navigable: {seen:?}");
-    }
 
-    #[test]
-    fn block_select_walks_and_feeds_the_copy_chain() {
         // AC (Change 3): block-select sets a real selection whose text is the
         // whole block; walking prev moves to the older block; clear resets it.
         let mut pane = three_blocks();
@@ -2828,8 +2745,11 @@ mod tests {
         assert_eq!(pane.block_select(BlockDir::Prev), Some(2));
     }
 
+
+
+
     #[test]
-    fn rerun_command_targets_selected_else_newest() {
+    fn rerun_rows() {
         // AC-HP (Change 4): rerun resolves the command line to re-send - the
         // selected block's, else the newest.
         let mut pane = three_blocks();
@@ -2837,10 +2757,7 @@ mod tests {
         pane.block_select(BlockDir::Prev); // newest (2)
         pane.block_select(BlockDir::Prev); // block 1
         assert_eq!(pane.rerun_command().as_deref(), Some("echo two"));
-    }
 
-    #[test]
-    fn rerun_command_heals_a_selected_block_evicted_since_selection() {
         // Select a block, then evict it under a tiny retained budget: rerun must
         // fall back to the newest command, not report "nothing to rerun" on the
         // stale ref.
@@ -2858,10 +2775,7 @@ mod tests {
         );
         // The stale selected_block=0 no longer resolves; heal to the newest.
         assert_eq!(pane.rerun_command().as_deref(), Some("cmd5"));
-    }
 
-    #[test]
-    fn search_releases_the_block_selection_for_rerun() {
         // Search and block-select share term.selection, so a search must not leave
         // a stale selected_block as the rerun target (incl. a co-viewer's rerun).
         let mut pane = three_blocks();
@@ -2885,10 +2799,19 @@ mod tests {
         assert_eq!(pane.search_open("zz-no-such-token"), (0, 0));
         assert_eq!(pane.selected_block, None);
         assert_eq!(pane.rerun_command().as_deref(), Some("echo three"));
+
+        // A block from a bare-`C` emitter (no `B`, no captured command) has
+        // nothing to rerun - None, so the server refuses rather than sending garbage.
+        let mut pane = Pane::new(6, 40);
+        pane.feed(b"$ \x1b]133;C\x07output\x1b]133;D;0\x07");
+        assert!(pane.read_block(BlockSel::Last).is_ok());
+        assert_eq!(pane.rerun_command(), None);
     }
 
+
+
     #[test]
-    fn is_pristine_idle_shell_gates_takeover() {
+    fn takeover_rows() {
         // The `.`=here take-over reap gate. Only a shell that has drawn a prompt and run
         // nothing is safe to reap.
         // No markers yet (un-integrated / not-yet-prompted): not trustworthy -> refuse.
@@ -2907,10 +2830,7 @@ mod tests {
         let mut ran = Pane::new(6, 40);
         ran.feed(b"\x1b]133;C\x07out\x1b]133;D;0\x07\x1b]133;A\x07");
         assert!(!ran.is_pristine_idle_shell(), "a command has already run");
-    }
 
-    #[test]
-    fn shell_activity_names_what_the_pane_knows() {
         // One reading for four realities. A pane that never spoke OSC 133
         // is UNMEASURED, never idle; an open command block is Running; a prompt
         // that ran nothing is Empty; a completed block is Idle. The takeover gate
@@ -2945,15 +2865,7 @@ mod tests {
         assert!(!ran.is_pristine_idle_shell(), "Idle is not pristine");
     }
 
-    #[test]
-    fn rerun_command_is_none_for_a_bare_c_block() {
-        // A block from a bare-`C` emitter (no `B`, no captured command) has
-        // nothing to rerun - None, so the server refuses rather than sending garbage.
-        let mut pane = Pane::new(6, 40);
-        pane.feed(b"$ \x1b]133;C\x07output\x1b]133;D;0\x07");
-        assert!(pane.read_block(BlockSel::Last).is_ok());
-        assert_eq!(pane.rerun_command(), None);
-    }
+
 
     // -- Turn blocks (hook-emitted markers) -------------------------------------
 
@@ -2969,7 +2881,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_markers_segment_pane_history_and_navigate() {
+    fn turn_rows() {
         // Hook-shaped markers segment a claude pane by turns: each block's span
         // is exactly one turn's output, idle repaints between turns land outside
         // every block, and BlockJump prev from the live tail anchors at the
@@ -3020,10 +2932,7 @@ mod tests {
             sel.contains("t3a") && sel.contains("t3c"),
             "selection spans the turn: {sel:?}"
         );
-    }
 
-    #[test]
-    fn shell_and_turn_blocks_navigate_the_union_in_stream_order() {
         // AC edge: a pane mixing SHELL blocks (auto-injected zsh) and TURN blocks
         // (claude launched from that shell) is one stream-ordered sequence - no
         // special-casing anywhere.
@@ -3054,6 +2963,7 @@ mod tests {
         assert_eq!(pane.block_select(BlockDir::Prev), Some(0));
         assert_eq!(pane.rerun_command().as_deref(), Some("ls"));
     }
+
 
     #[test]
     fn unbalanced_turn_markers_degrade_never_corrupt() {
@@ -3090,7 +3000,7 @@ mod tests {
     // -- In-scrollback search (v12) ------------------------------------
 
     #[test]
-    fn search_jumps_scrolls_and_highlights_case_insensitively() {
+    fn search_rows() {
         // AC1-HP + AC3-EDGE: the match is found case-insensitively and as a
         // substring, the view scrolls back into history to reach it, and the
         // highlight spans exactly the matched columns on the single row.
@@ -3111,10 +3021,7 @@ mod tests {
             "Deadlock",
             "highlight spans exactly the 8 matched columns"
         );
-    }
 
-    #[test]
-    fn search_no_match_is_zero_and_does_not_move() {
         // AC1-ERR: a query with no occurrence returns total 0, sets no selection,
         // and leaves the viewport where it was (a visible signal, never a jump).
         let mut pane = Pane::new(4, 40);
@@ -3126,10 +3033,7 @@ mod tests {
         assert!(!pane.has_selection());
         assert!(!pane.has_search());
         assert_eq!(pane.display_offset(), before, "viewport did not move");
-    }
 
-    #[test]
-    fn search_step_walks_and_rests_at_both_ends() {
         // AC2-HP + AC2-EDGE: n/N walk the matches and rest (do not wrap) at the
         // oldest and newest, with the counter tracking the position. 12 rows each
         // carry "error" - a match on the live tail and the oldest history row both
@@ -3157,49 +3061,7 @@ mod tests {
             (_, c) = pane.search_step(BlockDir::Next).unwrap();
         }
         assert_eq!(c, 12, "Next rests on the newest match");
-    }
 
-    #[test]
-    fn search_empty_query_clears() {
-        // Boundaries: an empty query is a clear, not a scan that matches every row.
-        let mut pane = Pane::new(4, 40);
-        pane.feed(b"hello world\r\n");
-        pane.search_open("hello");
-        assert!(pane.has_selection());
-        assert_eq!(pane.search_open(""), (0, 0));
-        assert!(!pane.has_selection(), "empty query drops the highlight");
-        assert!(!pane.has_search());
-    }
-
-    #[test]
-    fn search_step_without_active_search_is_none() {
-        // Errors: a step on a pane with no active search is a clean None (the
-        // server maps it to a no-op Notice), never a panic.
-        let mut pane = Pane::new(4, 40);
-        pane.feed(b"nothing to find here\r\n");
-        assert_eq!(pane.search_step(BlockDir::Next), None);
-        assert_eq!(pane.search_step(BlockDir::Prev), None);
-        assert!(!pane.has_search());
-    }
-
-    #[test]
-    fn resize_clears_active_search() {
-        // AC3-FR: reflow stales the stored anchors, so a resize drops the search
-        // snapshot and its highlight; a later step no-ops rather than mis-jumping.
-        let mut pane = Pane::new(3, 20);
-        for i in 0..8 {
-            pane.feed(format!("match{i}\r\n").as_bytes());
-        }
-        pane.search_open("match");
-        assert!(pane.has_search());
-        pane.resize(3, 10);
-        assert!(!pane.has_search(), "resize drops the search snapshot");
-        assert!(!pane.has_selection());
-        assert_eq!(pane.search_step(BlockDir::Next), None);
-    }
-
-    #[test]
-    fn search_step_re_highlights_the_right_row_after_saturation() {
         // (AC edge): saturate a tiny scrollback so history is already at
         // cap, open a search, then stream output that evicts lines the match
         // survives. A re-highlight (search_step) must land on the real match, not
@@ -3227,6 +3089,44 @@ mod tests {
             "highlight must track the real match, not drift to a filler row"
         );
     }
+
+
+
+    #[test]
+    fn search_edge_rows() {
+        // Boundaries: an empty query is a clear, not a scan that matches every row.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"hello world\r\n");
+        pane.search_open("hello");
+        assert!(pane.has_selection());
+        assert_eq!(pane.search_open(""), (0, 0));
+        assert!(!pane.has_selection(), "empty query drops the highlight");
+        assert!(!pane.has_search());
+
+        // Errors: a step on a pane with no active search is a clean None (the
+        // server maps it to a no-op Notice), never a panic.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"nothing to find here\r\n");
+        assert_eq!(pane.search_step(BlockDir::Next), None);
+        assert_eq!(pane.search_step(BlockDir::Prev), None);
+        assert!(!pane.has_search());
+
+        // AC3-FR: reflow stales the stored anchors, so a resize drops the search
+        // snapshot and its highlight; a later step no-ops rather than mis-jumping.
+        let mut pane = Pane::new(3, 20);
+        for i in 0..8 {
+            pane.feed(format!("match{i}\r\n").as_bytes());
+        }
+        pane.search_open("match");
+        assert!(pane.has_search());
+        pane.resize(3, 10);
+        assert!(!pane.has_search(), "resize drops the search snapshot");
+        assert!(!pane.has_selection());
+        assert_eq!(pane.search_step(BlockDir::Next), None);
+    }
+
+
+
 
     #[test]
     fn search_step_re_anchors_when_older_matches_age_out() {

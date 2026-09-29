@@ -1309,14 +1309,11 @@ mod tests {
     // -- layout ---------------------------------------------------------
 
     #[test]
-    fn tree_layout_single_leaf_fills_viewport() {
+    fn tree_layout_rows() {
         let node = Node::Leaf(1);
         let panes = layout(&node, VIEWPORT);
         assert_eq!(panes, vec![(1, VIEWPORT)]);
-    }
 
-    #[test]
-    fn tree_layout_two_leaf_horizontal_split_no_gaps_no_overlap() {
         let node = Node::Branch {
             axis: Axis::Horizontal,
             children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
@@ -1331,10 +1328,7 @@ mod tests {
         // exactly one divider cell between them, no gap, no overlap
         assert_eq!(r2.x, r1.x + r1.cols + 1);
         assert_eq!(r1.cols + 1 + r2.cols, VIEWPORT.cols);
-    }
 
-    #[test]
-    fn tree_layout_integer_tiling_exact_union_no_gaps() {
         let node = Node::Branch {
             axis: Axis::Horizontal,
             children: vec![
@@ -1369,10 +1363,12 @@ mod tests {
         }
     }
 
+
+
     // -- split ------------------------------------------------------------
 
     #[test]
-    fn tree_split_horizontal_on_lone_leaf_wraps_and_focuses_new_pane() {
+    fn tree_split_insert_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1391,10 +1387,7 @@ mod tests {
             other => panic!("expected a Branch, got {other:?}"),
         }
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_split_same_axis_inserts_adjacent_halving_ratio() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1427,10 +1420,7 @@ mod tests {
             other => panic!("expected a Branch, got {other:?}"),
         }
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_split_directional_inserts_on_requested_side() {
         let viewport = Rect {
             x: 0,
             y: 0,
@@ -1468,10 +1458,7 @@ mod tests {
             assert_eq!(tab.focus, 3);
             check_invariants(&tab).unwrap();
         }
-    }
 
-    #[test]
-    fn tree_split_directional_wraps_lone_leaf_in_requested_order() {
         for (direction, axis, expected) in [
             (Dir::Left, Axis::Horizontal, vec![2, 1]),
             (Dir::Right, Axis::Horizontal, vec![1, 2]),
@@ -1490,10 +1477,7 @@ mod tests {
             assert!(matches!(tab.root, Node::Branch { axis: actual, .. } if actual == axis));
             check_invariants(&tab).unwrap();
         }
-    }
 
-    #[test]
-    fn tree_split_cross_axis_wraps_leaf_in_new_branch() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1526,8 +1510,12 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
+
+
+
+
     #[test]
-    fn tree_split_refused_below_min_size_leaves_tree_unchanged() {
+    fn tree_split_refusal_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1550,10 +1538,7 @@ mod tests {
             }
         );
         assert_eq!(tab, before, "tree must be unchanged on refusal");
-    }
 
-    #[test]
-    fn tree_split_refusal_checks_each_axis_independently() {
         // Regression (spec review): the guard must be per-pane per-axis. A
         // short-wide pane (rows == MIN_ROWS exactly, passes both) has a
         // SMALLER min dimension than the tall-thin panes a split would
@@ -1589,6 +1574,7 @@ mod tests {
         assert_eq!(tab, before, "tree must be unchanged on refusal");
     }
 
+
     // -- navigate -----------------------------------------------------------
 
     fn grid_2x2() -> Node {
@@ -1614,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_navigate_2x2_grid_geometric_corners() {
+    fn tree_navigate_rows() {
         // 1=TL 2=TR 3=BL 4=BR
         let node = grid_2x2();
         assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Right), Some(2));
@@ -1628,10 +1614,7 @@ mod tests {
         // no pane exists beyond an edge
         assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Left), None);
         assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Up), None);
-    }
 
-    #[test]
-    fn tree_navigate_partial_overlap_picks_largest_overlap() {
         // Left column split V: pane 1 gets 70% of the height (tall), pane 2
         // gets 30% (short). Pane 3 spans the full height on the right.
         // Both 1 and 2 are "left of" 3 with the same edge distance, so the
@@ -1658,10 +1641,11 @@ mod tests {
         assert_eq!(navigate(&node, viewport, 3, Dir::Left), Some(1));
     }
 
+
     // -- close ----------------------------------------------------------
 
     #[test]
-    fn tree_close_middle_of_three_redistributes_ratios_proportionally() {
+    fn tree_close_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1691,10 +1675,7 @@ mod tests {
             "focus must re-anchor to a surviving sibling"
         );
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_close_collapses_nested_same_axis_branch() {
         // GP(V) [ P(H) [ Leaf(A), Q(V)[Leaf(B), Leaf(C)] ], Leaf(X) ]
         // Closing A collapses P to its single remaining child Q (axis V),
         // which nests inside GP (also axis V) - normalize must flatten it.
@@ -1746,8 +1727,9 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
+
     #[test]
-    fn tree_close_last_pane_reports_tab_empty() {
+    fn tree_close_edge_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1755,10 +1737,7 @@ mod tests {
             focus: 1,
         };
         assert!(close(&mut tab, VIEWPORT, 1));
-    }
 
-    #[test]
-    fn tree_close_unknown_pane_is_idempotent_noop() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1773,10 +1752,11 @@ mod tests {
         assert_eq!(tab, before);
     }
 
+
     // -- resize -----------------------------------------------------------
 
     #[test]
-    fn tree_resize_transfers_ratio_between_neighbors() {
+    fn tree_resize_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -1796,6 +1776,16 @@ mod tests {
             other => panic!("expected a Branch, got {other:?}"),
         }
         check_invariants(&tab).unwrap();
+
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        let before = tab.clone();
+        assert!(!resize(&mut tab, VIEWPORT, Dir::Right, RESIZE_STEP));
+        assert_eq!(tab, before);
     }
 
     // -- set_seam_pos ------------------------------------------
@@ -1835,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_set_seam_pos_puts_the_divider_on_the_asked_for_cell() {
+    fn tree_set_seam_pos_geometry_rows() {
         let mut tab = pair_tab();
         assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 150));
         assert_eq!(divider_x(&tab, 1), 150, "the divider lands where asked");
@@ -1843,10 +1833,7 @@ mod tests {
         assert!((r[0] - 0.75).abs() < 1e-4, "150 of 200 available");
         assert!((r[0] + r[1] - 1.0).abs() < 1e-4, "sum conserved");
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_set_seam_pos_is_idempotent_and_drift_free() {
         // Absolute positions, so re-sending one changes nothing and a long drag
         // accumulates no error - the reason the wire carries a target rather
         // than a delta.
@@ -1866,28 +1853,7 @@ mod tests {
             "returning to a cell lands exactly, whatever the path there"
         );
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_set_seam_pos_clamps_at_minimum_size() {
-        // AC5-EDGE: the divider stops at the clamp; it never crushes a pane to
-        // zero or drives a ratio negative.
-        let mut tab = pair_tab();
-        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
-        let r = ratios(&tab, &[]);
-        assert!(r[1] > 0.0, "the far pane keeps a minimum: {r:?}");
-        assert!((r[0] + r[1] - 1.0).abs() < 1e-4, "sum conserved: {r:?}");
-        assert!(
-            divider_x(&tab, 1) <= WIDE.cols - MIN_COLS,
-            "the far pane keeps at least MIN_COLS of room"
-        );
-        check_invariants(&tab).unwrap();
-        // Already clamped: pushing further the same way does nothing.
-        assert!(!set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
-    }
-
-    #[test]
-    fn tree_set_seam_pos_measures_the_branch_child_not_the_flanking_pane() {
         // The pane that flanks a seam is NOT its branch child once axes
         // alternate more than one level: Horizontal -> Vertical -> Horizontal
         // is legal, so P3 below spans only part of A's width. Measuring from
@@ -1941,10 +1907,7 @@ mod tests {
             "the outer divider lands on the asked-for cell, measured from A"
         );
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_set_seam_pos_is_exact_at_arbitrary_nesting_depth() {
         // The fix must generalise, not just handle the one shape that exposed
         // it. Four levels of alternating axes, with the seam addressed by the
         // DEEPEST pane on each side - the worst case for confusing a pane's
@@ -2018,8 +1981,12 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
+
+
+
+
     #[test]
-    fn tree_set_seam_pos_refuses_a_nan_ratio_instead_of_panicking() {
+    fn tree_set_seam_pos_refusal_rows() {
         // f32::clamp panics on a NaN bound, and `lo > hi` cannot catch one -
         // every comparison against NaN is false, so it would sail through.
         // check_invariants has the same blind spot, so a NaN can reach here
@@ -2043,10 +2010,7 @@ mod tests {
         let r = ratios(&tab, &[]);
         assert!(r[0].is_nan(), "the NaN child is untouched");
         assert_eq!(r[1], 0.5, "and so is its neighbour");
-    }
 
-    #[test]
-    fn tree_set_seam_pos_refuses_a_stale_or_non_adjacent_pair() {
         // AC4-ERR: the address IS the validation. A pane that has gone, or a
         // pair that does not flank one seam, leaves the tree untouched.
         let mut tab = Tab {
@@ -2086,7 +2050,23 @@ mod tests {
         );
         assert!((r.iter().sum::<f32>() - 1.0).abs() < 1e-4);
         check_invariants(&tab).unwrap();
+
+        // AC5-EDGE: the divider stops at the clamp; it never crushes a pane to
+        // zero or drives a ratio negative.
+        let mut tab = pair_tab();
+        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
+        let r = ratios(&tab, &[]);
+        assert!(r[1] > 0.0, "the far pane keeps a minimum: {r:?}");
+        assert!((r[0] + r[1] - 1.0).abs() < 1e-4, "sum conserved: {r:?}");
+        assert!(
+            divider_x(&tab, 1) <= WIDE.cols - MIN_COLS,
+            "the far pane keeps at least MIN_COLS of room"
+        );
+        check_invariants(&tab).unwrap();
+        // Already clamped: pushing further the same way does nothing.
+        assert!(!set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
     }
+
 
     #[test]
     fn tree_set_seam_pos_resolves_a_seam_flanked_by_nested_panes() {
@@ -2119,23 +2099,11 @@ mod tests {
         check_invariants(&via_top).unwrap();
     }
 
-    #[test]
-    fn tree_resize_noop_when_no_matching_ancestor() {
-        let mut tab = Tab {
-            name: None,
-            id: 0,
-            root: Node::Leaf(1),
-            focus: 1,
-        };
-        let before = tab.clone();
-        assert!(!resize(&mut tab, VIEWPORT, Dir::Right, RESIZE_STEP));
-        assert_eq!(tab, before);
-    }
 
     // -- replace_leaf (open-here) --------------------------------
 
     #[test]
-    fn tree_replace_leaf_lone_root_swaps_and_moves_focus() {
+    fn tree_replace_leaf_rows() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -2145,10 +2113,7 @@ mod tests {
         assert!(replace_leaf(&mut tab, 1, 9));
         assert_eq!(tab.root, Node::Leaf(9));
         assert_eq!(tab.focus, 9);
-    }
 
-    #[test]
-    fn tree_replace_leaf_nested_preserves_geometry() {
         // A displaced pane deep in the tree is swapped in place: ratios,
         // branch axes, and sibling ids are all untouched - only pane 2 flips.
         let mut tab = Tab {
@@ -2181,10 +2146,7 @@ mod tests {
         assert_eq!(rect_of(&before_layout, 3), rect_of(&after_layout, 3));
         assert_eq!(rect_of(&after_layout, 2), None);
         check_invariants(&tab).unwrap();
-    }
 
-    #[test]
-    fn tree_replace_leaf_absent_is_noop() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -2197,10 +2159,7 @@ mod tests {
         let before = tab.clone();
         assert!(!replace_leaf(&mut tab, 42, 9));
         assert_eq!(tab, before);
-    }
 
-    #[test]
-    fn tree_replace_leaf_unfocused_keeps_focus() {
         let mut tab = Tab {
             name: None,
             id: 0,
@@ -2213,6 +2172,9 @@ mod tests {
         assert!(replace_leaf(&mut tab, 2, 9));
         assert_eq!(tab.focus, 1);
     }
+
+
+
 
     // -- move_leaf -------------------------------------------------
 
@@ -2237,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_move_leaf_relocates_a_pane_into_a_sibling_row() {
+    fn tree_move_leaf_rows() {
         // AC1-HP: grid 1 2 / 3 4; move 2 to the seam between 3 and 4 =>
         // 1 spans the top, 3 2 4 share the bottom.
         let mut tab = grid_2x2_tab();
@@ -2261,10 +2223,54 @@ mod tests {
             vec![Node::Leaf(3), Node::Leaf(2), Node::Leaf(4)],
             "2 landed between 3 and 4, in that order"
         );
+
+        // Invariant: relocation is pure surgery - no pane is lost, duplicated,
+        // or minted, and the tree stays well-formed.
+        let mut tab = grid_2x2_tab();
+        let before: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        let after: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(before, after, "the pane set must be identical");
+        check_invariants(&tab).expect("tree must stay well-formed after a move");
+
+        let mut tab = grid_2x2_tab();
+        tab.focus = 1;
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        assert_eq!(tab.focus, 2, "the relocated pane takes focus");
+
+        // Moving 2 out of the top row leaves that row single-child; the
+        // collapse+normalize pass must fold it away rather than leave a
+        // one-child branch standing (which check_invariants rejects).
+        let mut tab = grid_2x2_tab();
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        check_invariants(&tab).expect("no single-child branch may survive");
+        // And the fold is real: the top row is the bare leaf, not a wrapper.
+        let Node::Branch { children, .. } = &tab.root else {
+            panic!("root collapsed unexpectedly");
+        };
+        assert!(matches!(children[0].1, Node::Leaf(1)));
+
+        // Moving below a target whose parent runs Horizontal must wrap that
+        // target in a Vertical branch, the same way split_directional does.
+        let mut tab = grid_2x2_tab();
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Down).expect("the move is legal here");
+        check_invariants(&tab).expect("cross-axis relocation stays well-formed");
+        let panes = layout(&tab.root, MOVE_VIEWPORT);
+        let r2 = leaf_rect(&panes, 2);
+        let r3 = leaf_rect(&panes, 3);
+        assert!(r2.y > r3.y, "2 sits below 3 after a Down move");
     }
 
     #[test]
-    fn tree_move_leaf_refuses_a_drop_back_onto_the_seam_it_already_abuts() {
+    fn tree_move_leaf_refusal_rows() {
         // A seam is addressed by its LEFT/TOP flank, so dropping a pane on the
         // divider it already sits against names its neighbour and slips past
         // the `mover == target` guard. The remove-then-split would rebuild the
@@ -2286,38 +2292,7 @@ mod tests {
             "a move that changes nothing structural must not be applied"
         );
         assert_eq!(tab, before, "and the 80/20 split survives untouched");
-    }
 
-    #[test]
-    fn tree_move_leaf_preserves_the_pane_set_and_invariants() {
-        // Invariant: relocation is pure surgery - no pane is lost, duplicated,
-        // or minted, and the tree stays well-formed.
-        let mut tab = grid_2x2_tab();
-        let before: Vec<PaneId> = {
-            let mut v = leaves(&tab.root);
-            v.sort_unstable();
-            v
-        };
-        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
-        let after: Vec<PaneId> = {
-            let mut v = leaves(&tab.root);
-            v.sort_unstable();
-            v
-        };
-        assert_eq!(before, after, "the pane set must be identical");
-        check_invariants(&tab).expect("tree must stay well-formed after a move");
-    }
-
-    #[test]
-    fn tree_move_leaf_focus_follows_the_moved_pane() {
-        let mut tab = grid_2x2_tab();
-        tab.focus = 1;
-        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
-        assert_eq!(tab.focus, 2, "the relocated pane takes focus");
-    }
-
-    #[test]
-    fn tree_move_leaf_refuses_a_move_that_would_undersize_a_pane() {
         // AC4-ERR: the refusal leaves the tree byte-identical, so the client
         // can flash a rejection without re-syncing.
         let mut tab = grid_2x2_tab();
@@ -2346,10 +2321,7 @@ mod tests {
             "three panes cannot share a row this narrow"
         );
         assert_eq!(tab, before, "tree must be unchanged on refusal");
-    }
 
-    #[test]
-    fn tree_move_leaf_is_a_no_op_for_ids_not_in_the_tree() {
         // AC6-FR: a stale drop names a pane another client already closed.
         let mut tab = grid_2x2_tab();
         let before = tab.clone();
@@ -2363,10 +2335,7 @@ mod tests {
             Err(MoveError::PaneGone)
         );
         assert_eq!(tab, before);
-    }
 
-    #[test]
-    fn tree_move_leaf_onto_itself_is_a_no_op() {
         // AC5-EDGE: dropping a pane on its own origin cancels rather than
         // running a remove+reinsert that would churn ratios for no reason.
         let mut tab = grid_2x2_tab();
@@ -2376,10 +2345,7 @@ mod tests {
             Err(MoveError::Origin)
         );
         assert_eq!(tab, before);
-    }
 
-    #[test]
-    fn tree_move_leaf_refuses_every_move_a_single_pane_tab_can_express() {
         // A lone pane has nowhere to go. Both addressable forms refuse, and
         // neither reaches the `Some(None)` removal branch - which is why that
         // branch folds into PaneGone instead of carrying its own variant.
@@ -2403,33 +2369,13 @@ mod tests {
         assert_eq!(tab, before);
     }
 
-    #[test]
-    fn tree_move_leaf_collapses_the_branch_it_emptied() {
-        // Moving 2 out of the top row leaves that row single-child; the
-        // collapse+normalize pass must fold it away rather than leave a
-        // one-child branch standing (which check_invariants rejects).
-        let mut tab = grid_2x2_tab();
-        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
-        check_invariants(&tab).expect("no single-child branch may survive");
-        // And the fold is real: the top row is the bare leaf, not a wrapper.
-        let Node::Branch { children, .. } = &tab.root else {
-            panic!("root collapsed unexpectedly");
-        };
-        assert!(matches!(children[0].1, Node::Leaf(1)));
-    }
 
-    #[test]
-    fn tree_move_leaf_across_axes_wraps_the_target() {
-        // Moving below a target whose parent runs Horizontal must wrap that
-        // target in a Vertical branch, the same way split_directional does.
-        let mut tab = grid_2x2_tab();
-        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Down).expect("the move is legal here");
-        check_invariants(&tab).expect("cross-axis relocation stays well-formed");
-        let panes = layout(&tab.root, MOVE_VIEWPORT);
-        let r2 = leaf_rect(&panes, 2);
-        let r3 = leaf_rect(&panes, 3);
-        assert!(r2.y > r3.y, "2 sits below 3 after a Down move");
-    }
+
+
+
+
+
+
 }
 
 #[cfg(test)]
@@ -2634,7 +2580,7 @@ mod detach_graft_tests {
     }
 
     #[test]
-    fn detach_leaf_removes_pane_keeps_others() {
+    fn tree_detach_rows() {
         let mut t = tab_1234();
         let out = detach_leaf(&mut t, VP, 3).expect("3 is present");
         assert!(matches!(out, DetachOutcome::Detached { .. }));
@@ -2642,25 +2588,16 @@ mod detach_graft_tests {
         ls.sort_unstable();
         assert_eq!(ls, vec![1, 2, 4]);
         check_invariants(&t).expect("well-formed after detach");
-    }
 
-    #[test]
-    fn detach_last_pane_reports_tab_emptied() {
         // AC1-EDGE substrate: the only leaf detaches -> caller drops the tab.
         let mut t = leaf_tab(7);
         assert_eq!(detach_leaf(&mut t, VP, 7), Ok(DetachOutcome::TabEmptied));
-    }
 
-    #[test]
-    fn detach_absent_pane_is_pane_gone_and_leaves_tree() {
         let mut t = tab_1234();
         let before = t.clone();
         assert_eq!(detach_leaf(&mut t, VP, 99), Err(MoveError::PaneGone));
         assert_eq!(before, t, "tree untouched on absent pane");
-    }
 
-    #[test]
-    fn detach_focused_pane_reanchors_focus() {
         let mut t = tab_1234();
         t.focus = 3;
         let DetachOutcome::Detached { new_focus } = detach_leaf(&mut t, VP, 3).unwrap() else {
@@ -2674,18 +2611,18 @@ mod detach_graft_tests {
         assert_ne!(new_focus, 3);
     }
 
+
+
+
     #[test]
-    fn graft_subtree_splices_next_to_anchor() {
+    fn tree_graft_rows() {
         let mut dst = tab_1234();
         graft_subtree(&mut dst, VP, 1, Dir::Right, Node::Leaf(50)).expect("legal graft");
         let mut ls = leaves(&dst.root);
         ls.sort_unstable();
         assert_eq!(ls, vec![1, 2, 3, 4, 50]);
         check_invariants(&dst).expect("well-formed after graft");
-    }
 
-    #[test]
-    fn graft_absent_anchor_is_pane_gone_and_leaves_tree() {
         let mut dst = tab_1234();
         let before = dst.clone();
         assert_eq!(
@@ -2693,10 +2630,7 @@ mod detach_graft_tests {
             Err(MoveError::PaneGone)
         );
         assert_eq!(before, dst);
-    }
 
-    #[test]
-    fn graft_min_size_refusal_leaves_tree_intact() {
         // AC2-ERR: grafting a two-pane subtree into a viewport too narrow to
         // hold the extra column must refuse and leave the destination exactly.
         let tiny = Rect {
@@ -2716,8 +2650,10 @@ mod detach_graft_tests {
         assert_eq!(before, dst, "destination unchanged on min-size refusal");
     }
 
+
+
     #[test]
-    fn split_at_splits_arbitrary_target_without_moving_focus() {
+    fn tree_move_round_trip_rows() {
         // AC1-FR substrate: split_at inserts beside an arbitrary target and
         // leaves focus put (unlike split_directional, which follows).
         let mut t = tab_1234();
@@ -2725,10 +2661,7 @@ mod detach_graft_tests {
         split_at(&mut t, VP, 1, Dir::Right, 50).expect("legal split");
         assert!(leaves(&t.root).contains(&50), "new pane inserted");
         assert_eq!(t.focus, 2, "split_at never moves focus");
-    }
 
-    #[test]
-    fn detach_then_graft_round_trips_pane_set() {
         // Models: break pane 4 into its own tab, then join it back adjacent to 1.
         let mut t = tab_1234();
         let before: std::collections::BTreeSet<_> = leaves(&t.root).into_iter().collect();
@@ -2742,8 +2675,9 @@ mod detach_graft_tests {
         check_invariants(&t).unwrap();
     }
 
+
     #[test]
-    fn anchored_candidate_replaces_anchor_and_preserves_source() {
+    fn tree_anchored_candidate_rows() {
         // AC2-HP (pure half): the anchor pane's leaf is REPLACED by a realized
         // subtree; the anchor survives inside it (slot realized to its own id).
         let t = tab_1234(); // H[ V[1,3], V[2,4] ]
@@ -2766,10 +2700,7 @@ mod detach_graft_tests {
             name: None,
         };
         check_invariants(&ct).unwrap();
-    }
 
-    #[test]
-    fn anchored_candidate_refuses_minimum_fit() {
         // AC4-EDGE-MINIMUM-FIT: a candidate whose panes fall below the minimum
         // is refused, and the source tab is left untouched.
         let t = leaf_tab(1);
@@ -2791,10 +2722,7 @@ mod detach_graft_tests {
             })
         );
         assert_eq!(t.root, Node::Leaf(1), "refusal leaves source untouched");
-    }
 
-    #[test]
-    fn anchored_candidate_missing_anchor_is_pane_gone() {
         let t = tab_1234();
         let before = t.clone();
         assert_eq!(
@@ -2803,4 +2731,6 @@ mod detach_graft_tests {
         );
         assert_eq!(t.root, before.root);
     }
+
+
 }
