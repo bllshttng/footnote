@@ -4654,7 +4654,8 @@ mod tests {
     // daemon_roster_path reads FNO_CLAUDE_DAEMON_DIR, a process-global. Serialize
     // the env-touching tests below (cargo runs tests in parallel threads; no
     // serial_test dep in this crate) so they never observe each other's mutation.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     fn write_roster(home: &Path, session_uuid: &str) {
         let daemon = home.join(".claude").join("daemon");

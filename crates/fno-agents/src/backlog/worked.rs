@@ -878,7 +878,9 @@ fn admit(workers: &mut Vec<String>, name: &str, verdict: &str) {
 /// Open-phase nodes whose roster workers are live: the strict fold. An
 /// unreadable roster refuses (the caller renders the named refusal); the
 /// transcript listing is built once and shared across every resolution.
-fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>, String> {
+pub(crate) fn live_worked_node_ids(
+    entries: &[Value],
+) -> Result<Vec<(String, Vec<String>)>, String> {
     if !entries.iter().any(|e| !terminal_entry(e)) {
         return Ok(Vec::new());
     }

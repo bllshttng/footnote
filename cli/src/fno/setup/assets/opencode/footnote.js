@@ -164,7 +164,7 @@ function makeHandler(io, dir) {
             if (crown) {
               await io.sendSynthetic(
                 sid,
-                `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/reign/references/cli-commands.md.`,
+                `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/lead/references/cli-commands.md.`,
               )
             }
           } catch (e) {

@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.goldens._door import door_graph
 
 runner = CliRunner()
 
@@ -46,10 +47,9 @@ def test_completed_node_excluded_from_next_and_ready(tmp_graph):
          "plan_path": "q.md", "project": "x"},
     ]}))
 
-    nxt = runner.invoke(app, ["backlog", "next", "--project", "x"],
-                        catch_exceptions=False)
-    assert nxt.exit_code == 0, nxt.output
-    assert json.loads(nxt.stdout)["id"] == "ab-LIVE"
+    code, out, err = door_graph(tmp_graph, "next", "--project", "x")
+    assert code == 0, err
+    assert json.loads(out)["id"] == "ab-LIVE"
 
     rdy = runner.invoke(app, ["backlog", "ready", "--project", "x"],
                         catch_exceptions=False)

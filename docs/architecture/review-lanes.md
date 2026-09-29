@@ -187,7 +187,7 @@ A wrapped `fno agents mail send` cannot carry a verb. It writes an `<fno_mail ..
 
 ## Do not assert a cause for a refusal
 
-Invocation refusals have been observed, but no cause is confirmed. Do not invent a mechanism or ask workers to check speculative flags. If inline fno review refuses, report the exact refusal and stop. Do not retry through raw mail, a native verb, or another session. See [reign/references/review.md](../../skills/reign/references/review.md) for the worker contract.
+Invocation refusals have been observed, but no cause is confirmed. Do not invent a mechanism or ask workers to check speculative flags. If inline fno review refuses, report the exact refusal and stop. Do not retry through raw mail, a native verb, or another session. See [lead/references/review.md](../../skills/reign/references/review.md) for the worker contract.
 
 ## Counting invocations
 
