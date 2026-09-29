@@ -1,6 +1,5 @@
 use super::{classify, classify_rows, run_evals_attempt, validate_cohorts};
 use serde_json::json;
-use serde_json::Value;
 
 fn decl() -> serde_json::Value {
     json!({
