@@ -620,7 +620,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
             .unwrap()
     };
     assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
-    assert_eq!(by_other("king"), feed_detail::NOT_RECORDED);
+    assert_eq!(by_other("lead"), feed_detail::NOT_RECORDED);
     assert!(by_other("pane").contains("the node's current worker"));
 }
 
