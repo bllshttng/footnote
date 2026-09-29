@@ -190,7 +190,7 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     runner = kwargs.pop("runner", FakeRunner())
     provider = kwargs.pop("provider", "claude")
     name = kwargs.pop("name", "peer")
-    # Routed Claude fixtures here are z.ai routes: supply the vendor axis explicitly.
+    # Routed Claude fixtures here are z.ai routes: vendor axis stays explicit.
     if provider == "claude" and kwargs.get("route_env") is not None:
         kwargs.setdefault("route_provider", "zai")
     if kwargs.get("route_provider") is not None:
@@ -252,6 +252,7 @@ def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
     return fno_bin, worker_bin
 
 
+@pytest.mark.timeout(600)
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
