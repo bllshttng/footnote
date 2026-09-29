@@ -592,6 +592,12 @@ FIELD_META: dict[str, Meta] = {
         "Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); "
         "falls back to the script's own detection when empty. Default empty.",
     ),
+    "guards.preset": Meta(
+        "advanced",
+        "Guardrail preset: strict (every gatable guard), standard (default: the "
+        "two destructive-write guards stay on), or off. Read in Rust by "
+        "guard_enabled; FNO_GUARD_PRESET wins over this key. Default standard.",
+    ),
     "worktree.prune_done": Meta(
         "advanced",
         "How far the merged sweep's done-node arm goes on a done tree with "

@@ -130,13 +130,11 @@ Then offer the guardrail preset: how many of footnote's own incident guards this
 > 2. **standard** (default) - keeps the two destructive-write guards (pipe exit-hiding, git protection) and turns the four fleet-incident guards off.
 > 3. **off** - none of the gatable guards; the state-integrity guards (graph write protection and friends) stay on in every preset.
 
-Write the answer as env, the form the preset reader prefers:
+Write the answer to the project config (the reader prefers `FNO_GUARD_PRESET`, then this key):
 
 ```bash
-export FNO_GUARD_PRESET=<strict|standard|off>   # into the shell rc this project runs from
+fno config set guards.preset <strict|standard|off> --local
 ```
-
-(The config key `guards.preset` holds the same value once the schema carries the field; the reader prefers the env, then the key.)
 
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
