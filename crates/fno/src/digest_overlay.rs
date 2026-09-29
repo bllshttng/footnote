@@ -153,23 +153,26 @@ pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::Keymap
     (t, join_warnings(user_warns))
 }
 
-/// The user's own themes: config `[mux.themes.<name>]` materialized through
-/// the same file ladder the keymap walks (`$FNO_CONFIG` sole, else project
-/// roots over the global file, a higher layer wins per role key - the
-/// Python loader's deep-merge, mirrored). Built-ins win name collisions, so
-/// a user theme can never shadow a shipped one. `inherit` names a built-in
-/// to start from (default `footnote-superscript`); every other key is a
-/// Theme role in the sideline color vocabulary, and a value the reader
-/// cannot parse is reported, never silently ignored. File-level problems
-/// (bad TOML, unreadable file) stay the keymap reader's warnings - it reads
-/// these same files and already reports them once.
+/// The user's own themes: the import's theme folder, then config
+/// `[mux.themes.<name>]` tables materialized through the same file ladder
+/// the keymap walks (`$FNO_CONFIG` sole, else project roots over the global
+/// file, a higher layer wins per role key - the Python loader's deep-merge,
+/// mirrored). The folder sits below every config layer, so a hand-written
+/// table tunes an imported theme one role at a time. Built-ins win name
+/// collisions, so a user theme can never shadow a shipped one. `inherit`
+/// names a built-in to start from (default `footnote-superscript`); every
+/// other key is a Theme role in the sideline color vocabulary, and a value
+/// the reader cannot parse is reported, never silently ignored. File-level
+/// problems (bad TOML, unreadable file) stay the keymap reader's warnings -
+/// it reads these same files and already reports them once.
 pub fn user_themes(
     cwd: &Path,
 ) -> (
     Vec<(String, crate::theme::Theme)>,
     Vec<crate::keys::KeymapWarning>,
 ) {
-    let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
+    let mut layers: Vec<PathBuf> = theme_folder_files();
+    layers.extend(match non_empty_env("FNO_CONFIG") {
         Some(explicit) => vec![PathBuf::from(explicit)],
         None => {
             let global = global_config_toml();
@@ -183,7 +186,7 @@ pub fn user_themes(
                 )
                 .collect()
         }
-    };
+    });
     let merged = merge_theme_layers(layers.iter().map(|p| themes_from_file(p)));
     let mut themes: Vec<(String, crate::theme::Theme)> = Vec::new();
     let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
@@ -214,7 +217,15 @@ fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(table) = content.parse::<toml::Table>() else {
+    themes_from_str(&content)
+}
+
+/// The `[mux.themes.<name>]` tables of one file's TEXT, the same shape
+/// [`themes_from_file`] returns. The theme importer parses fetched text
+/// through this reader, so a preview resolves through the exact code the
+/// reader runs.
+pub(crate) fn themes_from_str(text: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let Ok(table) = text.parse::<toml::Table>() else {
         return Vec::new();
     };
     let Some(themes) = table
@@ -245,6 +256,49 @@ fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
         .collect()
 }
 
+/// The imported-theme folder: `<state root>/mux/themes`. The import saves
+/// here and [`user_themes`] reads it as the lowest layer. `None` in test
+/// builds without an override: `mux_sidecar_root` has no test twin, so a
+/// test that wants the folder pins it through [`set_themes_dir_for_test`].
+pub(crate) fn themes_dir() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    {
+        Some(crate::proto::mux_sidecar_root().join("mux").join("themes"))
+    }
+    #[cfg(test)]
+    TEST_THEMES_DIR.with(|c| c.borrow().clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_THEMES_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_themes_dir_for_test(dir: Option<PathBuf>) {
+    TEST_THEMES_DIR.with(|c| *c.borrow_mut() = dir);
+}
+
+/// The folder's `*.toml` files, sorted by name: one layer per file, lowest
+/// precedence. A missing folder adds no layer; an unreadable file stays
+/// silent, the same posture as a bad config file.
+fn theme_folder_files() -> Vec<PathBuf> {
+    let Some(dir) = themes_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    files
+}
+
 /// Collapse theme layers, lowest precedence first, one (theme, role) pair at
 /// a time - the same shape as [`merge_key_layers`], keyed by theme name.
 fn merge_theme_layers(
@@ -271,7 +325,7 @@ fn merge_theme_layers(
 /// the parent's palette identity are interned with `Box::leak`: `Theme.name`
 /// is `&'static str`, and a config read is attach-rate, so the ceiling is
 /// bytes per distinct theme name per attach, not per render.
-fn materialize_user_theme(
+pub(crate) fn materialize_user_theme(
     name: &str,
     spec: &[(String, String)],
 ) -> (crate::theme::Theme, Vec<crate::keys::KeymapWarning>) {
@@ -1740,10 +1794,19 @@ mod tests {
 
 #[cfg(test)]
 mod user_theme_tests {
-    use super::{join_warnings, materialize_user_theme, merge_theme_layers};
+    use super::{
+        join_warnings, materialize_user_theme, merge_theme_layers, set_themes_dir_for_test,
+        user_themes,
+    };
     use crate::keys::KeymapWarning;
     use crate::proto::Color;
     use crate::theme::{ground_set, Theme};
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    // Serializes the two env-pinned tests below (the outer tests module
+    // keeps its own lock; siblings never share one).
+    static FOLDER_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn spec(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -1843,6 +1906,83 @@ mod user_theme_tests {
         assert!(a.1.iter().any(|(k, v)| k == "brand" && v == "#111111"));
         assert!(a.1.iter().any(|(k, v)| k == "base" && v == "#222222"));
         assert_eq!(a.1.len(), 2, "no key is dropped across layers");
+    }
+
+    #[test]
+    fn the_theme_folder_is_the_lowest_layer_and_a_config_table_wins_per_role() {
+        let _env = FOLDER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-themes-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("themes");
+        std::fs::create_dir_all(&dir).unwrap();
+        set_themes_dir_for_test(Some(dir.clone()));
+        let ambient = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", base.join("config.toml"));
+        std::fs::write(
+            dir.join("midnight.toml"),
+            "[mux.themes.midnight]\nbase = \"#101018\"\nstamp = \"#e8e8e8\"\nbrand = \"#0000ff\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("config.toml"),
+            "[mux.themes.midnight]\nbrand = \"#ff0000\"\n",
+        )
+        .unwrap();
+        let (themes, w) = user_themes(Path::new("/"));
+        assert!(w.is_empty(), "{w:?}");
+        let t = &themes.iter().find(|(n, _)| n == "midnight").unwrap().1;
+        assert_eq!(
+            t.base,
+            Color::Rgb(0x10, 0x10, 0x18),
+            "the folder supplies base"
+        );
+        assert_eq!(
+            t.brand,
+            Color::Rgb(0xff, 0x00, 0x00),
+            "the config table wins the role"
+        );
+        match ambient {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        set_themes_dir_for_test(None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_file_cannot_shadow_a_built_in() {
+        let _env = FOLDER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-themes-dir2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("themes");
+        std::fs::create_dir_all(&dir).unwrap();
+        set_themes_dir_for_test(Some(dir.clone()));
+        let ambient = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", base.join("config.toml"));
+        std::fs::write(base.join("config.toml"), "").unwrap();
+        std::fs::write(
+            dir.join("gruvbox.toml"),
+            "[mux.themes.gruvbox]\nbase = \"#010203\"\n",
+        )
+        .unwrap();
+        let (themes, _) = user_themes(Path::new("/"));
+        assert!(
+            themes.iter().any(|(n, _)| n == "gruvbox"),
+            "the reader lists the folder name"
+        );
+        let (t, w) = Theme::from_name_in("gruvbox", &themes);
+        assert_eq!(
+            t.base,
+            Theme::from_name("gruvbox").0.base,
+            "the built-in wins"
+        );
+        assert!(w.is_none());
+        match ambient {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        set_themes_dir_for_test(None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
