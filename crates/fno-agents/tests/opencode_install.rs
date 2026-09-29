@@ -410,23 +410,27 @@ fn agent_restrictions_render_as_permission_records() {
 /// the user's, kept, named, status partial.
 #[test]
 fn legacy_bridge_adoption_backs_up_and_replaces() {
-    let s = scratch("legacy-adopt");
-    write_file(
-        &s.conf.join("plugins/footnote.js"),
-        "// footnote bridge v9\nold bridge body\n",
-    );
-    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert_eq!(
-        read(&s.conf.join("plugins/footnote.js")),
-        "// footnote bridge v9\n"
-    );
-    assert_eq!(receipt.replaced_legacy.len(), 1, "named in the receipt");
-    let backup = &receipt.replaced_legacy[0].backup;
-    assert!(backup.contains(".fno-backup-"), "{backup}");
-    assert_eq!(
-        read(&s.conf.join(backup)),
-        "// footnote bridge v9\nold bridge body\n"
-    );
+    {
+        let s = scratch("legacy-adopt");
+        write_file(
+            &s.conf.join("plugins/footnote.js"),
+            "// footnote bridge v9\nold bridge body\n",
+        );
+        let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+        assert_eq!(
+            read(&s.conf.join("plugins/footnote.js")),
+            "// footnote bridge v9\n"
+        );
+        assert_eq!(receipt.replaced_legacy.len(), 1, "named in the receipt");
+        let backup = &receipt.replaced_legacy[0].backup;
+        assert!(backup.contains(".fno-backup-"), "{backup}");
+        assert_eq!(
+            read(&s.conf.join(backup)),
+            "// footnote bridge v9\nold bridge body\n"
+        );
+        // The first Scratch drops here: it holds the env lock, and the second
+        // scratch below would deadlock against itself otherwise.
+    }
 
     // A bridge with a different first line is the user's: kept, partial.
     let s = scratch("legacy-foreign");
