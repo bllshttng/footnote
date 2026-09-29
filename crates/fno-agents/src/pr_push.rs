@@ -1133,6 +1133,22 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 3;
     }
 
+    // (5c) The shrink-only test cap, the same `--max-net 0` gate the guards
+    // workflow runs in CI. Refusing here moves the fix one round earlier: a
+    // breach used to surface as a red main only after both runs had spent.
+    if let Err(gate) = crate::test_delta::shrink_only_gate(&git, &cwd, "origin/main") {
+        match gate {
+            crate::test_delta::ShrinkGate::OverCap(msg) => {
+                eprintln!("pr-push: refusing: {msg}");
+                return 3;
+            }
+            crate::test_delta::ShrinkGate::Diff(msg) => {
+                eprintln!("pr-push: could not read the test delta ({msg}); nothing pushed");
+                return 4;
+            }
+        }
+    }
+
     // (6) The fetched remote head of the SAME-NAME branch, read BEFORE
     // preflight: a doomed push must not first spend a rehearsal of up to an
     // hour. This is the head both the lease and the in-flight read pin to;
@@ -1590,26 +1606,18 @@ exit 1
     }
 
     #[test]
-    fn ac2_err_a_failed_runs_read_is_err_never_green_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let gh = stub_gh(dir.path());
-        std::fs::write(dir.path().join("fail-runs"), b"").unwrap();
-        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
-            .expect_err("the runs read failed");
-        assert!(
-            err.contains("actions/runs"),
-            "err names the runs read: {err}"
-        );
-    }
-
-    #[test]
-    fn a_failed_status_read_is_err_never_green_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let gh = stub_gh(dir.path());
-        std::fs::write(dir.path().join("fail-status"), b"").unwrap();
-        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
-            .expect_err("the status read failed");
-        assert!(err.contains("status"), "err names the status read: {err}");
+    fn a_failed_gh_read_is_err_never_green_rows() {
+        for (marker, fragment) in [("fail-runs", "actions/runs"), ("fail-status", "status")] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = stub_gh(dir.path());
+            std::fs::write(dir.path().join(marker), b"").unwrap();
+            let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
+                .expect_err("the gh read failed");
+            assert!(
+                err.contains(fragment),
+                "err names the {fragment} read: {err}"
+            );
+        }
     }
 
     // The record parser: clean and torn captures read empty without touching
@@ -1621,5 +1629,94 @@ exit 1
         assert!(commit_citation_failures(log).is_empty());
         assert!(commit_citation_failures("").is_empty());
         assert!(commit_citation_failures("abc1234\u{1f}no separator").is_empty());
+    }
+
+    /// A work repo off a pushed bare origin: base commit on main carrying
+    /// one test, then the feature branch. `base_body`/`feat_body` write
+    /// lib.rs at each commit so one fixture serves refuse and allow.
+    fn push_repo(dir: &std::path::Path, base_body: &str, feat_body: &str) -> (String, String) {
+        let origin = dir.join("origin.git");
+        let work = dir.join("work");
+        std::fs::create_dir(&origin).unwrap();
+        let o = Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        std::fs::create_dir(&work).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        std::fs::write(work.join("lib.rs"), base_body).unwrap();
+        git(&["add", "lib.rs"]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["checkout", "-q", "-b", "feature/cap"]);
+        std::fs::write(work.join("lib.rs"), feat_body).unwrap();
+        git(&["add", "lib.rs"]);
+        git(&["commit", "-q", "-m", "feat: exercise the cap"]);
+        (
+            origin.to_str().unwrap().to_string(),
+            work.to_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn the_shrink_gate_refuses_net_new_tests_and_passes_a_flat_delta() {
+        // Unit row: the OverCap message names the table, the flat delta is
+        // Ok, and a Diff failure is its own variant.
+        let dir = tempfile::tempdir().unwrap();
+        let (_origin, work) = push_repo(
+            dir.path(),
+            "#[test]\nfn kept_case() {}\n",
+            "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+        );
+        let err = match crate::test_delta::shrink_only_gate(
+            "git",
+            std::path::Path::new(&work),
+            "origin/main",
+        ) {
+            Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
+            other => panic!("expected an over-cap refusal: {other:?}"),
+        };
+        assert!(err.contains("net +1 test declarations"), "{err}");
+        assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
+
+        // Wiring rows: the verb refuses the +1 head with 3 and pushes the
+        // flat head with 0. The flat body keeps the base test and adds a
+        // non-test edit, so the delta is genuinely flat.
+        for (feat_body, expected) in [
+            (
+                "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+                3,
+            ),
+            ("#[test]\nfn kept_case() {}\n\nfn helper() {}\n", 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_origin, work) = push_repo(dir.path(), "#[test]\nfn kept_case() {}\n", feat_body);
+            let argv = [
+                "--cwd",
+                work.as_str(),
+                "--no-preflight",
+                "--stamps-dir",
+                dir.path().join("stamps").to_str().unwrap(),
+            ]
+            .map(str::to_string);
+            assert_eq!(run_push(&argv), expected);
+        }
     }
 }

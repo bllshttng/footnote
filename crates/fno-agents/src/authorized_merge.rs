@@ -1295,11 +1295,20 @@ fn checkout_refused(output: &str) -> bool {
     lower.contains("is already used by worktree") || lower.contains("already checked out")
 }
 
+/// The fno gh proxy prefixes its own stderr with `fno config:` when it warns
+/// about an unmodeled config key. That text is never gh's verdict.
+fn is_config_warning(line: &str) -> bool {
+    line.trim_start().starts_with("fno config:")
+}
+
 /// The first non-blank line of a command's output, capped for a receipt.
+/// Leading `fno config:` warning lines are skipped so the reason names the
+/// real gh error; a stderr of only warnings still reports its first line.
 fn first_line(output: &str) -> String {
     let line = output
         .lines()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| !line.trim().is_empty() && !is_config_warning(line))
+        .or_else(|| output.lines().find(|line| !line.trim().is_empty()))
         .unwrap_or("no error output");
     // Truncate by CHARACTER. A byte slice panics when the cut lands inside a
     // multi-byte character, and gh output carries them (a PR title, a branch
@@ -1309,6 +1318,19 @@ fn first_line(output: &str) -> String {
 
 fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
     let lower = output.to_lowercase();
+    if lower.contains("secondary rate limit") {
+        // A burst (a fleet undrafting many PRs at once) trips GitHub's
+        // secondary limiter. The same command succeeds after the backoff, so
+        // it holds like any other retryable state - never a merge-method
+        // fault.
+        return Outcome::Held {
+            reason: format!(
+                "GitHub secondary rate limit; wait out the backoff, then retry the {}: {}",
+                effect.word(),
+                first_line(output)
+            ),
+        };
+    }
     let reason = if lower.contains("fno/review-coverage") {
         // This verb published that status itself moments ago. GitHub has not
         // observed it yet, so the refusal clears on a retry.
@@ -3332,20 +3354,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            2094,
-            Ok(crate::merge_gates::StaleOverlap {
-                ci_base_sha: "abcdef123456".to_string(),
-                landed: 4,
-                shared: Vec::new(),
-            }),
-        );
-        assert_eq!(outcome, ProbeOutcome::Clear);
-    }
-
-    #[test]
     fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
@@ -3415,25 +3423,27 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        let mut req = request(Effect::Arm);
-        req.require_checks = true;
-        assert_eq!(run(&fake, &req).word(), "armed");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
-    }
-
-    #[test]
-    fn a_merge_without_required_checks_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        assert_eq!(run(&fake, &request(Effect::Merge)).word(), "merged");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    fn an_arm_or_unchecked_merge_skips_ci_base_freshness() {
+        // One table test, two rows: the effect that owes no freshness probe
+        // skips it, whatever its arm spelling.
+        for (effect, require_checks) in [(Effect::Arm, true), (Effect::Merge, false)] {
+            let fake = Fake {
+                ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+                ..clean()
+            };
+            let mut req = request(effect);
+            req.require_checks = require_checks;
+            assert_eq!(
+                run(&fake, &req).word(),
+                if effect == Effect::Arm {
+                    "armed"
+                } else {
+                    "merged"
+                },
+                "{effect:?} require_checks={require_checks}"
+            );
+            assert_eq!(*fake.ci_base_calls.borrow(), 0);
+        }
     }
 
     #[test]
@@ -4016,6 +4026,61 @@ mod tests {
         let line = "e".repeat(198) + &"é".repeat(20);
         let cut = first_line(&line);
         assert_eq!(cut.chars().count(), 200);
+        // The fallback table row: an stderr of only config warnings still
+        // reports its first line instead of collapsing to "no error output".
+        let out = "fno config: guards.preset is not a modeled config key; ignored\n";
+        assert_eq!(
+            first_line(out),
+            "fno config: guards.preset is not a modeled config key; ignored"
+        );
+    }
+
+    #[test]
+    fn a_secondary_rate_limit_behind_a_config_warning_reads_retryable_not_merge_method() {
+        // Specimen 2026-09-29: the fno gh proxy printed its config warning on
+        // stderr first, so the real gh error - a secondary rate limit - read
+        // as a merge-method fault and the worker burned three tries on it.
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: You have exceeded a secondary rate limit. Please wait a bit \
+                        before you try again."
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "held");
+        let detail = outcome.detail();
+        assert!(detail.contains("secondary rate limit"), "{detail}");
+        assert!(!detail.contains("merge method"), "{detail}");
+        assert!(!detail.contains("guards.preset"), "{detail}");
+    }
+
+    #[test]
+    fn the_failure_reason_names_the_real_gh_error_past_a_config_warning() {
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: unknown flag: --squash"
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "failed");
+        assert!(outcome.detail().contains("unknown flag: --squash"));
+        assert!(!outcome.detail().contains("guards.preset"));
     }
 
     #[test]

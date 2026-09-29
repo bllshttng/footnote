@@ -19,6 +19,7 @@ pub(crate) fn paint(
     focus_pane: bool,
     theme: &Theme,
 ) {
+    let started = std::time::Instant::now();
     let (top, left, h, w) = rect;
     if h == 0 || w == 0 {
         return;
@@ -51,7 +52,7 @@ pub(crate) fn paint(
         cols,
         (top, left, bar_h, w),
         &bar_chrome,
-        bar_body,
+        &bar_body,
         None,
         None,
         theme,
@@ -76,17 +77,37 @@ pub(crate) fn paint(
         )
     };
     // The board pane: the kanban render or the uncapped list, banded only
-    // while the pane holds focus.
+    // while the pane holds focus. Both shapes go through the paint memo
+    // (the frame-cost measurement): a frame recompose re-blits the cached
+    // lines instead of re-rendering every card.
     let board_inner_w = if framed {
         board_w.saturating_sub(chrome::Chrome::FRAME_COLS)
     } else {
         board_w
     };
-    let (board_lines, f2) = if b.query.view == crate::backlog_model::View::List {
-        list_lines(b, board_inner_w)
-    } else {
-        render(b, board_inner_w)
+    let bkey = crate::client::backlog_board::BodyKey {
+        gen: b.body_gen,
+        lane: b.lane,
+        col: b.col,
+        row: b.row,
+        w: board_inner_w,
+        list: b.query.view == crate::backlog_model::View::List,
+        query: b.query.q.clone(),
+        errors: b.errors.len(),
+        columns: b.layout.columns.clone(),
     };
+    let (board_body_ref, f2) = b.board_body_cached(bkey, || {
+        let (lines, follow) = if b.query.view == crate::backlog_model::View::List {
+            list_lines(b, board_inner_w)
+        } else {
+            render(b, board_inner_w)
+        };
+        let body = lines
+            .iter()
+            .map(|l| backlog_style::to_body_line(&l.clone().pad_to(board_inner_w)))
+            .collect();
+        (lines, body, follow)
+    });
     let follow = f2;
     // The board pane wears the cursor band while it holds focus.
     let band = if focus_pane { None } else { follow };
@@ -102,13 +123,6 @@ pub(crate) fn paint(
             ),
         ])
         .flat();
-    let board_body: Vec<chrome::BodyLine> = board_lines
-        .iter()
-        .map(|l| {
-            let line = l.clone().pad_to(board_inner_w);
-            backlog_style::to_body_line(&line)
-        })
-        .collect();
     if framed {
         framed_region(
             cells,
@@ -116,12 +130,13 @@ pub(crate) fn paint(
             cols,
             board_rect,
             &board_chrome,
-            board_body,
+            &board_body_ref,
             follow,
             band,
             theme,
         );
     } else {
+        let board_lines = b.board_lines_cached();
         backlog_style::paint_panel(
             cells,
             rows,
@@ -147,30 +162,43 @@ pub(crate) fn paint(
     } else {
         detail_rect.3
     };
-    let (dlines, dfollow) = if node.is_empty() {
-        (vec![BLine::meta("no card under the cursor")], None)
-    } else {
+    let dkey = crate::client::backlog_board::DetailKey {
+        gen: b.body_gen,
+        node: node.clone(),
+        sel: b.detail.as_ref().map(|d| d.sel),
+        w: detail_inner_w,
+        doc: b
+            .doc
+            .as_ref()
+            .map(|d| (d.node_id.clone(), d.path.clone(), d.mtime, d.error.clone())),
+    };
+    let is_empty_node = node.is_empty();
+    let (detail_body_ref, dfollow_pre) = b.detail_lines_cached(dkey, || {
+        if is_empty_node {
+            return (
+                vec![BLine::meta("no card under the cursor")],
+                Vec::new(),
+                None,
+            );
+        }
         let sel = b.detail.as_ref().map(|d| d.sel);
         let (ls, f) = node_detail::pane_lines(b, &node, sel, detail_inner_w);
-        let scroll = b.detail.as_ref().map(|d| d.scroll).unwrap_or(0);
-        let ls = ls.into_iter().skip(scroll).collect::<Vec<_>>();
-        // The follow index pointed at the pre-skip body.
-        let f = f.map(|i| i.saturating_sub(scroll));
-        (ls, f)
-    };
-    let d_follow = if focus_pane { dfollow } else { None };
+        let body = ls
+            .iter()
+            .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_inner_w)))
+            .collect();
+        (ls, body, f)
+    });
+    // The scroll rides after the memo read (a skip over the cached lines).
+    let scroll = b.detail.as_ref().map(|d| d.scroll).unwrap_or(0);
+    let dfollow_pre = dfollow_pre.map(|i| i.saturating_sub(scroll));
+    // The detail pane wears its follow line only while it holds focus.
+    let dfollow = if focus_pane { dfollow_pre } else { None };
     let detail_chrome = chrome::Chrome::new(
         format!("details \u{b7} {node}"),
         crate::popup::Anchor::Center,
     )
     .flat();
-    let detail_body: Vec<chrome::BodyLine> = dlines
-        .iter()
-        .map(|l| {
-            let line = l.clone().pad_to(detail_inner_w);
-            backlog_style::to_body_line(&line)
-        })
-        .collect();
     if framed {
         framed_region(
             cells,
@@ -178,12 +206,14 @@ pub(crate) fn paint(
             cols,
             detail_rect,
             &detail_chrome,
-            detail_body,
-            d_follow,
-            d_follow,
+            &detail_body_ref[scroll.min(detail_body_ref.len())..],
+            dfollow,
+            dfollow,
             theme,
         );
     } else {
+        let dlines = b.detail_lines_raw();
+        let dlines = &dlines[scroll.min(dlines.len())..];
         backlog_style::paint_panel(
             cells,
             rows,
@@ -191,8 +221,8 @@ pub(crate) fn paint(
             detail_rect.0,
             detail_rect.3,
             detail_rect.2,
-            &dlines,
-            d_follow,
+            dlines,
+            dfollow,
             theme,
         );
     }
@@ -216,6 +246,8 @@ pub(crate) fn paint(
         None,
         theme,
     );
+    let micros = started.elapsed().as_micros();
+    b.record_paint(micros);
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn framed_region(
@@ -224,7 +256,7 @@ pub(crate) fn framed_region(
     cols: usize,
     rect: (usize, usize, usize, usize),
     chrome: &chrome::Chrome,
-    body: Vec<chrome::BodyLine>,
+    body: &[chrome::BodyLine],
     follow: Option<usize>,
     band: Option<usize>,
     theme: &Theme,

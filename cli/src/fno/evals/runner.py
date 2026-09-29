@@ -39,51 +39,36 @@ class SpawnResult:
 SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
-def _observe_worker(name: str) -> Optional[dict]:
-    """Registry identity, when the spawn left a registry row to read back."""
-    try:
-        from fno.agents.registry import load_registry
-        for entry in load_registry():
-            if entry.name == name:
-                return {"harness": entry.harness, "model": entry.model,
-                        "model_basis": entry.model_basis, "effort": entry.effort,
-                        "harness_session_id": entry.harness_session_id}
-    except (AttributeError, KeyError):
-        return None
-    return None
+def _observe_lane(
+    lane: Any,
+    workdir: Optional[Path],
+    started_wall: float,
+    *,
+    attempted: bool,
+    spawned: bool,
+    worker_name: str,
+) -> dict[str, object]:
+    """The native observe door (``evals-attempt`` stdin ``op: observe``):
+    identity and usage read back from the attempt's own transcript store. A
+    ``VerbUnavailable`` keeps the row honest - ``unverified`` with a named
+    reason, never a guessed status (AC10-EDGE)."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-
-def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *,
-                   attempted: bool = True, spawned: bool = True) -> dict[str, object]:
-    """Requested vs. observed config; a harness/model mismatch is ``substituted``.
-    No ``observed`` dict is one of three things: never attempted (grade-only,
-    ``not-applicable``), a real spawn failure (``unavailable``), or a spawn that
-    succeeded but left no readable registry row - which is ``unverified``, not
-    a capacity refusal."""
-    if lane is None:
-        return {}
-    fields: dict[str, object] = {
-        "requested_lane": lane.name, "requested_harness": lane.harness,
-        "requested_model": lane.model, "requested_effort": lane.effort,
+    payload = {
+        "op": "observe",
+        "lane": {"name": lane.name, "harness": lane.harness,
+                 "model": lane.model, "effort": lane.effort},
+        "attempted": attempted,
+        "spawned": spawned,
+        "worker": worker_name,
+        "workdir": str(workdir) if workdir else None,
+        "started_epoch": started_wall,
     }
-    if observed is None:
-        if not attempted:
-            fields["lane_status"] = "not-applicable"
-        elif not spawned:
-            fields["lane_status"] = "unavailable"
-        else:
-            fields["lane_status"] = "unverified"
-        return fields
-    fields.update(
-        observed_harness=observed.get("harness"), observed_model=observed.get("model"),
-        observed_model_basis=observed.get("model_basis"), observed_effort=observed.get("effort"),
-        observed_session_id=observed.get("harness_session_id"),
-    )
-    substituted = (bool(lane.harness) and observed.get("harness") != lane.harness) or (
-        bool(lane.model) and observed.get("model") != lane.model)
-    fields["substituted"] = substituted
-    fields["lane_status"] = "substituted" if substituted else "ok"
-    return fields
+    try:
+        return dict(verb_call("evals-attempt", payload))
+    except VerbUnavailable:
+        return {"lane_status": "unverified", "lane_reason": "observe door unavailable",
+                "usage": None, "usage_source": None}
 
 
 @dataclass(frozen=True)
@@ -274,7 +259,7 @@ def run_task(
     variant_ref: Optional[str] = None,
     lane: Optional[Any] = None,
     experiment_id: Optional[str] = None,
-    observe: Optional[Callable[[str], Optional[dict]]] = None,
+    observe: Optional[Callable[..., dict[str, object]]] = None,
     max_retries: int = 0,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per ATTEMPT.
@@ -285,8 +270,9 @@ def run_task(
     consumes no completed (case, repeat) slot, so the slot retries up to
     *max_retries* times; graded task failures never retry.
     A requested *lane* records the requested coordinate; *observe* (default
-    _observe_worker) reads back what ran. *experiment_id* is an opaque
-    cohort tag recorded on the row."""
+    _observe_lane, the native door) reads back what ran from the attempt's own
+    transcript store. *experiment_id* is an opaque cohort tag recorded on the
+    row."""
     if not VARIANT_RE.match(variant):
         raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
     if variant == BASELINE:
@@ -301,7 +287,7 @@ def run_task(
     spawn_fn = spawn or (
         lambda p, w, t: _default_spawn(p, w, t, provider=worker_provider, lane=lane)
     )
-    observe_fn = observe or _observe_worker
+    observe_fn = observe or _observe_lane
     if history_path is None:
         from fno import paths as _paths
         history_path = _paths.evals_history()
@@ -313,6 +299,7 @@ def run_task(
     for i in range(repeat):
         for attempt_index in range(max_retries + 1):
             started = time.monotonic()
+            started_wall = time.time()
             reason = ""
             gate_blocked = False
             spawn_res: Optional[SpawnResult] = None
@@ -346,8 +333,16 @@ def run_task(
                         reason = outcome.reason
                 _remove_worktree(repo_root, workdir)
 
-            observed = observe_fn(worker_name) if spawned and worker_name else None
-            lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt), spawned=spawned)
+            # The door reads the harness's own transcript store by the (unique,
+            # now-removed) attempt workdir; the worktree removal above does not
+            # touch the store.
+            lane_evidence: dict[str, object] = {}
+            if lane is not None:
+                lane_evidence = dict(observe_fn(
+                    lane, workdir, started_wall,
+                    attempted=bool(task.prompt), spawned=spawned,
+                    worker_name=worker_name,
+                ))
 
             duration = round(time.monotonic() - started, 3)
             passed = outcome is not None and outcome.passed

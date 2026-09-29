@@ -34,7 +34,7 @@ Each run appends one history row per task-run to `~/.fno/history/evals-history.j
 
 ## Reading the result
 
-There is no cohort-comparison command yet. Read `~/.fno/history/evals-history.jsonl` directly (`--experiment_id` filters to one cohort) and compare pass rates by hand across the two cohort ids. Folding this into one `fno doctor evals report` view, with a promotion recommendation, is deferred follow-up work.
+`fno doctor evals report --by-cohort` folds the history by cohort id: per cohort, attempts, graded, accepted, pass rate with a bootstrap interval, lane-status counts, exclusions by reason, median wall time, tokens, and dollars per accepted change (priced via `--prices`, `unmeasured` unless every scored row carries usage and a price line). A `--json` flag prints the same fold. Read the fold side by side across the two cohort ids for the comparison.
 
 A `lane_status` of `substituted` on any row means capacity served a different harness than requested. Exclude that row before comparing lanes. It is not a real sample of the lane you meant to qualify.
 
@@ -55,4 +55,4 @@ A live trial runs only with an explicit configured budget and an account that ca
 - It never edits `config.routing.models`, `agents.profiles`, or any production lane order. Applying a qualification result is a separate, reviewed config change.
 - It never claims one model is universally superior. A result is scoped to the fixtures and the cohort it was measured against.
 - It adds no new eval scheduler, benchmark service, or model/effort enum. The lane vocabulary is `config.routing.models`, the same rows `agents.profiles.*.lanes` already reference.
-- It does not yet fold cohort rows into one comparison report or a promotion recommendation. That is future work, not part of this delivery.
+- The cohort report folds and compares; it does not recommend. The promotion recommendation stays a human read of the fold (the harness-fit study's decision rules live in its preregistration, `evals/harness-fit/README.md`).
