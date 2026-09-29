@@ -373,33 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn the_client_exec_holds_the_seed_provenance_group_out() {
-        let held: Vec<String> = env_of(&client_command(&[
-            "claude".to_string(),
-            "--bg".to_string(),
-            "--name".to_string(),
-            "probe".to_string(),
-        ]))
-        .into_iter()
-        .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_") || k.starts_with("FNO_AGENT_"))
-        .map(|(k, _)| k)
-        .collect();
-        assert_eq!(
-            held.len(),
-            SEED_PROVENANCE_KEYS.len() + PER_SPAWN_IDENTITY_KEYS.len()
-        );
-        for key in SEED_PROVENANCE_KEYS
-            .into_iter()
-            .chain(PER_SPAWN_IDENTITY_KEYS)
-        {
-            assert!(
-                held.iter().any(|k| k == key),
-                "key {key} not held out of the client env"
-            );
-        }
-    }
-
-    #[test]
     fn poison_covers_the_measured_birth_env_but_not_the_config_dir() {
         for key in [
             "FNO_AGENTS_RUNTIME",
@@ -482,6 +455,20 @@ mod tests {
             }
         }
         let envs = env_of(&cmd);
+        // The same birth via the CLIENT door: a claude client that
+        // auto-starts the daemon fossils its env for every later session, so
+        // the door holds the seed group and the identity pair beside the
+        // poison set the supervisor birth already covers.
+        let client_held: Vec<String> =
+            env_of(&client_command(&["claude".to_string(), "--bg".to_string()]))
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_") || k.starts_with("FNO_AGENT_"))
+                .map(|(k, _)| k)
+                .collect();
+        assert_eq!(
+            client_held.len(),
+            SEED_PROVENANCE_KEYS.len() + PER_SPAWN_IDENTITY_KEYS.len()
+        );
         for k in poison {
             assert!(
                 envs.iter().any(|(n, v)| n == k && v.is_none()),

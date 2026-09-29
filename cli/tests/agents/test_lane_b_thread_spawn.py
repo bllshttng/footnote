@@ -245,7 +245,21 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
 ) -> None:
     """The minted id rides the rendered create argv AND the keeper argv, and
     the row carries the socket + the id the viewport's pi thread arm reads."""
+    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
+
     recorded = _fake_keeper(monkeypatch, lane_b_home)
+    real_popen = dispatch_mod.subprocess.Popen
+
+    keeper_env: dict = {}
+
+    def _recording_popen(argv, **kwargs):  # noqa: ANN001, ANN202
+        if "--keeper" in [str(part) for part in argv]:
+            keeper_env.update(kwargs.get("env") or {})
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", _recording_popen)
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        monkeypatch.setenv(_seed_key, "stale-parent-value")
     receipt = _lane_b_thread_spawn(name="wk-pi", harness="pi", cwd=lane_b_home)
 
     argv = list(recorded["argv"])  # type: ignore[arg-type]
@@ -282,37 +296,11 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.mux is None, "a thread row is pane-less: no mux ref"
     assert row.fno_id == session_id
     assert row.origin == "spawn"
-
-
-def test_lane_b_keeper_env_carries_no_inherited_seed_block(
-    lane_b_home, monkeypatch
-) -> None:
-    """x-ea11: the keeper passes its env through to the harness child, so a
-    stale seed provenance block inherited from the dispatcher would reach the
-    worker verbatim and misattribute its first message. The spawn floor pops
-    the whole group beside the identity scrub."""
-    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
-
-    recorded = _fake_keeper(monkeypatch, lane_b_home)
-    real_popen = dispatch_mod.subprocess.Popen
-
-    keeper_env: dict = {}
-
-    def _recording_popen(argv, **kwargs):  # noqa: ANN001, ANN202
-        if "--keeper" in [str(part) for part in argv]:
-            keeper_env.update(kwargs.get("env") or {})
-        return real_popen(argv, **kwargs)
-
-    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", _recording_popen)
-
-    for key in SEED_PROVENANCE_KEYS:
-        monkeypatch.setenv(key, "stale-parent-value")
-
-    receipt = _lane_b_thread_spawn(name="wk-seedprov", harness="pi", cwd=lane_b_home)
-    assert receipt["session_id"]
+    # The keeper passes its env through to the harness child, so a stale seed
+    # block inherited from the dispatcher must not survive the spawn floor.
     assert "argv" in recorded, "the keeper launch is the behavior under test"
-    for key in SEED_PROVENANCE_KEYS:
-        assert key not in keeper_env, f"{key} reached the keeper child env"
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        assert _seed_key not in keeper_env, f"{_seed_key} reached the keeper child env"
 
 
 def test_lane_b_spawn_renders_grok_argv_and_registers_the_row(
