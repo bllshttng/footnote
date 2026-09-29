@@ -262,8 +262,9 @@ def test_graph_json_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(result, Path)
     assert result.is_absolute()
     assert result.name == "graph.json"
-    # Must be under the state_dir (default ~/.fno/)
-    assert result.parent.name == ".fno"
+    # Must be under the state_dir (default ~/.fno/), in the db/ folder
+    assert result.parent.name == "db"
+    assert result.parent.parent.name == ".fno"
 
 
 def test_ledger_json_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -543,7 +544,7 @@ def test_custom_state_dir_propagates_to_graph_json(
     from fno.paths import graph_json
 
     result = graph_json()
-    assert result == Path(custom_dir).resolve() / "graph.json"
+    assert result == Path(custom_dir).resolve() / "db" / "graph.json"
 
 
 def test_custom_state_dir_propagates_to_briefs_dir(
@@ -585,7 +586,7 @@ def test_paths_cache_sees_a_settings_edit(tmp_path: Path, monkeypatch: pytest.Mo
         encoding="utf-8",
     )
     second = graph_json()
-    assert second == changed_dir.resolve() / "graph.json"
+    assert second == changed_dir.resolve() / "db" / "graph.json"
     assert first != second, "a settings edit must invalidate the keyed cache"
 
 
@@ -681,7 +682,7 @@ def test_graph_json_uses_state_dir_even_if_the_removed_override_is_present(
     from fno.paths import graph_json
 
     result = graph_json()
-    assert result == Path(custom_dir).resolve() / "graph.json"
+    assert result == Path(custom_dir).resolve() / "db" / "graph.json"
 
 
 def test_explicit_briefs_dir_override(
@@ -1148,7 +1149,7 @@ def test_state_dir_honors_fno_state_dir_env(
     from fno.paths import graph_json, state_dir
 
     assert state_dir() == (tmp_path / "pinned").resolve()
-    assert graph_json() == (tmp_path / "pinned").resolve() / "graph.json"
+    assert graph_json() == (tmp_path / "pinned").resolve() / "db" / "graph.json"
 
 
 def test_state_dir_empty_carrier_falls_back_to_config(

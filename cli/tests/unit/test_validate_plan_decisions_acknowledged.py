@@ -331,6 +331,12 @@ def test_unreadable_graph_fails_closed_before_coord_lifecycle(tmp_path):
         expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
         authority_source="agent",
     )
+    # The graph read resolves through the layout ladder; the empty legacy
+    # twin makes the root spelling the one it reads, then the corrupt anchor
+    # is what the validator trips on.
+    import sqlite3
+
+    sqlite3.connect(state_dir / "graph.db").close()
     (state_dir / "graph.json").write_text("{not valid json\n", encoding="utf-8")
 
     plan = tmp_path / "unreadable-graph.md"

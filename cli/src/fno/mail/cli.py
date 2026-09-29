@@ -733,7 +733,7 @@ def _ruling_graph_path(workdir: Path) -> Path:
         pass
     settings = load_settings_for_repo(repo_root)
     resolver = paths.resolve_configured_path
-    return resolver(settings.state_dir, project_root=repo_root, settings=settings) / "graph.json"
+    return paths.place_anchor(resolver(settings.state_dir, project_root=repo_root, settings=settings))
 
 
 def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:
