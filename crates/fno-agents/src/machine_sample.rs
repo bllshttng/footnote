@@ -546,8 +546,8 @@ mod tests {
         assert_eq!(rows[0]["name"], "git");
         assert_eq!(rows[0]["count"], 3);
         assert_eq!(rows[0]["ppid"], 100, "largest parent sub-group wins");
-        assert_eq!(rows[1]["name"], "ssh");
-        assert_eq!(rows[2]["name"], "rustc");
+        assert_eq!(rows[1]["name"], "rustc", "count ties sort by name");
+        assert_eq!(rows[2]["name"], "ssh");
         assert_eq!(rows.len(), 3, "an empty command names no group");
     }
 }
