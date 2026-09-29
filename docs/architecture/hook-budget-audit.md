@@ -136,8 +136,8 @@ Other configured commands do not emit a per-invocation marker that can serve as 
 
 ## Proven Orphan
 
-`hooks/law-session-start.sh` is a no-op tombstone with no registration or dynamic caller in the complete caller sweep `RIPGREP_CONFIG_PATH= rg -uu -n -g '!.git/**' -g '!**/target/**' -g '!graphify-out/**' 'law-session-start\.sh|hooks/hooks\.json' .`. It remains for the compatibility release named in its own lifecycle comment; its removal is not counted as a safe dispatch saving. Other hooks with partial or absent invocation telemetry stay installed.
+`hooks/law-session-start.sh` is a no-op tombstone with no registration or dynamic caller in the complete caller sweep `RIPGREP_CONFIG_PATH= rg -uu -n -g '!.git/**' -g '!**/target/**' -g '!graphify-out/**' 'law-session-start\.sh|hooks/hooks\.json' .`. It remains for the compatibility release named in its own lifecycle comment. Its removal is not counted as a safe dispatch saving. Other hooks with partial or absent invocation telemetry stay installed.
 
 ## Timing
 
-CI `hook_budget_bash_pretooluse_dispatch` completed on PR head `b03303a7dfa6`: p90 420.8 ms, maximum 436.2 ms, `exec_count=11`, within the 1000 ms budget. The prior measured head reported 14 execs; the pinned event-path fast path removes three path-discovery execs. The native event journal cannot measure harness dispatch overhead.
+CI `hook_budget_bash_pretooluse_dispatch` completed on PR head `b03303a7dfa6`: p90 420.8 ms, maximum 436.2 ms, `exec_count=11`, within the 1000 ms budget. The prior measured head reported 14 execs. The pinned event-path fast path removes three path-discovery execs. The native event journal cannot measure harness dispatch overhead.
