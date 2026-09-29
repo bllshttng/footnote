@@ -89,13 +89,16 @@ def test_invariant_1_atomic_settings_under_concurrent_access(settings_path: Path
     """GIVEN N concurrent atomic_mutate_settings calls THEN every observable
     state of settings.yaml is parseable YAML and the final state reflects
     exactly one of the contributing mutations."""
-    from fno.adapters.providers.loader import atomic_mutate_settings
+    from fno.adapters.providers.loader import atomic_mutate_settings, mutable_accounts_block
 
     targets = ["claude-anthropic", "claude-openrouter", "claude-bedrock"]
 
     def swapper(target: str):
         def m(d: dict) -> dict:
-            d["config"]["providers"]["active"] = target
+            # The first write migrates the pre-rename block, so later
+            # mutators see the flat shape; route through the one helper
+            # that knows both spellings.
+            mutable_accounts_block(d)["active"] = target
             return d
         atomic_mutate_settings(m, settings_path=settings_path)
 
@@ -114,7 +117,8 @@ def test_invariant_1_atomic_settings_under_concurrent_access(settings_path: Path
         t.join()
     assert corrupt == []
     final = yaml.safe_load(settings_path.read_text())
-    assert final["config"]["providers"]["active"] in targets
+    # The first write migrates the pre-rename block to top-level accounts.
+    assert final["accounts"]["active"] in targets
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +142,10 @@ def test_invariant_2_single_swap_persists_new_active(settings_path: Path, tmp_pa
 
     assert r.decision is SwapDecision.SWAPPED
     final = yaml.safe_load(settings_path.read_text())
-    # Active flipped to second provider per priority order
-    assert final["config"]["providers"]["active"] == r.new_provider_id
-    assert final["config"]["providers"]["active"] != "claude-anthropic"
+    # Active flipped to second provider per priority order; the write
+    # migrates the pre-rename block to top-level accounts.
+    assert final["accounts"]["active"] == r.new_provider_id
+    assert final["accounts"]["active"] != "claude-anthropic"
 
 
 # ---------------------------------------------------------------------------

@@ -436,7 +436,7 @@ FIELD_META: dict[str, Meta] = {
     "mux.status_row": Meta("advanced", "Show the mux status row at the bottom of the terminal (default on).", default_source="default"),
     "mux.theme": Meta(
         "advanced",
-        "Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - \"theme.brand\" and \"theme.needs_you\" take #rrggbb values that hold under any theme (the tab-bar mark's stamp takes no override).",
+        "Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - \"theme.brand\", \"theme.needs_you\" and \"theme.border\" take #rrggbb values that hold under any theme, and every role also takes `default` to pin that role to the terminal's own text color (white on a dark ground, black on paper); theme.border recolors every border at once (the pane frame, the modal outlines). The tab-bar mark's stamp takes no override.",
         default_source="default",
     ),
     # --- config.dev.* (: maintainer local-dev) ---
