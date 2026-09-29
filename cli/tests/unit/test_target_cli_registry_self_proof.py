@@ -343,6 +343,18 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     assert fields["SESSION_ID"] == mine
     assert fields["COLLISION"] == ""
 
+    # A pruned cwd must degrade, not crash: the registry reader answers None
+    # and the resolver keeps its zero-ground answer instead of raising.
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    os.chdir(gone)
+    gone.rmdir()
+    try:
+        result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+        assert result.exit_code == 0, result.output
+    finally:
+        monkeypatch.chdir(tmp_path)
+
     # Bystander guard: two live thread rows on one cwd answer nothing, so the
     # marker is refused and names the holder again.
     sibling_row = dict(row, name="w-x1a5a-sibling", harness_session_id=sibling)

@@ -133,7 +133,7 @@ def resolve_self_identity(
     ):
         environ_w = os.environ if env is None else env
         seen = {session_identity_key(s) for s in witness(canonical.harness)}
-        row = live_thread_row_for_cwd(os.getcwd())
+        row = live_thread_row_for_cwd(_own_cwd())
         if row and row[0] == canonical.harness:
             seen.add(session_identity_key(row[1]))
         thread_value = (environ_w.get("CODEX_THREAD_ID") or "").strip()
@@ -184,6 +184,15 @@ def resolve_self_identity(
     )
 
 
+def _own_cwd() -> str:
+    # A pruned worktree cannot read its own cwd; identity must degrade, not
+    # crash (an empty cwd makes the registry reader answer None).
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
 def _fill_spawn_record(owned):
     """Fill a session id the walk could not supply from the cwd-keyed spawn
     record.
@@ -194,7 +203,7 @@ def _fill_spawn_record(owned):
     """
     if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
         return owned
-    row = live_thread_row_for_cwd(os.getcwd())
+    row = live_thread_row_for_cwd(_own_cwd())
     if row is None:
         return owned
     harness, session_id = row
