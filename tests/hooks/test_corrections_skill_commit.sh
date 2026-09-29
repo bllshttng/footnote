@@ -44,8 +44,8 @@ commit_skill() {
 
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
-mkdir -p "$D/fno" "$D/claude" "$D/repo"
-LOG="$D/fno/corrections.log"
+mkdir -p "$D/fno/logs" "$D/claude" "$D/repo"
+LOG="$D/fno/logs/corrections.log"
 # The hook never bootstraps the log (the install script's job); autocorrect
 # created it in real usage, so the test creates it here.
 : > "$LOG"
