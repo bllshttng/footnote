@@ -177,6 +177,7 @@ def is_scrub(line: str) -> bool:
 WHEEL_CHANNEL_SMOKES = {
     "brew_formula_smoke.sh",  # keg bin: `fno-py --version`
     "cargo_bootstrap_smoke.sh",  # cargo shim self-provisions, then runs
+    "channel_matrix_smoke.sh",  # per-row install: curl/uv/pip/brew/cargo/npm
     "clean_machine_smoke.sh",  # fresh venv: `python -c "import fno..."`
     "fno_sh_smoke.sh",  # uv tool bin: `fno-py --version`
     "test_build.sh",  # throwaway venv: wheel contents + `python -c`

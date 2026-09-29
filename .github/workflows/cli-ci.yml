@@ -212,6 +212,11 @@ jobs:
           python-version: "3.12"
       - name: Install PyYAML
         run: python3 -m pip install --quiet "pyyaml>=6"
+      # The generator fail-closes when it cannot verify pack manifests through
+      # the in-tree fno-py (`uv run --project cli`); without uv the job dies
+      # refusing every pack, never green.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
       - name: Run the bundle freshness check
         run: bash scripts/lint/check-skill-bundles-fresh.sh
 
@@ -677,9 +682,11 @@ jobs:
     # raising the number: a raised cap only hides the growth until the next
     # PR pays it. The real-process integration shard moved to its own job,
     # test-agents-integration. After that split the widest of 12 passing
-    # runs sampled 2026-09-24 was 11.1m. 20 leaves room for a cold cargo
-    # cache, and a hang fails sooner.
-    timeout-minutes: 20
+    # runs sampled 2026-09-24 was 11.1m; the lib suite has since grown
+    # past 6550 tests and the env-holding fixtures serialize behind one
+    # shared lock, so 30 leaves room for a cold cargo cache and a hang
+    # still fails sooner than a stuck queue would.
+    timeout-minutes: 30
 
     # The claim classifier parity harness needs the FULL oracle package
     # (pydantic included: fno.claims.staleness imports claims/types.py), not a

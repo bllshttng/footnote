@@ -552,6 +552,9 @@ mod tests {
 
     #[test]
     fn checkin_interval_defaults_to_fifty_five_minutes_and_window_to_165_minutes() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("default-interval");
         // Pin FNO_CONFIG: a live global config carrying king.checkin_interval
         // (or a prior test's leaked path) must not answer for the default.

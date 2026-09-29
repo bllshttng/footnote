@@ -534,15 +534,15 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     and still merge clean, so the assertion pins one command per harness.
     Guard ordering is owned inside the dispatcher and covered at that boundary.
     """
-    guards = [
-        ("hooks/git-protection.py", "python3"),
-        ("hooks/bin-install-guard.sh", "bash"),
-        ("hooks/bg-process-guard.py", "python3"),
-        ("hooks/pipe-guard.sh", "bash"),
-        ("hooks/recursive-grep-guard.py", "python3"),
-        ("hooks/test-run-guard.sh", "bash"),
-    ]
-    for guard, _interp in guards:
+    # The chain lives inside the dispatcher now; these are its guards.
+    for guard in (
+        "hooks/git-protection.py",
+        "hooks/bin-install-guard.sh",
+        "hooks/bg-process-guard.py",
+        "hooks/pipe-guard.sh",
+        "hooks/recursive-grep-guard.py",
+        "hooks/test-run-guard.sh",
+    ):
         assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
 
     for path, root_var, matcher in (

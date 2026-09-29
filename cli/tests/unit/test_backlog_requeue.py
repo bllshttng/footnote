@@ -65,7 +65,7 @@ def _out(result) -> str:
 
 
 def _wedged_node(**over) -> dict:
-    """in_progress via an open do row alone: lock free, no PR (the x-4f44 shape)."""
+    """in_progress via an open do row alone, no claim lockfile (x-4f44 shape)."""
     node = {
         "id": NODE_ID,
         "title": "Wedged thing",
@@ -74,8 +74,6 @@ def _wedged_node(**over) -> dict:
         "project": "p",
         "plan_path": "internal/plan.md",  # so the settled node derives ready
         "status": "in_progress",
-        "locked_by": None,
-        "locked_at": None,
         "pr_number": None,
         "sessions": [{
             "phase": "execute",
@@ -127,6 +125,18 @@ def _fresh_node() -> dict:
 def _acquire(key: str, holder: str, pid: int, root: Path) -> None:
     from fno.claims.core import acquire_claim
     acquire_claim(key=key, holder=holder, pid=pid, root=root)
+
+
+def _dead_pid() -> int:
+    candidate = 999_999
+    while True:
+        try:
+            os.kill(candidate, 0)
+        except ProcessLookupError:
+            return candidate
+        except PermissionError:
+            pass
+        candidate += 1
 
 
 # -- AC1-HP: requeue settles the wedged node ---------------------------------
@@ -246,18 +256,31 @@ def test_ac4_unclaim_refuses_wedge_it_did_not_clear(tmp_graph, claims_root):
     assert "fno backlog requeue" in _out(result)
 
 
-def test_ac5_unclaim_clears_lock_held_in_progress(tmp_graph, claims_root):
-    _seed(tmp_graph, [_wedged_node(
-        status="in_progress",
-        locked_by="target-session:gone",
-        locked_at="2026-09-05T06:00:00Z",
-        sessions=[],
-    )])
+def test_ac5_unclaim_releases_stale_claim_and_derives_ready(tmp_graph, claims_root):
+    from fno.graph.store import read_graph
+
+    _seed(tmp_graph, [_wedged_node(status="in_progress", sessions=[])])
+    _acquire(f"node:{NODE_ID}", "target-session:gone", pid=_dead_pid(), root=claims_root)
     result = runner.invoke(app, ["backlog", "unclaim", NODE_ID])
     assert result.exit_code == 0, _out(result)
     assert "Unclaimed" in result.output
-    node = _read(tmp_graph)[0]
+    node = read_graph(tmp_graph)[0]
     assert node["status"] == "ready"
+    assert node["locked_by"] is None
+
+
+def test_unclaim_refuses_missing_node_without_releasing_orphan_claim(claims_root):
+    from fno.claims.io import claim_path
+
+    node_id = f"ab-{os.getpid():08x}"
+    key = f"node:{node_id}"
+    _acquire(key, "target-session:gone", pid=_dead_pid(), root=claims_root)
+
+    result = runner.invoke(app, ["backlog", "unclaim", node_id])
+
+    assert result.exit_code != 0, _out(result)
+    assert "not found" in _out(result)
+    assert claim_path(key, root=claims_root).exists(), "missing nodes cannot release claims"
 
 
 # -- AC6-EDGE: a node with a PR is in_review, not requeueable -----------------
@@ -278,85 +301,23 @@ def test_ac6_requeue_never_clears_a_pr(tmp_graph, claims_root, monkeypatch):
 
 
 def test_requeue_aborts_when_claim_lands_mid_verb(tmp_graph, claims_root, monkeypatch):
-    """A manual claim that lands between requeue's read and its clear must
-    survive: the clear aborts instead of yanking a live late claim."""
+    """A claim acquired while dead session rows settle survives the requeue."""
     _seed(tmp_graph, [_wedged_node()])
     _dead_truth(monkeypatch)
     import fno.graph.store as gs
-    real_commit = gs.commit_rows_via_store
+    real_reap = gs.reap_open_session_record
 
-    def racing_commit(path, mutator):
-        def injected(entries):
-            for e in entries:
-                if e.get("id") == NODE_ID:
-                    e["locked_by"] = "target-session:late"
-            return mutator(entries)
-        return real_commit(path, injected)
+    def racing_reap(*args, **kwargs):
+        result = real_reap(*args, **kwargs)
+        _acquire(
+            f"node:{NODE_ID}", "target-session:late", pid=os.getpid(), root=claims_root
+        )
+        return result
 
-    monkeypatch.setattr(gs, "commit_rows_via_store", racing_commit)
+    monkeypatch.setattr(gs, "reap_open_session_record", racing_reap)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code != 0
     assert "target-session:late" in _out(result)
-
-
-def test_update_null_locked_by_refuses_wedge(tmp_graph):
-    """update --locked-by null earns its Updated line the same way unclaim
-    does: an open do row holds in_progress, so the receipt names requeue."""
-    _seed(tmp_graph, [_wedged_node()])
-    import subprocess as _sp
-
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    proc = _sp.run(
-        [str(binary), "backlog", "update", NODE_ID, "--locked-by", "null"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={
-            "PATH": os.environ["PATH"],
-            "HOME": str(tmp_graph.parent),
-            "FNO_STATE_DIR": str(tmp_graph.parent),
-            "FNO_TRACKER_BACKEND": "graph",
-        },
-        cwd=str(tmp_graph.parent),
-    )
-    out = proc.stdout + proc.stderr
-    assert proc.returncode != 0
-    assert "Updated" not in out
-    assert "in_progress" in out
-    assert "fno backlog requeue" in out
-
-
-@pytest.mark.skip(
-
-
-    reason="known defect: the terminal transition releases the claim but the "
-
-
-    "row's locked_by/session_id mirror keeps the holder until the claim-mirror "
-
-
-    "row releases in the same write"
-
-
-)
-
-
-def test_update_null_locked_by_clears_lock_alone(tmp_graph):
-    """The discrimination case: locked_by alone held the node, so the clear
-    transitions it and the Updated line prints."""
-    _seed(tmp_graph, [_wedged_node(
-        locked_by="target-session:gone",
-        locked_at="2026-09-05T06:00:00Z",
-        sessions=[],
-    )])
-    result = runner.invoke(app, ["backlog", "update", NODE_ID, "--locked-by", "null"])
-    assert result.exit_code == 0, _out(result)
-    assert "Updated" in result.output
-    assert _read(tmp_graph)[0]["status"] == "ready"
 
 
 # -- x-e594: the inference-sample marker, measured 2026-09-12 -----------------
@@ -573,3 +534,34 @@ def test_requeue_refuses_an_idle_row_when_the_roster_is_unread(tmp_graph, claims
     assert result.exit_code == 3, _out(result)
     assert "roster unread" in _out(result)
     assert _read(tmp_graph)[0]["sessions"][0]["session_id"] == DEAD_SESSION
+
+
+def test_update_null_locked_by_refuses_wedge(tmp_graph):
+    """update --locked-by null earns its Updated line the same way unclaim
+    does: an open do row holds in_progress, so the receipt names requeue."""
+    _seed(tmp_graph, [_wedged_node()])
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", NODE_ID, "--locked-by", "null"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert "Updated" not in out
+    assert "in_progress" in out
+    assert "fno backlog requeue" in out
