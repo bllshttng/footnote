@@ -3875,8 +3875,8 @@ async fn keys_modal_which_key_executes_a_bound_key_to_the_wire() {
     assert!(v.keys_modal.is_none(), "executing a chord closes the modal");
     let mut cur = std::io::Cursor::new(buf);
     match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::SplitH) => {}
-        other => panic!("expected SplitH from `%`, got {other:?}"),
+        ClientMsg::Command(Command::SplitDir(Dir::Right)) => {}
+        other => panic!("expected SplitDir(Right) from `%`, got {other:?}"),
     }
 }
 
@@ -5164,49 +5164,11 @@ fn tab_and_new_tab_cells(v: &View) -> ((u16, u16), (u16, u16)) {
 }
 
 #[test]
-fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
-    // AC3-HP: right-pressing a tab cell opens the menu pinned to that tab's
-    // stable id, with close tab last after a rule.
-    let mut v = view_with_agents(vec![]);
-    let ((tr, tc), _) = tab_and_new_tab_cells(&v);
-    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
-    let m = v.row_menu.as_ref().unwrap();
-    assert_eq!(m.target, super::MenuTarget::Tab(0));
-    assert_eq!(
-        m.actions,
-        vec![
-            super::MenuAction::TabNew,
-            super::MenuAction::TabRename,
-            super::MenuAction::TabReorder(-1),
-            super::MenuAction::TabReorder(1),
-            super::MenuAction::TabMoveTo,
-            super::MenuAction::TabJoin(Dir::Left),
-            super::MenuAction::TabJoin(Dir::Right),
-            super::MenuAction::TabJoin(Dir::Up),
-            super::MenuAction::TabJoin(Dir::Down),
-            super::MenuAction::TabClose,
-        ]
-    );
-    // The destructive item sits last, after a Rule (menu grammar).
-    let labels = menu_labels(m);
-    // `Close`, not `Close tab`: one shape with the row menu's `✕ Remove`.
-    assert_eq!(labels.last().map(String::as_str), Some("Close"));
-    assert!(
-        m.popup
-            .rows
-            .iter()
-            .rposition(|r| matches!(r, PopupRow::Rule))
-            .is_some_and(|rule_at| m.popup.rows.len() - 1 > rule_at),
-        "a rule separates close tab from the rest"
-    );
-}
-
-#[test]
 fn tab_menu_falls_through_on_the_new_tab_cell() {
     // AC4-EDGE: the `+` cell is not a tab, so no menu opens and the press
     // is left to fall through - never swallowed by a silent no-op.
     let mut v = view_with_agents(vec![]);
-    let ((tr, tc), (pr, pc)) = tab_and_new_tab_cells(&v);
+    let ((tr, tc), (pr, pc)) = tab_and_new_tab_cells(&view_with_agents(vec![]));
     // Sanity: the cells are on the strip but resolve differently.
     assert_eq!(v.tab_cell_at(tr, tc), Some(0));
     assert_eq!(v.tab_cell_at(pr, pc), None);
@@ -5223,7 +5185,7 @@ async fn a_right_press_on_a_tab_cell_re_anchors_an_open_menu() {
     let tabs = squad_tabs(&v, 1);
     let ((tr, tc), _) = tab_and_new_tab_cells(&v);
     // Start from a menu pinned to the OTHER tab (index 1).
-    v.row_menu = Some(super::build_tab_menu(1, &tabs[1], Anchor::Center));
+    v.row_menu = Some(super::build_tab_menu(1, &tabs[1], Anchor::Center, false));
     let mut buf: Vec<u8> = Vec::new();
     super::row_menu_mouse(
         &mut v,
@@ -5635,7 +5597,10 @@ fn menu_accelerators_never_collide_within_one_menu() {
             "live pane row",
             super::build_row_menu(&live, Anchor::Center),
         ),
-        ("tab", super::build_tab_menu(0, &tabs[0], Anchor::Center)),
+        (
+            "tab",
+            super::build_tab_menu(0, &tabs[0], Anchor::Center, false),
+        ),
     ];
     for (name, menu) in menus {
         let mut seen: Vec<u8> = Vec::new();
@@ -6664,6 +6629,7 @@ async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
         1,
         &squad_tabs(&v, 1)[1],
         Anchor::Center,
+        false,
     ));
     match menu_command_for(&mut v, super::MenuAction::TabJoin(Dir::Left)).await {
         Command::JoinTab {
@@ -6758,7 +6724,7 @@ fn menu_hints_resolve_the_live_keymap_and_never_invent_one() {
     // carries no hint slot at all, so nothing can hardcode a chord there
     // either.
     let tabs = squad_tabs(&view_with_agents(vec![]), 1);
-    let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center);
+    let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center, false);
     for (label, id) in [
         ("New tab", "new-tab"),
         ("Rename", "rename-tab"),
@@ -16295,6 +16261,8 @@ fn ux_shot_twenty_tabs_before() {
 // under the file-budget gate; this file is shrink-only against main.
 #[path = "client/tests/section_menu_tests.rs"]
 mod section_menu_tests;
+#[path = "client/tests/tab_menu_tests.rs"]
+mod tab_menu_tests;
 use section_menu_tests::arm_clear_dead;
 
 // (x-e763) The default-dispatch lifecycle gestures, same file-budget rule.

@@ -191,8 +191,9 @@ pub fn resolve_keymap(
                 slot.1 = *byte;
             }
         }
-        // A key sitting on the prefix byte can never dispatch.
-        if let Some((action, _)) = final_map.iter().find(|(_, k)| *k == prefix) {
+        // A key sitting on the prefix byte can never dispatch. Sentinel
+        // rows (key 0) hold no chord, so they can sit beside anything.
+        if let Some((action, _)) = final_map.iter().find(|(a, k)| *k == prefix && *k != 0) {
             let action = action.clone();
             if let Some(i) = proposed.iter().position(|(a, _)| *a == action) {
                 warnings.push(KeymapWarning(format!(
@@ -214,8 +215,11 @@ pub fn resolve_keymap(
         }
         // Two actions on one byte: the later PROPOSAL loses, so a swap survives
         // (each half moves off the other's key) while a genuine double-booking
-        // is refused.
+        // is refused. Sentinel rows (key 0) hold no chord and never collide.
         let dup = final_map.iter().enumerate().find_map(|(i, (_, k))| {
+            if *k == 0 {
+                return None;
+            }
             final_map[i + 1..]
                 .iter()
                 .find(|(_, k2)| k2 == k)
@@ -991,8 +995,32 @@ fn default_bindings() -> Vec<KeyBinding> {
     };
     vec![
         // panes
-        b(b'%', "split-h", Cmd(C::SplitH), Panes, "split horizontal"),
-        b(b'"', "split-v", Cmd(C::SplitV), Panes, "split vertical"),
+        b(
+            b'%',
+            "split-right",
+            Cmd(C::SplitDir(Dir::Right)),
+            Panes,
+            "split right",
+        ),
+        b(
+            b'"',
+            "split-down",
+            Cmd(C::SplitDir(Dir::Down)),
+            Panes,
+            "split down",
+        ),
+        // Key 0 is the sentinel for "bindable, no default chord": arrows and
+        // hjkl are taken by focus and resize, so `split-up`/`split-left` ship
+        // unbound and materialize in the live table only once a
+        // `config.mux.keys` rebind names them (see `bindings_for`).
+        b(0, "split-up", Cmd(C::SplitDir(Dir::Up)), Panes, "split up"),
+        b(
+            0,
+            "split-left",
+            Cmd(C::SplitDir(Dir::Left)),
+            Panes,
+            "split left",
+        ),
         b(
             b'h',
             "focus-left",
@@ -1323,6 +1351,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 fn bindings_for(map: &Keymap) -> Vec<KeyBinding> {
     let mut rows = default_bindings();
+    // A sentinel row (key 0: bindable, no default chord) enters the live
+    // table only once a rebind gives it a real key; shipping it unbound
+    // would break the parity contract between `chord()` and the modal.
+    rows.retain(|kb| kb.key != 0 || map.rebinds.iter().any(|(a, _)| a == &kb.action));
     for (action, byte) in &map.rebinds {
         if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
             kb.key = *byte;
@@ -1531,7 +1563,7 @@ pub fn selector_hint() -> &'static str {
 /// would advertise a dead sequence the moment anyone set `config.mux.prefix`.
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
-    vec![
+    let rows = vec![
         // The digit jump reads arbitrary numbers now, so the row
         // names the resolve doors instead of a nine-tab ceiling: Enter is the
         // explicit one, the quiet window covers number-then-nothing, and a
@@ -1617,7 +1649,22 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "rename · move · remove (confirm) the workspace row".into(),
             KeySection::SidelineRows,
         ),
-    ]
+    ];
+    // Bindable, no default chord: the two split directions with no free key.
+    // Listed while unbound so the reference names the action and its rebind
+    // door; each row leaves this table once a rebind materializes the action
+    // in `key_bindings` (no double row).
+    let mut rows = rows;
+    for (action, label) in [("split-up", "split up"), ("split-left", "split left")] {
+        if key_for(action).is_none() {
+            rows.push((
+                "-".into(),
+                format!("{label} (no default chord; rebind via config.mux.keys.{action})"),
+                KeySection::Panes,
+            ));
+        }
+    }
+    rows
 }
 
 /// The single-byte chord table. PREFIX (literal) and the digit range are
@@ -1845,11 +1892,14 @@ mod tests {
             events,
             vec![
                 Event::Forward(b"a".to_vec()),
-                Event::Cmd(Command::SplitH),
+                Event::Cmd(Command::SplitDir(Dir::Right)),
                 Event::Forward(b"b".to_vec()),
             ]
         );
-        assert_eq!(scan_all(&[b"\x02\""]), vec![Event::Cmd(Command::SplitV)]);
+        assert_eq!(
+            scan_all(&[b"\x02\""]),
+            vec![Event::Cmd(Command::SplitDir(Dir::Down))]
+        );
         assert_eq!(
             scan_all(&[b"\x02l"]),
             vec![Event::Cmd(Command::FocusDir(Dir::Right))]
@@ -2339,6 +2389,55 @@ mod tests {
     }
 
     #[test]
+    fn split_left_and_split_up_are_bindable_without_a_default_chord() {
+        // x-1b55: the two no-default split actions live in the table as
+        // sentinel rows (key 0). They resolve only under an explicit rebind,
+        // which materializes the row with its real key; the live table never
+        // carries a key-0 row, so the parity contract holds untouched.
+        let (map, warnings) = resolve_keymap(
+            None,
+            &[
+                ("split-left".into(), "G".into()),
+                ("split-up".into(), "u".into()),
+            ],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let rows = bindings_for(&map);
+        let left = rows
+            .iter()
+            .find(|kb| kb.action == "split-left")
+            .expect("materialized");
+        assert_eq!(left.key, b'G');
+        assert_eq!(left.disp, "G");
+        assert_eq!(left.event, Event::Cmd(Command::SplitDir(Dir::Left)));
+        let up = rows
+            .iter()
+            .find(|kb| kb.action == "split-up")
+            .expect("materialized");
+        assert_eq!(up.key, b'u');
+        assert_eq!(up.event, Event::Cmd(Command::SplitDir(Dir::Up)));
+        // No row ships key 0, and every row's key resolves to its own event:
+        // the parity shape, asserted on the local table.
+        for kb in &rows {
+            assert!(kb.key != 0, "sentinel row {} leaked", kb.action);
+            assert_eq!(
+                chord_for(&map, kb.key),
+                kb.event,
+                "chord diverged from row {}",
+                kb.action
+            );
+        }
+        // While unbound (the default map), the modal lists the action with
+        // its rebind door instead of a chord.
+        assert!(
+            meta_rows().iter().any(|(disp, label, _)| {
+                disp == "-" && label.contains("split up") && label.contains("split-up")
+            }),
+            "the unbound action is named in the reference"
+        );
+    }
+
+    #[test]
     fn every_binding_has_a_unique_stable_action_id() {
         // The config surface: `config.mux.keys.<action>`. A duplicate id would
         // make one of the two unrebindable, and a stray uppercase or space would
@@ -2373,6 +2472,11 @@ mod tests {
         // unreachable while the help still shows it.
         let mut seen = std::collections::HashSet::new();
         for kb in default_bindings() {
+            // Sentinel rows (key 0: bindable, no default chord) hold no
+            // chord, so the uniqueness rule does not apply to them.
+            if kb.key == 0 {
+                continue;
+            }
             assert!(
                 seen.insert(kb.key),
                 "key {} bound twice (second: {:?})",
@@ -2517,7 +2621,7 @@ mod tests {
             scan_all(&[b"\x1b\x02%"]),
             vec![
                 Event::Forward(b"\x1b".to_vec()),
-                Event::Cmd(Command::SplitH)
+                Event::Cmd(Command::SplitDir(Dir::Right))
             ]
         );
         // A near-miss CSI ahead of the prefix: same re-dispatch of the tail.
@@ -2525,7 +2629,7 @@ mod tests {
             scan_all(&[b"\x1b[1;3\x02%"]),
             vec![
                 Event::Forward(b"\x1b[1;3".to_vec()),
-                Event::Cmd(Command::SplitH)
+                Event::Cmd(Command::SplitDir(Dir::Right))
             ]
         );
     }
@@ -2546,7 +2650,10 @@ mod tests {
         assert!(s.chord_pending());
         assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b".to_vec())));
         assert!(!s.chord_pending());
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
         assert_eq!(s.flush_chord(), None, "nothing held: a no-op");
         // A partial multi-byte candidate flushes the same way.
         let mut s = Scanner::default();
@@ -2709,7 +2816,10 @@ mod tests {
         for c in &chunks {
             s.scan(c, now);
         }
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
     }
 
     #[test]
@@ -2756,7 +2866,10 @@ mod tests {
         assert_eq!(events, vec![Event::Forward(b"\x1b[2J".to_vec())]);
         let mut s = Scanner::default();
         s.scan(b"\x1b[20", now);
-        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(
+            s.scan(b"\x02%", now),
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))]
+        );
     }
 
     const RESIZE_R: Event = Event::Cmd(Command::ResizeDir(Dir::Right));
@@ -2864,7 +2977,7 @@ mod tests {
         s.scan(b"\x02L", t0); // arm
         assert_eq!(
             s.scan(b"\x02%", t0 + Duration::from_millis(100)),
-            vec![Event::Cmd(Command::SplitH)],
+            vec![Event::Cmd(Command::SplitDir(Dir::Right))],
             "prefix+% still splits inside the window"
         );
         // prefix+% is not a resize, so the window is now closed: bare L forwards.

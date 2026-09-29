@@ -9781,12 +9781,7 @@ impl Core {
         // Tree mutations tile against the viewed tab's CLAMPED area.
         let vp = self.tab_rect(view.1);
         match cmd {
-            Command::SplitH | Command::SplitV => {
-                let axis = if matches!(cmd, Command::SplitH) {
-                    Axis::Horizontal
-                } else {
-                    Axis::Vertical
-                };
+            Command::SplitDir(dir) => {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
@@ -9815,7 +9810,7 @@ impl Core {
                 let Some(tab) = self.viewed_tab_mut(view) else {
                     return Flow::Continue;
                 };
-                match tree::split(tab, vp, axis, pid) {
+                match tree::split_directional(tab, vp, dir, pid) {
                     Ok(()) => self.push_layout(true),
                     Err(e) => {
                         // AC1-EDGE: refused split reaps the pre-spawned

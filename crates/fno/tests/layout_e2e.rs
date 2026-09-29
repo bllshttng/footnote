@@ -183,14 +183,14 @@ fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
     assert_focused_winsize(&mut c, pane_a, 22, 78);
 
     // Split H: 79 usable cols (1 divider), floor half = 39, last child 40.
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     let l = c.wait_layout(10, "2-pane layout", |l| l.panes.len() == 2);
     let pane_b = l.focus;
     assert_ne!(pane_b, pane_a, "the new pane takes focus (AC1-HP)");
     assert_focused_winsize(&mut c, pane_b, 22, 38);
 
     // Split V on the focused right pane: 23 usable rows, 11 top / 12 bottom.
-    c.cmd(Command::SplitV);
+    c.cmd(Command::SplitDir(Dir::Down));
     let l = c.wait_layout(10, "3-pane layout", |l| l.panes.len() == 3);
     let pane_c = l.focus;
     assert_focused_winsize(&mut c, pane_c, 10, 38);
@@ -204,19 +204,58 @@ fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
 
 // -- item 2: geometric navigation on a 2x2 grid ----------------------------
 
+// -- item 1b: the four directional splits (x-1b55) --------------------------
+
+#[test]
+fn layout_e2e_split_dir_places_the_new_pane_on_each_side() {
+    // One command shape, four directions: the new pane lands on the
+    // requested side of the FOCUSED pane, even halves, focus follows.
+    // Left and Up get the geometric proof here; Right and Down are the
+    // long-standing behavior already asserted by the tests above.
+    let scratch = Scratch::new("splitdir");
+    let _server = sh_server(&scratch);
+    let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
+
+    // LEFT: 79 usable cols split evenly, new pane takes the left half
+    // (x=0, 39 cols), the focused pane keeps the right (x=40, 40 cols).
+    c.cmd(Command::SplitDir(Dir::Left));
+    let l = c.wait_layout(10, "A|B left", |l| l.panes.len() == 2);
+    let pane_b = l.focus;
+    assert_ne!(pane_b, pane_a, "focus follows the new pane");
+    let b = l.panes.iter().find(|(id, _)| *id == pane_b).unwrap().1;
+    let a = l.panes.iter().find(|(id, _)| *id == pane_a).unwrap().1;
+    assert_eq!(b.x, 0, "the new pane lands on the left side");
+    assert_eq!((b.cols, a.x, a.cols), (39, 40, 40), "even halves");
+
+    // UP: from the new left pane, 23 usable rows split evenly: new pane
+    // on top (y=0, 11 rows), the focused pane below (y=12, 12 rows).
+    c.cmd(Command::SplitDir(Dir::Up));
+    let l = c.wait_layout(10, "A|B/C up", |l| l.panes.len() == 3);
+    let pane_c = l.focus;
+    assert_ne!(pane_c, pane_b, "focus follows the new pane");
+    let c_rect = l.panes.iter().find(|(id, _)| *id == pane_c).unwrap().1;
+    let b_rect = l.panes.iter().find(|(id, _)| *id == pane_b).unwrap().1;
+    assert_eq!(c_rect.x, b.x, "the up-split stays inside B's column band");
+    assert_eq!(
+        (c_rect.y, c_rect.rows, b_rect.y, b_rect.rows),
+        (0, 11, 12, 12),
+        "the new pane lands on top, even halves"
+    );
+}
+
 #[test]
 fn layout_e2e_2x2_grid_navigates_geometrically() {
     let scratch = Scratch::new("nav");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
 
-    c.cmd(Command::SplitH); // A | B
+    c.cmd(Command::SplitDir(Dir::Right)); // A | B
     let pane_b = c.wait_layout(10, "A|B", |l| l.panes.len() == 2).focus;
-    c.cmd(Command::SplitV); // B stacks -> C below
+    c.cmd(Command::SplitDir(Dir::Down)); // B stacks -> C below
     let pane_c = c.wait_layout(10, "B/C", |l| l.panes.len() == 3).focus;
     c.cmd(Command::FocusDir(Dir::Left));
     c.wait_layout(10, "focus A", |l| l.focus == pane_a);
-    c.cmd(Command::SplitV); // A stacks -> D below
+    c.cmd(Command::SplitDir(Dir::Down)); // A stacks -> D below
     let pane_d = c.wait_layout(10, "A/D", |l| l.panes.len() == 4).focus;
 
     // Grid: A top-left, D bottom-left, B top-right, C bottom-right.
@@ -246,7 +285,7 @@ fn layout_e2e_resize_propagates_winsize_and_burst_settles_exactly() {
     let scratch = Scratch::new("resize");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     c.wait_layout(10, "2 panes", |l| l.panes.len() == 2);
     c.cmd(Command::FocusDir(Dir::Left));
     c.wait_layout(10, "focus A", |l| l.focus == pane_a);
@@ -281,9 +320,9 @@ fn layout_e2e_close_middle_redistributes_and_focus_survives() {
     let scratch = Scratch::new("close");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
-    c.cmd(Command::SplitH); // [A .5, B .5]
+    c.cmd(Command::SplitDir(Dir::Right)); // [A .5, B .5]
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
-    c.cmd(Command::SplitH); // same-axis insert: [A .5, B .25, C .25]
+    c.cmd(Command::SplitDir(Dir::Right)); // same-axis insert: [A .5, B .25, C .25]
     let pane_c = c.wait_layout(10, "3 panes", |l| l.panes.len() == 3).focus;
 
     c.cmd(Command::FocusDir(Dir::Left)); // the middle pane (B)
@@ -352,7 +391,7 @@ fn layout_e2e_flooded_pane_never_starves_its_sibling() {
     let scratch = Scratch::new("flood");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
 
     // Flood the focused right pane hard.
@@ -376,7 +415,7 @@ fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
     let cwd = scratch.dir("w");
     let (mut c, pane_a) = attach_settled(&scratch, &cwd);
     // Tab 1: a split with distinct markers in both panes.
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
     c.input(b"echo marker-right\r");
     c.wait_pane_text(10, pane_b, |t| t.contains("marker-right"));
@@ -443,7 +482,7 @@ fn layout_e2e_modesync_flips_with_focus_between_divergent_panes() {
     let scratch = Scratch::new("modes");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
-    c.cmd(Command::SplitH);
+    c.cmd(Command::SplitDir(Dir::Right));
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
 
     // Focused pane B negotiates BOTH bracketed paste (?2004, synced) AND mouse

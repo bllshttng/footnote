@@ -349,7 +349,9 @@ fn default_true() -> bool {
 /// v95: `AgentLaunchRequest.worktree` + `branch` (serde default), the
 /// composer's worktree choice the server resolves through `fno-agents
 /// launch-workdir` before the spawn argv is built; floor stays 58.
-pub const PROTO_VERSION: u32 = 95;
+/// v96: `Command::SplitDir(Dir)` replaces `SplitH`/`SplitV` - new variant,
+/// not additive; handshake stops the skew. Floor stays 58.
+pub const PROTO_VERSION: u32 = 96;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1524,8 +1526,12 @@ pub enum AgentBadge {
 /// a layout change can never corrupt state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Command {
-    SplitH,
-    SplitV,
+    /// (v96) Split the focused pane, new pane on `dir`'s side, even halves,
+    /// focus follows. Replaces `SplitH`/`SplitV` (which were Right/Down with
+    /// the direction thrown away); the tab menu's Split rows and the four
+    /// bindable `split-*` actions all send this one variant. New variant, not
+    /// additive; handshake stops the skew.
+    SplitDir(Dir),
     ClosePane,
     /// (v90) Close ONLY the portal seat `seat` - the viewer pane - never the
     /// row it shows: removing a row is not removing a pane, and closing a
@@ -3904,7 +3910,7 @@ mod tests {
             ClientMsg::Input(b"echo hello\r".to_vec()),
             ClientMsg::Resize { rows: 50, cols: 90 },
             ClientMsg::Detach,
-            ClientMsg::Command(Command::SplitH),
+            ClientMsg::Command(Command::SplitDir(Dir::Right)),
             ClientMsg::Command(Command::FocusDir(Dir::Left)),
             ClientMsg::Command(Command::ResizeDir(Dir::Down)),
             ClientMsg::Command(Command::SelectTab(3)),
