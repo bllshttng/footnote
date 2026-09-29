@@ -318,15 +318,24 @@ const SEED_PROVENANCE_KEYS: [&str; 6] = [
     "FNO_SEED_PROV_MSG_ID",
 ];
 
+/// The per-spawn identity pair. A child that inherits them reports its
+/// parent's name and harness as its own, which is how one daemon fossil
+/// broke whoami, mail attribution, and target start for later workers.
+const PER_SPAWN_IDENTITY_KEYS: [&str; 2] = ["FNO_AGENT_SELF", "FNO_AGENT_HARNESS"];
+
 /// The client Command for `claude-birth-exec`, holding the seed provenance
-/// group out of the child env. A claude client that finds no daemon
-/// auto-starts one from its own env, and that env is fossilized for every
-/// session the daemon forks later; the supervisor birth already holds these
-/// back (`is_poison`), so the client exec is the remaining door.
+/// group and the per-spawn identity pair out of the child env. A claude
+/// client that finds no daemon auto-starts one from its own env, and that env
+/// is fossilized for every session the daemon forks later; the supervisor
+/// birth already holds all `FNO_*` back (`is_poison`), so the client exec is
+/// the remaining door.
 fn client_command(argv: &[String]) -> std::process::Command {
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    for key in SEED_PROVENANCE_KEYS {
+    for key in SEED_PROVENANCE_KEYS
+        .into_iter()
+        .chain(PER_SPAWN_IDENTITY_KEYS)
+    {
         cmd.env_remove(key);
     }
     cmd
@@ -372,14 +381,20 @@ mod tests {
             "probe".to_string(),
         ]))
         .into_iter()
-        .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_"))
+        .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_") || k.starts_with("FNO_AGENT_"))
         .map(|(k, _)| k)
         .collect();
-        assert_eq!(held.len(), SEED_PROVENANCE_KEYS.len());
-        for key in SEED_PROVENANCE_KEYS {
+        assert_eq!(
+            held.len(),
+            SEED_PROVENANCE_KEYS.len() + PER_SPAWN_IDENTITY_KEYS.len()
+        );
+        for key in SEED_PROVENANCE_KEYS
+            .into_iter()
+            .chain(PER_SPAWN_IDENTITY_KEYS)
+        {
             assert!(
                 held.iter().any(|k| k == key),
-                "seed key {key} not held out of the client env"
+                "key {key} not held out of the client env"
             );
         }
     }
