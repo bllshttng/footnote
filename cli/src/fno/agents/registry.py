@@ -1658,6 +1658,26 @@ def row_owning_session_id(
     return entry.name
 
 
+def spawn_row_session_ids(harness: str, registry_path: Optional[Path] = None) -> frozenset[str]:
+    """The caller's own spawn row's session id, keyed by its spawn-minted name (FNO_AGENT_SELF, then FNO_WORKER_NAME): the spawner writes the id in the spawn flow, never from the marker under test, so this is the non-circular ground the claim handover trusts. Empty on any miss; never raises."""
+    name = (os.environ.get("FNO_AGENT_SELF") or os.environ.get("FNO_WORKER_NAME") or "").strip()
+    if not name or not harness:
+        return frozenset()
+    try:
+        entries = load_registry(registry_path)
+    except Exception:  # noqa: BLE001 - a witness degrades, never crashes
+        return frozenset()
+    wanted = harness.strip().lower()
+    for entry in entries:
+        live_harness = (entry.harness or "").strip().lower()
+        if entry.status not in _OWNERSHIP_LIVE_STATUSES or live_harness != wanted:
+            continue
+        if entry.name == name or name in (entry.aliases or []):
+            sid = (getattr(entry, "harness_session_id", "") or "").strip()
+            return frozenset({sid}) if sid else frozenset()
+    return frozenset()
+
+
 class LoadedRegistry(list[AgentEntry]):
     """Registry rows plus whether a forward read retained every raw row."""
 
