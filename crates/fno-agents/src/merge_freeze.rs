@@ -285,14 +285,16 @@ mod tests {
     }
 
     #[test]
-    fn absence_reads_clear() {
+    fn freeze_gate_contract() {
         let (_dir, home) = home("freeze-absent");
         assert_eq!(verdict_for_in(&home, Some(42)), Verdict::Clear);
         assert!(refusal_in(&home, Some(42)).is_none());
+        set_scope_contract();
+        unreadable_fail_closed_contract();
+        set_clear_lifecycle_contract();
     }
 
-    #[test]
-    fn a_set_freeze_refuses_an_off_list_pr_and_admits_a_listed_one() {
+    fn set_scope_contract() {
         let (_dir, home) = home("freeze-scoped");
         let out = run_in(
             &home,
@@ -312,8 +314,7 @@ mod tests {
         assert!(code != 0);
     }
 
-    #[test]
-    fn an_unreadable_record_refuses_fail_closed() {
+    fn unreadable_fail_closed_contract() {
         let (_dir, home) = home("freeze-unreadable");
         std::fs::write(record_path(&home), "{").unwrap();
         assert!(matches!(
@@ -323,8 +324,7 @@ mod tests {
         assert!(refusal_in(&home, Some(42)).is_some());
     }
 
-    #[test]
-    fn set_refuses_when_a_freeze_is_already_active_and_clear_needs_evidence() {
+    fn set_clear_lifecycle_contract() {
         let (_dir, home) = home("freeze-lift");
         let g = |extra: Value| {
             let mut base = json!({"subject": "s", "set_by": "crown", "allow": [1]});

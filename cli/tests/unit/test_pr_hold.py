@@ -595,9 +595,11 @@ def test_hold_for_pr_refuses_a_plan_less_node_hold(tmp_path, monkeypatch):
     assert verdict.hold.set_by == "king:candor"
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold:x-5a5c" in reason
+    _malformed_node_hold_refuses(tmp_path, monkeypatch)
+    _unclaimed_node_hold_ignored(tmp_path, monkeypatch)
 
 
-def test_hold_for_pr_fails_closed_on_a_malformed_node_hold(tmp_path, monkeypatch):
+def _malformed_node_hold_refuses(tmp_path, monkeypatch):
     _graph(
         tmp_path,
         monkeypatch,
@@ -616,7 +618,7 @@ def test_hold_for_pr_fails_closed_on_a_malformed_node_hold(tmp_path, monkeypatch
     assert reason is not None and "dispatch-hold-invalid:x-5a5c" in reason
 
 
-def test_hold_for_pr_ignores_a_hold_on_an_unclaimed_node(tmp_path, monkeypatch):
+def _unclaimed_node_hold_ignored(tmp_path, monkeypatch):
     """A node-level hold on a node this PR does not name must not refuse it."""
     _graph(
         tmp_path,

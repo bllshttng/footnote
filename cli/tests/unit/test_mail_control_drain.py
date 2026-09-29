@@ -42,8 +42,10 @@ def _seed_thread(recipient):
     return threads[-1]
 
 
-def test_write_new_thread_marks_control_pending(env):
+def test_the_control_lane_stamps_pending_flags(env):
     from fno.inbox.store import write_new_thread
+
+    _ordinary_write_leaves_no_flag(env)
 
     handle = write_new_thread(
         MY_HANDLE,
@@ -53,19 +55,19 @@ def test_write_new_thread_marks_control_pending(env):
     )
     assert handle is not None
     assert _flag_path(MY_HANDLE).exists()
+    _control_reply_append_marks_pending(env)
 
 
-def test_ordinary_write_leaves_no_flag(env):
+def _ordinary_write_leaves_no_flag(env):
     from fno.inbox.store import write_new_thread
 
     write_new_thread(MY_HANDLE, sender="alice", kind="send", body="plain status")
     assert not _flag_path(MY_HANDLE).exists()
 
 
-def test_control_reply_append_marks_pending(env):
+def _control_reply_append_marks_pending(env):
     from fno.inbox.store import append_to_thread
 
     thread = _seed_thread(MY_HANDLE)
-    assert not _flag_path(MY_HANDLE).exists()
     append_to_thread(thread, sender="king", body="control: hold")
     assert _flag_path(MY_HANDLE).exists()

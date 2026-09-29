@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_set_on_a_plan_less_node_writes_the_node_field() {
+    fn plan_less_node_field_contract() {
         let (_dir, graph) = fixture_plan_less(json!({}));
         let out = run("hold-set", &set_payload(graph.display().to_string()));
         let receipt: Value = serde_json::from_str(&out).unwrap();
@@ -945,10 +945,12 @@ mod tests {
         let entry = crate::graph_store::read_rows(&graph).unwrap()[0].clone();
         assert_eq!(entry["dispatch_hold"]["set_by"], "crown");
         assert!(matches!(dispatch_hold(&entry), HoldState::Held));
+        set_twice_refuses_contract();
+        release_clears_contract();
+        release_unheld_refuses_contract();
     }
 
-    #[test]
-    fn hold_set_twice_on_a_plan_less_node_refuses_naming_the_release() {
+    fn set_twice_refuses_contract() {
         let (_dir, graph) = fixture_plan_less(json!({}));
         let g = graph.display().to_string();
         run("hold-set", &set_payload(g.clone()));
@@ -959,8 +961,7 @@ mod tests {
         assert!(out.contains("hold release"), "{out}");
     }
 
-    #[test]
-    fn hold_release_on_a_plan_less_node_clears_the_node_field() {
+    fn release_clears_contract() {
         let (_dir, graph) = fixture_plan_less(json!({}));
         let g = graph.display().to_string();
         run("hold-set", &set_payload(g.clone()));
@@ -972,8 +973,7 @@ mod tests {
         assert!(matches!(dispatch_hold(&entry), HoldState::Absent));
     }
 
-    #[test]
-    fn hold_release_on_a_plan_less_unheld_node_refuses() {
+    fn release_unheld_refuses_contract() {
         let (_dir, graph) = fixture_plan_less(json!({}));
         let out = run(
             "hold-release",

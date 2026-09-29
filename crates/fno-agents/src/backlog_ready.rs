@@ -2065,10 +2065,14 @@ mod tests {
         assert_eq!(read.release_when, "Finding fixed");
         assert_eq!(read.review_on, "2099-08-20");
         assert_eq!(read.set_by, "king:119e3c52");
+        past_review_note_contract();
+        malformed_blocks_contract();
+        unreadable_plan_contract();
+        missing_vs_absent_root_contract();
+        node_field_contract();
     }
 
-    #[test]
-    fn a_past_review_date_keeps_the_hold_active_with_the_note() {
+    fn past_review_note_contract() {
         let (_d, root) = hold_dir("hold-plan-past");
         let plan = held_plan(&root, "held.md", "2020-01-01");
         let read = hold_read(
@@ -2079,8 +2083,7 @@ mod tests {
         assert!(read.detail.contains("remains active"), "{}", read.detail);
     }
 
-    #[test]
-    fn malformed_blocks_fail_closed() {
+    fn malformed_blocks_contract() {
         let shapes = [
             serde_json::json!("blocked"),
             serde_json::json!({"reason": "why"}),
@@ -2096,8 +2099,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_unreadable_bound_plan_fails_closed() {
+    fn unreadable_plan_contract() {
         let (_d, root) = hold_dir("hold-plan-unreadable");
         let plan = root.join("malformed.md");
         std::fs::write(&plan, "---\nstatus: ready\ndispatch_hold: [\n").unwrap();
@@ -2107,8 +2109,7 @@ mod tests {
         assert!(matches!(read.state, HoldState::Invalid));
     }
 
-    #[test]
-    fn a_missing_plan_under_a_mounted_root_fails_closed_but_an_absent_root_falls_through() {
+    fn missing_vs_absent_root_contract() {
         let (_d, root) = hold_dir("hold-plan-missing");
         let stale = root.join("gone.md"); // root exists, file does not
         let read = hold_read(
@@ -2127,8 +2128,7 @@ mod tests {
         assert!(matches!(read.state, HoldState::Held), "{:?}", read);
     }
 
-    #[test]
-    fn the_node_field_answers_without_a_plan() {
+    fn node_field_contract() {
         let read = hold_read(&serde_json::json!({
             "id": "x-n",
             "dispatch_hold": {"reason": "rc freeze", "release_when": "lift", "review_on": "2099-01-01", "set_by": "king"},
@@ -2157,10 +2157,10 @@ mod tests {
         assert!(v.held);
         assert_eq!(v.reason, "r");
         assert!(dispatch_hold_verdict(&child, &by_id).is_some());
+        fan_in_cap_contract();
     }
 
-    #[test]
-    fn the_walk_counts_every_dequeue_against_the_cap_under_fan_in() {
+    fn fan_in_cap_contract() {
         // 200 middle nodes fanning into one shared root: reconverging
         // duplicates must burn the cap, never skip a held root past dequeue
         // 64, and no id may be evaluated twice.

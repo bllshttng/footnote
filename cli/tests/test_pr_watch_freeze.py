@@ -28,29 +28,23 @@ CLEAR = {"outcome": "clear", "exit_code": 0, "detail": ""}
 FROZEN = {"outcome": "frozen", "exit_code": 0, "detail": "rc freeze crown"}
 
 
-class TestMergeFreezeVerdict:
-    def test_a_clear_receipt_reads_none(self, monkeypatch):
-        seen = _door(monkeypatch, receipt=CLEAR)
-        assert merge_freeze_refusal(42) is None
-        assert seen["verb"] == "authorized-merge"
-        assert '{"op": "freeze-check", "pr": 42}' in seen["args"][0]
-
-    def test_an_off_list_pr_refuses_naming_the_freeze(self, monkeypatch):
-        _door(monkeypatch, receipt=FROZEN)
-        why = merge_freeze_refusal(2500)
-        assert why is not None
-        assert "rc freeze" in why
-        assert "2500" in why
-
-    def test_a_failed_check_refuses_fail_closed(self, monkeypatch):
-        _door(monkeypatch, error="fno-agents binary not found")
-        why = merge_freeze_refusal(42)
-        assert why is not None and "unavailable" in why
-
-    def test_an_unreadable_receipt_refuses_fail_closed(self, monkeypatch):
-        _door(monkeypatch, receipt=[1, 2])
-        why = merge_freeze_refusal(42)
-        assert why is not None and "unavailable" in why
+def test_the_freeze_verdict_contract(monkeypatch):
+    # A clear receipt reads none; the ask is one freeze-check op.
+    seen = _door(monkeypatch, receipt=CLEAR)
+    assert merge_freeze_refusal(42) is None
+    assert seen["verb"] == "authorized-merge"
+    assert '{"op": "freeze-check", "pr": 42}' in seen["args"][0]
+    # An off-list PR refuses naming the freeze.
+    _door(monkeypatch, receipt=FROZEN)
+    why = merge_freeze_refusal(2500)
+    assert why is not None
+    assert "rc freeze" in why and "2500" in why
+    # A failed check and an unreadable receipt both refuse fail-closed.
+    _door(monkeypatch, error="fno-agents binary not found")
+    assert "unavailable" in (merge_freeze_refusal(42) or "")
+    _door(monkeypatch, receipt=[1, 2])
+    assert "unavailable" in (merge_freeze_refusal(42) or "")
+    _queue_contract(monkeypatch)
 
 
 # --- the arm's queue ----------------------------------------------------------
@@ -118,26 +112,21 @@ def _run_queue(monkeypatch, entries, pr, receipt=None):
     return counts, receipts
 
 
-class TestQueueSkipsUnderFreeze:
-    def test_an_off_list_pr_skips_with_a_receipt_naming_the_freeze(
-        self, monkeypatch
-    ):
-        counts, receipts = _run_queue(
+def _queue_contract(monkeypatch):
+    counts, receipts = _run_queue(
             monkeypatch,
             {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}},
             2500,
             receipt=FROZEN,
         )
-        assert counts["held"] == 1
-        assert counts["executed"] == 0
-        held = [d for k, d in receipts if k == "merge_grant_execution" and d.get("phase") == "held"]
-        assert held and "rc freeze" in str(held[-1].get("reason"))
-        skipped = [d for k, d in receipts if k == "pr_watch_skipped"]
-        assert skipped and skipped[-1].get("reason") == "merge-freeze"
-
-    def test_no_freeze_runs_the_merge(self, monkeypatch):
-        counts, receipts = _run_queue(
-            monkeypatch, {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}}, 2500
-        )
-        assert counts["executed"] == 1
-        assert counts["held"] == 0
+    assert counts["held"] == 1
+    assert counts["executed"] == 0
+    held = [d for k, d in receipts if k == "merge_grant_execution" and d.get("phase") == "held"]
+    assert held and "rc freeze" in str(held[-1].get("reason"))
+    skipped = [d for k, d in receipts if k == "pr_watch_skipped"]
+    assert skipped and skipped[-1].get("reason") == "merge-freeze"
+    counts, _ = _run_queue(
+        monkeypatch, {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}}, 2500
+    )
+    assert counts["executed"] == 1
+    assert counts["held"] == 0
