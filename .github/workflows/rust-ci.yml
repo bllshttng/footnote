@@ -136,6 +136,9 @@ jobs:
       - name: Run the release version table test
         run: bash tests/ci/test_release_version.sh
 
+      - name: Run the release notes drafter table test
+        run: bash tests/ci/test_draft_release_notes.sh
+
   stress:
     name: rust e2e concurrency stress (20 trials)
     # Nightly and manual dispatch only. The 20 trials ran 32 minutes on PR
