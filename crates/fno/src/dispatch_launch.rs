@@ -161,16 +161,16 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if !req.substrate.is_empty() {
         argv.extend(["--substrate".to_string(), req.substrate.clone()]);
     }
-    argv.extend([
-        // Fail immediately on a full spawn gate rather than queueing: a
-        // popup launch that silently waits reads as a hung button.
-        "--no-wait".to_string(),
-    ]);
     // The mux session anchors a PANE placement; the door refuses the flag on
     // any other substrate, so a thread launch (the default) never sends it.
     if req.substrate == "pane" {
         argv.extend(["--mux-session".to_string(), session.to_string()]);
     }
+    argv.extend([
+        // Fail immediately on a full spawn gate rather than queueing: a
+        // popup launch that silently waits reads as a hung button.
+        "--no-wait".to_string(),
+    ]);
     // A routing-row pick rides the row's route alone: a route owns the
     // model, so the model+vendor pair (a route AND a model) never forms.
     if let Some(r) = &req.route {

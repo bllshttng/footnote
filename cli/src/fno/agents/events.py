@@ -339,6 +339,24 @@ def emit_spawn_accepted(
     )
 
 
+KIND_AGENT_SPAWN_REFUSED = "agent_spawn_refused"
+
+
+def emit_spawn_refused(*, argv: list[str], exit_code: int, reason: str) -> None:
+    """Record a pre-birth refusal of `fno agents spawn`.
+
+    A gate that stops a launch before any worker exists (substrate, seed,
+    node read, permissions) previously left NO event row, so the feed showed
+    nothing for a launch the operator watched refuse. The argv rides the row
+    (the seed file's path does, never its content), and the reason is the
+    door's own fatal stderr line.
+    """
+    _emit_daemon_envelope(
+        KIND_AGENT_SPAWN_REFUSED,
+        {"argv": argv, "exit_code": exit_code, "reason": reason},
+    )
+
+
 # ---------------------------------------------------------------------
 # Classified session-id transitions. Written to the SAME daemon
 # lifecycle log births and deaths use, so a succession is joinable with the
