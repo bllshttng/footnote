@@ -500,11 +500,14 @@ pub(crate) fn candidate(
     spec: Vec<(String, String)>,
     taken: &HashSet<String>,
 ) -> Result<Candidate, String> {
+    let normalized = final_name(raw_name, &HashSet::new())?;
     let name = final_name(raw_name, taken)?;
     let builtin = crate::theme::THEME_NAMES
         .iter()
-        .any(|name| name.eq_ignore_ascii_case(raw_name));
-    let collided = taken.iter().any(|held| held.eq_ignore_ascii_case(raw_name));
+        .any(|builtin| builtin.eq_ignore_ascii_case(&normalized));
+    let collided = taken
+        .iter()
+        .any(|held| held.eq_ignore_ascii_case(&normalized));
     let rename_reason = (name != raw_name).then(|| {
         if builtin {
             format!("{raw_name} is a shipped theme")
@@ -812,6 +815,17 @@ mod tests {
             "midnight-2"
         );
         assert!(final_name("***", &HashSet::new()).is_err());
+        let collision = candidate(
+            "Catppuccin Mocha",
+            vec![("base".into(), "#101010".into())],
+            &HashSet::from(["catppuccin-mocha".into()]),
+        )
+        .unwrap();
+        assert_eq!(collision.name, "catppuccin-mocha-2");
+        assert!(collision
+            .rename_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("already your theme")));
         let light = parse_theme_text("background = #ffffff", "light").unwrap();
         assert!(light[0]
             .1
