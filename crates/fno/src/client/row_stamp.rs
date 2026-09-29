@@ -169,7 +169,11 @@ impl View {
     /// terminal loses.
     pub(super) fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
         let (full, _) = self.notice.as_ref()?;
-        let room = cols.saturating_sub(1);
+        // The open feed panel is senior: the toast right-aligns to the
+        // panel's edge, so it never paints under the feed. Every caller goes
+        // through this one function, so the hit test and the paint agree.
+        let right = cols.saturating_sub(self.feed_panel_w() as usize);
+        let room = right.saturating_sub(1);
         let text: String = if full.chars().count() > room {
             full.chars()
                 .take(room.saturating_sub(1))
@@ -178,7 +182,7 @@ impl View {
         } else {
             full.clone()
         };
-        let start = cols.saturating_sub(text.chars().count() + 1);
+        let start = right.saturating_sub(text.chars().count() + 1);
         Some((start, text))
     }
 }
@@ -488,5 +492,28 @@ mod tests {
             Some(idx),
             "the commit re-anchors the selector on the acted row"
         );
+    }
+
+    // (AC13-HP) The toast yields: with the feed panel open 40 columns on a
+    // 120-column terminal, the notice ends at or before column 80.
+    #[test]
+    fn a_notice_yields_to_the_open_feed_panel() {
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.feed = Some(crate::client::feed_view::open_overlay(None, 0));
+        view.feed_width = 40;
+        assert_eq!(view.feed_panel_w(), 40, "the panel renders 40 wide");
+        view.set_notice("a very long toast that would previously paint under the panel".into());
+        let (start, text) = view.notice_overlay(120).expect("a notice is set");
+        let end = start + text.chars().count();
+        assert!(
+            end <= 80,
+            "the toast ends at {end}, past the panel's left edge"
+        );
+        // A closed panel keeps the old full-width behaviour.
+        view.feed = None;
+        let (start, text) = view.notice_overlay(120).expect("a notice is set");
+        let end = start + text.chars().count();
+        assert_eq!(end, 119, "closed panel: the toast hugs the right edge");
     }
 }
