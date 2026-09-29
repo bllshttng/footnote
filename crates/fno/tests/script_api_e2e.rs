@@ -651,6 +651,10 @@ fn zero_viewer_identity_join_reads_fresh_registry_and_real_claim() {
         assert!(location.contains(&format!(r#""panes":[{pane_id}]"#)));
     }
 
+    // The retired `claim` spelling forwards to the installed wheel, whose
+    // legacy claim path emits through the event store; that store needs a
+    // native fno binary and the scratch env guarantees none on PATH, so pin
+    // the built binary via the passthrough `resolve_native_bin` reads first.
     let claim = scratch
         .command()
         .args([
@@ -663,6 +667,7 @@ fn zero_viewer_identity_join_reads_fresh_registry_and_real_claim() {
             "60s",
             "--json",
         ])
+        .env("FNO_BIN", env!("CARGO_BIN_EXE_fno"))
         .output()
         .unwrap();
     assert!(
