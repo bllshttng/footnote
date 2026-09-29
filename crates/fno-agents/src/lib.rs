@@ -250,6 +250,7 @@ pub mod model_env_scrub;
 pub mod model_family;
 pub mod naming;
 pub mod needs;
+pub mod node_branch;
 pub mod node_origin;
 pub mod node_reading;
 pub mod node_route;
