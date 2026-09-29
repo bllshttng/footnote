@@ -673,31 +673,6 @@ fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
 }
 
 #[test]
-fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
-    let (mut core, pane) = template_core();
-    core.session_name = "sess".into();
-    core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
-    let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
-    addressed.name = "addressed".into();
-    addressed.harness_session_id = Some("target-id".into());
-
-    match core.pane_send(
-        pane,
-        b"payload",
-        false,
-        Some("target-id"),
-        Ok(vec![addressed]),
-        false,
-    ) {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
-            assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
-        }
-        other => panic!("expected identity refusal before typing, got {other:?}"),
-    }
-}
-
-#[test]
 fn pane_send_deduplicates_equivalent_registry_occupants() {
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();

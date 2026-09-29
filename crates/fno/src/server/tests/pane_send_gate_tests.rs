@@ -77,3 +77,46 @@ fn pane_send_dnd_refuses_plain_and_accepts_hold_pass() {
         other => panic!("a hold-passed send must land, got {other:?}"),
     }
 }
+
+#[test]
+fn pane_send_addresses_the_session_uuid_not_the_name() {
+    // The measured x-48fc shape: a succession heir renamed after spawn
+    // (kestrel-heir -> bob) leaves the pane label stale while the registry
+    // row carries the same session uuid. Addressing by uuid must land -
+    // the label is display, not identity - and a different uuid must
+    // still refuse.
+    let (mut core, pane) = template_core();
+    core.session_name = "sess".into();
+    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-heir".into());
+    let mut heir = agent_in("sess", pane, None, false);
+    heir.name = "bob".into();
+    heir.harness_session_id = Some("01a0ee3f-235d-7671-8fbb-e09af1d5fb52".into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("01a0ee3f-235d-7671-8fbb-e09af1d5fb52"),
+        Ok(vec![heir]),
+        false,
+    ) {
+        ServerMsg::Ok => {}
+        other => panic!("a uuid-matched send must land, got {other:?}"),
+    }
+    let mut impostor = agent_in("sess", pane, None, false);
+    impostor.name = "bob".into();
+    impostor.harness_session_id = Some("d4c0ffee-0000-0000-0000-000000000000".into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("01a0ee3f-235d-7671-8fbb-e09af1d5fb52"),
+        Ok(vec![impostor]),
+        false,
+    ) {
+        ServerMsg::Err { code, msg } => {
+            assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+            assert!(msg.contains("01a0ee3f"), "names the uuid: {msg}");
+        }
+        other => panic!("a uuid mismatch must refuse, got {other:?}"),
+    }
+}
