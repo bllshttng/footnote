@@ -50,10 +50,6 @@ def _resolve_fno_binary() -> str:
     return "fno-py"  # last resort: bare name (launchd may still find it via PATH)
 
 
-# The freeze record's readers: this arm's pre-check in _dispatch, and the
-# merge owner's Rust gate.
-
-
 # ---------------------------------------------------------------------------
 # Module-level adapter callables (extracted for testability)
 # ---------------------------------------------------------------------------

@@ -954,7 +954,6 @@ def write_new_thread(
     # Best-effort: the derived markdown render. A failure is logged, not fatal.
     _write_render_best_effort(target, _format_thread(handle))
 
-    # A control body must reach the recipient at its next TOOL boundary.
     from fno.mail.budget import is_control
 
     if is_control(body):
