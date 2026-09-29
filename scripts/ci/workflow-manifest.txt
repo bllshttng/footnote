@@ -24,4 +24,4 @@ review-coverage-gate.yml
 skill-limitations.yml
 rust-ci.yml
 stacked-base-guard.yml
-.github/workflows/install-channels.yml
+install-channels.yml
