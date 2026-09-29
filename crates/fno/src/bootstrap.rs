@@ -1693,17 +1693,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backlog_no_sibling_remedy_names_the_wheel_warm_up() {
-        // The cargo channel ships no fno-agents, and its two old remedies
-        // could not fix that: a reinstall re-runs the same Rust-only crate,
-        // and doctor update needs the wheel. The refusal must name the one
-        // verb chain that actually provisions the sibling.
-        assert!(BACKLOG_NO_SIBLING_REMEDY.contains("`fno config get`"));
-        assert!(BACKLOG_NO_SIBLING_REMEDY.contains("bundles fno-agents"));
-        assert!(BACKLOG_NO_SIBLING_REMEDY.contains("FNO_AGENTS_BIN"));
-    }
-
-    #[test]
     fn stray_stdout_line_does_not_reassign_probe_fields() {
         // A venv can print at interpreter startup - a .pth file, a
         // sitecustomize - BEFORE the probe's own lines run. Positional parsing
@@ -1814,6 +1803,21 @@ mod tests {
         assert!(
             m.contains("uv tool install --force --compile-bytecode --from <repo>/cli fno"),
             "{m}"
+        );
+        // The cargo-channel no-sibling refusal names the warm-up that can
+        // actually provision the sibling: a reinstall re-runs the same
+        // Rust-only crate, and doctor update needs the wheel.
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("`fno config get`"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
+        );
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("bundles fno-agents"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
+        );
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("FNO_AGENTS_BIN"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
         );
     }
 
