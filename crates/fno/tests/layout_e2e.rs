@@ -175,7 +175,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
 // -- item 1: splits create live shells sized to their rects ---------------
 
 #[test]
-fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
+fn layout_e2e_split_dir_yields_live_sized_shells_on_every_side() {
     let scratch = Scratch::new("splits");
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
@@ -200,21 +200,13 @@ fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
     c.cmd(Command::FocusDir(Dir::Left));
     c.wait_layout(10, "focus back on A", |l| l.focus == pane_a);
     assert_focused_winsize(&mut c, pane_a, 22, 37);
-}
 
-// -- item 2: geometric navigation on a 2x2 grid ----------------------------
-
-// -- item 1b: the four directional splits -----------------------------------
-
-#[test]
-fn layout_e2e_split_dir_places_the_new_pane_on_each_side() {
-    // One command shape, four directions: the new pane lands on the
-    // requested side of the FOCUSED pane, even halves, focus follows.
-    // Left and Up get the geometric proof here; Right and Down are the
-    // long-standing behavior already asserted by the tests above.
-    let scratch = Scratch::new("splitdir");
-    let _server = sh_server(&scratch);
-    let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
+    // Phase 2, a fresh session: the other two directions. One command
+    // shape, four directions total: the new pane lands on the requested
+    // side of the FOCUSED pane, even halves, focus follows.
+    let scratch2 = Scratch::new("splitdir");
+    let _server2 = sh_server(&scratch2);
+    let (mut c, pane_a) = attach_settled(&scratch2, &scratch2.dir("w"));
 
     // LEFT: 79 usable cols split evenly, new pane takes the left half
     // (x=0, 39 cols), the focused pane keeps the right (x=40, 40 cols).
@@ -242,6 +234,8 @@ fn layout_e2e_split_dir_places_the_new_pane_on_each_side() {
         "the new pane lands on top, even halves"
     );
 }
+
+// -- item 2: geometric navigation on a 2x2 grid ----------------------------
 
 #[test]
 fn layout_e2e_2x2_grid_navigates_geometrically() {

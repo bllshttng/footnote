@@ -6600,7 +6600,7 @@ async fn tab_menu_reorder_names_the_clicked_tab_and_its_squad() {
 }
 
 #[tokio::test]
-async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
+async fn tab_menu_join_and_split_target_the_viewed_tab() {
     // Join is the drag's verb through the menu: the clicked tab joins the
     // viewed tab as a split of the focused pane. The clicked tab being the
     // focus's own tab is the join-into-self the wire refuses - named as a
@@ -6643,6 +6643,38 @@ async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
         }
         other => panic!("expected JoinTab, got {other:?}"),
     }
+
+    // The Split twin: the VIEWED tab's own cell sends Command::SplitDir
+    // (the server applies it to the sender's viewed tab); a menu left open
+    // across a view flip refuses by notice, never a send.
+    v.layout.squads[0].active_tab = 0;
+    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+    match menu_command_for(&mut v, super::MenuAction::TabSplit(Dir::Left)).await {
+        Command::SplitDir(Dir::Left) => {}
+        other => panic!("expected SplitDir(Left) from the viewed tab's menu, got {other:?}"),
+    }
+    // Stale: the view flips while a menu is open; executing a Split cell
+    // refuses instead of splitting whatever is viewed NOW.
+    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+    v.layout.squads[0].active_tab = 1;
+    let sel = v
+        .row_menu
+        .as_ref()
+        .unwrap()
+        .actions
+        .iter()
+        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
+        .expect("the menu was opened while tab 0 was viewed");
+    v.row_menu.as_mut().unwrap().popup.sel = sel;
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "a stale Split cell sends nothing");
+    assert!(
+        v.notice
+            .as_ref()
+            .is_some_and(|(s, _)| s.contains("split acts on the viewed tab")),
+        "the refusal is named"
+    );
 }
 
 /// One squad's `TabMeta` list, cloned out of the layout borrow.

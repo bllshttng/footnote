@@ -193,7 +193,7 @@ pub fn resolve_keymap(
         }
         // A key sitting on the prefix byte can never dispatch. Sentinel
         // rows (key 0) hold no chord, so they can sit beside anything.
-        if let Some((action, _)) = final_map.iter().find(|(a, k)| *k == prefix && *k != 0) {
+        if let Some((action, _)) = final_map.iter().find(|(_, k)| *k == prefix && *k != 0) {
             let action = action.clone();
             if let Some(i) = proposed.iter().position(|(a, _)| *a == action) {
                 warnings.push(KeymapWarning(format!(
@@ -2370,7 +2370,7 @@ mod tests {
     }
 
     #[test]
-    fn rebinding_moves_the_chord_and_its_help_together() {
+    fn rebinding_moves_the_chord_and_materializes_sentinel_rows() {
         // The key-table parity rule, carried onto rebinds: whatever the modal
         // prints is what the dispatcher runs. Applied to a LOCAL table copy -
         // `install` is process-global and one-shot, so a test must not take it.
@@ -2386,13 +2386,10 @@ mod tests {
         assert_eq!(detach.key, 0x11);
         assert_eq!(detach.disp, "C-q", "the key table prints the NEW key");
         assert_eq!(detach.event, Event::Detach);
-    }
 
-    #[test]
-    fn split_left_and_split_up_are_bindable_without_a_default_chord() {
-        // The two no-default split actions live in the table as
-        // sentinel rows (key 0). They resolve only under an explicit rebind,
-        // which materializes the row with its real key; the live table never
+        // The two no-default split actions live in the table as sentinel
+        // rows (key 0). They resolve only under an explicit rebind, which
+        // materializes the row with its real key; the live table never
         // carries a key-0 row, so the parity contract holds untouched.
         let (map, warnings) = resolve_keymap(
             None,
