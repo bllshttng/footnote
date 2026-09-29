@@ -98,13 +98,39 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     };
     let outcome = answer.get("outcome").and_then(|o| o.as_str());
     let effect = match outcome {
-        Some("succeeded") => crate::crown_names::carry_succession(store, scope),
+        Some("succeeded") => {
+            let pending = succession_pending(payload);
+            crate::crown_names::carry_succession(store, scope, pending)
+        }
         Some("granted") => crate::crown_names::forget(store, scope),
         _ => Ok(()),
     };
     if let Err(e) = effect {
         eprintln!("crown-settle: crown names: {e}");
     }
+}
+
+/// The pending-succession inputs for a succeeded settle: the heir from the
+/// payload's `heir` key (the spawned row's name, plumbed by dispatch), the
+/// predecessor from the plan's first vacated holder_id. A payload without
+/// the heir key (an old caller) carries no pending record and keeps
+/// today's shape.
+fn succession_pending(payload: &Value) -> Option<crate::crown_names::PendingSuccession> {
+    let heir = payload
+        .get("heir")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let plan = payload.get("plan")?;
+    let (name, session) = parse_holder_ids(plan.get("holder_ids"))
+        .ok()?
+        .into_iter()
+        .next()?;
+    Some(crate::crown_names::PendingSuccession {
+        heir_name: heir.to_string(),
+        predecessor_name: name,
+        predecessor_session: session,
+        ts: crate::daemon::now_rfc3339_like(),
+    })
 }
 
 fn resolve_with_projects(
@@ -917,6 +943,56 @@ mod tests {
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert_eq!(doc["crowns"]["x-aaaa"]["regnal"], json!(2));
         assert_eq!(doc["crowns"]["x-aaaa"]["holder_session"], json!(null));
+
+        // A payload carrying the heir key pends the succession with the
+        // predecessor identity from the plan's holder_ids.
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-aaaa", "heir": "king-heir",
+                "plan": {
+                    "caller": {"kind": "agent", "name": "king-heir"},
+                    "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
+                    "outcome": "succeeded", "vacate": ["king-old"],
+                },
+                "rows": [{
+                    "name": "king-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "harness_session_id": "sess-old",
+                }],
+            }),
+            &crown_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "succeeded");
+        let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
+        let doc: Value = serde_json::from_str(&store).unwrap();
+        let pending = &doc["crowns"]["x-aaaa"]["pending_succession"];
+        assert_eq!(pending["heir_name"], json!("king-heir"));
+        assert_eq!(pending["predecessor_name"], json!("king-old"));
+        assert_eq!(pending["predecessor_session"], json!("sess-old"));
+        assert!(pending["ts"].is_string());
+        // Without the heir key (an old caller) today's shape holds: no
+        // pending record is written.
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-aaaa",
+                "plan": {
+                    "caller": {"kind": "agent", "name": "king-heir"},
+                    "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
+                    "outcome": "succeeded", "vacate": ["king-old"],
+                },
+                "rows": [{
+                    "name": "king-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "harness_session_id": "sess-old",
+                }],
+            }),
+            &crown_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "succeeded");
+        let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
+        let doc: Value = serde_json::from_str(&store).unwrap();
+        assert!(doc["crowns"]["x-aaaa"].get("pending_succession").is_none());
     }
 
     #[test]

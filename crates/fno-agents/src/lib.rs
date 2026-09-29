@@ -1552,6 +1552,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // arm and `fno agents reap`). Python's attended `king done` emits the
     // same kind through the shared emitter.
     "agent_crown_vacated",
+    // A succession reverted: the reap sweep restored the predecessor's
+    // session after an heir died unbound past the window (crown_reap.rs;
+    // the daemon retire arm and `fno agents reap`).
+    "crown_succession_reverted",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

@@ -690,6 +690,7 @@ def settle_spawn_crown(
     scope: str,
     plan: dict,
     exclude_name: Optional[str] = None,
+    heir: Optional[str] = None,
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
@@ -707,7 +708,7 @@ def settle_spawn_crown(
     try:
         answer = spawn_overlay_call({
             "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
-            "plan": plan, "rows": [asdict(row) for row in rows],
+            "plan": plan, "heir": heir, "rows": [asdict(row) for row in rows],
         })
         outcome = answer["outcome"]
         if outcome not in ("granted", "succeeded", "declined"):
