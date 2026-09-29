@@ -1910,6 +1910,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "pi",
     "cursor-agent",
     "grok",
+    "zcode",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1932,6 +1933,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "pi" => Some(Box::new(PiProvider)),
         "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
         "grok" => Some(Box::new(GrokProvider)),
+        "zcode" => Some(Box::new(crate::zcode::ZcodeProvider)),
         _ => None,
     }
 }

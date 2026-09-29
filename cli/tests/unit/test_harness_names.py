@@ -26,7 +26,7 @@ def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
 
 
 def test_the_complete_roster_carries_the_evidence_backed_hosts():
-    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the eight
+    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the nine
     capability-backed names plus hermes and openclaw, which host real sessions
     per docs/SETUP-*.md. scripts/ci/check-harness-roster-parity.py holds this
     union against the shipped evidence surfaces in CI."""
@@ -43,6 +43,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
         "grok",
         "hermes",
         "openclaw",
+        "zcode",
     }
     from fno.agents.harness_map import known_harnesses
 
@@ -57,6 +58,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
         "pi",
         "cursor-agent",
         "grok",
+        "zcode",
     }
 
 

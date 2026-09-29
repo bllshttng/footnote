@@ -401,6 +401,8 @@ pub mod wait;
 pub mod wake_meter;
 pub mod worktree_reapable;
 pub mod write_queue;
+pub mod zcode;
+pub mod zcode_ask;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

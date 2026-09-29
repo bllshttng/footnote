@@ -145,6 +145,7 @@ HARNESS_SESSION_ID_FIELDS = {
     "pi": "harness_session_id",
     "cursor-agent": "harness_session_id",
     "grok": "harness_session_id",
+    "zcode": "harness_session_id",
 }
 
 # The registry's legacy per-harness session-id keys. Distinct from the

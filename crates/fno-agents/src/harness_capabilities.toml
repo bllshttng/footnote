@@ -1516,7 +1516,127 @@ bypass_flag = "--always-approve"
 takes_model = true
 takes_effort = true
 
+# zcode: the keeper-lane reading this file's other thread rows carry does NOT
+# exist for zcode - no [harness.zcode.keeper] arm, no conversion stanza. The
+# interactive TUI is unbuildable on the measured install (ZCode.app 3.14.3
+# ships no @zcode/tui beside zcode.cjs; a TUI launch exits 1 before painting,
+# captured twice 2026-09-29), so there is no persistent child to keep. The
+# measured lane is headless one-shot turns: -p mints sess_<uuid>, resume is
+# `--resume`, and the row's spawn feature seats the harness from that
+# journey. No keeper arm = the thread substrate refuses with the TUI-dead
+# evidence.
+[harness.zcode]
+permission_bypass = ["--mode=yolo"]
+# permission_modes: zcode's own --mode values (zcode-cli arguments; the
+# trial doc measured `--mode yolo` live). efforts EMPTY: zcode has no
+# effort axis.
+efforts = []
+permission_modes = ["build", "edit", "plan", "yolo"]
+resume = "native-session"
+autonomous_pane = false
+route_on_pane = false
+# Loop participation is native-shaped (the harness loads footnote's Claude
+# plugin and its Stop hook runs `fno-agents hook stop` verbatim), but the
+# live fire in a -p turn is not yet measured; the change-4 live fire proves
+# or demotes this. Until the probe passes, "" keeps looping dispatch
+# refused, the same posture grok records.
+loop_participation = "extension"
+loop_extension = ""
+command_surface = "slash"
+slash_prefix = "fno:"
+# Measured 2026-09-29 on the live headless turns (4 of them: two mints, a
+# resume recall, and an unsandboxed-write probe), NOT from a TUI: no pane
+# lane exists, the TUI cannot launch on the measured install, and agy's row
+# is the precedent for an unsupported readiness surface on a live harness.
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = []
+# No pane lane, so no measured send-keys floor; the field is pane-vocabulary
+# and the validator requires its presence, so the unreachable 0/enter shape
+# rides along (grok's measured floor was 0; zcode's pane never runs).
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+# zcode mints its own sess_<uuid> and takes none on the command line, so the
+# create turn itself is the mint: the argv carries no id, and the id is read
+# back from the turn's own stream-json (the final result line, sessionId on
+# every line). cursor-agent's strategy, minus the fd dance - `zcode -p`
+# exits on its own.
+session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
+
+# No approval prompts are reachable: the lane is headless yolo and there is
+# no pane to compose keys at. Three empty arms, grok's shape.
+[harness.zcode.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.zcode.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.zcode.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+# The interactive forms are UNSUPPORTED on the measured install, and that is
+# the measured fact the row carries: the bundle lacks @zcode/tui, so
+# `zcode --resume <id>` (the TUI resume) exits 1 before painting. A working
+# TUI is the precondition for building those forms; nothing here is
+# reference-derived.
+[harness.zcode.resume_strategy.forms.interactive_create]
+kind = "unsupported"
+tokens = []
+
+[harness.zcode.resume_strategy.forms.interactive_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.zcode.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+# The measured lane. The prompt rides -p's value in the runner (zcode takes
+# no prompt positional), so the form carries the fixed flags; the runner in
+# zcode_ask.rs composes the argv.
+[harness.zcode.resume_strategy.forms.headless_create]
+kind = "flag"
+tokens = ["zcode", "--mode", "yolo", "--output-format", "stream-json"]
+
+[harness.zcode.resume_strategy.forms.headless_resume]
+kind = "flag"
+tokens = ["zcode", "--mode", "yolo", "--output-format", "stream-json", "--resume", "{session_id}"]
+
+[harness.zcode.model_switch_strategy]
+# zcode has no model flag (arguments.ts carries none; the model is the
+# account's own default, `~/.zcode/cli/config.json` model.main). The spawn's
+# -m axis therefore refuses on zcode.
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
+# State-root: measured 2026-09-29 - a yolo -p turn wrote a file outside its
+# cwd on request. headless is the measured lane; pane stays unmeasured (no
+# pane lane exists).
+[harness.zcode.state_root_grant]
+pane = "unmeasured"
+thread = "unmeasured"
+headless = "unsandboxed"
+
+# spawn: the create-and-resume journey, measured live 2026-09-29 (mint ->
+# cross-process resume recall -> registry row; ZCode.app 3.14.3, CLI bundle
+# 0.16.9).
+[harness.zcode.features.spawn]
+state = "native"
+measured_by = { reader = "session-id resume journey", version = "3.14.3", date = "2026-09-29" }
+
 # PANE-TO-THREAD CONVERSION (`fno agents resume <name> --substrate thread`).
+# One stanza per harness naming HOW a live pane becomes a persistent thread.
 # One stanza per harness naming HOW a live pane becomes a persistent thread.
 # Code branches on `strategy` only, never on a harness name; a harness with
 # no stanza reads `unsupported` (the accessor supplies that default). Every

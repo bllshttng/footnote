@@ -1505,6 +1505,7 @@ mod tests {
         "cursor-agent",
         "grok",
         "agy",
+        "zcode",
     ];
 
     /// Roster and teaching metadata cannot drift apart: every native verb
@@ -1552,14 +1553,22 @@ mod tests {
                 "gemini",
                 "grok",
                 "opencode",
-                "pi"
+                "pi",
+                "zcode"
             ]
         );
         for (name, caps) in &contract.harness {
-            assert_eq!(caps.permission_response.len(), 3, "{name}");
+            // Pane vocabulary invariants hold only where a pane lane exists.
+            // zcode is the first pane-less row (ready_marker unsupported, no
+            // permission prompts and no send-keys on an unbuilt lane), so its
+            // pane-shaped tables read empty on purpose.
+            let pane_lane = caps.ready_marker != "unsupported";
+            if pane_lane {
+                assert_eq!(caps.permission_response.len(), 3, "{name}");
+                assert!(!caps.submit_keys.is_empty(), "{name}");
+            }
             assert_eq!(caps.resume_strategy.forms.len(), 5, "{name}");
             assert!(!caps.model_switch_strategy.kind.is_empty(), "{name}");
-            assert!(!caps.submit_keys.is_empty(), "{name}");
             assert!(
                 LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()),
                 "{name}"
