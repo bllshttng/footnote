@@ -28,7 +28,7 @@ pub fn run_provider_cap(args: &[String]) -> i32 {
         Some((action, rest)) if action == "decide" => cap_decide(rest),
         Some((action, rest)) if action == "vault" => crate::claude_vault::run(rest),
         _ => {
-            eprintln!("usage: provider-cap status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait | vault sync|refresh");
+            eprintln!("usage: provider-cap status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait | vault sync|refresh|login");
             2
         }
     }

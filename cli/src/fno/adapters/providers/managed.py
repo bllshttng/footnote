@@ -81,6 +81,10 @@ class KeychainError(ManagedStoreError):
     """
 
 
+class NeedsLogin(ManagedStoreError):
+    """The stored credential is dead or missing; use must run an interactive login."""
+
+
 class SwitchDeferred(ManagedStoreError):
     """The switch could not run now (live-pin gate or mutex contention).
 
@@ -163,6 +167,17 @@ def _vault(action: str, *args: str) -> dict:
     except (TypeError, ValueError) as exc:
         raise ManagedStoreError((proc.stderr or "vault returned no JSON receipt").strip()) from exc
     return receipt
+
+
+def run_vault_login(record_id: str) -> int:
+    """Run the Rust vault login with inherited stdio (the two browser logins)."""
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise ManagedStoreError("fno-agents binary not found; run fno doctor update --rust")
+    command = [str(binary), "provider-cap", "vault", "login", "--id", record_id, "--store", str(store_root())]
+    return subprocess.run(command, check=False).returncode
 
 
 def _utc_now_iso() -> str:
@@ -1818,16 +1833,14 @@ def _switch_locked(
         refresh_args = ["--id", target.id] + (["--config-dir", str(target.config_dir)] if target.config_dir else [])
         receipt = _vault("refresh", *refresh_args)
         if receipt.get("verdict") == "dead":
-            raise ManagedStoreError(
-                f"stored credential for '{target.id}' is spent (invalid_grant); sign in as "
-                f"{target.id} and run `fno config accounts register {target.id}`; the slot was not touched"
+            raise NeedsLogin(
+                f"stored credential for '{target.id}' is spent (invalid_grant); the slot was not touched"
             )
     try:
         target_blob = stored.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ManagedStoreError(
-            f"no credential snapshot for '{target.id}' at {stored} - run "
-            f"`fno config accounts register {target.id}` first"
+        raise NeedsLogin(
+            f"no credential snapshot for '{target.id}' at {stored}"
         ) from exc
     if not target_blob.strip():
         raise ManagedStoreError(f"credential snapshot for '{target.id}' is empty; refusing to materialize")

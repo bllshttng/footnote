@@ -7,9 +7,12 @@ the measurement behind each row: docs/architecture/thread-lanes.md.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from fno import paths
 
 #: Every launch axis a spawn can carry, as (flag an operator types, the row's
 #: ``carries`` name). A row that omits the name refuses the flag; a row that
@@ -298,3 +301,13 @@ def keeper_thread_spawn(
         short_id=session_id,
         effective_message=effective_message,
     )
+
+
+def _lane_b_keeper_socket(name: str) -> Path:
+    """``<state-root>/mux/threads/<name>.sock``, session-keyed beside the pane
+    keepers' ``mux/panes/``. Derivation + override rules: the
+    ``mux/threads`` row in docs/state-root-inventory.md."""
+    override = os.environ.get("FNO_AGENTS_HOME")
+    if override:
+        return Path(override).expanduser().parent / "mux" / "threads" / f"{name}.sock"
+    return paths.state_dir() / "mux" / "threads" / f"{name}.sock"
