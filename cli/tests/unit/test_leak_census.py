@@ -154,3 +154,20 @@ def test_reap_rooted_reports_cmdline_and_cwd(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_reap_rooted_retries_transient_process_snapshot_keyerror(tmp_path, monkeypatch):
+    from fno.agents import orphans
+
+    calls = 0
+
+    def _read_processes(_reaper):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyError("process exited during metadata read")
+        return iter(())
+
+    monkeypatch.setattr(orphans, "iter_processes", _read_processes)
+    assert reap_rooted([str(tmp_path)]) == []
+    assert calls == 2
