@@ -45,8 +45,8 @@ pub fn short_home() -> fno_agents::paths::AgentsHome {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    fno_agents::paths::AgentsHome::at(std::path::PathBuf::from(format!(
-        "/tmp/fnoec{}_{}",
+    fno_agents::paths::AgentsHome::at(std::env::temp_dir().join(format!(
+        "fnoec{}_{}",
         std::process::id(),
         n
     )))
