@@ -263,6 +263,10 @@ fn agent_file(stem: &str, md: &str, contract: OpencodeContract) -> Option<Vec<u8
             .find_map(|l| l.split_once(':').filter(|(k, _)| k.trim() == key))
             .map(|(_, v)| v.trim().to_string())
             .filter(|v| !v.is_empty())
+            // A YAML block scalar indicator means the description is
+            // multi-line; the simple parser cannot fold it, so the stem
+            // stands in rather than a literal "|-".
+            .filter(|v| !matches!(v.as_str(), "|" | "|-" | "|+" | ">" | ">-" | ">+"))
     };
     let description = field("description").unwrap_or_else(|| stem.to_string());
     let mut text = format!(
@@ -279,6 +283,7 @@ fn agent_file(stem: &str, md: &str, contract: OpencodeContract) -> Option<Vec<u8
         .filter(|v| v.starts_with('['))
         .map(|v| bracket_names(&v));
     let map_keys = |names: &[String], stem: &str| -> Vec<&'static str> {
+        let mut seen = std::collections::BTreeSet::new();
         names
             .iter()
             .filter_map(|n| {
@@ -288,7 +293,10 @@ fn agent_file(stem: &str, md: &str, contract: OpencodeContract) -> Option<Vec<u8
                         "opencode install: agent {stem}: tool {n} has no opencode permission key; dropped from the record"
                     );
                 }
-                key
+                // Three claude names share one opencode key (Write, Edit and
+                // MultiEdit all map to edit); a repeated key is a duplicate
+                // YAML mapping key, which opencode refuses.
+                key.filter(|k| seen.insert(*k))
             })
             .collect()
     };
