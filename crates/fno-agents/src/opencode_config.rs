@@ -700,14 +700,6 @@ mod tests {
         let text = "{\n  // opencode config\n  \"plugin\": [\n    \"oh-my-openagent@latest\",\n    \"opencode-antigravity-auth\",\n    \"fno\"\n  ],\n  \"theme\": \"decoy\"\n}\n";
         std::fs::write(&file, text).unwrap();
         let (_s, _e, elements) = scan_plugin_array(text).unwrap();
-        let finding = |i: usize, spec: &str| Finding {
-        let dir = std::env::temp_dir().join(format!("fno-ocfg-disable-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("opencode.jsonc");
-        let text = "{\n  // opencode config\n  \"plugin\": [\n    \"oh-my-openagent@latest\",\n    \"opencode-antigravity-auth\",\n    \"fno\"\n  ],\n  \"theme\": \"decoy\"\n}\n";
-        std::fs::write(&file, text).unwrap();
-        let (_s, _e, elements) = scan_plugin_array(text).unwrap();
         let finding = |i: usize, spec: &str, kind: FindingKind| Finding {
             file: file.clone(),
             start: elements[i].0,
