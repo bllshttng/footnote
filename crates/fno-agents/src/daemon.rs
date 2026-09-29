@@ -7527,7 +7527,7 @@ fn fill_random(buf: &mut [u8]) {
 pub(crate) mod sweeps;
 pub(crate) use sweeps::{park_sweep, stale_sweep};
 #[cfg(test)]
-pub(crate) use sweeps::{parse_stale_sweep, PARK_SWEEP_INTERVAL_SECS, STALE_SWEEP_INTERVAL_SECS};
+pub(crate) use sweeps::{parse_stale_sweep, STALE_SWEEP_INTERVAL_SECS};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]

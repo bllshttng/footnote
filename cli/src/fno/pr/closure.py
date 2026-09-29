@@ -369,7 +369,6 @@ def bind_closure_claims(
     pr_number: int,
     pr_url: Optional[str],
     repo: Optional[str] = None,
-    owner: Optional[str] = None,
 ) -> ClosureBindResult:
     """Validate every claimed id, then bind all of them - or mutate nothing.
 
@@ -393,7 +392,6 @@ def bind_closure_claims(
         pr_number=pr_number,
         pr_url=pr_url,
         repo=repo,
-        owner=owner,
     )
     return ClosureBindResult(
         outcome=result.outcome,
@@ -418,6 +416,10 @@ def bind_created_pr(
     is free text: one that never carried the id resolves to nothing, and a reused
     or handed-off worktree still carries the PREVIOUS node's id and would bind
     the PR to it.
+
+    ``owner`` is accepted for caller compatibility and never stamped on the
+    row: the claim store is the lock's single writer, so the holder of record
+    comes from the claim the caller already acquired, not from here.
 
     With no ``node_id``, branch text is a candidate only. Exactly one well-formed
     segment must name a node in this graph; zero or several refuse before any
@@ -462,7 +464,6 @@ def bind_created_pr(
         pr_number=pr_number,
         pr_url=pr_url,
         repo=repo,
-        owner=owner,
     )
     if result.outcome != "bound":
         return result
@@ -473,7 +474,6 @@ def bind_created_pr(
 def bind_created_pr_from_branch(
     pr_url: str,
     *,
-    owner: Optional[str] = None,
     cwd: Optional[str] = None,
     head_ref: Optional[str] = None,
     node_id: Optional[str] = None,
@@ -506,7 +506,7 @@ def bind_created_pr_from_branch(
     except Exception as exc:
         return ClosureBindResult(outcome="refused", refusal=f"graph read failed: {exc}")
     probe = bind_created_pr(
-        copy.deepcopy(snapshot), head_ref=head_ref, pr_url=pr_url, owner=owner,
+        copy.deepcopy(snapshot), head_ref=head_ref, pr_url=pr_url,
         node_id=authoritative,
     )
     if probe.outcome != "bound":
@@ -516,7 +516,7 @@ def bind_created_pr_from_branch(
 
     def _mutate(entries: list[dict]) -> list[dict]:
         box.append(bind_created_pr(
-            entries, head_ref=head_ref, pr_url=pr_url, owner=owner, node_id=authoritative,
+            entries, head_ref=head_ref, pr_url=pr_url, node_id=authoritative,
         ))
         return entries
 

@@ -946,7 +946,8 @@ def atomic_mutate_settings(
                     "atomic_mutate_settings: mutator must return a dict, "
                     f"got {type(updated).__name__}"
                 )
-            content = tomli_w.dumps(_strip_none(_flatten_config(updated)))
+            migrated = _strip_none(_flatten_config(updated))
+            content = tomli_w.dumps(migrated) if settings_path.suffix == ".toml" else yaml.safe_dump(migrated, sort_keys=False)
             tmp_path: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(

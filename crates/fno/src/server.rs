@@ -1703,7 +1703,7 @@ pub(crate) struct Core {
     /// its recruited members (attach-ids + tombstone bits). Populated only by
     /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
     /// squad persistent (an attach-born origin squad is absent and never
-    /// written). Written through to `~/.fno/squads.json` on every membership
+    /// written). Written through to `~/.fno/mux/squads.json` on every membership
     /// mutation. Keyed by session-scoped id, so a removed squad's entry is
     /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
     /// map entry per closed workspace per session, bounded by session length).

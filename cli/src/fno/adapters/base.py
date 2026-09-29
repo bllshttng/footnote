@@ -113,17 +113,6 @@ class RuntimeAdapter(Protocol):
         """
         ...
 
-    def create_worktree(self, *, name: str, base: str = "main") -> dict:
-        """Create a git worktree at ``~/.fno/worktrees/{proj}-{name}/`` on branch ``feature/{name}``.
-
-        ``proj`` is the project id resolved from ``.fno/settings.yaml``
-        (or derived from the git remote basename); see
-        :func:`fno.worktree_paths.resolve_project_id`.
-
-        Returns: {"worktree_path": str, "branch": str, "status": str}
-        """
-        ...
-
     def call_api(self, *, command: list[str], retries: int = 3) -> AdapterCallResult:
         """Invoke an adapter API command with retry logic.
 

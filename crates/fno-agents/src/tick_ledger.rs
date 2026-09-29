@@ -224,6 +224,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "slot_login_health",
+        default_interval_s: crate::slot_cutover::SLOT_CUTOVER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: Some("slot_cutover"),
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "merge_close",
         default_interval_s: crate::merge_close::MERGE_CLOSE_INTERVAL_S,
         scheduler: SCHED_DAEMON,
@@ -1568,7 +1576,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 20);
+        assert_eq!(KNOWN_ARMS.len(), 21);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")

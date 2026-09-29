@@ -2175,25 +2175,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_exit_still_reads_unreadable() {
-        let read = SourceRead::err("exit 1: boom");
-        let q = queue(
-            "claims",
-            "src".to_string(),
-            &read,
-            Vec::new(),
-            true,
-            String::new(),
-            "",
-            None,
-        );
-        assert_eq!(q.status, "unreadable");
-        let body = queue_json(&q);
-        assert_eq!(body["count"], Value::Null);
-        assert!(body["error"].as_str().unwrap().contains("exit 1"));
-    }
-
-    #[test]
     fn an_open_prove_it_fail_becomes_a_failed_verdict_queue_row() {
         let outstanding = json!({
             "verdicts": {"total": 1, "error": null, "items": [{

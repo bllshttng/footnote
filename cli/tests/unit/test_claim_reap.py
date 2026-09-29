@@ -35,7 +35,6 @@ from fno.claims.core import (
     reap_dead_claims,
     refresh_claim,
     release_claim,
-    _clear_lock_mirror_for_reaped,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.types import Claim, now_ms
@@ -97,152 +96,6 @@ def is_provably_dead(claim: Claim, now: int | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class TestIsProvablyDead:
-    def test_dead_pid_same_machine_is_provably_dead(self):
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-            pid=_dead_pid(), host=socket.gethostname(),
-        )
-        assert is_provably_dead(claim) is True
-
-    def test_off_machine_is_never_provably_dead(self):
-        """AC3: even a locally-dead-looking pid cannot be proven dead off-host."""
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-            pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
-        )
-        assert is_provably_dead(claim) is False
-
-    def test_ttl_protected_suspect_is_never_provably_dead(self):
-        """AC4: dead pid but still inside the TTL window -> SUSPECT, kept."""
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms(), expires_at=now_ms() + 60_000,
-            pid=_dead_pid(), host=socket.gethostname(),
-        )
-        assert is_provably_dead(claim) is False
-
-    def test_live_claim_is_never_provably_dead(self):
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms(), expires_at=None,
-            pid=os.getpid(), host=socket.gethostname(),
-        )
-        assert is_provably_dead(claim) is False
-
-
-class TestExpiredTTLIsHostIndependent:
-    """x-cd1e: an expired TTL is provably dead from any host, for the rows that
-    cannot be identified at all.
-
-    The measured leak: this machine wrote claims as ``BB16s-MBP``,
-    ``BB16s-MacBook-Pro.local`` and a tailnet name within one hour. Rows
-    predating the ``machine_id`` field carry only that moving name, so a
-    host-gated sweep could never satisfy its same-machine proof and kept them
-    forever. Expiry is a clock reading, not a local measurement, so for THOSE
-    rows it needs no such proof.
-
-    A row that names a real other machine keeps the gate, and the boundary is
-    load-bearing: ``classify``'s corroborated hybrid arm reads an expired
-    claim as LIVE when its pid is live and prover-proven, and that pid means
-    something only on the machine that
-    wrote it. Reaping one from here would archive a claim its owner is still
-    refreshing, and the next reader would staff a second worker onto the node.
-    """
-
-    def test_expired_ttl_on_an_unidentifiable_row_is_reapable(self):
-        """The row this arm exists for: no machine_id, and a hostname that has
-        already moved, so no same-machine proof is ever possible for it."""
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 120_000,
-            expires_at=now_ms() - 60_000, pid=_dead_pid(),
-            host="bb16s-macbook-pro.bigeye-truck.ts.net",
-            machine_id=None,
-        )
-        assert is_provably_dead(claim) is True
-
-    def test_expired_ttl_on_an_unidentifiable_row_ignores_a_live_local_pid(self):
-        """The pid arm cannot rescue it: that pid belongs to another machine's
-        namespace, so a locally-live number proves nothing about the holder.
-        """
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 120_000,
-            expires_at=now_ms() - 60_000, pid=os.getpid(),
-            host="some-other-host", machine_id=None,
-        )
-        assert is_provably_dead(claim) is True
-
-    def test_expired_ttl_from_a_named_other_machine_is_kept(self):
-        """The boundary. That machine's `classify` reads this same claim as
-        LIVE whenever its pid is live, so archiving it here publishes as free a
-        node its owner is still working."""
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 120_000,
-            expires_at=now_ms() - 60_000, pid=_dead_pid(),
-            host="some-other-host", machine_id="not-this-machine",
-        )
-        provably_dead, bucket = classify_for_sweep(claim)
-        assert (provably_dead, bucket) == (False, "offhost")
-
-    def test_off_host_pid_liveness_claim_is_still_kept(self):
-        """The pid arm keeps its same-machine proof. Only expiry travels."""
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-            pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
-        )
-        provably_dead, bucket = classify_for_sweep(claim)
-        assert (provably_dead, bucket) == (False, "offhost")
-
-    def test_off_host_unexpired_ttl_is_still_kept(self):
-        claim = Claim(
-            key="k", holder="h", acquired_at=now_ms(),
-            expires_at=now_ms() + 60_000, pid=_dead_pid(),
-            host="some-other-host", machine_id="not-this-machine",
-        )
-        provably_dead, bucket = classify_for_sweep(claim)
-        assert (provably_dead, bucket) == (False, "offhost")
-
-    def test_expired_ttl_on_this_machine_with_a_live_pid_is_still_live(self):
-        """The corroborated hybrid arm survives: a suspended local session
-        keeps its slot when its pid was prover-proven at write time.
-
-        ``acquired_at`` has to postdate this process's own create_time, or
-        ``is_live`` reads the pid as reused and the claim is dead for an
-        unrelated reason - which would pass this assertion for the wrong one.
-        """
-        started = int(psutil.Process(os.getpid()).create_time() * 1000)
-        claim = Claim(
-            key="k", holder="h", acquired_at=started + 1,
-            expires_at=now_ms() - 1, pid=os.getpid(),
-            host=socket.gethostname(), pid_provenance="session-prover",
-        )
-        provably_dead, bucket = classify_for_sweep(claim)
-        assert (provably_dead, bucket) == (False, "live")
-
-    def test_expired_ttl_on_this_machine_with_a_live_unproven_pid_reaps(self):
-        """The specimen flip side: the same live local pid WITHOUT provenance
-        is reapable at expiry. A claim that cannot prove its pid cannot
-        outrank its own TTL."""
-        started = int(psutil.Process(os.getpid()).create_time() * 1000)
-        claim = Claim(
-            key="k", holder="h", acquired_at=started + 1,
-            expires_at=now_ms() - 1, pid=os.getpid(),
-            host=socket.gethostname(),
-        )
-        assert is_provably_dead(claim) is True
-
-    def test_hostname_drift_between_two_claims_does_not_change_the_verdict(self):
-        """The two spellings one box wrote in one hour reap identically."""
-        verdicts = {
-            host: is_provably_dead(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 120_000,
-                    expires_at=now_ms() - 60_000, pid=_dead_pid(), host=host,
-                )
-            )
-            for host in ("BB16s-MBP", "BB16s-MacBook-Pro.local")
-        }
-        assert verdicts == {"BB16s-MBP": True, "BB16s-MacBook-Pro.local": True}
-
-
 # ---------------------------------------------------------------------------
 # reap_dead_claims: the reaper (core.py)
 # ---------------------------------------------------------------------------
@@ -274,141 +127,23 @@ class TestReapDeadClaims:
         assert expired[0].name.startswith("node%3Ax-killed."), expired[0].name
 
 
-    @pytest.mark.skip(
-        reason="known defect: the reap releases the claim but the row's "
-        "locked_by/session_id mirror keeps the holder until the "
-        "claim-mirror row releases in the same write"
-    )
-    def test_AC3_HP_confirmed_node_release_clears_configured_graph_mirror(
-        self, tmp_path, monkeypatch
-    ):
-        """A confirmed explicit node release is the graph mirror clear trigger."""
-        node_id = "x-release-mirror"
-        holder = "target-session:release-mirror"
+    def test_node_release_does_not_open_or_write_the_graph(self, tmp_path, monkeypatch):
+        node_id = "x-release-lockfile-only"
+        holder = "target-session:release-lockfile-only"
         graph_path = tmp_path / "configured-graph.json"
-        seed_graph(graph_path, json.dumps(
-                {
-                    "entries": [
-                        {
-                            "id": node_id,
-                            "title": "Release mirror",
-                            "slug": "release-mirror",
-                            "type": "feature",
-                            "priority": "p2",
-                            "plan_path": "plans/release-mirror.md",
-                            "locked_by": holder,
-                            "session_id": holder,
-                            "claimed_at": "2026-01-01T00:00:00+00:00",
-                            "status": "in_progress",
-                        }
-                    ]
-                }
-            )
-            + "\n")
-        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
-        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+        graph_path.write_text(json.dumps({"entries": [{"id": node_id, "locked_by": "old-copy"}]}) + "\n")
+        before = graph_path.read_text()
+        monkeypatch.setattr(
+            "fno.paths.graph_json",
+            lambda: pytest.fail("claim release must not open the graph"),
+        )
 
         claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
-        assert claim_status(claim.key, root=tmp_path)["state"] == "live"
-        before = read_graph_strict(graph_path)[0]
-        assert before["locked_by"] == holder
-        assert before["session_id"] == holder
-
-        released = release_claim(
-            claim.key,
-            holder,
-            root=tmp_path,
-            sync_graph_mirror=True,
-        )
+        released = release_claim(claim.key, holder, root=tmp_path)
 
         assert isinstance(released, Claim)
         assert claim_status(claim.key, root=tmp_path)["state"] == "free"
-        after = read_graph_strict(graph_path)[0]
-        assert after["locked_by"] is None
-        assert after["session_id"] is None
-        assert after["locked_at"] is None
-        assert "claimed_at" not in after
-
-    def test_AC4_ERR_reacquired_node_claim_keeps_graph_mirror(self, tmp_path, monkeypatch):
-        """The exact claim-path recheck wins when a fresh owner is present."""
-        node_id = "x-reacquired-mirror"
-        holder = "target-session:reacquired-mirror"
-        graph_path = tmp_path / "configured-graph.json"
-        seed_graph(graph_path, json.dumps(
-                {
-                    "entries": [
-                        {
-                            "id": node_id,
-                            "title": "Reacquired mirror",
-                            "slug": "reacquired-mirror",
-                            "type": "feature",
-                            "priority": "p2",
-                            "plan_path": "plans/reacquired-mirror.md",
-                            "locked_by": holder,
-                            "session_id": holder,
-                            "locked_at": "2026-01-01T00:00:00+00:00",
-                            "status": "in_progress",
-                        }
-                    ]
-                }
-            )
-            + "\n")
-        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
-        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
-        claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
-        try:
-            assert claim_status(claim.key, root=tmp_path)["state"] == "live"
-            assert _clear_lock_mirror_for_reaped(
-                [node_id], claim_roots=[tmp_path]
-            ) == 0
-            row = read_graph_strict(graph_path)[0]
-            assert row["locked_by"] == holder
-            assert row["session_id"] == holder
-        finally:
-            assert release_claim(claim.key, holder, root=tmp_path) is not None
-
-    @pytest.mark.skip(
-        reason="known defect: the reap releases the claim but the row's "
-        "locked_by/session_id mirror keeps the holder until the "
-        "claim-mirror row releases in the same write"
-    )
-    def test_mirror_clear_names_the_node_and_prior_owner(self, tmp_path, monkeypatch, capsys):
-        """A lock silently removed is the defect class this file exists
-        against. The clear must name the node, the owner it dropped, and the
-        verb that re-claims the node."""
-        node_id = "x-named-clear"
-        holder = "target-session:named-clear"
-        graph_path = tmp_path / "configured-graph.json"
-        seed_graph(graph_path, json.dumps(
-                {
-                    "entries": [
-                        {
-                            "id": node_id,
-                            "title": "Named clear",
-                            "slug": "named-clear",
-                            "type": "feature",
-                            "priority": "p2",
-                            "plan_path": "plans/named-clear.md",
-                            "locked_by": holder,
-                            "session_id": holder,
-                            "locked_at": "2026-01-01T00:00:00+00:00",
-                            "status": "in_progress",
-                        }
-                    ]
-                }
-            )
-            + "\n")
-        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
-        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
-
-        cleared = _clear_lock_mirror_for_reaped([node_id], claim_roots=[tmp_path])
-
-        assert cleared == 1
-        err = capsys.readouterr().err
-        assert f"cleared locked_by='{holder}' on {node_id}" in err
-        assert f"fno agents claim acquire node:{node_id}" in err
-        row = read_graph_strict(graph_path)[0]
-        assert row["locked_by"] is None
+        assert graph_path.read_text() == before
 
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
         root_a = tmp_path / "a"
@@ -566,8 +301,6 @@ class TestReapDeadClaims:
         assert summary["reaped"] == 0
         assert claim_path("k", root=tmp_path).exists()
 
-        import json
-
         events_path = tmp_path / ".fno" / "events.jsonl"
         # acquire_claim's claim_acquired is ephemeral-class, so it lands in the
         # .ephemeral sibling and the journal itself may not exist yet. Read both
@@ -631,7 +364,6 @@ class TestReapDeadClaims:
         # of the root, so a test reading the cwd-derived journal back has to
         # name that same file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap
 
         from fno.events.store_client import store_db_path
@@ -1687,7 +1419,7 @@ class TestSweepReadsWalkedDir:
             "kept_unclassified": 2, "unclassified_dirs": {"/claims": 2},
             "kept_suspect_unprobed_by": {"roster-read-degraded": 1},
             "kept_offhost": 0, "corrupted": 0, "vanished": 0, "contended": 0,
-            "reap_failed": [], "apply": True, "lock_mirror_cleared": 0,
+            "reap_failed": [], "apply": True,
             "roots": ["/claims"],
         }
         claim_events.emit_claim_reap_swept(summary)

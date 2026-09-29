@@ -84,6 +84,42 @@ def _native_update(g: Path, *args: str):
     return proc.returncode, proc.stdout + proc.stderr
 
 
+class _NativeReceipt:
+    """The CliRunner face of a native run: exit_code plus merged streams."""
+
+    def __init__(self, code: int, out: str):
+        self.exit_code = code
+        self.output = out
+
+
+def _native_supersede(g: Path, *args: str) -> _NativeReceipt:
+    """The supersede leaf answers natively; drive the dev binary over the
+    same store the fixture seeded (the _native_supersede twin of
+    _native_update)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "supersede", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return _NativeReceipt(proc.returncode, proc.stdout + proc.stderr)
+
+
 def _read_entries(g: Path) -> list[dict]:
     # The store owns state; graph.json is a frozen export, so read-backs
     # come from store rows.
@@ -533,7 +569,7 @@ def test_supersede_writes_both_directions(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py", "y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "consolidated", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "consolidated", "--surface", "x.py")
     assert res.exit_code == 0, res.output
 
     entries = _read_entries(tmp_graph)
@@ -548,8 +584,8 @@ def test_supersede_requires_cause_and_surface_before_mutation(tmp_graph, tmp_pat
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    result = _invoke(
-        "backlog", "supersede", "ab-new", "--replaces", "ab-old",
+    result = _native_supersede(
+        tmp_graph, "ab-new", "--replaces", "ab-old",
         "--reason", "consolidated",
     )
 
@@ -569,8 +605,8 @@ def test_supersede_records_pending_evidence_and_terminals_status(tmp_graph, tmp_
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["src/new.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    result = _invoke(
-        "backlog", "supersede", "ab-new", "--replaces", "ab-old",
+    result = _native_supersede(
+        tmp_graph, "ab-new", "--replaces", "ab-old",
         "--cause", "old implementation replaced", "--surface", "src/old.py",
     )
 
@@ -597,7 +633,7 @@ def test_supersede_persists_old_row_superseded(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py", "y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "consolidated", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "consolidated", "--surface", "x.py")
     assert res.exit_code == 0, res.output
 
     entries = _read_entries(tmp_graph)
@@ -617,7 +653,7 @@ def test_supersede_done_node_rejected(tmp_graph, tmp_path):
     entries[0]["status"] = "done"
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-shipped", "--cause", "test", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-shipped", "--cause", "test", "--surface", "x.py")
     assert res.exit_code != 0
     assert "already shipped" in res.output.lower() or "status=done" in res.output
 
@@ -638,7 +674,7 @@ def test_supersede_already_superseded_rejected(tmp_graph, tmp_path):
     entries[0]["superseded_by"] = "ab-mid"
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "test", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "test", "--surface", "x.py")
     assert res.exit_code != 0
     assert "already superseded" in res.output.lower()
 
@@ -648,7 +684,7 @@ def test_supersede_self_rejected(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-x", plan_path=str(_write_quick_plan(tmp_path / "x.md", ["x.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-x", "--replaces", "ab-x", "--cause", "test", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-x", "--replaces", "ab-x", "--cause", "test", "--surface", "x.py")
     assert res.exit_code != 0
     assert "supersede self" in res.output
 
@@ -659,7 +695,7 @@ def test_supersede_blank_reason_rejected(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "   ", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "   ", "--surface", "x.py")
     assert res.exit_code != 0
     assert "blank" in res.output.lower()
 
@@ -675,7 +711,7 @@ def test_supersede_deferred_node_keeps_park(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code == 0, res.output
     by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
     assert by_id["ab-old"]["superseded_by"] == "ab-new"
@@ -702,7 +738,7 @@ def test_supersede_live_children_rejected(tmp_graph, tmp_path):
         node["parent"] = "ab-old"
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code != 0
     assert "live child" in res.output.lower()
     assert "ab-k1" in res.output and "ab-k2" in res.output
@@ -725,8 +761,8 @@ def test_supersede_force_orphans_live_children(tmp_graph, tmp_path):
     node["parent"] = "ab-old"
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke(
-        "backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py", "--force"
+    res = _native_supersede(
+        tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py", "--force"
     )
     assert res.exit_code == 0, res.output
     assert "Cleared parent" in res.output and "ab-k1" in res.output
@@ -753,7 +789,7 @@ def test_supersede_done_child_kept_revivable_released(tmp_graph, tmp_path):
     deferred["deferred_at"] = "2026-07-01T00:00:00+00:00"
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code == 0, res.output
 
     entries = _read_entries(tmp_graph)
@@ -773,7 +809,7 @@ def test_unsupersede_restores_node_and_clears_backref(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code == 0, res.output
     assert {e["id"]: e for e in _read_entries(tmp_graph)}["ab-old"]["status"] == "superseded"
 
@@ -799,7 +835,7 @@ def test_unsupersede_resets_plan_status_off_terminal(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     # The graph row went terminal from the edge alone (x-e8f3), so the
     # projector stamps the plan in step with it.
     assert _plan_status(plan) == "superseded"
@@ -851,7 +887,7 @@ def test_unsupersede_prints_the_cleared_cause_and_any_plan_ruling(
     )
     monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
 
-    _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
 
     res = _invoke("backlog", "unsupersede", "ab-old")
 
@@ -876,7 +912,7 @@ def test_unsupersede_blocked_plan_fails_closed_to_design(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+    _native_supersede(tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     # The projector stamps the terminal the graph row now carries (x-e8f3).
     assert _plan_status(plan) == "superseded"
 
@@ -903,8 +939,8 @@ def test_force_supersede_does_not_corrupt_shared_plan(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke(
-        "backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py", "--force"
+    res = _native_supersede(
+        tmp_graph, "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py", "--force"
     )
     assert res.exit_code == 0, res.output
     # The shared plan keeps the OWNER's priority, not a child's p3.
@@ -925,7 +961,7 @@ def test_supersede_guard_not_bypassed_by_abbreviated_id(tmp_graph, tmp_path):
 
     # Abbreviated --replaces (resolves to ab-aabbccdd); the live child must
     # still trip the guard.
-    res = _invoke("backlog", "supersede", "ab-eeffffff", "--replaces", "ab-aabbcc", "--cause", "fold", "--surface", "x.py")
+    res = _native_supersede(tmp_graph, "ab-eeffffff", "--replaces", "ab-aabbcc", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code != 0
     assert "live child" in res.output.lower()
     assert "ab-11223344" in res.output
