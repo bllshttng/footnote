@@ -239,6 +239,9 @@ row_claude_marketplace() {
   assert_clean_machine
   install_cli_via_npm @anthropic-ai/claude-code || return 0
   export CLAUDE_CONFIG_DIR="$BASE/claude-config"
+  # The plugin install clones the marketplace repo through git; a fresh
+  # machine has no SSH keys, so rewrite the remote to HTTPS for this row.
+  git config --global url."https://github.com/".insteadOf "git@github.com:"
   run_capture claude plugin marketplace add bllshttng/footnote
   if [ "$RC" -ne 0 ]; then
     miss "marketplace-add" "rc=$RC: $(printf '%s' "$OUT" | tail -1)"
@@ -386,7 +389,9 @@ row_cargo() {
   assert_clean_machine
   if [ -n "$RUNNER_CARGO_BIN" ]; then
     # The image's rustup proxies live here; RUSTUP_HOME stays at its default.
+    # Some images ship rustup with no default toolchain; pick one.
     export PATH="$RUNNER_CARGO_BIN:$PATH"
+    rustup show active-toolchain >/dev/null 2>&1 || rustup default stable
   else
     # No rust on the image: install a private minimal toolchain.
     export RUSTUP_HOME="$BASE/rustup"
@@ -414,7 +419,9 @@ row_skills_sh() {
   assert_clean_machine
   install_cli_via_npm skills || return 0
   cd "$BASE/work"
-  run_capture npx --yes skills add bllshttng/footnote --skill tdd --agent '*' -y
+  # Install from THIS checkout, not from GitHub main: the row scores the PR's
+  # own skill (the no-CLI fallback sentence lands with the PR that writes it).
+  run_capture npx --yes skills add "$REPO_ROOT" --skill tdd --agent '*' -y
   if [ "$RC" -ne 0 ]; then
     miss "skills-add" "rc=$RC: $(printf '%s' "$OUT" | tail -1)"
     return 0
