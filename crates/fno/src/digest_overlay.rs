@@ -283,7 +283,7 @@ pub(crate) fn set_themes_dir_for_test(dir: Option<PathBuf>) {
 /// The folder's `*.toml` files, sorted by name: one layer per file, lowest
 /// precedence. A missing folder adds no layer; an unreadable file stays
 /// silent, the same posture as a bad config file.
-fn theme_folder_files() -> Vec<PathBuf> {
+pub(crate) fn theme_folder_files() -> Vec<PathBuf> {
     let Some(dir) = themes_dir() else {
         return Vec::new();
     };
