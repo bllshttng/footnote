@@ -97,18 +97,28 @@ fn diff_range(dir: &Path, range: &str) -> Result<String, String> {
     }
 }
 
+/// Why the shrink-only gate stopped the push: the delta rose over the cap
+/// (a refusal, the worker fixes the tree), or the delta could not be read
+/// (an infra failure, not a refusal).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShrinkGate {
+    OverCap(String),
+    Diff(String),
+}
+
 /// The shrink-only gate the push path shares with CI (`--max-net 0`). The
-/// error carries the table so a worker fixes the delta locally instead of
-/// learning the cap from a red main one full round later.
-pub fn shrink_only_gate(dir: &Path, base: &str) -> Result<(), String> {
+/// OverCap message carries the table so a worker fixes the delta locally
+/// instead of learning the cap from a red main one full round later.
+pub fn shrink_only_gate(dir: &Path, base: &str) -> Result<(), ShrinkGate> {
     let range = format!("{base}...HEAD");
-    let delta = TestDelta::from_diff(&diff_range(dir, &range)?);
+    let diff = diff_range(dir, &range).map_err(ShrinkGate::Diff)?;
+    let delta = TestDelta::from_diff(&diff);
     if let Some(net) = over_cap(&delta, 0) {
-        return Err(format!(
+        return Err(ShrinkGate::OverCap(format!(
             "the suite is shrink-only: net {net:+} test declarations against {base} (cap 0). \
              Delete a test that guards no contract of its own (docs/test-audit/README.md, Keep rule):\n{}",
             delta.markdown()
-        ));
+        )));
     }
     Ok(())
 }
@@ -242,7 +252,10 @@ mod tests {
         run(&["add", "lib.rs"]);
         run(&["commit", "-q", "-m", "add"]);
 
-        let err = shrink_only_gate(dir.path(), "main").unwrap_err();
+        let err = match shrink_only_gate(dir.path(), "main") {
+            Err(ShrinkGate::OverCap(msg)) => msg,
+            other => panic!("expected an over-cap refusal: {other:?}"),
+        };
         assert!(err.contains("net +1 test declarations"), "{err}");
         assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
     }

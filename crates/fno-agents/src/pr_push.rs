@@ -1136,9 +1136,17 @@ pub fn run_push(argv: &[String]) -> i32 {
     // (5c) The shrink-only test cap, the same `--max-net 0` gate the guards
     // workflow runs in CI. Refusing here moves the fix one round earlier: a
     // breach used to surface as a red main only after both runs had spent.
-    if let Err(msg) = crate::test_delta::shrink_only_gate(&cwd, "origin/main") {
-        eprintln!("pr-push: refusing: {msg}");
-        return 3;
+    if let Err(gate) = crate::test_delta::shrink_only_gate(&cwd, "origin/main") {
+        match gate {
+            crate::test_delta::ShrinkGate::OverCap(msg) => {
+                eprintln!("pr-push: refusing: {msg}");
+                return 3;
+            }
+            crate::test_delta::ShrinkGate::Diff(msg) => {
+                eprintln!("pr-push: could not read the test delta ({msg}); nothing pushed");
+                return 4;
+            }
+        }
     }
 
     // (6) The fetched remote head of the SAME-NAME branch, read BEFORE
