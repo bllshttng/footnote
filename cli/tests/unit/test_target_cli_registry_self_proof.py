@@ -88,32 +88,6 @@ def test_name_only_pane_stamp_resolves_without_row_or_proof(tmp_path, monkeypatc
     assert fields["COLLISION"] == ""
 
 
-def test_name_only_with_live_row_and_no_witness_fails_closed(tmp_path, monkeypatch):
-    """The round-1 P1 shape, re-pinned: a name_only stamp does NOT complete an
-    own-pair from the marker under test (that would be circular), so a marker
-    naming another live session's id meets that row as CONTENTION and the
-    verb refuses, naming the owner. The stamp names the family, never the id
-    - only a process witness or the stamp's own id half proves self."""
-    from fno.agents.registry import register_existing_session
-    from fno.paths_testing import use_tmpdir
-
-    use_tmpdir(monkeypatch, tmp_path)
-    theirs = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
-    owner = register_existing_session(harness="codex", session_id=theirs, cwd="/x").name
-    _silent_walk_and_attester(monkeypatch, theirs)
-    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
-    monkeypatch.setenv("CODEX_THREAD_ID", theirs)
-    monkeypatch.setenv("CODEX_SESSION_ID", theirs)
-
-    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
-    assert result.exit_code == 0, result.output
-    fields = _fields(result)
-    assert fields["HARNESS"] == ""
-    assert fields["SESSION_ID"] == ""
-    assert fields["DISPOSITION"] == "ambiguous"
-    assert fields["COLLISION"] == owner
-
-
 def test_name_only_own_row_resolves_when_the_attester_witnesses(
     tmp_path, monkeypatch
 ):
@@ -208,8 +182,10 @@ def test_name_only_foreign_row_with_other_witness_fails_closed(tmp_path, monkeyp
 
 def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch):
     """AC6-ERR (x-a409): no tree rollout and no daemon answer means no witness.
-    A name_only worker whose id a live row holds still refuses; the daemon
-    being down never widens into a guess."""
+    A name_only worker whose id a live row holds still refuses - the marker
+    under test never completes its own pair (that would be circular), so the
+    live row reads as contention and the verb answers empty, naming the
+    owner and the id. The daemon being down never widens into a guess."""
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
@@ -227,8 +203,11 @@ def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch
     result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
     assert result.exit_code == 0, result.output
     fields = _fields(result)
+    assert fields["HARNESS"] == ""
+    assert fields["SESSION_ID"] == ""
     assert fields["DISPOSITION"] == "ambiguous"
     assert fields["COLLISION"] == owner
+    assert fields["COLLISION_ID"] == mine
 
 
 # The session-harness stamp rules (honored while the pid is alive, ignored
