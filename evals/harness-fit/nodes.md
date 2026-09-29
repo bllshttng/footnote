@@ -1,7 +1,6 @@
 # Replay sample (x-632f)
 
-Systematic sample of 10 from the preregistered rule
-(merged 2026-09-01..2026-09-28, PR added a new test file, tests under 10 min):
+Systematic sample of 10 from the preregistered rule (merged 2026-09-01..2026-09-28, PR added a new test file, tests under 10 min):
 
 | task | node | merge sha | first-parent | hidden tests |
 |---|---|---|---|---|
