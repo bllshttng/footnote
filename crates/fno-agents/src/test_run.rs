@@ -1026,6 +1026,120 @@ fn wait_for_tests_admission() -> i32 {
 /// naming this holder, or one whose pid is this cargo or an ancestor (a
 /// nested cargo, a doctest's rustdoc), admits at once without a second
 /// claim.
+/// The build-holder fast path. The invariant (2026-09-29, twice observed): a
+/// cargo never stays parked holding `build:cargo` without a run slot. The
+/// slot holders queue on `build:cargo` (lock order: slot first, then
+/// build), so a build holder joining the slot queue behind them is the
+/// admission deadlock: it waited on a full cap whose holders waited on its
+/// own build claim. A build holder takes any free slot without queueing;
+/// `None` sends it to the slot queue, whose scan strips the slot of any
+/// holder parked at the build door. `root` exists for tests; production
+/// passes `None` (the global root).
+fn admit_build_holder_free_slot(
+    cargo_pid: u32,
+    worktree: &Path,
+    holder: &str,
+    keys: &[String],
+    root: Option<&Path>,
+) -> Option<()> {
+    let (state, rec) = crate::claims::status(BUILD_CLAIM_KEY, root);
+    let rec = if matches!(state, crate::claims::ClaimState::Live) {
+        rec
+    } else {
+        None
+    }?;
+    if rec.holder != holder {
+        return None;
+    }
+    for key in keys {
+        if let crate::claims::AcquireOutcome::Acquired(_) = crate::claims::acquire(
+            key,
+            holder,
+            crate::claims::AcquireOpts {
+                pid: Some(cargo_pid),
+                reason: Some("cargo run slot; build:cargo holder".to_string()),
+                events_dir: Some(worktree.to_path_buf()),
+                root: root.map(Path::to_path_buf),
+                ..Default::default()
+            },
+        ) {
+            return Some(());
+        }
+    }
+    None
+}
+
+/// Whether the cargo named by a `cargo:<worktree>:<pid>` holder string is
+/// parked at a cargo admission door. The waiter marker is keyed by the
+/// encoded worktree path, so the marker alone cannot tell this holder from
+/// a later cargo in the same checkout: the marker content names its
+/// `cargo_pid`, and only a matching pid with a live writer counts. An
+/// actively compiling or testing holder has no marker, so it is never a
+/// steal target. A stale marker (dead writer) is removed on the read, the
+/// same self-heal the stop hook applies.
+fn slot_holder_is_parked(holder: &str, waiters_dir: &Path) -> bool {
+    let Some((prefix, pid)) = holder.rsplit_once(':') else {
+        return false;
+    };
+    let Some(worktree) = prefix.strip_prefix("cargo:") else {
+        return false;
+    };
+    let Ok(cargo_pid) = pid.parse::<u64>() else {
+        return false;
+    };
+    let marker = waiters_dir.join(format!("{}.json", crate::claims::encode_key(worktree)));
+    let Ok(raw) = std::fs::read_to_string(&marker) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    if value["cargo_pid"].as_u64() != Some(cargo_pid) {
+        return false;
+    }
+    let since_ms = value["since_ms"].as_i64().unwrap_or(i64::MAX);
+    let wrapper = value["pid"].as_u64().unwrap_or(0) as i32;
+    let alive = wrapper > 0
+        && match crate::claims::probe_pid(wrapper) {
+            crate::claims::PidProbe::Created(create_ms) => create_ms <= since_ms,
+            crate::claims::PidProbe::Refused => true,
+            crate::claims::PidProbe::Absent => false,
+        };
+    if !alive {
+        let _ = std::fs::remove_file(&marker);
+    }
+    alive
+}
+
+/// Release the slot of every Live holder parked at a cargo admission door
+/// (an exact-holder release, so a claim that changed hands is a no-op).
+/// While the asker holds `build:cargo`, those holders are the deadlock
+/// population: they wait on the build claim this asker holds. Returns the
+/// holders stripped. `waiters_dir` and `root` are test seams; production
+/// passes the real waiters dir and the global root.
+fn release_parked_slot_holders(
+    keys: &[String],
+    holder: &str,
+    waiters_dir: &Path,
+    root: Option<&Path>,
+    events_dir: Option<&Path>,
+) -> Vec<String> {
+    let mut stripped = Vec::new();
+    for key in keys {
+        if let (crate::claims::ClaimState::Live, Some(rec)) = crate::claims::status(key, root) {
+            if rec.holder != holder && slot_holder_is_parked(&rec.holder, waiters_dir) {
+                eprintln!(
+                    "cargo admission: build holder takes {key} from {} (parked at the build door)",
+                    rec.holder
+                );
+                let _ = crate::claims::release(key, &rec.holder, root, events_dir);
+                stripped.push(rec.holder);
+            }
+        }
+    }
+    stripped
+}
+
 fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     install_signal_handlers();
     // The tests hold parks the cargo doors instead of failing them: a
@@ -1054,6 +1168,10 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
         }
     }
 
+    if admit_build_holder_free_slot(cargo_pid, &worktree, &holder, &keys, None).is_some() {
+        return Ok(());
+    }
+
     let mut wait = CargoWait::new(cargo_pid, &worktree);
     let started = wait.started;
     let opts = |i: usize| crate::claims::AcquireOpts {
@@ -1073,6 +1191,18 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
         }
     };
     let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, _, w| {
+        // While this asker holds build:cargo, a slot holder parked at the
+        // build door waits on the claim this asker holds; strip its slot so
+        // the next poll takes it. A build holder never stays parked behind
+        // the cap (the 2026-09-29 admission deadlock, twice).
+        if crate::claims::status(BUILD_CLAIM_KEY, None)
+            .1
+            .is_some_and(|rec| rec.holder == holder)
+        {
+            if let Some(dir) = crate::claims::build_waiters_dir() {
+                release_parked_slot_holders(&keys, &holder, &dir, None, Some(&worktree));
+            }
+        }
         wait.poll_held(rows, Some((cap, "cargo run slots")), None, w)
     });
     wait.clear_marker();
@@ -1400,16 +1530,26 @@ fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
 /// A compile process: a token of the argv naming `rustc` (a bare rustc, an
 /// sccache client's target, or this wrapper's argument), or an argv0 that is
 /// a build-script binary. The holder's own argv never counts: the walk below
-/// excludes the holder row itself.
+/// excludes the holder row itself. A wrapper parked at an admission door
+/// names rustc only as an argument behind `--`; counting it holds the holder
+/// "compiling" forever and starves the idle takeover. An admitted wrapper
+/// execs rustc, so its argv no longer names the door.
 pub(crate) fn is_compile(row: &crate::census::ProcRow) -> bool {
-    let argv0 = row.command.split_whitespace().next().unwrap_or("");
+    let tokens: Vec<&str> = row.command.split_whitespace().collect();
+    if tokens
+        .windows(2)
+        .any(|w| w[0] == "test-run" && matches!(w[1], "build-admit" | "run-admit"))
+    {
+        return false;
+    }
+    let argv0 = tokens.first().copied().unwrap_or("");
     if Path::new(argv0)
         .file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with("build-script-"))
     {
         return true;
     }
-    row.command.split_whitespace().any(|token| {
+    tokens.iter().any(|token| {
         Path::new(token)
             .file_name()
             .is_some_and(|name| name == "rustc")
@@ -1802,54 +1942,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_timeout_and_claims_root_before_the_separator() {
-        let args: Vec<String> = [
-            "--timeout",
-            "60",
-            "--claims-root",
-            "/tmp/x",
-            "--",
-            "sleep",
-            "1",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let opts = parse_args(&args).unwrap();
-        assert_eq!(opts.timeout, Duration::from_secs(60));
-        assert_eq!(opts.claims_root, Some(PathBuf::from("/tmp/x")));
-        assert_eq!(opts.argv, vec!["sleep".to_string(), "1".to_string()]);
-    }
-
-    #[test]
-    fn defaults_timeout_when_omitted() {
-        let args: Vec<String> = ["--", "sleep", "1"].iter().map(|s| s.to_string()).collect();
-        let opts = parse_args(&args).unwrap();
-        assert_eq!(opts.timeout, Duration::from_secs(1800));
-    }
-
-    #[test]
-    fn a_flag_shaped_binary_arg_after_the_separator_is_never_consumed() {
-        let args: Vec<String> = ["--", "cargo", "test", "--", "--nocapture"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let opts = parse_args(&args).unwrap();
-        assert_eq!(
-            opts.argv,
-            vec![
-                "cargo".to_string(),
-                "test".to_string(),
-                "--".to_string(),
-                "--nocapture".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn missing_separator_refuses() {
-        let args: Vec<String> = ["--timeout", "60"].iter().map(|s| s.to_string()).collect();
-        assert!(parse_args(&args).is_err());
+    fn parse_args_splits_flags_from_the_argvs_after_the_separator() {
+        let cases = [
+            (
+                vec![
+                    "--timeout",
+                    "60",
+                    "--claims-root",
+                    "/tmp/x",
+                    "--",
+                    "sleep",
+                    "1",
+                ],
+                Duration::from_secs(60),
+                Some(PathBuf::from("/tmp/x")),
+                vec!["sleep", "1"],
+            ),
+            (
+                vec!["--", "sleep", "1"],
+                Duration::from_secs(1800),
+                None,
+                vec!["sleep", "1"],
+            ),
+            (
+                // A flag-shaped binary arg after the separator is never consumed.
+                vec!["--", "cargo", "test", "--", "--nocapture"],
+                Duration::from_secs(1800),
+                None,
+                vec!["cargo", "test", "--", "--nocapture"],
+            ),
+        ];
+        for (args, timeout, root, argv) in cases {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let opts = parse_args(&args).unwrap();
+            assert_eq!(opts.timeout, timeout, "{args:?}");
+            assert_eq!(opts.claims_root, root, "{args:?}");
+            assert_eq!(
+                opts.argv,
+                argv.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "{args:?}"
+            );
+        }
+        let no_separator: Vec<String> = ["--timeout", "60"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_args(&no_separator).is_err());
     }
 
     /// AC15-HP: a `test:priority` claim whose holder path is spelled through
@@ -2259,6 +2394,126 @@ mod tests {
             proc_row(201, 200, "/t/bin/rustc --crate-name a"),
         ];
         assert_eq!(holder_compiling(&rows, 100), None);
+    }
+
+    #[test]
+    fn a_wrapper_parked_at_an_admission_door_is_not_a_compile() {
+        // The parked build-admit wrapper names rustc only as an argument
+        // behind `--`; counting it starved the idle takeover (2026-09-29).
+        let parked = "/r/bin/fno-agents test-run build-admit --cargo-pid 100 --worktree /r -- /t/bin/rustc --crate-name a";
+        let rows = vec![
+            proc_row(100, 1, "cargo test --lib"),
+            proc_row(101, 100, parked),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), Some(false));
+        let rows = vec![
+            proc_row(100, 1, "cargo test --lib"),
+            proc_row(
+                101,
+                100,
+                "/r/bin/fno-agents test-run run-admit --cargo-pid 100 --worktree /r",
+            ),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), Some(false));
+        // The same wrapper once admitted execs rustc: a compile again.
+        let rows = vec![
+            proc_row(100, 1, "cargo test --lib"),
+            proc_row(101, 100, "/t/bin/rustc --crate-name a"),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), Some(true));
+    }
+
+    #[test]
+    fn a_build_holder_never_stays_parked_without_a_run_slot() {
+        // The invariant (2026-09-29, twice observed): never stay parked
+        // holding build:cargo without a run slot. Phase 1: a free slot is
+        // taken at once, no queue. Phase 2: a full cap queues the holder,
+        // whose scan strips the slot of a holder parked at the build door;
+        // an actively running holder (no waiter marker) is never touched.
+        let root = std::env::temp_dir().join(format!("fno-buildhold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let waiters = root.join("waiters");
+        std::fs::create_dir_all(&waiters).unwrap();
+        let holder_of = |pid: u32| format!("cargo:{}:{pid}", worktree.display());
+        let live = std::process::id();
+        let events = worktree.clone();
+        let test_root = root.clone();
+        let opts = move || crate::claims::AcquireOpts {
+            pid: Some(live),
+            events_dir: Some(events.clone()),
+            root: Some(test_root.clone()),
+            ..Default::default()
+        };
+        let keys: Vec<String> = (0..2).map(|i| format!("test:cargo-run:{i}")).collect();
+        // Phase 1: slot 0 taken, slot 1 free. The free slot goes at once.
+        assert!(matches!(
+            crate::claims::acquire("test:cargo-run:0", &holder_of(200), opts()),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert!(matches!(
+            crate::claims::acquire("build:cargo", &holder_of(100), opts()),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let admitted =
+            admit_build_holder_free_slot(100, &worktree, &holder_of(100), &keys, Some(&root));
+        assert!(admitted.is_some(), "a free slot must be taken at once");
+        let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
+        assert_eq!(s1.unwrap().holder, holder_of(100));
+        let _ = crate::claims::release(
+            "test:cargo-run:1",
+            &holder_of(100),
+            Some(&root),
+            Some(&worktree),
+        );
+        let _ = crate::claims::release(
+            "test:cargo-run:0",
+            &holder_of(200),
+            Some(&root),
+            Some(&worktree),
+        );
+        // Phase 2: the cap fills. Holder 200 parks at the build door (its
+        // waiter marker names cargo_pid 200 with a live writer); holder 300
+        // keeps running in the same checkout (the marker cannot name it).
+        let marker_body = serde_json::json!({
+            "pid": std::process::id(),
+            "cargo_pid": 200u32,
+            "worktree": worktree,
+            "holder": holder_of(200),
+            "since_ms": crate::claims::now_ms(),
+        });
+        std::fs::write(
+            waiters.join(format!(
+                "{}.json",
+                crate::claims::encode_key(&worktree.to_string_lossy())
+            )),
+            marker_body.to_string(),
+        )
+        .unwrap();
+        for (key, pid) in [("test:cargo-run:0", 200), ("test:cargo-run:1", 300)] {
+            assert!(matches!(
+                crate::claims::acquire(key, &holder_of(pid), opts()),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+        }
+        let fast =
+            admit_build_holder_free_slot(100, &worktree, &holder_of(100), &keys, Some(&root));
+        assert!(fast.is_none(), "a full cap sends the holder to the queue");
+        let stripped = release_parked_slot_holders(
+            &keys,
+            &holder_of(100),
+            &waiters,
+            Some(&root),
+            Some(&worktree),
+        );
+        assert_eq!(stripped, vec![holder_of(200)]);
+        let (_, s0) = crate::claims::status("test:cargo-run:0", Some(&root));
+        let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
+        assert!(s0.is_none(), "the parked holder's slot must be freed");
+        assert_eq!(s1.unwrap().holder, holder_of(300));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
