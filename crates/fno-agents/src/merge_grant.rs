@@ -387,6 +387,24 @@ pub fn head_grant_subject(repo_slug: &str, pr: i64, head: &str) -> String {
     format!("{MERGE_GRANT_SUBJECT}:{repo_slug}#{pr}@{head}")
 }
 
+/// The head-scoped parts of a subject [`head_grant_subject`] mints:
+/// `(repo_slug, pr, head)`; `None` for anything else. One parser for the
+/// format, so the answer side derives the same subject the gate reads. The
+/// head must be the full 40-hex sha the writer mints: a prefix would let one
+/// subject answer for heads it does not name.
+pub fn parse_head_grant_subject(subject: &str) -> Option<(String, i64, String)> {
+    let rest = subject
+        .strip_prefix(MERGE_GRANT_SUBJECT)?
+        .strip_prefix(':')?;
+    let (repo, rest) = rest.split_once('#')?;
+    let (pr, head) = rest.split_once('@')?;
+    if !repo.contains('/') || head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let pr: i64 = pr.parse().ok()?;
+    (pr > 0).then_some((repo.to_string(), pr, head.to_string()))
+}
+
 /// The attended command an operator runs in their own terminal to record the
 /// grant. Only that door can carry it: `decide/__init__.py` refuses
 /// `--authority operator` from any agent session, so a worker can never mint

@@ -695,6 +695,29 @@ fn head_grant_subject_scopes_repo_pr_and_head() {
 }
 
 #[test]
+fn parse_head_grant_subject_round_trips_the_minted_shape() {
+    let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+    assert_eq!(
+        parse_head_grant_subject(&format!("merge-grant:o/r#42@{sha}")),
+        Some(("o/r".to_string(), 42, sha.to_string()))
+    );
+    for bad in [
+        "merge-grant:o/r#42@short",
+        "merge-grant:o#42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "other:o/r#42@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:o/r#zero@a29b38c37b18e737eaf850e8765920498287cabf",
+        "merge-grant:o/r#0@a29b38c37b18e737eaf850e8765920498287cabf",
+    ] {
+        assert_eq!(
+            parse_head_grant_subject(bad),
+            None,
+            "{bad} must not parse as a merge-grant subject"
+        );
+    }
+}
+
+#[test]
 fn attended_grant_command_names_subject_decision_and_authority() {
     let cmd = attended_grant_command("o/r", 42, "abc");
     assert!(cmd.starts_with("fno backlog decide '"), "{cmd}");

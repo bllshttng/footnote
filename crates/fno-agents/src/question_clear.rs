@@ -317,6 +317,93 @@ mod tests {
         assert!(closed.contains("q-reask"));
         assert!(questions.contains_key("q-reask"));
     }
+
+    #[test]
+    fn an_answered_merge_grant_question_becomes_the_operator_grant_at_that_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let subject = format!("merge-grant:footnote#2739@{sha}");
+        let req = request(&tmp, "q-grant", Some("Merge it now."));
+        seed_question(
+            &req,
+            &ask("q-grant", "Merge PR 2739?", Some(&subject), Some("x-0000")),
+        );
+
+        let result = run_clear(&req);
+
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let decisions = graph_decisions(&req);
+        let at_subject = |head: &str| {
+            let want = format!("merge-grant:footnote#2739@{head}");
+            let rows: Vec<Value> = decisions
+                .iter()
+                .filter(|r| r["subject"] == want.as_str())
+                .cloned()
+                .collect();
+            crate::merge_grant::head_grant_status(
+                serde_json::to_vec(&json!({ "decisions": rows }))
+                    .ok()
+                    .as_deref(),
+            )
+        };
+        assert_eq!(at_subject(sha), crate::merge_grant::HeadGrant::Granted);
+        assert_eq!(
+            at_subject("1111111111111111111111111111111111111111"),
+            crate::merge_grant::HeadGrant::Absent
+        );
+    }
+
+    #[test]
+    fn a_hold_answer_records_operator_law_that_grants_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let subject = format!("merge-grant:footnote#2739@{sha}");
+        let req = request(&tmp, "q-hold", Some("Hold it."));
+        seed_question(
+            &req,
+            &ask("q-hold", "Merge PR 2739?", Some(&subject), Some("x-0000")),
+        );
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let rows: Vec<Value> = graph_decisions(&req)
+            .into_iter()
+            .filter(|r| r["subject"] == subject.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["authority_source"], "operator");
+        assert_eq!(rows[0]["decision"], "Hold it.");
+        let payload = serde_json::to_vec(&json!({ "decisions": rows })).unwrap();
+        assert_eq!(
+            crate::merge_grant::head_grant_status(Some(&payload)),
+            crate::merge_grant::HeadGrant::Conflict
+        );
+    }
+    #[test]
+    fn an_agent_session_clear_never_mints_the_operator_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let subject = format!("merge-grant:footnote#2739@{sha}");
+        let mut req = request(&tmp, "q-agent", Some("Merge it now."));
+        req.provenance = json!({"decided_by": "agent-1", "authority_source": "agent"});
+        seed_question(
+            &req,
+            &ask("q-agent", "Merge PR 2739?", Some(&subject), Some("x-0000")),
+        );
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let decisions = graph_decisions(&req);
+        assert!(
+            decisions.iter().all(|r| r["subject"] != subject.as_str()),
+            "no row may land at the merge-grant subject from an agent clear"
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|r| r["subject"] == "x-0000")
+                .count(),
+            1
+        );
+    }
 }
 use crate::backlog::api::{self, Store};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -563,6 +650,20 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             answer.lines.push(format!(
                 "outstanding: closed {qid} (decision {decision_id} {label})"
             ));
+            if let Some(subject) = merge_grant_subject(question_event) {
+                if operator_can_grant(req) {
+                    answer.lines.push(if is_affirmative_merge_answer(&text) {
+                        format!(
+                            "outstanding: operator merge grant recorded at {subject} (binds this head only)"
+                        )
+                    } else {
+                        format!(
+                            "outstanding: law recorded at {subject} grants nothing; the gate grants only \"{}\"",
+                            crate::merge_grant::MERGE_GRANT_DECISION
+                        )
+                    });
+                }
+            }
             answer.closed.push(ClosedQuestion {
                 qid: qid.clone(),
                 decision_id: Some(decision_id.clone()),
@@ -721,14 +822,31 @@ fn make_decision(
         .get("node")
         .and_then(Value::as_str)
         .filter(|node| !node.trim().is_empty());
-    let subject = node
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("question:{qid}"));
+    // A merge-grant question's answer IS the operator's ruling on that exact
+    // head, so the row lands at the head-scoped subject the merge gate reads
+    // (`merge-grant:<repo>#<pr>@<sha>`), never at the node: a row at the node
+    // subject is invisible to `head_grant_status`, so a board-approved head
+    // used to read absent at the gate. Operator law only: a session that
+    // resolves an agent authority can no more mint the grant through the
+    // clear door than through decide.
+    let grant_subject = merge_grant_subject(question_event).filter(|_| operator_can_grant(req));
+    let affirmative = grant_subject.is_some() && is_affirmative_merge_answer(answer);
+    let decision_text = if affirmative {
+        crate::merge_grant::MERGE_GRANT_DECISION.to_string()
+    } else {
+        answer.to_string()
+    };
+    let subject = match &grant_subject {
+        Some(subject) => subject.clone(),
+        None => node
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("question:{qid}")),
+    };
     let mut decision = Map::new();
     let mut id_bytes = [0u8; 4];
     getrandom::fill(&mut id_bytes).expect("OS CSPRNG unavailable");
     decision.insert("decision_id".into(), json!(format!("d-{}", hex(&id_bytes))));
-    decision.insert("decision".into(), json!(answer));
+    decision.insert("decision".into(), json!(decision_text));
     decision.insert("subject".into(), json!(subject));
     decision.insert("question_id".into(), json!(qid));
     decision.insert(
@@ -767,6 +885,26 @@ fn make_decision(
         .get("authority_source")
         .and_then(Value::as_str)
         .unwrap_or("");
+    // The board answer carries the operator's authority onto the row: the
+    // gate honors only `operator` rows, and the answer came from the
+    // operator's own surface. `or_insert` keeps a real attended-terminal
+    // resolution (`--authority operator` at a terminal) intact.
+    if grant_subject.is_some() {
+        decision
+            .entry("authority_source".into())
+            .or_insert(json!("operator"));
+        decision
+            .entry("decided_by".into())
+            .or_insert(json!("operator"));
+        decision
+            .entry("attested_by".into())
+            .or_insert(json!("question-board"));
+        if affirmative {
+            // The row carries the canonical decision the gate reads; the
+            // user's exact words stay on it as rationale.
+            decision.insert("rationale".into(), json!(answer));
+        }
+    }
     if matches!(authority, "crown" | "agent" | "beastmode") {
         if let Some(node) = node {
             let connection = crate::backlog::open(&req.graph)?;
@@ -791,6 +929,55 @@ fn make_decision(
         "source": "target",
         "data": decision,
     }))
+}
+
+/// Operator law only. States 2/3 of the provenance resolver (no harness
+/// identity: the question board, the attention arm, an operator terminal)
+/// and an explicit `--authority operator` are the two shapes allowed to mint
+/// the grant row; a resolved agent authority never is.
+fn operator_can_grant(req: &ClearRequest) -> bool {
+    matches!(
+        req.provenance
+            .get("authority_source")
+            .and_then(Value::as_str),
+        None | Some("") | Some("operator")
+    )
+}
+
+/// The closed set of board answers that read as the affirmative grant.
+/// Exact-match polarity like the gate's own constant check: free prose never
+/// parses, so an answer outside the set still records law at the subject
+/// (the gate reads it as a conflict and refuses) but grants nothing.
+fn is_affirmative_merge_answer(answer: &str) -> bool {
+    let normalized = answer
+        .trim()
+        .trim_end_matches(['.', '!', '?', ';', ',', ':'])
+        .to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "merge it now"
+            | "merge now"
+            | "merge it"
+            | "merge"
+            | "merge authorized for this head"
+            | "yes"
+            | "y"
+            | "approve"
+            | "approved"
+            | "lgtm"
+            | "ship it"
+            | "go ahead"
+            | "do it"
+    )
+}
+
+/// The question's merge-grant subject, when it is one.
+fn merge_grant_subject(question_event: &Value) -> Option<String> {
+    let subject = question_event
+        .get("data")
+        .and_then(|data| data.get("subject"))
+        .and_then(Value::as_str)?;
+    crate::merge_grant::parse_head_grant_subject(subject).map(|_| subject.to_string())
 }
 
 fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, String) {
