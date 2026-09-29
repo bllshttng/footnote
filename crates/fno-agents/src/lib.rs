@@ -170,6 +170,7 @@ pub mod gc_adopt;
 pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
+pub mod gc_open_pr_guard;
 pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
@@ -1484,6 +1485,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_sent",
     "pr_nudge_escalated",
     "pr_nudge_paused",
+    // Open-PR reap guard (daemon-emitted): the retirement sweep refused to
+    // reap a driver row whose node PR is open with no recorded termination.
+    // Filed once per row, beside the reap-keep task it announces.
+    "worker_reap_refused",
     // Burn arm (daemon-emitted): a worker whose spend or node age grows on
     // a flat sample is woken; three unanswered wakes escalate as one fleet
     // task through the pr-nudge store.
