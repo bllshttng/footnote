@@ -108,6 +108,9 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # value instead of the one the code under test states. Keeping NO_COLOR
     # visible here reproduces that false positive on the Python side.
     "NO_COLOR",
+    # A developer's visual-motion preference must not change the splash output
+    # seen by tests or subprocesses.
+    "REDUCED_MOTION",
     # The mux client's light-background probe (digest_overlay.rs theme_for):
     # a developer's terminal reports its own palette, and a suite must not
     # resolve the theme from the machine it happens to run on.

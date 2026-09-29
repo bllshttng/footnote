@@ -174,7 +174,7 @@ def test_the_shards_cover_every_step() -> None:
 
 
 def test_pytest_runs_in_every_pytest_shard() -> None:
-    """The expensive half runs once in each of the thirteen pytest legs."""
+    """The PR shards split pytest from the scheduled slow pane journeys."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
@@ -184,6 +184,20 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
         if step in _selected(names, flag, globs, shard, total)
     ]
     assert carriers == [("smoke-pytest", shard) for shard in range(1, 14)]
+    pytest_step = next(
+        command
+        for name, _cwd, command in smoke_steps(_REPO_ROOT)
+        if name == "Pytest (unit + integration)"
+    )
+    assert "-m 'not slow_e2e'" in pytest_step
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    lane = workflow["jobs"]["slow-e2e"]
+    assert lane["if"] == (
+        "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
+    )
+    runs = "\n".join(step.get("run", "") for step in lane["steps"])
+    assert "-m slow_e2e" in runs
+    assert "cli/tests/agents/test_pane_journeys.py" in runs
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:

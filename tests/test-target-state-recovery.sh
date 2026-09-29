@@ -43,12 +43,11 @@ if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
   case " $* " in
     *" --field _archived"*) printf 'null\n'; exit 0 ;;
     *" --field id"*)
-      if [[ "${3:-}" == "--strict" ]]; then
-        printf '%s\n' "${4:-}"
-      else
-        printf '%s\n' "${3:-}"
-      fi
-      exit 0 ;;
+      node_id="${3:-unknown}"
+      [[ "$node_id" == "--strict" ]] && node_id="${4:-unknown}"
+      printf '%s\n' "$node_id"
+      exit 0
+      ;;
     *" --field status"*)    printf 'in_review\n'; exit 0 ;;
     *" --field pr_number"*) printf '4242\n'; exit 0 ;;
   esac
