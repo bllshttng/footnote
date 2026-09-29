@@ -98,7 +98,6 @@ cli/tests/integration/test_install_frontdoor_journey.py::test_authorized_target_
 cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_native_update_repaint.py::_update::pytest.skip  # CI pytest env builds no dev fno-agents binary
-cli/tests/integration/test_no_hardcoded_paths.py::test_ac1_hp_no_hardcoded_paths_in_tree::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_provider_usage_live.py::test_live_provider_usage_has_numeric_usage_and_future_resets::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_rank_operator_only.py::_binary::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # on main before this ratchet: the sandbox helper skips when no dev fno-agents build exists
