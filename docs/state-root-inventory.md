@@ -238,9 +238,9 @@ If you are cleaning up an install and hit one of these, find the writer first. I
 
 ## Foreign and cwd-relative debris
 
-A `.fno/`, `.claude/`, `.abilities/`, or `.impeccable/` directory nested *inside* the state root is not a root writer. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes --> Each holds project-relative paths written by a process whose working directory happened to be the state root. When `FNO_REPO_ROOT` is unset and `git rev-parse` fails, `paths.resolve_repo_root()` falls back to `Path.cwd()`. Foreign plugins do the same with their own literals.
+An unexpected plugin or project-state directory nested *inside* the state root is not a root writer. Each holds project-relative paths written by a process whose working directory happened to be the state root. When `FNO_REPO_ROOT` is unset and `git rev-parse` fails, `paths.resolve_repo_root()` falls back to `Path.cwd()`. Foreign plugins do the same with their own literals.
 
-Leave them. The finding is the cwd fallback, not the directories it produced. `.abilities` is the pre-rename state-root name, so anything under it predates the rename. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
+Leave them. The finding is the cwd fallback, not the directories it produced.
 
 ## The project journal and `FNO_EVENTS_PATH`
 

@@ -515,14 +515,12 @@ def phase_seconds_left() -> Optional[float]:
 
 
 def _ritual_timeout() -> float:
-    """Cold-ritual subprocess timeout: the sweep slice minus a 10s reserve so
-    the verb times out as an ordinary recorded failure BEFORE the phase alarm
-    fires - an alarm cut mid-subprocess would skip the caller's persist and
-    replay the same ritual every tick (AC6)."""
+    """Cap one cold ritual at 135s, above the measured 128s high, and leave
+    15s under the drain's attempt floor to persist before the phase alarm."""
     left = phase_seconds_left()
     if left is None:
-        return 300.0
-    return min(300.0, left - 10)
+        return _RITUAL_TIMEOUT_CAP_S
+    return min(_RITUAL_TIMEOUT_CAP_S, left - 10)
 
 
 def _gh_budget_backoff_left() -> float:
@@ -1269,6 +1267,7 @@ def _run_tick(
 
 # A real merge took about 120s, and head attempts ran 115-128s under load.
 _MERGE_FLOOR_S = 150.0
+_RITUAL_TIMEOUT_CAP_S = 135.0
 
 
 def run_execute_queue(

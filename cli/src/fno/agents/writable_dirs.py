@@ -191,12 +191,15 @@ def _state_roots() -> list[Path]:
     except Exception:
         pass
     try:
-        from fno.paths import agents_registry_path
+        from fno.paths import agents_registry_path, agents_runtime_registry_path
 
-        # The registry write directory; FNO_AGENTS_HOME relocates it independently of state_dir.
+        # The registry write directories; FNO_AGENTS_HOME relocates the Rust runtime independently of state_dir.
         registry_dir = agents_registry_path().parent
         if not any(registry_dir.is_relative_to(root) for root in out):
             out.append(registry_dir)
+        runtime_registry_dir = agents_runtime_registry_path().parent
+        if not any(runtime_registry_dir.is_relative_to(root) for root in out):
+            out.append(runtime_registry_dir)
     except Exception:
         pass
     return out
