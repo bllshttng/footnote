@@ -1,6 +1,6 @@
 # The court scope fold
 
-`fno agents court -n` folds every crown's scope into its row: counts by
+`fno agents org -n` folds every crown's scope into its row: counts by
 status for the whole scope, the active nodes with their worker, PR and
 session ids, and the omitted count stated rather than implied. Design
 notes gathered here.

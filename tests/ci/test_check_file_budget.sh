@@ -75,6 +75,12 @@ check 'a deleted module does not offset nested growth' 1 'added +120 lines (adde
 fresh; git mv scripts/tool.py cli/src/fno/tool.py; commit
 check 'a module moved into the tree counts as growth' 1 'added +150 lines (added-line budget 30'
 
+fresh; git mv cli/src/fno/keep.py cli/src/fno/renamed.py; commit
+check 'an in-tree move counts as its content edit, not full growth' 0 'cli/src/fno added +0, net +0, budget 30'
+
+fresh; git mv cli/src/fno/dead.py cli/src/fno/moved.py; lines 12 grow >> cli/src/fno/moved.py; commit
+check 'an in-tree move with edits counts only the edit' 0 'cli/src/fno added +12, net +12, budget 30'
+
 fresh; mkdir -p cli/src/fno/tests; lines 150 t > cli/src/fno/tests/test_x.py; commit
 check 'test files do not count against the tree' 0 'cli/src/fno added +0, net +0, budget 30'
 
