@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn tear_inside_the_author_value_is_not_a_stable_refusal() {
+    fn probe_refusal_rows() {
         // METADATA torn mid-value answers all three fields with the author
         // truncated. "Jason Noah Ch" is not a stranger's answer: it is a
         // prefix of the one string the rule matches on, and stamping it as a
@@ -1714,10 +1714,7 @@ mod tests {
             "a torn prefix is an instrument failure: re-ask it"
         );
         assert!(!refusal_is_stable(false, "fno"));
-    }
 
-    #[test]
-    fn a_foreign_name_with_the_exact_owner_is_a_stable_refusal() {
         let e = decide_identity("notfno", OWNER_AUTHOR).unwrap_err();
         assert!(e.contains("name=notfno"), "{e}");
         assert!(
@@ -1725,6 +1722,7 @@ mod tests {
             "an exact owner is complete, not a torn prefix"
         );
     }
+
 
     #[test]
     fn a_receipt_never_prints_a_blank_version() {
@@ -1741,10 +1739,20 @@ mod tests {
     }
 
     #[test]
-    fn identity_accepts_our_package() {
+    fn identity_rows() {
         assert!(decide_identity("fno", "Jason Noah Choi").is_ok());
         // case-insensitive name, author embedded in a longer string
         assert!(decide_identity("FNO", "Jason Noah Choi <j@x>").is_ok());
+
+        let e = decide_identity("notfno", "Jason Noah Choi").unwrap_err();
+        assert!(e.contains("name=notfno"), "{e}");
+
+        // A squatter could publish a package literally named `fno`; the author
+        // marker is what stops us running it (AC3-EDGE).
+        let e = decide_identity("fno", "Mallory").unwrap_err();
+        assert!(e.contains("author=Mallory"), "{e}");
+
+        assert!(decide_identity("fno", "").is_err());
     }
 
     #[test]
@@ -1769,27 +1777,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn identity_rejects_foreign_name() {
-        let e = decide_identity("notfno", "Jason Noah Choi").unwrap_err();
-        assert!(e.contains("name=notfno"), "{e}");
-    }
+
+
 
     #[test]
-    fn identity_rejects_foreign_author() {
-        // A squatter could publish a package literally named `fno`; the author
-        // marker is what stops us running it (AC3-EDGE).
-        let e = decide_identity("fno", "Mallory").unwrap_err();
-        assert!(e.contains("author=Mallory"), "{e}");
-    }
-
-    #[test]
-    fn identity_rejects_empty_author() {
-        assert!(decide_identity("fno", "").is_err());
-    }
-
-    #[test]
-    fn stale_wheel_names_version_and_remedy() {
+    fn stale_wheel_rows() {
         // AC1-EDGE: readable version -> named version + source-install fallback.
         let m = stale_wheel_message(true, Some("0.2.1")).unwrap();
         assert!(m.contains("(0.2.1)"), "{m}");
@@ -1798,26 +1790,17 @@ mod tests {
             m.contains("uv tool install --force --compile-bytecode --from <repo>/cli fno"),
             "{m}"
         );
-    }
 
-    #[test]
-    fn stale_wheel_pre_rename_script_without_version() {
         // The old `bin/fno` is present but metadata unreadable: still a stale
         // wheel, message omits the version clause rather than faking one.
         let m = stale_wheel_message(true, None).unwrap();
         assert!(m.contains("predates this shim"), "{m}");
         assert!(!m.contains("()"), "{m}");
-    }
 
-    #[test]
-    fn stale_wheel_old_version_without_script() {
         // A pre-0.3.0 version with no readable `bin/fno` is still stale.
         let m = stale_wheel_message(false, Some("0.2.1")).unwrap();
         assert!(m.contains("(0.2.1)"), "{m}");
-    }
 
-    #[test]
-    fn stale_wheel_none_when_not_stale() {
         // Neither signal readable -> None, so the caller keeps the generic error.
         assert!(stale_wheel_message(false, None).is_none());
         // A modern version (>= 0.3.0) with no pre-rename script is a broken
@@ -1825,6 +1808,9 @@ mod tests {
         assert!(stale_wheel_message(false, Some("0.3.0")).is_none());
         assert!(stale_wheel_message(false, Some("1.0.0")).is_none());
     }
+
+
+
 
     /// A unique temp dir laid out as a valid fno checkout (`cli/pyproject.toml`).
     fn valid_checkout() -> PathBuf {
@@ -1841,15 +1827,12 @@ mod tests {
     }
 
     #[test]
-    fn install_source_defaults_to_by_name() {
+    fn install_source_rows() {
         // US4/AC (end-user path): no env, no pin -> "fno", byte-identical.
         assert_eq!(install_source(None, None).unwrap(), "fno");
         assert_eq!(install_source(Some(""), None).unwrap(), "fno");
         assert_eq!(install_source(Some("   "), Some("  ")).unwrap(), "fno");
-    }
 
-    #[test]
-    fn install_source_honors_override() {
         assert_eq!(
             install_source(Some("/tmp/fno-0.1.0-py3-none-any.whl"), None).unwrap(),
             "/tmp/fno-0.1.0-py3-none-any.whl"
@@ -1858,20 +1841,14 @@ mod tests {
             install_source(Some("  fno==0.1.0  "), None).unwrap(),
             "fno==0.1.0"
         );
-    }
 
-    #[test]
-    fn install_source_env_wins_over_pin() {
         // AC4-EDGE: rung-1 env override beats a set rung-2 pin.
         let root = valid_checkout();
         assert_eq!(
             install_source(Some("/env/wheel.whl"), Some(root.to_str().unwrap())).unwrap(),
             "/env/wheel.whl"
         );
-    }
 
-    #[test]
-    fn install_source_valid_pin_expands_to_cli() {
         // US1/AC1-HP: a valid pin -> `<checkout>/cli` (the wheel-build path).
         let root = valid_checkout();
         assert_eq!(
@@ -1880,8 +1857,11 @@ mod tests {
         );
     }
 
+
+
+
     #[test]
-    fn install_source_invalid_pin_fails_loud() {
+    fn install_source_failure_rows() {
         // US3/AC3-FR: a set-but-invalid pin errors naming config.dev.source and
         // the bad path; it does NOT fall through to "fno".
         let e = install_source(None, Some("/no/such/checkout"))
@@ -1889,16 +1869,14 @@ mod tests {
             .msg;
         assert!(e.contains("config.dev.source"), "{e}");
         assert!(e.contains("/no/such/checkout"), "{e}");
-    }
 
-    #[test]
-    fn install_source_pin_at_repo_root_without_cli_fails() {
         // A pin to a dir that exists but lacks cli/pyproject.toml is invalid
         // (strict check catches "pinned the repo root, not cli/").
         let root = env::temp_dir().join(format!("fno-boot-bare-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         assert!(install_source(None, Some(root.to_str().unwrap())).is_err());
     }
+
 
     #[test]
     fn expand_tilde_expands_leading_home() {
@@ -1919,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_dev_source_reads_the_pin() {
+    fn dev_source_rows() {
         // US2: pure parse of [dev].source from a flat config.toml body.
         assert_eq!(
             parse_dev_source("[dev]\nsource = \"/home/me/fno\"\n").as_deref(),
@@ -1930,10 +1908,7 @@ mod tests {
             parse_dev_source("[dev]\nsource = \"  /p  \"\n").as_deref(),
             Some("/p")
         );
-    }
 
-    #[test]
-    fn parse_dev_source_degrades_on_missing_and_malformed() {
         // AC2-ERR: malformed/absent config is "no pin", never fatal.
         assert_eq!(parse_dev_source("not valid toml {{{"), None);
         assert_eq!(parse_dev_source(""), None);
@@ -1941,8 +1916,9 @@ mod tests {
         assert_eq!(parse_dev_source("[dev]\nsource = \"\"\n"), None);
     }
 
+
     #[test]
-    fn locate_failure_names_the_path_and_the_reason() {
+    fn locate_failure_rows() {
         // The whole point: the terminal must show WHICH path was built and WHY it
         // was rejected. The generic message named neither, which is how two
         // separate sessions concluded the resolver looks for `fno` when it looks
@@ -1951,6 +1927,39 @@ mod tests {
         let m = locate_failure_message(Some(&p), false, "fno", None);
         assert!(m.contains("/u/.local/share/uv/tools/fno/bin/fno-py"), "{m}");
         assert!(m.contains("nothing exists at that path"), "{m}");
+
+        // PyPI-by-name and a local checkout fail for different reasons, so the
+        // message must say which rung ran. `fno` is the PyPI default; anything
+        // else came from config.dev.source / FNO_BOOTSTRAP_WHEEL.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let pypi = locate_failure_message(Some(&p), false, "fno", None);
+        assert!(pypi.contains("installed from: fno"), "{pypi}");
+        let local = locate_failure_message(Some(&p), false, "/home/me/footnote/cli", None);
+        assert!(
+            local.contains("installed from: /home/me/footnote/cli"),
+            "{local}"
+        );
+
+        // Present-but-unusable and absent are different bugs with different
+        // fixes, so they must not collapse into one message.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let present = locate_failure_message(Some(&p), true, "fno", None);
+        assert!(present.contains("not an executable file"), "{present}");
+        assert!(!present.contains("nothing exists"), "{present}");
+
+        // `uv tool dir` unreadable -> no path was ever built; claiming we
+        // "looked for" a path would be a lie.
+        let m = locate_failure_message(None, false, "fno", None);
+        assert!(m.contains("no path built"), "{m}");
+        assert!(m.contains("uv tool dir"), "{m}");
+
+        // When the stale-wheel diagnosis applies it is the actionable one, so it
+        // must survive alongside the new path/reason lines.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let stale = stale_wheel_message(true, Some("0.2.1"));
+        let m = locate_failure_message(Some(&p), false, "fno", stale);
+        assert!(m.contains("/tools/fno/bin/fno-py"), "{m}");
+        assert!(m.contains("(0.2.1)"), "{m}");
     }
 
     #[test]
@@ -1985,51 +1994,9 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[test]
-    fn install_wheel_retries_only_the_enotempty_signature_and_verifies_the_marker() {
-        // A fake uv that fails twice with the incident signature, then succeeds
-        // and materializes the marker tree (entrypoint + one .pyc). install_wheel
-        // must absorb both failures, run three attempts total, and accept the
-        // result only because the marker verifies.
-        let root = env::temp_dir().join(format!("fno-uvfake-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        let tool_dir = root.join("tools");
-        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
-        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__"))
-            .unwrap();
-        fs::write(
-            tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"),
-            "",
-        )
-        .unwrap();
-        let entry = tool_dir.join("fno/bin/fno-py");
-        fs::write(&entry, "#!/bin/sh\n").unwrap();
-        // Executable, as uv writes it: the marker verifies with `-x`.
-        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
-        let counter = root.join("attempts");
-        let script = format!(
-            "#!/bin/sh\n\
-             case \"$1 $2\" in\n\
-             'tool dir') echo '{}'; exit 0;;\n\
-             'tool install') n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
-             if [ $n -lt 3 ]; then \
-             echo 'error: failed to remove directory `/x/fno/lib`: Directory not empty (os error 66)' >&2; exit 2; \
-             fi; exit 0;;\n\
-             esac; exit 64\n",
-            tool_dir.display(),
-            c = counter.display()
-        );
-        let uv = root.join("uv");
-        fs::write(&uv, script).unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
-
-        install_wheel(&uv, "fno").expect("retry absorbs the signature race");
-        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "3");
-        fs::remove_dir_all(&root).ok();
-    }
 
     #[test]
-    fn install_wheel_retries_a_uv_spawn_that_is_transiently_busy() {
+    fn install_wheel_retry_rows() {
         // ETXTBSY at exec (os error 26): a writer still holds the uv binary
         // open when we spawn it. Seen on a 2026-08-18 CI run against the fake
         // uv a test had written microseconds earlier. Reproduced here by
@@ -2084,6 +2051,46 @@ mod tests {
         install_wheel(&uv, "fno").expect("a busy-at-exec uv is retried, not fatal");
         assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
         writer.join().unwrap();
+        fs::remove_dir_all(&root).ok();
+
+        // A fake uv that fails twice with the incident signature, then succeeds
+        // and materializes the marker tree (entrypoint + one .pyc). install_wheel
+        // must absorb both failures, run three attempts total, and accept the
+        // result only because the marker verifies.
+        let root = env::temp_dir().join(format!("fno-uvfake-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
+        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__"))
+            .unwrap();
+        fs::write(
+            tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"),
+            "",
+        )
+        .unwrap();
+        let entry = tool_dir.join("fno/bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        // Executable, as uv writes it: the marker verifies with `-x`.
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        let counter = root.join("attempts");
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             'tool install') n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
+             if [ $n -lt 3 ]; then \
+             echo 'error: failed to remove directory `/x/fno/lib`: Directory not empty (os error 66)' >&2; exit 2; \
+             fi; exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display(),
+            c = counter.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        install_wheel(&uv, "fno").expect("retry absorbs the signature race");
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "3");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2562,31 +2569,10 @@ mod tests {
         assert!(m.contains("FNO_BOOTSTRAP_WHEEL"), "{m}");
     }
 
-    #[test]
-    fn install_failure_message_redacts_credentials_in_the_source() {
-        // Redaction lives inside the builder so no caller can leak by forgetting.
-        let m = install_failure_message("https://user:tok@example.com/wheels/fno.whl");
-        assert!(!m.contains("tok"), "{m}");
-        assert!(m.contains("<redacted>@example.com"), "{m}");
-    }
+
 
     #[test]
-    fn locate_failure_names_the_install_source() {
-        // PyPI-by-name and a local checkout fail for different reasons, so the
-        // message must say which rung ran. `fno` is the PyPI default; anything
-        // else came from config.dev.source / FNO_BOOTSTRAP_WHEEL.
-        let p = PathBuf::from("/tools/fno/bin/fno-py");
-        let pypi = locate_failure_message(Some(&p), false, "fno", None);
-        assert!(pypi.contains("installed from: fno"), "{pypi}");
-        let local = locate_failure_message(Some(&p), false, "/home/me/footnote/cli", None);
-        assert!(
-            local.contains("installed from: /home/me/footnote/cli"),
-            "{local}"
-        );
-    }
-
-    #[test]
-    fn locate_failure_never_prints_a_credential() {
+    fn credential_rows() {
         // FNO_BOOTSTRAP_WHEEL can be an authenticated URL, and this message is
         // both printed and persisted. Redaction lives INSIDE the builder so no
         // caller can leak by forgetting; assert through the builder, not the
@@ -2601,6 +2587,11 @@ mod tests {
         assert!(!m.contains("s3cr3t"), "{m}");
         assert!(!m.contains("deadbeef"), "{m}");
         assert!(m.contains("pkgs.example.com"), "{m}");
+
+        // Redaction lives inside the builder so no caller can leak by forgetting.
+        let m = install_failure_message("https://user:tok@example.com/wheels/fno.whl");
+        assert!(!m.contains("tok"), "{m}");
+        assert!(m.contains("<redacted>@example.com"), "{m}");
     }
 
     #[test]
@@ -2635,7 +2626,7 @@ mod tests {
     }
 
     #[test]
-    fn source_key_is_a_digest_not_the_source() {
+    fn source_key_rows() {
         // The stamp lives in a shared cache dir, so the raw source must never
         // reach it. A digest also means the key cannot be reversed into a token.
         let secret = "https://ci:s3cr3t@host/fno.whl";
@@ -2646,10 +2637,7 @@ mod tests {
         // Still a stable identity: same source in, same key out.
         assert_eq!(source_key(secret), k);
         assert_ne!(source_key("fno"), k);
-    }
 
-    #[test]
-    fn source_key_resolves_relative_paths_before_keying() {
         // A relative FNO_BOOTSTRAP_WHEEL names different artifacts from different
         // working directories. Keying on the literal string would let a broken
         // install under checkout A suppress a valid first install under checkout
@@ -2668,10 +2656,7 @@ mod tests {
             source_key(a.to_str().unwrap()),
             source_key(other.join("cli").to_str().unwrap())
         );
-    }
 
-    #[test]
-    fn source_key_does_not_canonicalize_a_bare_spec() {
         // `fno` is a PyPI name, not a path. Canonicalizing it would resolve
         // against the cwd whenever a file or dir of that name sits there (this
         // repo has `crates/fno`), making the by-name rung's key cwd-dependent.
@@ -2686,38 +2671,13 @@ mod tests {
         assert_eq!(canonical_source("/no/such/wheel.whl"), "/no/such/wheel.whl");
     }
 
-    #[test]
-    fn locate_failure_distinguishes_present_from_absent() {
-        // Present-but-unusable and absent are different bugs with different
-        // fixes, so they must not collapse into one message.
-        let p = PathBuf::from("/tools/fno/bin/fno-py");
-        let present = locate_failure_message(Some(&p), true, "fno", None);
-        assert!(present.contains("not an executable file"), "{present}");
-        assert!(!present.contains("nothing exists"), "{present}");
-    }
+
+
+
+
 
     #[test]
-    fn locate_failure_without_a_tool_dir_says_so() {
-        // `uv tool dir` unreadable -> no path was ever built; claiming we
-        // "looked for" a path would be a lie.
-        let m = locate_failure_message(None, false, "fno", None);
-        assert!(m.contains("no path built"), "{m}");
-        assert!(m.contains("uv tool dir"), "{m}");
-    }
-
-    #[test]
-    fn locate_failure_keeps_the_stale_wheel_remedy() {
-        // When the stale-wheel diagnosis applies it is the actionable one, so it
-        // must survive alongside the new path/reason lines.
-        let p = PathBuf::from("/tools/fno/bin/fno-py");
-        let stale = stale_wheel_message(true, Some("0.2.1"));
-        let m = locate_failure_message(Some(&p), false, "fno", stale);
-        assert!(m.contains("/tools/fno/bin/fno-py"), "{m}");
-        assert!(m.contains("(0.2.1)"), "{m}");
-    }
-
-    #[test]
-    fn cached_failure_is_honest_about_not_reinstalling() {
+    fn cached_failure_rows() {
         // AC: the fast-fail must preserve the original diagnosis, say it is a
         // repeat, and name the exact file to remove for an immediate retry.
         let stamp = PathBuf::from("/c/fno-bootstrap/provision-failed");
@@ -2729,10 +2689,7 @@ mod tests {
             "{m}"
         );
         assert!(m.contains("rm /c/fno-bootstrap/provision-failed"), "{m}");
-    }
 
-    #[test]
-    fn cached_failure_honored_inside_the_cooldown() {
         // The severity multiplier this node exists for: a second invocation
         // inside the window must NOT re-run the 18-package install.
         let (msg, age) = decide_cached_failure("1000\tfno\nboom", 1000 + 30, "fno").unwrap();
@@ -2742,20 +2699,14 @@ mod tests {
         assert!(
             decide_cached_failure("1000\tfno\nboom", 1000 + FAILURE_COOLDOWN_SECS, "fno").is_some()
         );
-    }
 
-    #[test]
-    fn cached_failure_expires() {
         // One second past the window re-provisions, so a transient breakage
         // heals on its own without the operator knowing the cache exists.
         assert!(
             decide_cached_failure("1000\tfno\nboom", 1000 + FAILURE_COOLDOWN_SECS + 1, "fno")
                 .is_none()
         );
-    }
 
-    #[test]
-    fn cached_failure_is_keyed_to_the_install_source() {
         // The three install rungs are separate channels. A PyPI failure must not
         // suppress a local-checkout install, and repointing config.dev.source (or
         // setting FNO_BOOTSTRAP_WHEEL) must take effect on the very next call
@@ -2774,8 +2725,11 @@ mod tests {
         assert!(decide_cached_failure(&local, 1030, &source_key("/home/me/other/cli")).is_none());
     }
 
+
+
+
     #[test]
-    fn cached_failure_fails_open_on_every_unreadable_shape() {
+    fn cached_failure_failopen_rows() {
         // A negative cache that can wedge the bootstrap shut is worse than the
         // bug it fixes, so anything we cannot read means "re-provision".
         assert!(decide_cached_failure("", 2000, "fno").is_none()); // empty
@@ -2787,10 +2741,7 @@ mod tests {
                                                                                    // Future-dated (clock skew / restored backup): never a cooldown that
                                                                                    // outlives the clock.
         assert!(decide_cached_failure("9999\tfno\nboom", 1000, "fno").is_none());
-    }
 
-    #[test]
-    fn cached_failure_multiline_body_survives_intact() {
         // The stamped message is itself multi-line (source + path + reason +
         // remedy), so only the FIRST newline may end the header.
         let (msg, _) =
@@ -2799,8 +2750,9 @@ mod tests {
         assert_eq!(msg, "line one\nline two\nline three");
     }
 
+
     #[test]
-    fn failure_stamp_round_trips_through_its_own_writer_format() {
+    fn failure_stamp_rows() {
         // Guards the writer/reader pair against drifting apart: the exact bytes
         // write_failure_stamp emits must be what decide_cached_failure accepts.
         let source = "https://ci:s3cr3t@pkgs.example.com/fno.whl?token=deadbeef";
@@ -2817,27 +2769,23 @@ mod tests {
         let (back, age) = decide_cached_failure(&raw, 1005, &source_key(source)).unwrap();
         assert_eq!(back, msg);
         assert_eq!(age, 5);
-    }
 
-    #[test]
-    fn failure_stamp_sits_beside_the_sentinel() {
         // Same cache dir, distinct name: one operator-facing place to look, and
         // `rm -rf` of that dir is a complete reset.
         assert_eq!(failure_stamp_path().parent(), sentinel_path().parent());
         assert_ne!(failure_stamp_path(), sentinel_path());
     }
 
+
     #[test]
-    fn strip_ansi_removes_color_codes() {
+    fn strip_ansi_rows() {
         // matches the real `uv tool dir` colorized output shape
         let colored = "\u{1b}[36m/Users/me/.local/share/uv/tools\u{1b}[39m";
         assert_eq!(strip_ansi(colored), "/Users/me/.local/share/uv/tools");
-    }
 
-    #[test]
-    fn strip_ansi_leaves_plain_text() {
         assert_eq!(strip_ansi("/plain/path"), "/plain/path");
     }
+
 
     // --: the packaged-sibling resolution arm ------------------------
 
