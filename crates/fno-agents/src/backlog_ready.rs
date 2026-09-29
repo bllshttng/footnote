@@ -773,12 +773,6 @@ pub(crate) fn node_field_hold(entry: &Value) -> HoldState {
     node_field_read(entry).state
 }
 
-/// Validate one hold block (plan frontmatter or node field): four required
-/// fields; missing, blank, or unparseable is INVALID (refuse, never raise).
-pub(crate) fn hold_block_state(block: &Value) -> HoldState {
-    hold_block_read(block).state
-}
-
 /// One hold read: the state plus the fields a receipt renders, and the
 /// INVALID reason or the passed-review note.
 #[derive(Debug, Clone)]

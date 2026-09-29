@@ -38,12 +38,6 @@ pub enum Verdict {
     Unavailable { detail: String },
 }
 
-pub(crate) fn verdict_for(pr: Option<u64>) -> Verdict {
-    verdict_for_in(&AgentsHome::from_env().root(), pr)
-}
-
-/// The same read against an explicit home; the seam the tests use so they
-/// never race the process env.
 pub(crate) fn verdict_for_in(home: &std::path::Path, pr: Option<u64>) -> Verdict {
     let path = record_path(home);
     let text = match std::fs::read_to_string(&path) {
