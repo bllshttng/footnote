@@ -1059,7 +1059,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                         "cost unmeasured".to_string()
                     };
                     println!(
-                        "  {id}: attempts={} graded={} accepted={} rate={:.1}% [{:.1},{:.1}] median={}s {cost}",
+                        "  {id}: attempts={} graded={} accepted={} rate={:.1}% [{:.1},{:.1}] median={}s in={} out={} cache_r={} cache_w={} {cost}",
                         c["attempts"],
                         c["graded"],
                         c["accepted"],
@@ -1067,6 +1067,10 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                         lo * 100.0,
                         hi * 100.0,
                         c["median_wall_s"],
+                        c["tokens"]["input"],
+                        c["tokens"]["output"],
+                        c["tokens"]["cache_read"],
+                        c["tokens"]["cache_write"],
                     );
                 }
             }
