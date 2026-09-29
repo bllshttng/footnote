@@ -101,6 +101,9 @@ pub struct Behavior {
     /// incarnation serving the new build. The fake models the protocol side
     /// of the swap; the state file is the script's to rewrite.
     pub upgrade_marker: Option<(String, String)>,
+    /// Close the connection on `turn/start` without answering: the ack-loss
+    /// shape the seed lane must read as in-flight, never as a failed delivery.
+    pub unacked_turn_start: bool,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -130,6 +133,7 @@ impl Default for Behavior {
             loaded_ids: vec!["thread-t".to_string()],
             thread_status: "idle".to_string(),
             upgrade_marker: None,
+            unacked_turn_start: false,
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -225,6 +229,12 @@ impl Behavior {
 
     pub fn with_upgrade_marker(mut self, marker: &str, version: &str) -> Self {
         self.upgrade_marker = Some((marker.to_string(), version.to_string()));
+        self
+    }
+
+    /// Close the connection on `turn/start` without answering.
+    pub fn with_unacked_turn_start(mut self) -> Self {
+        self.unacked_turn_start = true;
         self
     }
 }
@@ -438,6 +448,9 @@ async fn serve(conn: UnixStream, home: std::path::PathBuf, behavior: Behavior) {
                 }
             }
             Some("turn/start") => {
+                if behavior.unacked_turn_start {
+                    return;
+                }
                 turn_n += 1;
                 steered = false;
                 let turn_id = format!("turn-{turn_n}");

@@ -1,64 +1,50 @@
 # Test-audit campaigns
 
-Running home for the global test audit: one campaign PR per subsystem, one ledger per campaign in this folder. Method, value bar, and junk patterns live in the test-audit skill (`skills/test-audit/`). Campaign order of work is that skill's `CAMPAIGN.md`. Optimize for confidence, not deletion count.
+Running home for footnote's test-cut campaigns: one campaign PR per campaign key, one ledger per campaign in this folder. Method and junk patterns live in the test-audit skill (`skills/test-audit/`). Footnote campaigns run the keep rule below, which replaces the skill's value bar, retention bar and ledger shape. Target: at most 15,447 declarations, half the 30,893 measured at 325d7e4ddb (2026-09-28).
 
 ## Census
 
-Measured on main (2026-09-25). Command for Python (the naive `^def test_` count misses 2,078 class-method tests):
+The count of record, re-run at each campaign base and after each merge. Command for Python (the naive `^def test_` count misses the class-method tests):
 
 ```sh
 git ls-files -z '*.py' | xargs -0 grep -hcE '^[[:space:]]*(async )?def test_' | awk '{s+=$1} END {print s}'
-git ls-files -z 'crates/*.rs' | xargs -0 grep -hcE '#\[(tokio::)?test\]' | awk '{s+=$1} END {print s}'
+git ls-files -z 'crates/*.rs' | xargs -0 grep -hcE '#\[(tokio::)?test' | awk '{s+=$1} END {print s}'
 ```
 
-20,337 Python declarations in 1,130 files. 10,137 Rust in 672 files. About 287 test-shaped shell files. About 30,500 declarations before parametrize expansion.
+At 325d7e4ddb: 19,570 Python declarations in 1,115 files. 11,323 Rust in 772 files. 30,893 total, before parametrize expansion. The Rust command is the prefix form `'#\[(tokio::)?test'`: the `\]`-terminated form misses 92 `#[tokio::test(flavor ...)]` declarations.
 
-The src-read column counts tests in files that read repo source or docs (`SKILL.md`, `AGENTS.md`, `getsource`, `.md` read_text). It is a suspicion signal for the exact-source-grep junk pattern, not a verdict.
+## Keep rule
 
-| Python owner (tests, files) | src-read | Rust owner (tests) |
-|---|---|---|
-| fno.agents 4,908 / 235: registry 977, harnesses 631, dispatch 427, cli 354, mux_spawn 325, spawn_defaults 312, harness_map 250, spawn_gate 203, session_truth 169, account_env 160 | 33% | fno-agents root files 4,747 (king 322, spawn 209, client 207, claude 179, daemon 137, gc 135, claims 125, codex 107) |
-| fno.graph 2,991 / 150: store 1,192, cli 345, _reconcile 303, _intake 264, ladder 129, collision 97 | 16% | fno-agents/tests 1,125; loopcheck 440; daemon 308; backlog 167 |
-| fno.claims 1,101 / 40 (claim-owner files alone: about 550) | 19% | claims family 189 |
-| fno.adapters 1,027 / 26 | 0% | - |
-| no fno import (CI-gate, hook, skill tests) 882 / 106 | 64% | - |
-| fno.pr 821, pr_watch 505, review 143, review_capability 108 | 6-26% | pr/merge/review 484 |
-| fno.config 716, paths 545, config_cli 88 | 26-36% | config/paths/route/provider 337 |
-| fno.plan 541, retro 225, scoreboard 186, provenance 189 | 12-41% | plan/acceptance/manifest 157 |
-| fno.mail 409, events 400, bus 140, relay 101 | 27-31% | mail 87, event 72 |
-| repo tests/ Python 396 | 72% | - |
-| long tail: about 60 owners, 3,700 tests | varies | fno crate (mux) 2,120: client 506 + client_tests.rs, server 282, squad 97; loopcheck/finalize family 1,007; daemon/gc 635; king/crown/reign 700 |
+One contract, one keeper. The burden sits on the test. A deletion owes no per-test evidence.
 
-## Campaign queue
+- When its ledger row names the one contract a test alone guards, the test stays. It must also name a credible failure that turns it red. A test that cannot name both is deleted.
+- When several tests guard one contract, keep the strongest boundary (the real verb, store or transport). Delete the rest.
+- When the text is a user-facing byte (a refusal string, config key, or path), the grep stays. This rule covers greps of docs, skills, workflows and source files. A behavior test must not cover the same text.
+- When the dual-implementation inventory (docs/architecture/dual-implementation-inventory.md) marks the port complete, delete the test that forces both legs to agree. Principle 9: delete a leg. Never keep a harness forcing two legs to agree.
+- Per-flag, per-key and per-default tests fold into one table test per surface. One row covers each distinct branch, not each value.
+- When a second campaign scope uses a test helper or CI selftest double, its test stays. Otherwise the helper test is deleted.
+- Slow, static or flaky is still not a reason to keep.
+- Parametrize conversion is not a cut. The scoped pytest collected-case count must fall by the same half as the declaration count.
+- The skill's contract families (public API, config, storage and the rest) are kinds of contract a test can name. They are not a reason to keep a test another test already covers.
+- Never delete a test that is the only guard for a fail-closed path.
 
-Rank rule: suites that test both legs of a dual implementation first, then src-read density times size, then Rust-only suites. Each campaign re-baselines on the main it starts from, so counts drift. A campaign measuring over about 1,400 declarations at baseline splits along a production owner boundary before its ledger starts. After each merge the merging session files the next row as a child node and blueprints it from its row here.
+## Campaigns
 
-| # | Campaign | In scope (approx) | Python leg | Rust leg | Why this rank |
-|---|---|---|---|---|---|
-| 3 | claims | 550 Py + 189 Rust | cli/src/fno/claims/io.py:158; claims/cli.py | claims_root.rs:82; claim_verbs.rs:130 | dual, parity-guarded, smallest dual owner |
-| 4 | spawn and dispatch | 1,267 Py + 276 Rust | agents/spawn_gate.py, dispatch, mux_spawn | spawn_gate.rs | dual; test_spawn_pane.py is 5,324 lines (shrink-only) |
-| 5 | session registry | 1,230 Py | agents/registry.py | registry_json.rs | dual; 977 tests on one owner |
-| 6 | graph store and board view | 1,192 Py + graph_store Rust | graph/render.py | backlog_view.rs | dual; unguarded mirror per the dual-implementation inventory |
-| 7 | mail, bus, events, relay | 1,050 Py + 159 Rust | events/log.py | claude_ask.rs; claims.rs | dual emitters |
-| 8 | config and paths | 1,349 Py + 337 Rust | paths.py | paths.rs | partial dual, 36% src-read |
-| 9 | CI gates, hooks, skill tests | 882 Py + 396 repo Py + shell | none (tooling) | none | highest src-read density |
-| 10 | graph verbs | about 1,400 Py + 167 Rust | graph/cli.py | fno-agents/src/backlog | junk density 16% but big |
-| 11 | pr and review | 1,072 Py + 484 Rust | fno.pr, fno.review | pr_*, merge_*, review | dual in part |
-| 12 | plan, retro, scoreboard, provenance | about 1,140 Py + 157 Rust | fno.plan | acceptance, manifest | 41% src-read in plan |
-| 13 | harness adapters | 1,041 Py (harnesses, harness_map, account_env) | fno.agents.harnesses | claude*, codex* | lower src-read |
-| 14 | king, crown, reign | about 400 Py + 700 Rust | fno.king | king*, crown*, reign* | Rust-heavy |
-| 15 | mux (fno crate) | 2,120 Rust, split client/server if over the bound | absent | crates/fno/src | Rust-only; client_tests.rs 16,930 lines shrink-only |
-| 16 | loopcheck, finalize, daemon, gc | 1,642 Rust | absent in production | loopcheck/, daemon/ | coordinate with the CI-sharding plan on loop_check.rs |
-| 17-18 | long tail (adapters 1,027, cli 479, setup, inbox, ...) | about 3,700 Py, split in two by owner | varies | varies | lowest measured density |
+Ten campaigns, K1 to K10, run in key order, one PR each. Two or three can run at once. The map (`campaign-map.tsv`) is the scope contract: a campaign edits only files its key names, plus its own ledger. Each campaign re-baselines on the origin/main it starts from. The before-count can drift from the one here. The ceiling moves with the recount. A PR's bound is the 3,000 added-line cap, not a declaration split. Expected landing zone is 45 percent kept, about 13,900 declarations.
 
-(The stress e2e audit predates this queue and is row two below. The skill's own trial campaign is row one.)
+| Key | Scope | Py | Rust | Total | Files | Ceiling | Ledger |
+|---|---|---:|---:|---:|---:|---:|---|
+| K1 | tooling (CI gates, hooks, lint, skills, repo tests/, goldens, benchmarks) plus config, paths, setup, doctor, update, worktree | 2,675 | 333 | 3,008 | 185 | 1,504 | [k1-campaign.md](k1-campaign.md) |
+| K2 | spawn and dispatch | 2,093 | 518 | 2,611 | 152 | 1,306 | [k2-campaign.md](k2-campaign.md) |
+| K3 | session registry, watchdog, discover, recovery, reap, crown | 2,534 | 535 | 3,069 | 163 | 1,535 | [k3-campaign.md](k3-campaign.md) |
+| K4 | harness adapters and providers (cli/src/fno/adapters colocated tests, harnesses, claude/codex Rust) | 1,593 | 669 | 2,262 | 122 | 1,131 | [k4-campaign.md](k4-campaign.md) |
+| K5 | graph store, board, backlog verbs, claims, carveouts | 3,547 | 999 | 4,546 | 273 | 2,273 | [k5-campaign.md](k5-campaign.md) |
+| K6 | pr, review, merge, pr_watch, mail, bus, events, relay, inbox, decide | 3,208 | 1,041 | 4,249 | 236 | 2,125 | [k6-campaign.md](k6-campaign.md) |
+| K7 | plan, retro, scoreboard, provenance, evals, target | 1,773 | 476 | 2,249 | 132 | 1,125 | [k7-campaign.md](k7-campaign.md) |
+| K8 | mux crate (all of crates/fno) | 0 | 3,012 | 3,012 | 204 | 1,506 | [k8-campaign.md](k8-campaign.md) |
+| K9 | loopcheck, finalize, daemon, gc, king, crown, reign, heal | 0 | 2,200 | 2,200 | 99 | 1,100 | [k9-campaign.md](k9-campaign.md) |
+| K10 | long tail (everything the other keys did not claim) | 2,147 | 1,540 | 3,687 | 321 | 1,844 | [k10-campaign.md](k10-campaign.md) |
 
-## Running total
+## Ledgers
 
-Declarations are `def test_` / `#[test]` counts. Campaign rows link their ledger in this folder. CI minutes come from the smoke-duration-report lines of the campaign PR run against the last main run.
-
-| Campaign | Declarations before | Declarations after | CI minutes before | CI minutes after | Ledger |
-|---|---|---|---|---|---|
-| 1: spec-trial campaign | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | the trial PR body |
-| 2: stress e2e | 53 | 48 | 20.6 (20-trial job) | 15.9 | stress-e2e-campaign.md |
-| 3: claims | 446 Py + 169 Rust | 431 Py + 168 Rust | shards skipped: the PR touches docs and tests only | same (10 collected cases and 1 Rust test less to run) | claims-campaign.md |
+Each campaign writes `docs/test-audit/k<N>-campaign.md` and never edits this README. Parallel campaigns share no file. The table above links the ten ledgers once. Ledger shape: a header with the base sha, declarations before and after, and collected cases before and after. Then one row per in-scope test file: `file | before | after | contracts kept`. Name each kept contract once with its credible failure. The preservation spot-check (five kept contracts, one mutation each, keeper goes red) is recorded in the ledger.
