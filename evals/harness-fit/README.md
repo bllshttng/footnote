@@ -43,9 +43,9 @@ This commit lands before the first results commit. It settles six points the fir
 - Repeats. Run 0 is one pass per arm over the 89 Terminal-Bench 2 tasks, paired by task. The 3-repeat rule applies to Run 1 only. Terminal-Bench 2 already gives n = 89 per arm.
 - Run 0 timeout. Each Terminal-Bench 2 task keeps its own agent timeout at `timeout_multiplier: 1.0`, the published protocol. Run 0 rates then compare with the public board. The 45-minute budget applies to Run 1.
 - Terminus 2 model. Terminus 2 runs glm-5.3-flash through z.ai like every other arm. The model stays fixed, so this arm measures the harness. The Sonnet price row is gone.
-- Prices. glm-5.3-flash costs 0.15 USD per 1M input tokens, 0.03 per 1M cached input and 0.50 per 1M output (z.ai pricing page, read 2026-09-29). z.ai lists no cache-write charge and bills written tokens as input, so cache write is 0.15. The report prices by the exact model string, so every string an arm can report carries the same rates.
+- Prices. Per 1M tokens, glm-5.3-flash costs 0.15 USD input, 0.03 cached input and 0.50 output. Source: the z.ai pricing page, read 2026-09-29. z.ai lists no cache-write charge and bills written tokens as input, so cache write is 0.15. The report prices by the exact model string, so every string an arm can report carries the same rates.
 - Concurrency. One Harbor job runs at a time with 4 concurrent trials. The Docker VM has 12 CPUs and 16 GB. Run 1 runs one attempt at a time beside Run 0.
-- Stop-rule check. Harbor starts a whole arm at once, so the check runs per job. Before each job, spent dollars plus 3 times the arm's smoke cost per task times 89 must stay under the ceiling. Before each Run 1 lane, spent dollars plus 3 times the lane's projection must stay under it.
+- Stop-rule check. Harbor starts a whole arm at once, so the check runs per job. Before each job, the driver adds spent dollars to a projection: 3 times the smoke cost per task, times 89. The sum must stay under the ceiling. Before each Run 1 lane, spent dollars plus 3 times the lane's projection must stay under it.
 
 Harbor 0.23.0 runs through `uvx`. The zcode arm needs a Harbor adapter. That adapter lives in the run workspace, not in this repo.
 
