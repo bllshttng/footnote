@@ -1467,6 +1467,20 @@ fn run_opencode_arm(
                 path.display()
             ));
         }
+
+        if let Some(models) = crate::opencode_config::omo_agent_models() {
+            let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
+            if !block.is_empty() && block != "{}" {
+                say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
+                say(block);
+            }
+            if !not_carried.is_empty() {
+                say(format!(
+                    "not carried from oh-my-openagent (no footnote counterpart): {}",
+                    not_carried.join(", ")
+                ));
+            }
+        }
         say("--dry-run: nothing written; re-run without --dry-run to apply".to_string());
         return 0;
     }
@@ -1482,6 +1496,20 @@ fn run_opencode_arm(
                     path.display()
                 ));
             }
+
+        if let Some(models) = crate::opencode_config::omo_agent_models() {
+            let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
+            if !block.is_empty() && block != "{}" {
+                say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
+                say(block);
+            }
+            if !not_carried.is_empty() {
+                say(format!(
+                    "not carried from oh-my-openagent (no footnote counterpart): {}",
+                    not_carried.join(", ")
+                ));
+            }
+        }
             let (_action, undo, refusals) = decide_plugin_array(&findings, yes);
             if json {
                 let mut value = serde_json::to_value(&receipt).unwrap_or_else(|_| json!({}));
@@ -1591,62 +1619,14 @@ fn decide_plugin_array(
 }
 
 fn print_status_prose(value: &serde_json::Value) {
-    let status = value["status"].as_str().unwrap_or("unknown");
-    match status {
-        "installed" => println!(
-            "opencode: installed (footnote {}): {} command(s), {} agent(s), {} skill(s)",
-            value["version"].as_str().unwrap_or("?"),
-            value["installed"]["commands"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0),
-            value["installed"]["agents"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0),
-            value["installed"]["skills"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0)
-        ),
-        "absent" => println!(
-            "opencode: not installed (bridge file {}); \
-             install with `fno config plugin install opencode`",
-            if value["bridge_present"].as_bool() == Some(true) {
-                "present, legacy"
-            } else {
-                "absent"
-            }
-        ),
-        _ => {
-            println!(
-                "opencode: PARTIAL: {} name(s) installed but not loaded: {}",
-                value["missing"].as_array().map(Vec::len).unwrap_or(0),
-                value["missing"]
-                    .as_array()
-                    .map(|names| names
-                        .iter()
-                        .filter_map(|n| n.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_default()
-            );
-            let stale = value["stale"].as_array().map(Vec::len).unwrap_or(0);
-            if stale > 0 {
-                println!(
-                    "opencode: {} loaded name(s) footnote's manifest does not know: {}",
-                    stale,
-                    value["stale"]
-                        .as_array()
-                        .map(|names| names
-                            .iter()
-                            .filter_map(|n| n.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "))
-                        .unwrap_or_default()
-                );
-            }
-        }
+    let Some(lines) = value["doctor_lines"].as_array() else {
+        println!("opencode: status unknown (the receipt carries no doctor lines)");
+        return;
+    };
+    for line in lines {
+        let level = line["level"].as_str().unwrap_or("INFO");
+        let text = line["text"].as_str().unwrap_or("");
+        println!("{level} {text}");
     }
 }
 

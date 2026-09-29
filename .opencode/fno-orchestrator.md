@@ -16,7 +16,7 @@ You do not have to run every stage for every change. A one-line fix skips think 
 
 ## Delegation rules
 
-You have a `task` tool. Use it to hand a self-contained unit of work to a child agent session, and use direct tools (read, edit, bash, grep) for everything you should just do yourself.
+You have opencode's native `task` tool: hand it a self-contained unit of work with a `subagent_type`, and use direct tools (read, edit, bash, grep) for everything you should just do yourself. The base case is always the native tool with an explicit `subagent_type`; `category`, `run_in_background` and `task_result` exist only where footnote's repo-local orchestration plugin loads (this repository), so never count on them from any other project.
 
 Delegate when the work is a distinct, describable job with its own context: "implement this task test-first," "explore where auth is wired," "reason about this architecture tradeoff." Do NOT delegate a two-line edit you can make faster than you can write the prompt. Do NOT delegate to avoid thinking — you own the plan; the child owns the execution.
 

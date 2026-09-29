@@ -13,6 +13,7 @@
 //! example never matches and a commented file survives an edit byte-exact
 //! outside the removed span.
 
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -160,8 +161,9 @@ fn spec_bare_name(spec: &str) -> &str {
 /// entry, or a 2.x object's `package` value).
 pub fn classify_spec(spec: &str) -> Option<FindingKind> {
     if let Some(path) = spec.strip_prefix("file:") {
-        let last = path.rsplit('/').next().unwrap_or(path);
-        return if last.contains("oh-my-openagent") || last.contains("oh-my-opencode") {
+        // The name sits mid-path in a real file: entry (...oh-my-openagent/
+        // packages/omo-opencode/dist/index.js), so the whole path is judged.
+        return if path.contains("oh-my-openagent") || path.contains("oh-my-opencode") {
             Some(FindingKind::Omo)
         } else {
             None
@@ -482,6 +484,64 @@ pub fn disable(findings: &[&Finding]) -> (Vec<String>, Vec<String>) {
     (undo, refused)
 }
 
+/// The per-agent model assignments in ~/.omo/omo.jsonc's `[opencode]`
+/// block (5.x config), read-only: footnote never writes under ~/.omo. The
+/// read only feeds the suggested agent block the install summary prints.
+pub fn omo_agent_models() -> Option<Vec<(String, String)>> {
+    let path = crate::paths::dirs_home().join(".omo/omo.jsonc");
+    let text = std::fs::read_to_string(path).ok()?;
+    let v = serde_json::from_str::<serde_json::Value>(strip_comments(&text).trim()).ok()?;
+    let agents = v.get("[opencode]")?.get("agents")?.as_object()?;
+    Some(
+        agents
+            .iter()
+            .filter_map(|(name, def)| {
+                let model = def.get("model")?.as_str()?.to_string();
+                Some((name.clone(), model))
+            })
+            .collect(),
+    )
+}
+
+/// omo agent -> the footnote agent that covers its job. Agents absent here
+/// (atlas, multimodal-looker, frontend-ui-ux-engineer, document-writer) and
+/// every category have no footnote counterpart and are named as not carried.
+const OMO_TO_FOOTNOTE: &[(&str, &[&str])] = &[
+    ("fno", &["sisyphus"]),
+    ("fno:archer", &["hephaestus", "sisyphus-junior"]),
+    ("fno:architect", &["oracle", "prometheus", "metis"]),
+    ("fno:scout", &["explore", "librarian"]),
+    ("fno:verifier", &["momus"]),
+];
+
+/// The suggested opencode.json `agent` block mapping omo's model
+/// assignments onto footnote's agents, plus the omo names nothing carries.
+/// Printed, never written.
+pub fn suggested_agent_block(models: &[(String, String)]) -> (String, Vec<String>) {
+    let mut block = serde_json::Map::new();
+    let mut carried: Vec<&str> = Vec::new();
+    for (footnote, omo_names) in OMO_TO_FOOTNOTE {
+        for omo in omo_names.iter() {
+            if let Some((_, model)) = models.iter().find(|(name, _)| name.as_str() == *omo) {
+                block.insert((*footnote).to_string(), json!({ "model": model }));
+                carried.push(*omo);
+                break;
+            }
+        }
+    }
+    let mut not_carried: Vec<String> = models
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|n| !carried.contains(n))
+        .map(str::to_string)
+        .collect();
+    not_carried.sort();
+    (
+        serde_json::to_string_pretty(&serde_json::Value::Object(block)).unwrap_or_default(),
+        not_carried,
+    )
+}
+
 fn utc_stamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
 }
@@ -534,7 +594,7 @@ fn cut_and_write(
 fn comma_span(text: &str, s: usize, e: usize) -> (usize, usize) {
     let bytes = text.as_bytes();
     let mut cut_start = s;
-    let mut cut_end = e;
+    let cut_end = e;
     if let Some(after) = next_structural(text, e) {
         if bytes[after] == b',' {
             return (s, after + 1);
@@ -639,7 +699,7 @@ mod tests {
         ];
         let refs: Vec<&Finding> = findings.iter().collect();
         let (undo, refused) = disable(&refs);
-        assert!(refused.is_empty(), "refusals: {refusals:?}");
+        assert!(refused.is_empty(), "refused: {refused:?}");
         assert_eq!(undo.len(), 1);
         let edited = std::fs::read_to_string(&file).unwrap();
         assert!(edited.contains("opencode-antigravity-auth"));
