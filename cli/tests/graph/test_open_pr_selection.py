@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from tests.fixtures.graph_seed import seed_graph
 from fno.graph.cli import cli, _has_unmerged_open_pr
+from tests.goldens._door import door_graph
 
 
 runner = CliRunner()
@@ -136,31 +137,31 @@ def test_predicate_missing_keys_default_ready():
 
 def test_next_skips_node_with_open_pr(graph_file):
     """AC1-EDGE: when the only ready node has an open PR, `next` returns null."""
-    graph_file([_node("ab-aaaa1111", pr_number=515)])
-    result = runner.invoke(cli, ["next", "--all"])
-    assert result.exit_code == 0
-    assert result.stdout.strip() == "null"
+    graph = graph_file([_node("ab-aaaa1111", pr_number=515)])
+    code, out, err = door_graph(graph, "next", "--all")
+    assert code == 0, err
+    assert out.strip() == "null"
 
 
 def test_next_returns_no_pr_sibling(graph_file):
     """`next` still selects a sibling node that has no PR."""
-    graph_file([
+    graph = graph_file([
         _node("ab-aaaa1111", pr_number=515),
         _node("ab-bbbb2222"),
     ])
-    result = runner.invoke(cli, ["next", "--all"])
-    assert result.exit_code == 0
-    picked = json.loads(result.stdout)
+    code, out, err = door_graph(graph, "next", "--all")
+    assert code == 0, err
+    picked = json.loads(out)
     assert picked is not None
     assert picked["id"] == "ab-bbbb2222"
 
 
 def test_next_unaffected_when_no_open_prs(graph_file):
     """A normal graph with no PRs is unchanged: `next` returns the ready node."""
-    graph_file([_node("ab-cccc3333")])
-    result = runner.invoke(cli, ["next", "--all"])
-    assert result.exit_code == 0
-    picked = json.loads(result.stdout)
+    graph = graph_file([_node("ab-cccc3333")])
+    code, out, err = door_graph(graph, "next", "--all")
+    assert code == 0, err
+    picked = json.loads(out)
     assert picked["id"] == "ab-cccc3333"
 
 
@@ -217,7 +218,7 @@ def test_ready_include_deferred_keeps_pr_bearing_deferred_node(graph_file):
 
 def test_next_include_deferred_keeps_pr_bearing_deferred_node(graph_file):
     """`next --include-deferred` can re-engage a deferred node that has a PR."""
-    graph_file([
+    graph = graph_file([
         _node(
             "ab-eeee5555",
             pr_number=515,
@@ -226,9 +227,9 @@ def test_next_include_deferred_keeps_pr_bearing_deferred_node(graph_file):
             deferred_reason="paused by operator",
         ),
     ])
-    result = runner.invoke(cli, ["next", "--all", "--include-deferred"])
-    assert result.exit_code == 0
-    picked = json.loads(result.stdout)
+    code, out, err = door_graph(graph, "next", "--all", "--include-deferred")
+    assert code == 0, err
+    picked = json.loads(out)
     assert picked is not None
     assert picked["id"] == "ab-eeee5555"
 

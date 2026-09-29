@@ -10,7 +10,7 @@ The command counts include every command entry in each harness event registratio
 |---|---:|---|
 | Claude | 48 before, 43 after | 16 events |
 | Codex | 36 before, 31 after | 9 events |
-| OpenCode | 2 logical lifecycle callbacks | `cli/src/fno/setup/assets/opencode/footnote.js`: `session.created` plus idle (`session.idle` in 1.x, `session.status` in 2.x) |
+| OpenCode | 8 logical callbacks | `cli/src/fno/setup/assets/opencode/footnote.js`: `session.created` (report + SessionStart hooks), idle (`session.idle` in 1.x, `session.status` in 2.x), `tool.execute.before` (PreToolUse, deny by throw), `tool.execute.after` (PostToolUse), `chat.message` (UserPromptSubmit), `experimental.chat.system.transform` (drains the injection queue), `experimental.session.compacting` (PreCompact), `shell.env` (identity stamp, 1.x only) |
 | Pi | 4 in-process callbacks | `cli/src/fno/setup/assets/pi/footnote.ts`: `session_shutdown`, `resources_discover`, `before_agent_start`, `agent_settled` |
 | AGY | 2 command hooks | `crates/fno-agents/src/agy_hooks.rs` registers `Stop` and `PreInvocation` adapters. |
 | DeepSeek Harness | 0 in-repository hook registrations | none found |
@@ -108,7 +108,7 @@ These surfaces are not shell-command arrays, so their callbacks are listed separ
 
 | Harness | Registered callbacks | Action and process boundary | Journal rate |
 |---|---|---|---|
-| OpenCode | 1.x `session.created`, `session.idle`; 2.x `session.created`, `session.status` when idle | The in-process plugin records session creation and runs the shared loop-check gate at idle. On a non-terminal decision it re-drives the same session. The adapter shells bounded `fno-agents` calls. | Unknown: no per-callback invocation marker. |
+| OpenCode | 1.x `session.created`, `session.idle`, `tool.execute.before`, `tool.execute.after`, `chat.message`, `experimental.chat.system.transform`, `experimental.session.compacting`, `shell.env`; 2.x `session.created`, `session.status` when idle (no `shell.env`) | The in-process bridge runs footnote's hooks.json through the plugin events: guards deny by throw, injections queue into the system prompt, compaction context rides the compacting hook, and `shell.env` stamps the session identity. It also records session creation and runs the shared loop-check gate at idle, re-driving the same session on a non-terminal decision. The adapter shells bounded `fno-agents` calls. | Unknown: no per-callback invocation marker. |
 | Pi | `session_shutdown`, `resources_discover`, `before_agent_start`, `agent_settled` | The in-process extension clears per-session state, offers skills, reports the session and injects announcements before a turn, and runs the shared loop-check gate after the agent settles. The adapter uses bounded `fno-agents` child calls. | Unknown: no per-callback invocation marker. |
 | AGY | `Stop`, `PreInvocation` | `agy-target-stop-hook.sh` runs the shared completion gate. `agy-crown-inject.sh` injects the crown prompt only on invocation 0. Both are command hooks installed in AGY's `hooks.json`. | Unknown for callback totals; stop sub-events are journaled, but there is no complete invocation denominator. |
 | DeepSeek Harness | No hook registration found | `crates/fno-agents/src/acp_stdio.rs` identifies `deepseek-harness-acp`; it does not register a hook callback. | Not applicable. |

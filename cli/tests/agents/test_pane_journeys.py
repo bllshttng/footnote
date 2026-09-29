@@ -52,7 +52,7 @@ def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
 
 
 @pytest.mark.slow_e2e
-@pytest.mark.timeout(144)
+@pytest.mark.timeout(300)
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:

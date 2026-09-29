@@ -4,26 +4,20 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fnoPlugin, {
   inferCategory,
-  parseFrontmatter,
-  toOpencodeAgent,
   extractAssistantText,
-  loadFootnoteAgents,
   createTaskTool,
   createTaskResultTool,
   isActivated,
-  resolvePluginRoot,
-  buildHookPayload,
-  protectionScriptsFor,
-  parseHookDecision,
-  runProtections,
   setupV2,
 } from "../plugins/fno.ts"
 
-// Run plugin init with FNO_OPENCODE forced, restoring the prior value.
+// Run plugin init with the activation gate forced, restoring the prior
+// value. The gate is ON by default now: activated means env unset, false
+// means an explicit FNO_OPENCODE=0.
 async function initPlugin(input: any, activated: boolean) {
   const prev = process.env.FNO_OPENCODE
-  if (activated) process.env.FNO_OPENCODE = "1"
-  else delete process.env.FNO_OPENCODE
+  if (activated) delete process.env.FNO_OPENCODE
+  else process.env.FNO_OPENCODE = "0"
   try {
     return await (fnoPlugin as any).server(input)
   } finally {
@@ -32,14 +26,23 @@ async function initPlugin(input: any, activated: boolean) {
   }
 }
 
-test("isActivated is opt-in (off by default)", () => {
-  expect(isActivated({})).toBe(false)
-  expect(isActivated({ FNO_OPENCODE: "0" })).toBe(false)
-  expect(isActivated({ FNO_OPENCODE: "1" })).toBe(true)
-  expect(isActivated({ FNO_OPENCODE: "true" })).toBe(true)
+test("isActivated is on by default and off only when explicitly disabled", () => {
+  const saved = process.env.FNO_OPENCODE
+  try {
+    delete process.env.FNO_OPENCODE
+    expect(isActivated()).toBe(true)
+    process.env.FNO_OPENCODE = "0"
+    expect(isActivated()).toBe(false)
+    process.env.FNO_OPENCODE = "false"
+    expect(isActivated()).toBe(false)
+    process.env.FNO_OPENCODE = "1"
+    expect(isActivated()).toBe(true)
+  } finally {
+    if (saved === undefined) delete process.env.FNO_OPENCODE
+    else process.env.FNO_OPENCODE = saved
+  }
 })
 
-// ---- pure helpers --------------------------------------------------------
 
 test("inferCategory maps known agents, undefined otherwise", () => {
   expect(inferCategory("fno:archer")).toBe("do")
@@ -49,71 +52,7 @@ test("inferCategory maps known agents, undefined otherwise", () => {
   expect(inferCategory(undefined)).toBeUndefined()
 })
 
-test("parseFrontmatter reads scalars and inline lists, skips nested, returns body", () => {
-  const raw = `---
-name: archer
-description: "TDD executor"
-model: sonnet
-tools: ["Read", "Write"]
-disallowedTools: ["Task", "WebSearch"]
-skills:
-  - fno:tdd
----
-Body line one.
-Body line two.`
-  const { data, body } = parseFrontmatter(raw)
-  expect(data.name).toBe("archer")
-  expect(data.description).toBe("TDD executor")
-  expect(data.model).toBe("sonnet")
-  expect(data.tools).toEqual(["Read", "Write"]) // inline lists survive
-  expect(data.disallowedTools).toEqual(["Task", "WebSearch"])
-  expect(data.skills).toBeUndefined() // block/nested lists still skipped
-  expect(body).toBe("Body line one.\nBody line two.")
-})
 
-test("parseFrontmatter with no frontmatter returns raw body", () => {
-  const { data, body } = parseFrontmatter("just text")
-  expect(data).toEqual({})
-  expect(body).toBe("just text")
-})
-
-test("toOpencodeAgent drops bare model names, keeps provider/model (AC6-HP)", () => {
-  expect(toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").ok).toBe(true)
-  if (toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").ok) {
-    expect(toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").def).toEqual({
-      mode: "subagent",
-      prompt: "prompt",
-      description: "d",
-    })
-  }
-  expect(toOpencodeAgent({ model: "anthropic/claude-sonnet-4-5" }, "p").ok).toBe(true)
-  const t = toOpencodeAgent({ model: "anthropic/claude-sonnet-4-5" }, "p")
-  if (t.ok) expect(t.def.model).toBe("anthropic/claude-sonnet-4-5")
-})
-
-test("disallowedTools carries into opencode's disable-only tools record (AC6-HP)", () => {
-  const t = toOpencodeAgent(
-    { disallowedTools: ["Task", "WebSearch", "Write"] },
-    "prompt",
-    "fno:reviewer",
-  )
-  expect(t.ok).toBe(true)
-  if (t.ok) expect(t.def.tools).toEqual({ task: false, websearch: false, write: false })
-})
-
-test("an allowlist tools field refuses the definition by name, field and value (AC6-ERR)", () => {
-  const t = toOpencodeAgent(
-    { tools: ["Read", "Grep", "Glob", "Bash"] },
-    "prompt",
-    "fno:archer",
-  )
-  expect(t.ok).toBe(false)
-  if (!t.ok) {
-    expect(t.agent).toBe("fno:archer")
-    expect(t.field).toBe("tools")
-    expect(t.value).toBe(JSON.stringify(["Read", "Grep", "Glob", "Bash"]))
-  }
-})
 
 test("extractAssistantText returns completed text only, reasoning never joins (AC5-ERR)", () => {
   expect(
@@ -129,25 +68,7 @@ test("extractAssistantText returns completed text only, reasoning never joins (A
   expect(extractAssistantText([{ type: "tool" }])).toBe("")
 })
 
-test("loadFootnoteAgents registers restriction-free defs and refuses allowlists by name", () => {
-  const { agents, refusals } = loadFootnoteAgents(`${import.meta.dir}/../..`)
-  // Restriction-free definitions register.
-  expect(agents["fno:architect"]).toBeDefined()
-  expect(agents["fno:architect"].mode).toBe("subagent")
-  expect(agents["fno:architect"].prompt.length).toBeGreaterThan(0)
-  // The repo's allowlist-carrying definitions refuse, naming agent+field.
-  const archer = refusals.find((r) => !r.ok && r.agent === "fno:archer")
-  expect(archer).toBeDefined()
-  if (archer && !archer.ok) expect(archer.field).toBe("tools")
-})
 
-test("loadFootnoteAgents on a missing dir returns empty agents and refusals", () => {
-  const { agents, refusals } = loadFootnoteAgents("/nonexistent-xyz")
-  expect(agents).toEqual({})
-  expect(refusals).toEqual([])
-})
-
-// ---- task tool (mocked client) -------------------------------------------
 
 function mockClient(overrides: Record<string, any> = {}) {
   return {
@@ -289,15 +210,19 @@ test("plugin init survives a client that rejects every provider read (AC1-ERR)",
   }
 })
 
-test("plugin is inert when FNO_OPENCODE unset — returns {} and never fetches (AC1-EDGE)", async () => {
+
+test("plugin is active when FNO_OPENCODE is unset, inert when it is 0 (AC1-EDGE)", async () => {
   let called = false
   const input = {
     client: { provider: { list: () => { called = true; return Promise.resolve({ data: [] }) } } },
     directory: "/nonexistent",
   }
-  const hooks = await initPlugin(input, false)
-  expect(hooks).toEqual({})
+  const hooks = await initPlugin(input, true)
+  expect(hooks.tool.task).toBeDefined()
+  expect(hooks.tool.task_result).toBeDefined()
   expect(called).toBe(false)
+  const inert = await initPlugin(input, false)
+  expect(Object.keys(inert)).toEqual([])
 })
 
 test("plugin init tolerates a malformed client (provider missing) — no sync crash (AC1-ERR)", async () => {
@@ -438,75 +363,6 @@ test("task_result on a child with no assistant message is pending (AC5-*)", asyn
 
 // ---- Change 7: policy outcomes on the V1 seams (AC8-*) --------------------
 
-test("the payload the seam builds is the claude shape the scripts already read (AC8-HP)", () => {
-  const payload = buildHookPayload("Bash", "ses_x", { command: "rg -uu x" }, "/proj")
-  expect(payload.tool_name).toBe("Bash")
-  expect(payload.session_id).toBe("ses_x")
-  expect(payload.cwd).toBe("/proj")
-  expect(payload.hook_event_name).toBe("PreToolUse")
-  expect((payload.tool_input as any).command).toBe("rg -uu x")
-})
-
-test("tool matching mirrors the claude matchers (AC8-HP)", () => {
-  expect(protectionScriptsFor("bash").map((e) => e.script)).toEqual([
-    "graph-write-protect.sh",
-    "generated-write-guard.sh",
-    "git-protection.py",
-    "pipe-guard.sh",
-    "recursive-grep-guard.py",
-  ])
-  expect(protectionScriptsFor("write").map((e) => e.script)).toContain("plan-location-guard.sh")
-  expect(protectionScriptsFor("webfetch")).toEqual([])
-})
-
-test("parseHookDecision honors deny and reads allow (AC8-HP)", () => {
-  const deny = parseHookDecision(
-    '{"decision":"block","reason":"no","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"forbidden surface"}}',
-  )
-  expect(deny.deny).toBe(true)
-  expect(deny.reason).toBe("forbidden surface")
-  expect(parseHookDecision("{}").deny).toBe(false)
-  expect(parseHookDecision("").deny).toBe(false)
-})
-
-test("runProtections denies on the script's decision and throws at the seam (AC8-HP)", async () => {
-  // A plugin root must resolve, or the seam reports no-root and allows. Stub
-  // the env so the suite never depends on the dev machine's ~/.fno.
-  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
-    const seen: string[] = []
-    const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
-      seen.push(script)
-      return JSON.stringify({
-        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
-      })
-    })
-    expect(out.denied).toBe(true)
-    expect(out.reason).toBe("protected manifest")
-    expect(seen.length).toBeGreaterThan(0)
-  })
-})
-
-test("a missing/deciding-nothing script reports once and allows - fail-open (AC8-ERR)", async () => {
-  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
-    const errors: string[] = []
-    const orig = console.error
-    console.error = (...a: unknown[]) => errors.push(a.join(" "))
-    try {
-      const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
-      expect(out.denied).toBe(false)
-      expect(errors.some((e) => e.includes("no decision"))).toBe(true)
-    } finally {
-      console.error = orig
-    }
-  })
-})
-
-test("resolvePluginRoot reads the env chain and the plugin-root file", () => {
-  expect(resolvePluginRoot({ FNO_PLUGIN_ROOT: "/p1" })).toBe("/p1")
-  expect(resolvePluginRoot({ CLAUDE_PLUGIN_ROOT: "/p2" })).toBe("/p2")
-  expect(resolvePluginRoot({})).toBeNull()
-})
-
 test("a finished child frees its slot; a running one holds it (review fix)", async () => {
   // Five children exist, but all read terminal: none counts against the cap.
   const terminal = {
@@ -593,10 +449,11 @@ function v2ProjectDir(): string {
   return dir
 }
 
-test("setup on a stub V2 ctx registers the four hooks and returns a safe cleanup (AC1-PORT)", async () => {
+
+test("setup on a stub V2 ctx registers the context hook and returns a safe cleanup (AC1-PORT)", async () => {
   const dir = v2ProjectDir()
   const { ctx, calls } = stubV2Ctx(dir)
-  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+  await withEnv({ FNO_OPENCODE: "1" }, async () => {
     const err = captureStderr()
     let cleanup: () => void
     try {
@@ -604,12 +461,7 @@ test("setup on a stub V2 ctx registers the four hooks and returns a safe cleanup
     } finally {
       err.restore()
     }
-    expect(calls.map((c) => `${c.kind}:${c.name}`).sort()).toEqual([
-      "session:compaction",
-      "session:context",
-      "tool:execute.after",
-      "tool:execute.before",
-    ])
+    expect(calls.map((c) => `${c.kind}:${c.name}`).sort()).toEqual(["session:context"])
     expect(() => cleanup()).not.toThrow()
   })
 })
@@ -634,76 +486,10 @@ test("the V2 context hook pushes the orchestrator prompt as a text part (AC1-POR
   })
 })
 
-test("the V2 execute.before hook throws the script's reason on deny and allows a silent script (AC1-DENY)", async () => {
-  const dir = v2ProjectDir()
-  const denyRoot = mkdtempSync(join(tmpdir(), "fno-root-"))
-  mkdirSync(join(denyRoot, "hooks"))
-  const denyScript = join(denyRoot, "hooks", "graph-write-protect.sh")
-  writeFileSync(
-    denyScript,
-    '#!/bin/sh\nprintf \'{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"protected manifest"}}\'\n',
-  )
-  chmodSync(denyScript, 0o755)
-  const { ctx, calls } = stubV2Ctx(dir)
-  await withEnv(
-    { FNO_OPENCODE: "1", FNO_PLUGIN_ROOT: denyRoot, FNO_AGENTS_BIN: "/nonexistent-fno-agents" },
-    async () => {
-      const err = captureStderr()
-      let cleanup: () => void
-      try {
-        cleanup = setupV2(ctx)
-      } finally {
-        err.restore()
-      }
-      const before = calls.find((c) => c.name === "execute.before")!.handler
-      await expect(before({ tool: "write", sessionID: "ses_d", input: {} })).rejects.toThrow(
-        "protected manifest",
-      )
-      cleanup()
-    },
-  )
 
-  const allowRoot = mkdtempSync(join(tmpdir(), "fno-root-"))
-  mkdirSync(join(allowRoot, "hooks"))
-  const silentScript = join(allowRoot, "hooks", "graph-write-protect.sh")
-  writeFileSync(silentScript, "#!/bin/sh\n")
-  chmodSync(silentScript, 0o755)
-  const { ctx: ctx2, calls: calls2 } = stubV2Ctx(dir)
-  await withEnv(
-    { FNO_OPENCODE: "1", FNO_PLUGIN_ROOT: allowRoot, FNO_AGENTS_BIN: "/nonexistent-fno-agents" },
-    async () => {
-      const err = captureStderr()
-      let cleanup: () => void
-      try {
-        cleanup = setupV2(ctx2)
-      } finally {
-        err.restore()
-      }
-      const before = calls2.find((c) => c.name === "execute.before")!.handler
-      // A script that gives no decision allows the call, as on V1.
-      await expect(before({ tool: "write", sessionID: "ses_a", input: {} })).resolves.toBeUndefined()
-      cleanup()
-    },
-  )
-})
-
-test("setup with FNO_OPENCODE unset registers nothing and returns a safe cleanup (AC1-INERT)", () => {
+test("setup with FNO_OPENCODE=0 registers nothing and returns a safe cleanup (AC1-INERT)", async () => {
   const { ctx, calls } = stubV2Ctx("/nonexistent")
-  const err = captureStderr()
-  let cleanup: () => void
-  try {
-    cleanup = setupV2(ctx)
-  } finally {
-    err.restore()
-  }
-  expect(calls).toEqual([])
-  expect(() => cleanup()).not.toThrow()
-})
-
-test("the V2 arm names the agents it did not register and the remedy, once (AC1-AGENTS)", async () => {
-  const dir = v2ProjectDir()
-  const { ctx, calls } = stubV2Ctx(dir)
-  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+  await withEnv({ FNO_OPENCODE: "0" }, () => {
     const err = captureStderr()
     let cleanup: () => void
     try {
@@ -711,15 +497,8 @@ test("the V2 arm names the agents it did not register and the remedy, once (AC1-
     } finally {
       err.restore()
     }
-    cleanup()
-    const lines = err.lines.filter((l) => l.includes("not registered"))
-    expect(lines.length).toBe(1)
-    expect(lines[0]).toContain("fno:helper")
-    expect(lines[0]).toContain("agent files")
-    expect(lines[0]).not.toMatch(/x-[0-9a-f]{4}/)
-    expect(lines[0]).not.toMatch(/#?\d{3,}/)
-    // No registration of any agent: the only calls are the four hooks.
-    expect(calls.length).toBe(4)
+    expect(calls).toEqual([])
+    expect(() => cleanup()).not.toThrow()
   })
 })
 
@@ -751,24 +530,23 @@ test("the V2 definition is a plain dual export with no V2 package import (AC1-NO
   expect(typeof (fnoPlugin as any).setup).toBe("function")
 })
 
-test("both arms work side by side: server keeps its tools, setup keeps its hooks (AC4-BOTH)", async () => {
+
+test("both arms work side by side: server keeps its tools, setup keeps its hook (AC4-BOTH)", async () => {
   const dir = v2ProjectDir()
   const { ctx, calls } = stubV2Ctx(dir)
-  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+  await withEnv({ FNO_OPENCODE: "1" }, async () => {
     const err = captureStderr()
     let hooks: any
     let cleanup: () => void
     try {
-      // V1 arm: the server entrypoint still carries hooks and tools.
       hooks = await (fnoPlugin as any).server({ client: {}, directory: "/nonexistent" })
-      // V2 arm: the setup entrypoint still registers the four hooks.
       cleanup = setupV2(ctx)
     } finally {
       err.restore()
     }
     expect(hooks.tool.task).toBeDefined()
     expect(hooks.tool.task_result).toBeDefined()
-    expect(calls.length).toBe(4)
+    expect(calls.length).toBe(1)
     cleanup!()
   })
 })
