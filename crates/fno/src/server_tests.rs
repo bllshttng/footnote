@@ -707,29 +707,28 @@ fn pane_send_rows() {
         ServerMsg::Ok
     ));
 
-    // Identity is the session uuid, never the name: a uuid-matched send
-    // lands despite the stale label; a different uuid refuses.
+    // Identity is the session uuid: a uuid-matched send lands despite a
+    // stale label; a different uuid refuses.
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("kestrel-heir".into());
-    let mut heir = agent_in("sess", pane, None, false);
-    heir.name = "bob".into();
+    let mut row = agent_in("sess", pane, None, false);
+    row.name = "bob".into();
     let uuid = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
-    heir.harness_session_id = Some(uuid.into());
+    row.harness_session_id = Some(uuid.into());
+    let sent = core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(uuid),
+        Ok(vec![row.clone()]),
+        false,
+    );
+    assert!(matches!(sent, ServerMsg::Ok));
+    row.harness_session_id = Some("d4c0ffee-0000-0000-0000-000000000000".into());
+    let refused = core.pane_send(pane, b"payload", false, Some(uuid), Ok(vec![row]), false);
     assert!(matches!(
-        core.pane_send(
-            pane,
-            b"payload",
-            false,
-            Some(uuid),
-            Ok(vec![heir.clone()]),
-            false
-        ),
-        ServerMsg::Ok
-    ));
-    heir.harness_session_id = Some("d4c0ffee-0000-0000-0000-000000000000".into());
-    assert!(matches!(
-        core.pane_send(pane, b"payload", false, Some(uuid), Ok(vec![heir]), false),
+        refused,
         ServerMsg::Err {
             code: err_code::TARGET_IDENTITY_MISMATCH,
             ..
