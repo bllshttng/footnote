@@ -84,6 +84,4 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
 
     sweep_orphaned_keepers(timeout=15.0)
 
-
-# The verdict adapter lives under tests/ with the rest of the fixtures.
 from fno.tests.hold_verdict_adapter import in_memory_hold_verdict  # noqa: E402,F401
