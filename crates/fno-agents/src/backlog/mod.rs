@@ -51,6 +51,8 @@ pub mod title_gate;
 pub mod update_cli;
 pub mod worked;
 pub mod workflows;
+pub mod undispatched;
+pub mod next;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};
