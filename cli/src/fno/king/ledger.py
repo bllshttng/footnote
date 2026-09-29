@@ -25,10 +25,10 @@ def build_ledger_data(rows=None, *, fold_fn=None) -> dict:
 
 
 def default_ledger_path() -> Path:
-    """``<state_dir>/reign.html``, the sibling of graph.html."""
+    """``<state_dir>/pages/reign.html``, beside the rendered graph pages."""
     from fno.graph._constants import _state_dir
 
-    return _state_dir() / "reign.html"
+    return _state_dir() / "pages" / "reign.html"
 
 
 def write_ledger(court: dict, path: Optional[Path] = None) -> Path:

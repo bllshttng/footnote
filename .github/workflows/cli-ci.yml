@@ -170,6 +170,7 @@ jobs:
     outputs:
       cargo: ${{ steps.select.outputs.cargo }}
       python_full: ${{ steps.select.outputs.python_full }}
+      skill_bundles: ${{ steps.select.outputs.skill_bundles }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -188,6 +189,31 @@ jobs:
         run: |
           rustc --edition=2021 crates/fno-agents/src/bin/pr-affected.rs -o "$RUNNER_TEMP/pr-affected"
           "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" "$PACKET_FITS" | tee -a "$GITHUB_OUTPUT"
+
+  # The freshness check rides the smoke registry, but a PR whose selector
+  # keeps the full Python lane off never runs a registry entry: PR 2719
+  # changed a bundled canonical script green and main went red at the merge
+  # commit. The selector now names bundle paths (skill_bundles); this job
+  # runs the check on exactly that packet. changed-smoke's always-lint set
+  # runs the same script on packets that fit, so a real drift can be red
+  # twice on purpose.
+  skill-bundles-fresh:
+    name: Skill bundles freshness
+    needs: [pr-affected]
+    if: ${{ !cancelled() && needs.pr-affected.outputs.skill_bundles == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet "pyyaml>=6"
+      - name: Run the bundle freshness check
+        run: bash scripts/lint/check-skill-bundles-fresh.sh
 
   # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
   # never in front of it: only `smoke` satisfies the merge gate - a green here
@@ -629,10 +655,9 @@ jobs:
         env:
           FNO_AGENTS_BIN: ${{ github.workspace }}/crates/fno-agents/target/release/fno-agents
           FNO_HOOK_LATENCY_OUT: ${{ runner.temp }}/hook-latency
-        # Quarantined: every fixture fails its exec allowlist. The stop and
-        # guard shims exec cat, mktemp and rm for stdin and stderr plumbing,
-        # and the stop fixtures now also reach gh. The fixtures run with
-        # --ignored, so an #[ignore] attribute cannot hold them; the skip does.
+        # The legacy `latency_` fixtures remain quarantined. The Bash hook
+        # budget fixture is named separately and measures the consolidated
+        # dispatcher with this job's exec trace and timing artifact.
         run: cargo test --release --manifest-path crates/fno-agents/Cargo.toml --test hook_latency -- --ignored --skip latency_ --test-threads=1 --nocapture
       - name: Upload samples
         if: always()

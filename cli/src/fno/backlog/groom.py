@@ -528,8 +528,8 @@ def render_groom_plist(
         home=_xml_escape(home),
         workdir=_xml_escape(workdir or home),
         hour=int(hour),
-        log_out=_xml_escape(str(state / "groom.out.log")),
-        log_err=_xml_escape(str(state / "groom.err.log")),
+        log_out=_xml_escape(str(state / "logs" / "groom.out.log")),
+        log_err=_xml_escape(str(state / "logs" / "groom.err.log")),
     )
 
 
@@ -553,6 +553,7 @@ def install_groom_agent(
     import sys
 
     from fno.pr_watch._install import _write_if_changed, bounce, default_agent_path
+    from fno.paths import state_dir
 
     if sys.platform != "darwin":
         return {
@@ -564,6 +565,7 @@ def install_groom_agent(
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
     install_path = install_path or default_agent_path(fno_binary)
+    (state_dir() / "logs").mkdir(parents=True, exist_ok=True)
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.

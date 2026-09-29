@@ -1,6 +1,6 @@
 ---
 name: autocorrect
-description: Self-improvement loop for the toolkit. Passive capture (git post-commit, verifiers, /fno:intel corrections) into ~/.fno/corrections.log; a monthly review surfaces patches; the user triages in about 20 minutes. Use when asked to review corrections, triage proposed patches, install or check the schedule, ingest the intel report, or audit recurring mistake classes.
+description: Self-improvement loop for the toolkit. Passive capture (git post-commit, verifiers, /fno:intel corrections) into ~/.fno/logs/corrections.log; a monthly review surfaces patches; the user triages in about 20 minutes. Use when asked to review corrections, triage proposed patches, install or check the schedule, ingest the intel report, or audit recurring mistake classes.
 ---
 
 # Autocorrect
@@ -11,7 +11,7 @@ The meta-improvement layer: passive capture, fresh-API review, human triage in 2
 
 ## Three writers, one log, one consumer
 
-Capture surfaces (write to `~/.fno/corrections.log`, never invoked by the agent):
+Capture surfaces (write to `~/.fno/logs/corrections.log`, never invoked by the agent):
 
 1. **git post-commit hook on `~/.claude/`** records every edit to rule/skill/CLAUDE.md files. Severity S1 by default; S0 if the commit subject starts with `urgent:` or `revert:`.
 2. **pre-commit verifier wrapper** (`scripts/corrections-verifier-log.sh`) any verifier in any repo calls when it blocks a commit. Verifier decides the severity (S0 for secret-scanner, S1 for style/lint, S2 for drift).
@@ -38,7 +38,7 @@ All commands are thin wrappers over scripts in this plugin's `scripts/` director
 ## Invariants (read before extending)
 
 1. **The agent is never the capture surface.** All three writers are passive (git hooks, verifier wrappers, scheduled ingester). If you find yourself proposing an agent-direct write, you're holding the wrong end of the loop.
-2. **Single artifact.** Everything funnels through `~/.fno/corrections.log`. Three writers, one consumer. Resist the urge to add ad-hoc per-source logs.
+2. **Single artifact.** Everything funnels through `~/.fno/logs/corrections.log`. Three writers, one consumer. Resist the urge to add ad-hoc per-source logs.
 3. **Severity tiers, not frequency thresholds.** S0 fires immediately on a single event. S1 and S2 both roll up in the monthly review. The registered cron passes `--severity S1,S2` on the 1st, and that scheduler is the one cadence owner. The writer decides severity.
 4. **Reviewer sees current full rule text, not just diffs.** Decisions are made against the rule as it stands today, not its history.
 5. **L1 -> L2 migration discipline.** Rules are a holding pen; verifiers are the destination. CONVERT-TO-VERIFIER patches MUST delete the rule text in the same commit they add the verifier. `autocorrect-triage.sh` surfaces this invariant.
@@ -48,11 +48,11 @@ All commands are thin wrappers over scripts in this plugin's `scripts/` director
 
 | File | Purpose |
 |---|---|
-| `~/.fno/corrections.log` | The canonical capture artifact. Mode 0600. |
+| `~/.fno/logs/corrections.log` | The canonical capture artifact. Mode 0600. |
 | `~/.claude/.corrections-watermark` | Last monthly review window end. |
 | `~/.claude/.s0-watcher-watermark` | Last S0 watcher tick. |
 | `~/.claude/.s0-processed.log` | Per-event hashes of S0 events already dispatched. |
-| `~/.fno/corrections.log.wm` | Per-event hashes ingested from the intel report. |
+| `~/.fno/logs/corrections.log.wm` | Per-event hashes ingested from the intel report. |
 | `~/.fno/corrections-rejected.log` | Items the user rejected during triage. |
 | `~/.claude/corrections-malformed.log` | Items where the patch did not apply cleanly. |
 | `~/.claude/proposed-patches/{review_id}.md` | The reviewer's patch list per review. |
@@ -76,7 +76,7 @@ bash $CLAUDE_PLUGIN_ROOT/scripts/install-autocorrect-cron.sh
 bash $CLAUDE_PLUGIN_ROOT/scripts/install-autocorrect-cron.sh --status
 
 # Tail the log
-tail -f ~/.fno/corrections.log
+tail -f ~/.fno/logs/corrections.log
 ```
 
 After setup, the loop runs unattended. The user only interacts during triage (~20 min/month) or to acknowledge an S0 review.

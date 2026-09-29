@@ -44,7 +44,8 @@ run_pack() {
 # ---- T01: binary runs -> packet carries the verify: block ----
 echo "T01: verify block embeds the corrections-verify markdown"
 D=$(fixture)
-printf '%s\n' "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/style.md | enforce emdash ban" > "$D/fno/corrections.log"
+mkdir -p "$D/fno/logs"
+printf '%s\n' "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/style.md | enforce emdash ban" > "$D/fno/logs/corrections.log"
 stub_agents "$D" "- 2026-09-10T12:00:00Z rules/style.md: improved (keep)
 "
 run_pack "$D"
@@ -65,7 +66,8 @@ rm -rf "$D"
 # ---- T02: no applied rows -> the no-corrections line, packet still validates ----
 echo "T02: no applied corrections reads the no-corrections line"
 D=$(fixture)
-printf '%s\n' "2026-09-10T12:00:00Z | S1 | target-postmortem | /tmp/pm.md | NoProgress: d" > "$D/fno/corrections.log"
+mkdir -p "$D/fno/logs"
+printf '%s\n' "2026-09-10T12:00:00Z | S1 | target-postmortem | /tmp/pm.md | NoProgress: d" > "$D/fno/logs/corrections.log"
 stub_agents "$D" "no applied corrections in window
 "
 run_pack "$D"
@@ -86,7 +88,8 @@ rm -rf "$D"
 # ---- T03: binary missing -> unavailable line, packet still complete ----
 echo "T03: corrections-verify unavailable keeps the packet whole"
 D=$(fixture)
-printf '%s\n' "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/style.md | enforce emdash ban" > "$D/fno/corrections.log"
+mkdir -p "$D/fno/logs"
+printf '%s\n' "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/style.md | enforce emdash ban" > "$D/fno/logs/corrections.log"
 FNO_HOME="$D/fno" CLAUDE_DIR_OVERRIDE="$D/claude" FNO_AGENTS_BIN="$D/absent-binary" \
     bash "$PACK" --dry-run > "$D/packet.yaml" 2> "$D/err.txt"
 RC=$?

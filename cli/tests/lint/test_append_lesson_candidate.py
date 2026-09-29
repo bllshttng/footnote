@@ -1,7 +1,7 @@
 """Regression tests for scripts/memory/append-lesson-candidate.sh.
 
 The dual-emit helper stages a load-bearing project lesson to
-~/.fno/lesson-candidates.jsonl. It must append one valid JSON line on success
+~/.fno/history/lesson-candidates.jsonl. It must append one valid JSON line on success
 and ALWAYS exit 0 (warn on failure) so it never blocks the memory write or merge.
 """
 import json

@@ -55,7 +55,7 @@ fn is_footnote_tree(root: &Path) -> bool {
 }
 
 /// The footnote tree to install from: the plugin root the session already
-/// resolves (env hints, then the `~/.fno/plugin-root` pointer), then the
+/// resolves (env hints, then the `~/.fno/install/plugin-root` pointer), then the
 /// filtered stage, then the repository around `cwd`. Refuses with every
 /// candidate named rather than half-installing.
 fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {

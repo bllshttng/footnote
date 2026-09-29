@@ -67,6 +67,11 @@ pub fn run(args: &[String]) -> i32 {
 /// `pub(crate)`: the route-slot verb resolves its refusal-journal path here,
 /// so the pin and the space fallback have one owner.
 pub(crate) fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
+    if name == "events" {
+        if let Some(v) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(v));
+        }
+    }
     let space = space_dir(cwd);
     let wt = worktree_space_dir(cwd);
     match name {
@@ -79,12 +84,7 @@ pub(crate) fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
             Some(if legacy.exists() { legacy } else { path })
         }
         "run-log" => Some(wt.join("run-log.jsonl")),
-        "events" => {
-            if let Some(v) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
-                return Some(PathBuf::from(v));
-            }
-            Some(crate::paths::events_path(cwd))
-        }
+        "events" => Some(crate::paths::events_path(cwd)),
         "plans" => Some(space.join("plans")),
         "inbox" => Some(space.join("inbox")),
         "kings" => Some(space.join("kings")),
