@@ -190,8 +190,8 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     runner = kwargs.pop("runner", FakeRunner())
     provider = kwargs.pop("provider", "claude")
     name = kwargs.pop("name", "peer")
-    # Routed Claude fixtures in this module are z.ai routes. Supply the vendor
-    # axis explicitly so the production seam never has to infer it from env.
+    # Routed Claude fixtures here are z.ai routes: supply the vendor axis
+    # explicitly so the production seam never infers it from env.
     if provider == "claude" and kwargs.get("route_env") is not None:
         kwargs.setdefault("route_provider", "zai")
     if kwargs.get("route_provider") is not None:
