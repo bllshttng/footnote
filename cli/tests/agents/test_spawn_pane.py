@@ -563,8 +563,7 @@ sleep 5
             message="AUTONOMOUS-PANE-TASK",
             provider="codex",
             cwd=repo,
-            session=session,
-            codex_sessions_dir=tmp_path / "no-rollouts",
+            session=session, yolo=True, codex_sessions_dir=tmp_path / "no-rollouts",
         )
 
         deadline = time.monotonic() + 10.0

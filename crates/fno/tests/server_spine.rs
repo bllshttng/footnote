@@ -120,6 +120,10 @@ fn server_command(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Command {
     for (key, value) in env {
         cmd.env(key, value);
     }
+    // Same contract as common::isolate_command: a verb that delegates to the
+    // Python CLI resolves its native event-store writer through FNO_BIN, and
+    // PATH carries no `fno` on a CI runner.
+    cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
     cmd
 }
 
