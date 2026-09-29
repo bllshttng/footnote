@@ -384,7 +384,7 @@ fn project_claim(record: &crate::claims::ClaimRecord) -> Result<NodeClaim, Strin
     })
 }
 
-fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
+pub(crate) fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
     let all = node_claims_by_id()?;
     Ok(all.get(node_id).cloned().unwrap_or_default())
 }
