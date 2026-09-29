@@ -2342,7 +2342,7 @@ console.log("backlog page helpers: 12 cases ok");
         for (page, name) in [
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
-            (NavPage::Crown, "crown"),
+            (NavPage::Crown, "rundown"),
             (NavPage::Fleet, "fleet"),
         ] {
             let frag = nav_fragment(page);
@@ -2404,7 +2404,7 @@ console.log("backlog page helpers: 12 cases ok");
         assert!(String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
         // The served crown page carries the shared nav (inserted after <body>).
         let text = String::from_utf8_lossy(&body).to_string();
-        assert!(text.contains("nav class=\"fno-nav\" data-current=\"crown\""));
+        assert!(text.contains("nav class=\"fno-nav\" data-current=\"rundown\""));
         let denied = private_page_response(
             &path,
             Some("wrong"),

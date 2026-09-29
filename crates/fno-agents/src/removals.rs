@@ -418,7 +418,7 @@ mod tests {
             r.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        assert_eq!(r.crown.as_deref(), Some("L2 x-eeee,x-4444"));
+        assert_eq!(r.crown.as_deref(), Some("Lead of x-eeee,x-4444"));
         assert_eq!(r.resume, None, "no receipt, no resume line");
     }
 

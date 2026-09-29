@@ -524,8 +524,22 @@ fn provider_receipt_matches(
                 } else {
                     format!("target:{session_id}")
                 };
-                receipt.get("objective").and_then(serde_json::Value::as_str)
-                    == Some(objective.as_str())
+                // A live goal still carrying the pre-rename spelling
+                // verifies like the lead spelling; the seed writes the new
+                // words, the receipt may answer in either.
+                let objective_matches = if resume {
+                    let scope_txt = scope.unwrap_or_default().trim().to_string();
+                    let answered = receipt
+                        .get("objective")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    answered == format!("$fno:lead {scope_txt}")
+                        || answered == format!("$fno:reign {scope_txt}")
+                } else {
+                    receipt.get("objective").and_then(serde_json::Value::as_str)
+                        == Some(objective.as_str())
+                };
+                objective_matches
                     && owner == expected_owner
                     && (!resume
                         || receipt

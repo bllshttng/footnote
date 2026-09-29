@@ -1402,6 +1402,9 @@ mod tests {
             row.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
+        // The receipt row's crown copies verbatim: the receipt is the
+        // surviving record, and the crown-event rows above are what render
+        // the title.
         assert_eq!(row.crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(row.detail, None);
     }
@@ -1449,7 +1452,7 @@ mod tests {
             .collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
         assert_eq!(granted[0].title, "jolly-finch crowned L2 x-eeee");
-        assert_eq!(granted[0].crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(granted[0].crown.as_deref(), Some("Lead of x-eeee"));
         assert_eq!(vacated.len(), 1, "vacated dedupes");
         assert_eq!(
             vacated[0].title,
@@ -1478,7 +1481,7 @@ mod tests {
             .iter()
             .find(|r| r.node == Some("x-child".into()))
             .unwrap();
-        assert_eq!(child.owner.as_deref(), Some("king heir L2"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // The crown row itself renders in the crowns band: no owner on it.
         let granted = p
             .rows
@@ -1491,7 +1494,7 @@ mod tests {
             .iter()
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
-        assert_eq!(epic.owner.as_deref(), Some("king heir L2"));
+        assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // Without a crown the child rolls up to its epic by the graph parent.
         let p = project("", &entries, &[], "", "");
         let child = p
