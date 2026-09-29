@@ -645,26 +645,6 @@ def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
         assert row_owning_session_id(sid, registry_path=reg, self_binding=None) is None
 
 
-def test_spawn_row_session_ids_serves_the_named_row(tmp_path, monkeypatch):
-    """The spawn-name witness reads the id the spawn flow wrote, keyed by the
-    name the spawner minted for this child (FNO_AGENT_SELF, then
-    FNO_WORKER_NAME)."""
-    from fno.agents.registry import spawn_row_session_ids
-
-    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
-    name, reg = _register(tmp_path, sid, provider="claude")
-    monkeypatch.setenv("FNO_AGENT_SELF", name)
-    assert spawn_row_session_ids("claude", registry_path=reg) == frozenset({sid})
-    monkeypatch.delenv("FNO_AGENT_SELF")
-    monkeypatch.setenv("FNO_WORKER_NAME", name)
-    assert spawn_row_session_ids("claude", registry_path=reg) == frozenset({sid})
-    # No export, wrong harness, foreign name: all degrade to empty.
-    monkeypatch.delenv("FNO_WORKER_NAME")
-    assert spawn_row_session_ids("claude", registry_path=reg) == frozenset()
-    monkeypatch.setenv("FNO_AGENT_SELF", name)
-    assert spawn_row_session_ids("codex", registry_path=reg) == frozenset()
-
-
 def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
     """AC3-ERR end-to-end: the owned resolver, wired to the real collider against
     a temp registry, refuses a foreign id a live row owns and records the owner,

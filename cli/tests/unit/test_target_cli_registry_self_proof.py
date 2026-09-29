@@ -252,23 +252,25 @@ def _silent_walk_claude_proof(monkeypatch, attested_id: str):
     )
 
 
-def test_name_only_claude_spawn_row_witness_resolves(tmp_path, monkeypatch):
-    """A claude spawned worker's stamp is name_only (the harness mints the id
-    after launch), its tree proves only the family, and no ancestor carries
-    the id. The worker's own spawn row - bound by its spawn-minted name -
-    witnesses the id, and the identity resolves canonically instead of
-    refusing the row that exists for this very launch."""
-    from fno.agents.registry import register_existing_session
+def test_name_only_claude_spawn_row_witness(tmp_path, monkeypatch):
+    """A claude spawned worker's own spawn row - bound by its spawn-minted
+    name - witnesses the id the spawn flow wrote: the identity resolves
+    canonically when the named row holds the marker id, a stale name export
+    (the row under that name holds a different live id) fails closed and
+    names the true holder, and the reader keys on FNO_AGENT_SELF with a
+    FNO_WORKER_NAME fallback, empty on any harness mismatch."""
+    from fno.agents.registry import register_existing_session, spawn_row_session_ids
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
-    row = register_existing_session(harness="claude", session_id=mine, cwd="/x")
+    stale_row_id = "019cc082-1111-7283-97cc-751c46742a08"
     _silent_walk_claude_proof(monkeypatch, mine)
-    monkeypatch.setenv("FNO_AGENT_SELF", row.name)
     monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
 
+    row = register_existing_session(harness="claude", session_id=mine, cwd="/x")
+    monkeypatch.setenv("FNO_AGENT_SELF", row.name)
     result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
     assert result.exit_code == 0, result.output
     fields = _fields(result)
@@ -277,28 +279,21 @@ def test_name_only_claude_spawn_row_witness_resolves(tmp_path, monkeypatch):
     assert fields["DISPOSITION"] == "canonical"
     assert fields["COLLISION"] == ""
 
+    # The reader seam behind the witness, keyed by the spawn-minted name.
+    assert spawn_row_session_ids("claude") == frozenset({mine})
+    monkeypatch.delenv("FNO_AGENT_SELF")
+    monkeypatch.setenv("FNO_WORKER_NAME", row.name)
+    assert spawn_row_session_ids("claude") == frozenset({mine})
+    assert spawn_row_session_ids("codex") == frozenset()
 
-def test_name_only_claude_stale_name_export_fails_closed(tmp_path, monkeypatch):
-    """The witness is bound to the spawn-minted name: when the row that name
-    holds a DIFFERENT session's id, it cannot witness the marker. A stale
-    name export (a reused spare process carrying the previous spawn's env)
-    stays ambiguous, and the live row that truly holds the marker is named."""
-    from fno.agents.registry import register_existing_session
-    from fno.paths_testing import use_tmpdir
-
-    use_tmpdir(monkeypatch, tmp_path)
-    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
-    stale_row_id = "019cc082-1111-7283-97cc-751c46742a08"
+    # A stale name export cannot witness: the row under that name holds a
+    # different live id, so the marker stays refused and names the holder.
     stale = register_existing_session(harness="claude", session_id=stale_row_id, cwd="/x")
-    holder = register_existing_session(harness="claude", session_id=mine, cwd="/x")
-    _silent_walk_claude_proof(monkeypatch, mine)
+    monkeypatch.delenv("FNO_WORKER_NAME")
     monkeypatch.setenv("FNO_AGENT_SELF", stale.name)
-    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
-
     result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
     assert result.exit_code == 0, result.output
     fields = _fields(result)
     assert fields["DISPOSITION"] == "ambiguous"
-    assert fields["COLLISION"] == holder.name
+    assert fields["COLLISION"] == row.name
     assert fields["COLLISION_ID"] == mine
