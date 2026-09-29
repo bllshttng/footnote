@@ -287,7 +287,8 @@ fn folder_files(folder: &Path) -> Result<Vec<PathBuf>, String> {
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        if entry.metadata().map(|m| m.is_file()).unwrap_or(false) {
+        let metadata = fs::metadata(entry.path()).map_err(|e| path_error(&entry.path(), &e))?;
+        if metadata.is_file() {
             files.push(entry.path());
         }
     }
@@ -370,7 +371,6 @@ pub(crate) fn parse_theme_text(
         if roles.iter().any(|key| table.contains_key(*key)) {
             let spec = table
                 .iter()
-                .filter(|(_, value)| !value.is_table() && !value.is_array())
                 .map(|(key, value)| {
                     (
                         key.clone(),
@@ -829,6 +829,14 @@ mod tests {
             .await
             .unwrap_err()
             .contains("UTF-8"));
+        #[cfg(unix)]
+        {
+            let socket_path = root.path().join("not-a-file.sock");
+            let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            assert!(parse_source("not-a-file.sock", root.path())
+                .unwrap_err()
+                .contains("not a regular file or folder"));
+        }
     }
 
     #[test]
@@ -842,6 +850,16 @@ mod tests {
         assert_eq!(fno[0].0, "midnight");
         let top = parse_theme_text("base = \"#101018\"\nbrand = \"blue\"", "top-level").unwrap();
         assert_eq!(top[0].0, "top-level");
+        let top_unknown = parse_theme_text("base = \"#101018\"\nunknown = [\"red\"]", "top-level")
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            candidate(&top_unknown.0, top_unknown.1, &HashSet::new())
+                .unwrap()
+                .warnings
+                .len(),
+            1
+        );
         let ghostty = parse_theme_text("background = 101010\nforeground = #eeeeee\nselection-background = #333333\npalette = 1=#ff0000\npalette = 3=#ffff00\npalette = 4=#0000ff\npalette = 8=#888888\nconfig-file = /tmp/other.conf", "ghost").unwrap();
         let values = ghostty[0]
             .1
@@ -926,6 +944,33 @@ mod tests {
         for forbidden in ["-H", "-u", "-b", "-K"] {
             assert!(!args.lines().any(|arg| arg == forbidden));
         }
+        let valid_program = root.path().join("valid-curl.sh");
+        let valid_args = root.path().join("valid-curl-args");
+        fs::write(
+            &valid_program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' 'background = 101010' 'foreground = #eeeeee' 'palette = 4=#0000ff'\n",
+                valid_args.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&valid_program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&valid_program, permissions).unwrap();
+        let bytes = fetch_with(
+            &valid_program,
+            "https://github.com/octo/themes/blob/main/mocha.conf",
+        )
+        .await
+        .unwrap();
+        let args = fs::read_to_string(valid_args).unwrap();
+        assert!(args.ends_with("https://raw.githubusercontent.com/octo/themes/main/mocha.conf\n"));
+        let ghostty = parse_theme_text(&String::from_utf8(bytes).unwrap(), "mocha").unwrap();
+        assert_eq!(ghostty[0].0, "mocha");
+        assert!(ghostty[0]
+            .1
+            .iter()
+            .any(|(key, value)| key == "brand" && value == "#0000ff"));
         let item = Candidate {
             name: "midnight".into(),
             rename_reason: None,

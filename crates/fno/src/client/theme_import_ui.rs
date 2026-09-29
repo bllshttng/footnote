@@ -141,6 +141,7 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
         } => {
             inert(&mut rows, PopupRow::Header(format!("preview: {source}")));
             let mut warned = false;
+            let paint_background = crate::digest_overlay::paint_background_enabled(cwd);
             for candidate in candidates {
                 inert(&mut rows, PopupRow::Header(candidate.name.clone()));
                 if let Some(reason) = &candidate.rename_reason {
@@ -152,7 +153,7 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
                     "ground: none - your terminal keeps its own background".into()
                 };
                 inert_entry(&mut rows, &ground);
-                if !crate::digest_overlay::paint_background_enabled(cwd) {
+                if !paint_background {
                     inert_entry(&mut rows, "(not painted: mux.paint_background is off)");
                 }
                 for (role, color) in role_colors(&candidate.theme) {
