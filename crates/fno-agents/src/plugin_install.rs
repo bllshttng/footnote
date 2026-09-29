@@ -1608,8 +1608,12 @@ fn decide_plugin_array(
         }
         return ("reported".into(), vec![], vec![]);
     }
-    let approved = if yes || json {
-        yes
+    let approved = if json {
+        // --json never edits, whatever --yes says: the receipt's action text
+        // and the guide both promise audit-only under --json.
+        false
+    } else if yes {
+        true
     } else if std::io::stdin().is_terminal() {
         print!("\nDisable these plugin entries? [Y/n] ");
         let _ = std::io::stdout().flush();
@@ -1625,7 +1629,7 @@ fn decide_plugin_array(
         return ("disabled".into(), undo, refusals);
     }
     if json {
-        eprintln!("kept: re-run `fno config plugin install opencode --yes` to disable them");
+        eprintln!("kept: --json never edits; re-run without --json to disable them");
     } else {
         println!("kept: re-run `fno config plugin install opencode --yes` to disable them");
     }
