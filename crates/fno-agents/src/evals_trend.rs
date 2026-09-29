@@ -1045,10 +1045,16 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                         _ => (0.0, 0.0),
                     };
                     let cost = if c["cost"]["measured"].as_bool().unwrap_or(false) {
-                        format!(
-                            "${:.4}/accepted",
-                            c["cost"]["dollars_per_accepted"].as_f64().unwrap_or(0.0)
-                        )
+                        match c["cost"]["dollars_per_accepted"].as_f64() {
+                            Some(per) => format!("${:.4}/accepted", per),
+                            // Measured total but zero accepted changes: there is
+                            // no per-accepted number, and 0.0000 would read as a
+                            // price.
+                            None => format!(
+                                "${:.4} total (0 accepted)",
+                                c["cost"]["dollars_total"].as_f64().unwrap_or(0.0)
+                            ),
+                        }
                     } else {
                         "cost unmeasured".to_string()
                     };
