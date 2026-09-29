@@ -358,12 +358,19 @@ def test_maintain_cli_prints_per_leg_counts(tmp_graph):
 # --- AC3-HP: summary appended to health-history ----------------------------
 
 
+def _history_path():
+    """The writer's own resolver: wave-2 moved the file under history/."""
+    from fno.health_monitor import _default_history_path
+
+    return _default_history_path()
+
+
 def test_maintain_cli_appends_health_history(tmp_graph):
     _seed(tmp_graph, [_node("ab-keep02", cwd="/home/u/code/fno", project="fno")])
     result = _invoke(["--apply"])
     assert result.exit_code == 0, result.output
 
-    hist = Path.home() / ".fno" / "health-history.jsonl"
+    hist = _history_path()
     assert hist.exists()
     lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
     maintain_records = [r for r in lines if r.get("scope") == "maintain"]
@@ -418,7 +425,7 @@ def test_maintain_budget_exceeded_exits_4_names_leg_and_appends_partial_row(
     assert "  harness-shape: 0" in result.stdout
     assert "dedup:" not in result.stdout
 
-    hist = Path.home() / ".fno" / "health-history.jsonl"
+    hist = _history_path()
     lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
     row = [r for r in lines if r.get("scope") == "maintain"][-1]["report"]
     assert row["complete"] is False
