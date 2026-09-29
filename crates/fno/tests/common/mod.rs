@@ -86,6 +86,13 @@ impl Scratch {
             )
             .env("FNO_E2E", "1")
             .env("FNO_PROCESS_ADMISSION_MAX", "512");
+        // The Python side of a forwarded verb emits through the native
+        // store and resolves its binary FNO_BIN, then the checkout build,
+        // then PATH. CI has no installed fno on PATH and no crates/*/target
+        // binary, so without this pin the claim leg dies in
+        // EventStoreUnavailable. The compile-time exe is the same build
+        // the test itself runs.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         // A server this command autospawns inherits the env and passes
         // it to every `fno-agents-worker` keeper it launches, so the keeper's
         // watchdog reaps it when this test binary exits. Applied after the
@@ -120,6 +127,9 @@ impl Scratch {
         );
         cmd.env("FNO_E2E", "1");
         cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
+        // Same FNO_BIN pin as isolate_command: the pty arm forwards verbs
+        // through Python too.
+        cmd.env("FNO_BIN", env!("CARGO_BIN_EXE_fno"));
         // Same contract as isolate_command: the autospawned server
         // inherits this and its keepers reap on this test binary's exit.
         // CommandBuilder has no batch envs(); apply the pair one call each.
