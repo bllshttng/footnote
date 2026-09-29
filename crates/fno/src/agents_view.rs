@@ -2005,7 +2005,6 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let crown_name = None;
         // The people title rides the row: one tolerant store read per
         // derive, keyed on the row's canonical scope. No record, no title -
         // the sideline falls back to the scope.
