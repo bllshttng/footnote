@@ -137,8 +137,15 @@ def _stub_run(calls, rc=0):
         stderr = ""
         stdout = ""
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     def _run(cmd, *a, **k):
         calls.append(list(cmd))
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
         return _Result()
 
     return _run
@@ -199,11 +206,18 @@ def test_init_binds_graph_for_node_input(tmp_path, monkeypatch):
     node = {"id": "x-b1d7", "plan_path": None, "title": "t", "cwd": str(tmp_path)}
     monkeypatch.setattr(target_cli, "_graph_entries_or_none", lambda: [node])
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     class _Result:
         returncode = 0
 
     def _run(cmd, *a, **k):
         calls.append(list(cmd))
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
         return _Result()
 
     monkeypatch.setattr(target_cli.subprocess, "run", _run)
@@ -241,7 +255,18 @@ def test_init_warns_on_prebound_different_plan(tmp_path, monkeypatch):
     class _Result:
         returncode = 0
 
-    monkeypatch.setattr(target_cli.subprocess, "run", lambda cmd, *a, **k: calls.append(list(cmd)) or _Result())
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
+    def _lambda_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
+        return _Result()
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _lambda_run)
     fake_root = tmp_path / "plugin"
     (fake_root / "hooks" / "helpers").mkdir(parents=True)
     (fake_root / "hooks" / "helpers" / "init-target-state.sh").write_text("#!/bin/bash\n")

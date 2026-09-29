@@ -43,11 +43,15 @@ fn sha_matches(a: &str, b: &str) -> bool {
     n >= 7 && a.get(..n) == b.get(..n)
 }
 
-/// One pass over the journal, rows grouped by branch. `evidence` answers per
-/// item for a whole corpus, and a per-item `select_rows` re-parse of the full
-/// text is O(items x journal) - minutes on a measured 62MB journal - so the
-/// classification reads one index instead.
-fn index_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
+/// One pass over the journal, rows grouped under the keys `keys_of` derives
+/// from each row's branch. `evidence` answers per item for a whole corpus,
+/// and a per-item `select_rows` re-parse of the full text is O(items x
+/// journal) - minutes on a measured 62MB journal - so the classification
+/// reads one index instead.
+fn index_rows_keyed<F>(events_text: &str, keys_of: F) -> BTreeMap<String, Vec<AttestationRow>>
+where
+    F: Fn(&str) -> Vec<String>,
+{
     let mut map: BTreeMap<String, Vec<AttestationRow>> = BTreeMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -80,17 +84,29 @@ fn index_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         if let Some(branch) = row_branch {
-            map.entry(branch.to_string())
-                .or_default()
-                .push(AttestationRow {
-                    head_sha,
-                    verdict,
-                    review_round,
-                    findings: blocking + nonblocking,
-                });
+            let row = AttestationRow {
+                head_sha,
+                verdict,
+                review_round,
+                findings: blocking + nonblocking,
+            };
+            for key in keys_of(branch) {
+                map.entry(key).or_default().push(row.clone());
+            }
         }
     }
     map
+}
+
+/// The display line reads by branch, so its index keeps the raw branch key.
+fn index_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
+    index_rows_keyed(events_text, |b| vec![b.to_string()])
+}
+
+/// The evidence read classifies per NODE: a row on any branch shape (legacy
+/// `feature/<id>` or `<kind>/<id>-<mini>`) proves review about its node.
+fn node_keyed_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
+    index_rows_keyed(events_text, |b| crate::node_branch::node_ids(b))
 }
 
 fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
@@ -130,7 +146,7 @@ pub fn summary_line(events_text: &str, branch: &str, head: &str) -> Option<Strin
 /// and found nothing); every `no_*` state is missing evidence, never a
 /// verified clean. Items come back in input order.
 pub fn evidence(events_text: &str, items: &[Value]) -> Value {
-    let index = index_rows(events_text);
+    let index = node_keyed_rows(events_text);
     let mut out = Vec::with_capacity(items.len());
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for item in items {
@@ -142,10 +158,7 @@ pub fn evidence(events_text: &str, items: &[Value]) -> Value {
             (None, _) => ("no_node", Value::Null),
             (Some(_), None) => ("no_pr", Value::Null),
             (Some(node), Some(_)) => {
-                let rows = index
-                    .get(&format!("feature/{node}"))
-                    .cloned()
-                    .unwrap_or_default();
+                let rows = index.get(node).cloned().unwrap_or_default();
                 if rows.is_empty() {
                     ("no_attestation", Value::Null)
                 } else if rows.iter().all(|r| r.findings == 0) {
@@ -348,11 +361,11 @@ mod tests {
     fn evidence_splits_clean_from_missing() {
         let events = format!(
             "{}\n{}\n",
-            attestation("feature/x-1", "aaa1111", "pass", Some(1), 2),
-            attestation("feature/x-2", "bbb2222", "pass", Some(1), 0),
+            attestation("feature/x-1111", "aaa1111", "pass", Some(1), 2),
+            attestation("feature/x-2222", "bbb2222", "pass", Some(1), 0),
         );
         let items: Vec<Value> = serde_json::from_str(
-            r#"[{"node":"x-1","pr_number":1},{"node":"x-2","pr_number":2},{"node":"x-3","pr_number":3},{"node":null,"pr_number":null},{"node":"x-4","pr_number":null}]"#,
+            r#"[{"node":"x-1111","pr_number":1},{"node":"x-2222","pr_number":2},{"node":"x-3333","pr_number":3},{"node":null,"pr_number":null},{"node":"x-4444","pr_number":null}]"#,
         )
         .expect("items parse");
         let out = evidence(&events, &items);
@@ -375,14 +388,31 @@ mod tests {
     }
 
     #[test]
+    fn evidence_classifies_both_branch_shapes_to_the_node() {
+        let events = format!(
+            "{}\n{}\n",
+            attestation("bugfix/x-aaaa-wrong-close", "aaa1111", "pass", Some(1), 0),
+            attestation("feature/x-aaaa", "bbb2222", "pass", Some(1), 0),
+        );
+        let items: Vec<Value> =
+            serde_json::from_str(r#"[{"node":"x-aaaa","pr_number":1}]"#).expect("parse");
+        let out = evidence(&events, &items);
+        assert_eq!(out["items"][0]["state"], "clean");
+        assert_eq!(
+            out["evidence_line"],
+            "evidence: scored=0 clean=1 missing=0 (no_node=0 no_pr=0 no_attestation=0)"
+        );
+    }
+
+    #[test]
     fn evidence_scores_against_the_latest_verdict() {
         let events = format!(
             "{}\n{}\n",
-            attestation("feature/x", "aaa1111", "pass", Some(1), 0),
-            attestation("feature/x", "bbb2222", "fail", Some(2), 1),
+            attestation("feature/x-4444", "aaa1111", "pass", Some(1), 0),
+            attestation("feature/x-4444", "bbb2222", "fail", Some(2), 1),
         );
         let items: Vec<Value> =
-            serde_json::from_str(r#"[{"node":"x","pr_number":1}]"#).expect("parse");
+            serde_json::from_str(r#"[{"node":"x-4444","pr_number":1}]"#).expect("parse");
         let out = evidence(&events, &items);
         assert_eq!(out["items"][0]["state"], "scored");
         // Precision follows the LATEST row; the earlier pass is history.

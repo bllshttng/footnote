@@ -561,3 +561,77 @@ def test_a_failed_disarm_is_surfaced_not_silenced(tmp_path, monkeypatch, capsys)
     assert "returned nonzero" in err
     assert "authentication failed" in err
     assert "may still exist" in err
+
+
+# --- node-level holds (x-b553): a merge hold works without a plan file ------
+
+_NODE_HOLD = {
+    "reason": "rc merge freeze",
+    "release_when": "king lifts the freeze",
+    "review_on": "2099-08-20",
+    "set_by": "king:candor",
+}
+
+
+def test_hold_for_pr_refuses_a_plan_less_node_hold(tmp_path, monkeypatch):
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body="---\nstatus: ready\n---\n",  # unused: entries given below
+        entries=[
+            {
+                "id": "x-5a5c",
+                "cwd": str(tmp_path),
+                "pr_number": 42,
+                "pr_url": "https://github.com/o/r/pull/42",
+                "dispatch_hold": dict(_NODE_HOLD),
+            },
+        ],
+    )
+    verdict = _hold.hold_for_pr(42, str(tmp_path))
+    assert verdict is not None
+    assert verdict.owner_id == "x-5a5c"
+    assert verdict.hold.state is DispatchHoldState.HELD
+    assert verdict.hold.set_by == "king:candor"
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold:x-5a5c" in reason
+    _malformed_node_hold_refuses(tmp_path, monkeypatch)
+    _unclaimed_node_hold_ignored(tmp_path, monkeypatch)
+
+
+def _malformed_node_hold_refuses(tmp_path, monkeypatch):
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body="---\nstatus: ready\n---\n",
+        entries=[
+            {
+                "id": "x-5a5c",
+                "cwd": str(tmp_path),
+                "pr_number": 42,
+                "pr_url": "https://github.com/o/r/pull/42",
+                "dispatch_hold": {"reason": "missing the other three keys"},
+            },
+        ],
+    )
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold-invalid:x-5a5c" in reason
+
+
+def _unclaimed_node_hold_ignored(tmp_path, monkeypatch):
+    """A node-level hold on a node this PR does not name must not refuse it."""
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body="---\nstatus: ready\n---\n",
+        entries=[
+            {
+                "id": "x-5a5c",
+                "cwd": str(tmp_path),
+                "pr_number": 42,
+                "pr_url": "https://github.com/o/r/pull/42",
+            },
+            {"id": "x-hold", "slug": "x-hold", "title": "x-hold", "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "dispatch_hold": dict(_NODE_HOLD)},
+        ],
+    )
+    assert _hold.hold_for_pr(42, str(tmp_path)) is None

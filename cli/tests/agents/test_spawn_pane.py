@@ -190,8 +190,7 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     runner = kwargs.pop("runner", FakeRunner())
     provider = kwargs.pop("provider", "claude")
     name = kwargs.pop("name", "peer")
-    # Routed Claude fixtures in this module are z.ai routes. Supply the vendor
-    # axis explicitly so the production seam never has to infer it from env.
+    # Routed Claude fixtures here are z.ai routes: vendor axis stays explicit.
     if provider == "claude" and kwargs.get("route_env") is not None:
         kwargs.setdefault("route_provider", "zai")
     if kwargs.get("route_provider") is not None:
@@ -253,6 +252,7 @@ def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
     return fno_bin, worker_bin
 
 
+@pytest.mark.timeout(600)
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -330,8 +330,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             str(rollout),
         ],
     )
-    # The daemon start would exec a real provider binary; the journey
-    # exercises the late-identity heal, not the daemon contract.
+    # The daemon start would exec a real provider; the journey exercises the heal.
     from fno.agents import codex_pane
 
     monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
@@ -479,6 +478,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         shutil.rmtree(mux_dir, ignore_errors=True)
 
 
+@pytest.mark.timeout(600)
 def test_codex_autonomous_pane_journey_completes_without_operator_input(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -266,30 +266,6 @@ def test_spawn_worker_os_error_surfaces_as_spawn_failed(monkeypatch):
     assert "argument list too long" in result["error"]
 
 
-# ----------------------------------------------------------------------
-# create_worktree (delegation)
-# ----------------------------------------------------------------------
-
-
-def test_create_worktree_delegates_to_shared(tmp_path, monkeypatch):
-    """create_worktree on the hermes adapter calls _shared.create_worktree."""
-    monkeypatch.chdir(tmp_path)
-    sentinel = {
-        "worktree_path": str(tmp_path / ".fno" / "worktrees" / "fno-x"),
-        "branch": "feature/x",
-        "status": "created",
-    }
-
-    with mock.patch(
-        "fno.adapters.hermes._create_worktree", return_value=sentinel
-    ) as mocked:
-        result = HermesCliAdapter().create_worktree(name="x", base="main")
-
-    mocked.assert_called_once_with(name="x", base="main")
-    assert result is sentinel
-
-
-# ----------------------------------------------------------------------
 # call_api
 # ----------------------------------------------------------------------
 
@@ -827,6 +803,5 @@ def test_adapter_implements_runtime_protocol():
     """Structural Protocol check - all four primitives present and callable."""
     adapter = HermesCliAdapter()
     assert callable(adapter.spawn_worker)
-    assert callable(adapter.create_worktree)
     assert callable(adapter.call_api)
     assert callable(adapter.health)

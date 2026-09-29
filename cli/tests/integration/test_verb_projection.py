@@ -114,10 +114,8 @@ def test_supersede_repaints_both_nodes(tmp_graph, tmp_path):
     new = _node(new_plan, id="x-0ec0", slug="new", priority="p0")
     _seed(tmp_graph, [old, new])
 
-    res = runner.invoke(
-        app, ["backlog", "supersede", "x-0ec0", "--replaces", "x-01d0", "--cause", "dup", "--surface", "x.py"]
-    )
-    assert res.exit_code == 0, res.output
+    res = run_native_create(tmp_graph, "supersede", "x-0ec0", "--replaces", "x-01d0", "--cause", "dup", "--surface", "x.py")
+    assert res.exit_code == 0, res.output + res.stderr
     # The new node's doc mirrors its graph priority.
     _, fields, _ = read_plan_file(new_plan)
     assert fields["priority"] == "p0"

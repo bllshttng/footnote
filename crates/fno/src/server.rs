@@ -68,6 +68,7 @@ mod agent_actions;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
 mod drift_retire;
+mod grid_reconcile;
 mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
@@ -6186,11 +6187,9 @@ impl Core {
     const NUDGE_DELAY: Duration = Duration::from_millis(300);
 
     /// Fire every due deferred repaint request (the 1s core tick's pass).
-    /// Re-reads each pane's CURRENT requested size (not `vt.size()`: a
-    /// keeper-hosted pane's `vt` only catches up once its resize ack lands,
-    /// so reading `vt.size()` here could still see the OLD size and nudge
-    /// the pty right back to it), so a nudge armed by an older geometry
-    /// never re-introduces a stale winsize.
+    /// Reads each pane's requested size, never `vt.size()`: a keeper-hosted
+    /// pane's vt catches up only when its resize ack lands, and a nudge armed
+    /// by an older geometry must never re-introduce a stale winsize.
     fn fire_due_nudges(&mut self) {
         let due: Vec<u64> = self
             .panes
@@ -9782,12 +9781,7 @@ impl Core {
         // Tree mutations tile against the viewed tab's CLAMPED area.
         let vp = self.tab_rect(view.1);
         match cmd {
-            Command::SplitH | Command::SplitV => {
-                let axis = if matches!(cmd, Command::SplitH) {
-                    Axis::Horizontal
-                } else {
-                    Axis::Vertical
-                };
+            Command::SplitDir(dir) => {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
@@ -9816,7 +9810,7 @@ impl Core {
                 let Some(tab) = self.viewed_tab_mut(view) else {
                     return Flow::Continue;
                 };
-                match tree::split(tab, vp, axis, pid) {
+                match tree::split_directional(tab, vp, dir, pid) {
                     Ok(()) => self.push_layout(true),
                     Err(e) => {
                         // AC1-EDGE: refused split reaps the pre-spawned
@@ -13221,6 +13215,7 @@ async fn serve(
             _ = pane_reap_tick.tick() => {
                 // Deferred repaint requests ride the same 1s pass.
                 core.fire_due_nudges();
+                core.reconcile_grid_sizes();
                 core.follow_portal_viewer_titles();
                 // Snapshot first: reader completion guarantees all output for
                 // these panes was enqueued before this point. Drain it, then

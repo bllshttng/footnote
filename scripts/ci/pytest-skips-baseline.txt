@@ -238,3 +238,7 @@ cli/tests/unit/test_mail_hold_parity.py::test_the_gate_receipt_reads_one_clock_a
 cli/tests/unit/test_mail_hold_parity.py::test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses::pytest.skip  # native hold gate: the wall-clock wording is the Rust gate receipt; no binary means no receipt to assert
 cli/tests/unit/test_strand.py::_seed_idea::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
 cli/tests/goldens/_door.py::door::pytest.skip  # native door: the golden receipts drive the fno-agents binary; without a dev build there is no door to pin
+cli/tests/integration/test_collision.py::_native_supersede::pytest.skip  # native supersede door: the guard ladder is the Rust leg's; no dev build means no door to pin
+cli/tests/unit/test_contain.py::_native_contain::pytest.skip  # native contain door: the guard ladder is the Rust leg's; no dev build means no door to pin
+cli/tests/unit/test_decompose.py::_native_supersede::pytest.skip  # native supersede door: the release contract is the Rust leg's; no dev build means no door to pin
+cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # native supersede door: the evidence-record contract is the Rust leg's; no dev build means no door to pin

@@ -787,6 +787,42 @@ def harness_session_id() -> str:
     return _HARNESS_SESSION_ID
 
 
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_hold_verdict(tmp_path, monkeypatch):
+    """The hold verdict answers from the graph on disk (one fno-agents
+    receipt). These tests build in-memory graphs; the adapter ships each
+    call's rows IN the payload so the reader answers from them. A test that
+    stubs the verdict itself overrides this."""
+
+    import json as _json
+
+    from fno.graph import ladder
+    from fno.rust_binary import call_binary_json as _real_call
+
+    real = ladder.dispatch_hold_verdict
+
+    def patched(entry, by_id):
+        rows = list(by_id.values())
+        if isinstance(entry, dict) and entry not in rows:
+            rows = rows + [entry]
+        rows = [e for e in rows if isinstance(e, dict) and e.get("id")]
+
+        def seeded_call(verb, args, *, timeout=None):
+            payload = _json.loads(args[0])
+            payload["entries"] = rows
+            return _real_call(verb, [_json.dumps(payload)], timeout=15)
+
+        monkeypatch.setattr("fno.rust_binary.call_binary_json", seeded_call)
+        if not isinstance(entry, dict) or not entry.get("id"):
+            # A row the graph cannot carry: read as unheld, as before.
+            return None
+        return real(entry, by_id)
+
+    monkeypatch.setattr(ladder, "dispatch_hold_verdict", patched)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Remove the throwaway sandbox created for state isolation."""
     import shutil

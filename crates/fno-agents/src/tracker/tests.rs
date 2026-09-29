@@ -13,6 +13,12 @@ use std::sync::{Arc, Mutex};
 /// The returned guard restores the previous values on drop, so the overrides
 /// never leak into sibling tests under parallel execution.
 fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
+    // Take the env lock before the first global pin: the save and the set
+    // below are process-global writes, and a sibling test's config read must
+    // not observe them mid-flight (the territory EnvGuard discipline).
+    let lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let empty = tmp.join("empty.toml");
     std::fs::write(&empty, "").unwrap();
     let saved = [
@@ -28,15 +34,7 @@ fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
     std::env::set_var("HOME", tmp);
     std::env::set_var("FNO_HOME", tmp);
     std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
-    // The guard holds the shared env lock for the caller's whole body: the
-    // pins above are process-global, and a concurrent test's config read
-    // must not observe them mid-flight (the territory EnvGuard discipline).
-    EnvGuard {
-        _lock: crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-        saved,
-    }
+    EnvGuard { _lock: lock, saved }
 }
 
 struct EnvGuard {
@@ -224,6 +222,11 @@ fn graph_fixture(dir: &std::path::Path, entries: Value) -> std::path::PathBuf {
 #[test]
 fn ac4_graph_list_open_excludes_terminal_and_carries_ordering_inputs() {
     let dir = tempfile::tempdir().unwrap();
+    // The readiness overlay resolves the global state root transitively; go
+    // hermetic and declare the root so a sibling's legal env restore can never
+    // land a real $HOME under this read (the p1 flake).
+    let _env = hermetic_env(dir.path());
+    crate::paths::pin_test_claims_root(dir.path());
     let path = graph_fixture(
         dir.path(),
         json!([
@@ -375,6 +378,8 @@ fn the_sidecar_file_reader_honors_its_contract() {
 #[test]
 fn the_graph_backend_projects_only_sidecar_keys() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = hermetic_env(dir.path());
+    crate::paths::pin_test_claims_root(dir.path());
     let path = graph_fixture(
         dir.path(),
         json!([

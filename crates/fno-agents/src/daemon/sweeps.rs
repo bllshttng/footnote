@@ -14,10 +14,9 @@ use crate::pr_park;
 /// costs one sweep and changes nothing.
 pub(crate) const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
 
-/// How long between park sweeps. A parked PR comes back on the next push, so
-/// the sweep's job is to notice the push; 6h bounds discovery lag on a clock
-/// that already ticks.
-pub(crate) const PARK_SWEEP_INTERVAL_SECS: i64 = 21_600;
+/// How long between park sweeps. A parked row owes its merge when its head
+/// moves; the sweep costs one `fno do pr info` per open parked row.
+pub(crate) const PARK_SWEEP_INTERVAL_SECS: i64 = 600;
 
 /// One fleet's stale-sweep reading, parsed from the verb's JSON line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +112,7 @@ pub fn stale_sweep(
     outcome
 }
 
-/// Park sweep on a 6h floor: un-parks open rows whose PR head moved since
+/// Park sweep on a 10-minute floor: un-parks open rows whose PR head moved since
 /// the park baseline or whose park passed 24 hours, and marks finished rows
 /// handled. The verb inside (`fno-agents pr-park sweep`) is idempotent on an
 /// untouched store, so a re-run costs one head probe per open row and

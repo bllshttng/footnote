@@ -393,7 +393,7 @@ def test_design_node_is_never_autonomously_selected(tmp_path):
     assert node["status"] != "ready"  # the filter every selector applies
 
 
-def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path):
+def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path, monkeypatch):
     """A backlog that is ALL design-stage must not return null silently."""
     from datetime import datetime, timezone
 
@@ -404,13 +404,14 @@ def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path):
     plan.write_text(DESIGN_FM)
     node = {"id": "x-d", "plan_path": str(plan), "created_at": _now()}
     recompute_statuses([node])
+    _seed_graph(tmp_path, monkeypatch, [node])
     out = _starvation_receipts(
         [node], None, True, None, set(), datetime.now(timezone.utc), 21
     )
     assert out == [("x-d", "design")]
 
 
-def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
+def test_think_attaches_plan_then_blueprint_arms_it(tmp_path, monkeypatch):
     """The whole point of the rung: /think can link its doc safely.
 
     Before this rung existed, linking a design doc flipped the node to `ready`
@@ -434,6 +435,7 @@ def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
     recompute_statuses([node])
     assert node["status"] == "design"
     assert node["status"] != "ready"  # the filter every autonomous selector applies
+    _seed_graph(tmp_path, monkeypatch, [node])
     assert _starvation_receipts([node], None, True, None, set(), now, 21) == [
         ("x-8af8", "design")
     ]
@@ -442,10 +444,11 @@ def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
     doc.write_text("---\nstatus: ready\nnode: x-8af8\n---\n\n## Execution Strategy\n")
     recompute_statuses([node])
     assert node["status"] == "ready"
+    _seed_graph(tmp_path, monkeypatch, [node])
     assert selection_guards(node, {"x-8af8": node}, now) is None
 
 
-def test_starvation_receipt_names_design_not_quarantined(tmp_path):
+def test_starvation_receipt_names_design_not_quarantined(tmp_path, monkeypatch):
     """A design-stage node is a lifecycle rung, not starvation.
 
     Reporting it as the generic `quarantined` would read as a stuck node and
@@ -463,6 +466,7 @@ def test_starvation_receipt_names_design_not_quarantined(tmp_path):
         "plan_path": str(plan),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    _seed_graph(tmp_path, monkeypatch, [node])
     out = _starvation_receipts(
         [node], None, True, None, set(), datetime.now(timezone.utc), 21
     )
@@ -655,6 +659,23 @@ def test_is_design_stage_is_now_one_rung_of_the_table(tmp_path):
 # selection re-probes every undesigned rung, not just `design` (codex P1) ------
 
 
+def _seed_graph(tmp_path, monkeypatch, rows: list[dict]) -> None:
+    """Persist the in-memory rows so the binary verdict sees the same graph."""
+    import json as _json
+
+    from tests.fixtures.graph_seed import seed_graph
+
+    complete = []
+    for e in rows:
+        row = {"type": "feature", "priority": "p2", "status": "ready", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
+    graph = tmp_path / "graph.json"
+    seed_graph(graph, _json.dumps({"entries": complete}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+
+
 def _ready_row(plan_path: str) -> dict:
     """A graph row PERSISTED as `ready` whose doc may say otherwise."""
     from datetime import datetime, timezone
@@ -672,7 +693,7 @@ def _ready_row(plan_path: str) -> dict:
     [("design", "design-stage"), ("idea", "idea-stage"), ("stub", "idea-stage")],
 )
 def test_a_stale_ready_row_is_re_probed_for_every_undesigned_rung(
-    tmp_path, status, expected
+    tmp_path, monkeypatch, status, expected
 ):
     """The persisted status can lie; the live doc decides.
 
@@ -687,13 +708,14 @@ def test_a_stale_ready_row_is_re_probed_for_every_undesigned_rung(
     plan = tmp_path / "p.md"
     plan.write_text(f"---\nstatus: {status}\n---\n")
     node = _ready_row(str(plan))
+    _seed_graph(tmp_path, monkeypatch, [node])
     verdict = selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
     )
     assert verdict == expected
 
 
-def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
+def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path, monkeypatch):
     """The guard must not hold back a genuinely ready node."""
     from datetime import datetime, timezone
 
@@ -702,12 +724,13 @@ def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
     plan = tmp_path / "r.md"
     plan.write_text("---\nstatus: ready\n---\n")
     node = _ready_row(str(plan))
+    _seed_graph(tmp_path, monkeypatch, [node])
     assert selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
     ) is None
 
 
-def test_an_unmounted_plan_root_remains_no_hold_signal(tmp_path):
+def test_an_unmounted_plan_root_remains_no_hold_signal(tmp_path, monkeypatch):
     """A cross-project or unmounted plan ROOT (the whole tree absent from
     this machine) has no declaration to validate here."""
     from datetime import datetime, timezone
@@ -715,167 +738,10 @@ def test_an_unmounted_plan_root_remains_no_hold_signal(tmp_path):
     from fno.backlog.advance import selection_guards
 
     node = _ready_row(str(tmp_path / "not-mounted" / "gone.md"))
+    _seed_graph(tmp_path, monkeypatch, [node])
     assert selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
     ) is None
-
-
-def test_a_missing_plan_under_a_mounted_root_fails_closed(tmp_path):
-    """Round-12 finding 6: a plan file absent while its plan root exists (a
-    stale path, a typo, a mid-fetch checkout) is unreadable plan state, and
-    unreadable plan state must never read as unheld."""
-    from datetime import datetime, timezone
-
-    from fno.backlog.advance import selection_guards
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold
-
-    node = _ready_row(str(tmp_path / "gone.md"))  # tmp_path itself exists
-    hold = dispatch_hold(node)
-    assert hold.state is DispatchHoldState.INVALID
-    assert "missing under its existing plan root" in (hold.detail or "")
-    guard = selection_guards(node, {node["id"]: node}, datetime.now(timezone.utc))
-    assert guard == "dispatch-hold-invalid:x-stale01", guard
-
-
-def test_the_policy_set_is_the_one_selection_uses():
-    """One definition of "undesigned", shared by the bool and the reason path."""
-    from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung
-
-    assert UNSELECTABLE_RUNGS == frozenset({Rung.IDEA, Rung.DESIGN})
-
-
-def _held_plan(tmp_path, *, set_by="king:119e3c52", name="held.md"):
-    plan = tmp_path / name
-    plan.write_text(
-        "---\n"
-        "status: ready\n"
-        "dispatch_hold:\n"
-        "  reason: Blocking review finding is unresolved\n"
-        "  release_when: The finding is fixed and re-reviewed\n"
-        "  review_on: 2026-08-20\n"
-        f"  set_by: {set_by}\n"
-        "---\n"
-    )
-    return plan
-
-
-def test_dispatch_hold_is_attributable_and_remains_active_on_review_date(tmp_path):
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold
-
-    hold = dispatch_hold(_plan(tmp_path, _held_plan(tmp_path).read_text()))
-    assert hold.state is DispatchHoldState.HELD
-    assert hold.reason == "Blocking review finding is unresolved"
-    assert hold.release_when == "The finding is fixed and re-reviewed"
-    assert hold.review_on == "2026-08-20"
-    assert hold.set_by == "king:119e3c52"
-
-
-@pytest.mark.parametrize(
-    "declaration",
-    [
-        "dispatch_hold: blocked",
-        "dispatch_hold:\n  reason: why",
-        "dispatch_hold:\n  reason: why\n  release_when: fixed\n  review_on: soon\n  set_by: king",
-        "dispatch_hold:\n  reason: '   '\n  release_when: fixed\n  review_on: 2026-08-20\n  set_by: king",
-        "dispatch_hold:\n  reason: why\n  release_when: fixed\n  review_on: 2026-08-20\n  set_by: '   '",
-    ],
-)
-def test_malformed_dispatch_hold_fails_closed(tmp_path, declaration):
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold
-
-    entry = _plan(tmp_path, f"---\nstatus: ready\n{declaration}\n---\n")
-    assert dispatch_hold(entry).state is DispatchHoldState.INVALID
-
-
-def test_unreadable_bound_plan_fails_closed_for_hold_policy(tmp_path):
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold
-
-    malformed = tmp_path / "malformed.md"
-    malformed.write_text("---\nstatus: ready\ndispatch_hold: [\n")
-    entry = {"id": "x-held", "plan_path": str(malformed)}
-    assert dispatch_hold(entry).state is DispatchHoldState.INVALID
-
-
-def test_dispatch_hold_walks_parent_and_contained_owner(tmp_path):
-    from fno.graph.ladder import dispatch_hold_verdict
-
-    owner_plan = _held_plan(tmp_path)
-    owner = {"id": "x-owner", "plan_path": str(owner_plan)}
-    parent = {"id": "x-parent", "parent": "x-owner"}
-    child = {"id": "x-child", "contained_in": "x-parent"}
-    by_id = {row["id"]: row for row in (owner, parent, child)}
-    verdict = dispatch_hold_verdict(child, by_id)
-    assert verdict is not None
-    assert verdict.guard_reason == "dispatch-hold:x-owner"
-
-
-def test_dispatch_hold_walk_counts_every_dequeue_against_the_cap(tmp_path, monkeypatch):
-    """Round-12 finding 9: reconverging duplicate queue entries must count
-    against the 64-step cap. A graph whose every node fans into one shared
-    grandparent enqueues that grandparent once per child; with the guard
-    firing before the increment, the real iteration count ran far past 64.
-    Force the failure: a monkeypatched dispatch_hold records real calls, and
-    a hold past dequeue #64 must be unreachable even under heavy fan-in."""
-    from fno.graph import ladder
-
-    calls = {"n": 0}
-    real = ladder.dispatch_hold
-
-    def counting(entry):
-        calls["n"] += 1
-        return real(entry)
-
-    monkeypatch.setattr(ladder, "dispatch_hold", counting)
-
-    # 200 unheld middle nodes, each with BOTH parent and contained_in
-    # pointing at one shared root (and one self-loop via each other for
-    # reconvergence): every dequeue after the first wave is a duplicate.
-    rows = [{"id": "x-root", "plan_path": None}]
-    for i in range(200):
-        rows.append(
-            {"id": f"x-mid{i:03d}", "parent": "x-root", "contained_in": "x-root"}
-        )
-    by_id = {row["id"]: row for row in rows}
-    assert ladder.dispatch_hold_verdict(rows[100], by_id) is None
-    assert calls["n"] <= 64, (
-        f"the walk evaluated {calls['n']} nodes - duplicates are escaping the cap"
-    )
-    # Enqueue-time dedup (codex round on PR 1282): with every queue slot a
-    # unique node, no id may be evaluated twice even under full fan-in.
-    evaluated = []
-
-    def recording(entry):
-        evaluated.append(entry["id"])
-        return real(entry)
-
-    monkeypatch.setattr(ladder, "dispatch_hold", recording)
-    assert ladder.dispatch_hold_verdict(rows[100], by_id) is None
-    assert len(evaluated) == len(set(evaluated)), "duplicate evaluations burn the cap"
-    # Positive control: the same graph with the cap genuinely binding must
-    # still terminate (not hang), and a held root INSIDE the bound is found.
-    held = _held_plan(tmp_path)
-    rows[0]["plan_path"] = str(held)
-    verdict = ladder.dispatch_hold_verdict(rows[1], by_id)
-    assert verdict is not None and verdict.guard_reason == "dispatch-hold:x-root"
-
-
-def test_selection_guards_refuse_held_node_and_held_ancestry(tmp_path):
-    from datetime import datetime, timezone
-
-    from fno.backlog.advance import selection_guards
-
-    owner = {
-        "id": "x-owner",
-        "status": "ready",
-        "plan_path": str(_held_plan(tmp_path)),
-    }
-    child = {"id": "x-child", "status": "ready", "parent": "x-owner"}
-    by_id = {row["id"]: row for row in (owner, child)}
-    now = datetime.now(timezone.utc)
-    assert selection_guards(owner, by_id, now) == "dispatch-hold:x-owner"
-    assert selection_guards(child, by_id, now) == "dispatch-hold:x-owner"
-
-
 # every readiness path re-probes the rung, not just `design` (sigma panel) -----
 
 
