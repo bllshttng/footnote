@@ -368,12 +368,13 @@ pub(crate) fn read_mux_members() -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-/// The mux squad store, beside graph.json in the state root.
+/// The mux squad store, under `mux/` in the state root once the server
+/// migrates it, else the legacy root spelling.
 fn squads_path() -> PathBuf {
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".fno").join("squads.json")
+    crate::state_layout::place(&base.join(".fno"), "squads.json")
 }
 
 /// The claude project store walked once: normalized `<uuid>` -> transcript

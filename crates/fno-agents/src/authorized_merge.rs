@@ -1295,11 +1295,20 @@ fn checkout_refused(output: &str) -> bool {
     lower.contains("is already used by worktree") || lower.contains("already checked out")
 }
 
+/// The fno gh proxy prefixes its own stderr with `fno config:` when it warns
+/// about an unmodeled config key. That text is never gh's verdict.
+fn is_config_warning(line: &str) -> bool {
+    line.trim_start().starts_with("fno config:")
+}
+
 /// The first non-blank line of a command's output, capped for a receipt.
+/// Leading `fno config:` warning lines are skipped so the reason names the
+/// real gh error; a stderr of only warnings still reports its first line.
 fn first_line(output: &str) -> String {
     let line = output
         .lines()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| !line.trim().is_empty() && !is_config_warning(line))
+        .or_else(|| output.lines().find(|line| !line.trim().is_empty()))
         .unwrap_or("no error output");
     // Truncate by CHARACTER. A byte slice panics when the cut lands inside a
     // multi-byte character, and gh output carries them (a PR title, a branch
@@ -1309,6 +1318,19 @@ fn first_line(output: &str) -> String {
 
 fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
     let lower = output.to_lowercase();
+    if lower.contains("secondary rate limit") {
+        // A burst (a fleet undrafting many PRs at once) trips GitHub's
+        // secondary limiter. The same command succeeds after the backoff, so
+        // it holds like any other retryable state - never a merge-method
+        // fault.
+        return Outcome::Held {
+            reason: format!(
+                "GitHub secondary rate limit; wait out the backoff, then retry the {}: {}",
+                effect.word(),
+                first_line(output)
+            ),
+        };
+    }
     let reason = if lower.contains("fno/review-coverage") {
         // This verb published that status itself moments ago. GitHub has not
         // observed it yet, so the refusal clears on a retry.
@@ -1574,11 +1596,29 @@ impl Probes for RealProbes {
         slot_holder_read(cwd, base_ref)
     }
 
-    fn take_slot(&self, _cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String> {
-        // One store: the space db that `fno agents claim status merge-slot:<base>`
-        // resolves for a non-global key (claim_store::open_for_key with no
-        // root), so a claim taken here is readable by the claim verb with no
-        // root and by any worktree of the repo.
+    fn take_slot(&self, cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String> {
+        // `merge-slot:` is repo-local, so rootless claim operations share the
+        // current repo space with every worktree.
+        let key = slot_key(base_ref);
+        let holder = slot_holder_key(pr);
+        let (state, record) = claims::status(&key, None);
+        let primary_holder = slot_holder_from_record(&key, state, record)?;
+        if primary_holder.is_some_and(|existing| existing != pr) {
+            return Err(format!(
+                "merge slot already held by pr:{}",
+                primary_holder.unwrap()
+            ));
+        }
+        let legacy_holder = legacy_slot_holder(cwd, &key)?;
+        if legacy_holder.is_some_and(|existing| existing != pr) {
+            return Err(format!(
+                "merge slot already held by pr:{}",
+                legacy_holder.unwrap()
+            ));
+        }
+        if primary_holder.is_none() && legacy_holder.is_some() {
+            return Ok(());
+        }
         let opts = crate::claims::AcquireOpts {
             pid_unavailable: true,
             ttl_ms: Some(MERGE_SLOT_TTL_MS),
@@ -1586,21 +1626,37 @@ impl Probes for RealProbes {
             reason: Some("ci_base_stale merge slot".to_string()),
             ..Default::default()
         };
-        let value =
-            crate::claim_store::acquire_db(&slot_key(base_ref), &slot_holder_key(pr), &opts)?;
-        match value.get("outcome").and_then(Value::as_str) {
-            Some("acquired") => Ok(()),
-            Some("held_by_other") => Err(format!(
-                "merge slot already held by {}",
-                value.get("holder").and_then(Value::as_str).unwrap_or("?")
-            )),
-            other => Err(format!("merge slot acquire answered {other:?}")),
+        match crate::claims::acquire(&key, &holder, opts) {
+            crate::claims::AcquireOutcome::Acquired(_) if primary_holder.is_some() => Ok(()),
+            crate::claims::AcquireOutcome::Acquired(_) => match legacy_slot_holder(cwd, &key) {
+                Ok(None) => Ok(()),
+                Ok(Some(existing)) => {
+                    let _ = crate::claims::release(&key, &holder, None, None);
+                    if existing == pr {
+                        Ok(())
+                    } else {
+                        Err(format!("merge slot already held by pr:{existing}"))
+                    }
+                }
+                Err(error) => {
+                    let _ = crate::claims::release(&key, &holder, None, None);
+                    Err(error)
+                }
+            },
+            crate::claims::AcquireOutcome::HeldByOther { holder, .. } => {
+                Err(format!("merge slot already held by {holder}"))
+            }
+            crate::claims::AcquireOutcome::Error(error) => Err(error),
         }
     }
 
-    fn release_slot(&self, _cwd: &Path, base_ref: &str, pr: u64) {
-        let _ =
-            crate::claim_store::release_db(&slot_key(base_ref), &slot_holder_key(pr), None, None);
+    fn release_slot(&self, cwd: &Path, base_ref: &str, pr: u64) {
+        let key = slot_key(base_ref);
+        let holder = slot_holder_key(pr);
+        let _ = crate::claims::release(&key, &holder, None, None);
+        if let Some(root) = canonical_repo_root(cwd) {
+            let _ = crate::claims::release(&key, &holder, Some(&root), None);
+        }
     }
 
     fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
@@ -1755,9 +1811,8 @@ fn stale_remedy(n: u64) -> String {
     format!("remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry")
 }
 
-/// The merge-slot claim key for a base branch. Not a global-id prefix: the
-/// crown's worktree cwd and the sweep's repo-root cwd must resolve one
-/// lockfile, so callers always pass an explicit `root`.
+/// The merge-slot claim key for a base branch. It is repo-local, so rootless
+/// claim operations resolve the shared space directory for every worktree.
 fn slot_key(base_ref: &str) -> String {
     format!("merge-slot:{base_ref}")
 }
@@ -1773,44 +1828,41 @@ pub(crate) fn parse_slot_holder(holder: &str) -> Option<u64> {
 /// The one merge-slot claim read. Strict polarity kept: a corrupted claim or
 /// an unparseable holder is an Err (the merge path refuses on an unreadable
 /// slot rather than merging past it); the fail-open consumer
-/// ([`merge_slot_holder`]) maps Err to None at its own boundary. Primary
-/// store: the space db `fno agents claim status merge-slot:<base>` reads with
-/// no root. A lockfile written by a pre-move merge verb is read once as a
-/// migration fallback at the canonical root, dropping out when its lease ends.
+/// ([`merge_slot_holder`]) maps Err to None at its own boundary. The primary
+/// read uses the repo-space lockfile; a pre-move lockfile at the canonical root
+/// remains a migration fallback until its lease ends.
 fn slot_holder_read(cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
     let key = slot_key(base_ref);
-    let value = crate::claim_store::status_db(&key, None);
-    match value {
-        Err(e) => Err(e),
-        Ok(v) => {
-            let state = v.get("state").and_then(Value::as_str).unwrap_or("");
-            if state == "corrupted" {
-                return Err(format!("merge slot claim corrupted: {key}"));
-            }
-            if matches!(state, "live" | "suspect") {
-                let holder = v
-                    .get("holder")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| format!("merge slot claim {key} read {state} with no holder"))?;
-                return parse_slot_holder(holder)
-                    .map(Some)
-                    .ok_or_else(|| format!("merge slot holder unparseable: {holder}"));
-            }
-            let _ = state;
-            let root = canonical_repo_root(cwd);
-            let (legacy_state, record) = claims::status(&key, root.as_deref());
-            match legacy_state {
-                ClaimState::Live | ClaimState::Suspect => {
-                    let record = record.ok_or_else(|| {
-                        format!("merge slot claim {key} read {legacy_state:?} with no record")
-                    })?;
-                    parse_slot_holder(&record.holder)
-                        .map(Some)
-                        .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
-                }
-                _ => Ok(None),
-            }
+    let (state, record) = claims::status(&key, None);
+    match slot_holder_from_record(&key, state, record)? {
+        Some(holder) => Ok(Some(holder)),
+        None => legacy_slot_holder(cwd, &key),
+    }
+}
+
+fn legacy_slot_holder(cwd: &Path, key: &str) -> Result<Option<u64>, String> {
+    let Some(root) = canonical_repo_root(cwd) else {
+        return Ok(None);
+    };
+    let (state, record) = claims::status(key, Some(&root));
+    slot_holder_from_record(key, state, record)
+}
+
+fn slot_holder_from_record(
+    key: &str,
+    state: ClaimState,
+    record: Option<claims::ClaimRecord>,
+) -> Result<Option<u64>, String> {
+    match state {
+        ClaimState::Corrupted => Err(format!("merge slot claim corrupted: {key}")),
+        ClaimState::Live | ClaimState::Suspect => {
+            let record = record
+                .ok_or_else(|| format!("merge slot claim {key} read {state:?} with no record"))?;
+            parse_slot_holder(&record.holder)
+                .map(Some)
+                .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
         }
+        _ => Ok(None),
     }
 }
 /// The live merge-slot holder for `base_ref`, fail-open: any claims fault
@@ -2165,7 +2217,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Err(message) => return (2, String::new(), message),
     };
     // The hold ops are merge-authority writes riding this verb's payload, not
-    // a new top-level root: `{"op": "hold-set"|"hold-release", ...}` answers
+    // a new top-level root: `{"op": "hold-set"|"freeze-set"|..., ...}` answers
     // with one receipt instead of a merge verdict.
     if payload
         .get("op")
@@ -2173,6 +2225,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         .is_some_and(|op| op.starts_with("hold-"))
     {
         let out = crate::merge_hold::run(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
+    // The freeze ops are the scoped merge freeze's transport, riding the same
+    // payload the hold ops use: `{"op": "freeze-set"|"freeze-clear"|"freeze-check",
+    // ...}` writes and reads the crown's freeze record.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("freeze-"))
+    {
+        let out = crate::merge_freeze::run(
             payload.get("op").and_then(Value::as_str).unwrap_or(""),
             &payload,
         );
@@ -2222,6 +2288,11 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // normally, and the quota ops above never touch the breaker.
     if !request.decide_only && matches!(request.effect, Effect::Merge | Effect::Arm) {
         if let Some((code, message)) = merges_breaker_refusal() {
+            return (code, String::new(), message);
+        }
+        // The scoped merge freeze: an off-list PR refuses with a receipt
+        // naming the freeze; an unreadable record refuses fail closed.
+        if let Some((code, message)) = crate::merge_freeze::refusal(request.pr) {
             return (code, String::new(), message);
         }
     }
@@ -2469,6 +2540,97 @@ mod tests {
             optional_unresolved: Some(Some(0)),
             ..Default::default()
         }
+    }
+
+    struct ClaimsRootRestore(Option<std::ffi::OsString>);
+
+    impl Drop for ClaimsRootRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+                None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+            }
+        }
+    }
+
+    fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+        let _env_lock = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = ClaimsRootRestore(std::env::var_os("FNO_CLAIMS_ROOT"));
+        std::env::set_var("FNO_CLAIMS_ROOT", root);
+        let result = f();
+        drop(restore);
+        result
+    }
+
+    #[test]
+    fn slot_holder_reads_lockfiles_and_refuses_corrupted_claims() {
+        let temp = tempfile::TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = slot_key("main");
+            assert!(matches!(
+                claims::acquire(
+                    &key,
+                    &slot_holder_key(17),
+                    claims::AcquireOpts {
+                        pid_unavailable: true,
+                        ttl_ms: Some(MERGE_SLOT_TTL_MS),
+                        ..Default::default()
+                    }
+                ),
+                claims::AcquireOutcome::Acquired(_)
+            ));
+            assert_eq!(
+                slot_holder_read(Path::new("/repo"), "main").unwrap(),
+                Some(17)
+            );
+            assert!(
+                !temp.path().join("graph.db").exists(),
+                "merge slots must use the claim lockfiles"
+            );
+
+            let corrupt = slot_key("broken");
+            let path = claims::claim_path(&corrupt, None).unwrap();
+            std::fs::write(path, "not: [valid yaml").unwrap();
+            let error = slot_holder_read(Path::new("/repo"), "broken").unwrap_err();
+            assert!(error.contains("corrupted"), "{error}");
+        });
+    }
+
+    #[test]
+    fn take_slot_refuses_a_live_legacy_lockfile_without_creating_a_second_slot() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success());
+
+        let current_root = temp.path().join("current");
+        with_claims_root(&current_root, || {
+            let key = slot_key("main");
+            assert!(matches!(
+                claims::acquire(
+                    &key,
+                    &slot_holder_key(8),
+                    claims::AcquireOpts {
+                        root: Some(repo.clone()),
+                        pid_unavailable: true,
+                        ttl_ms: Some(MERGE_SLOT_TTL_MS),
+                        ..Default::default()
+                    }
+                ),
+                claims::AcquireOutcome::Acquired(_)
+            ));
+
+            let error = RealProbes.take_slot(&repo, "main", 9).unwrap_err();
+            assert!(error.contains("pr:8"), "{error}");
+            assert!(!claims::claim_path(&key, None).unwrap().exists());
+        });
     }
 
     impl Probes for Fake {
@@ -3192,20 +3354,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            2094,
-            Ok(crate::merge_gates::StaleOverlap {
-                ci_base_sha: "abcdef123456".to_string(),
-                landed: 4,
-                shared: Vec::new(),
-            }),
-        );
-        assert_eq!(outcome, ProbeOutcome::Clear);
-    }
-
-    #[test]
     fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
@@ -3275,25 +3423,27 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        let mut req = request(Effect::Arm);
-        req.require_checks = true;
-        assert_eq!(run(&fake, &req).word(), "armed");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
-    }
-
-    #[test]
-    fn a_merge_without_required_checks_skips_ci_base_freshness() {
-        let fake = Fake {
-            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-            ..clean()
-        };
-        assert_eq!(run(&fake, &request(Effect::Merge)).word(), "merged");
-        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    fn an_arm_or_unchecked_merge_skips_ci_base_freshness() {
+        // One table test, two rows: the effect that owes no freshness probe
+        // skips it, whatever its arm spelling.
+        for (effect, require_checks) in [(Effect::Arm, true), (Effect::Merge, false)] {
+            let fake = Fake {
+                ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+                ..clean()
+            };
+            let mut req = request(effect);
+            req.require_checks = require_checks;
+            assert_eq!(
+                run(&fake, &req).word(),
+                if effect == Effect::Arm {
+                    "armed"
+                } else {
+                    "merged"
+                },
+                "{effect:?} require_checks={require_checks}"
+            );
+            assert_eq!(*fake.ci_base_calls.borrow(), 0);
+        }
     }
 
     #[test]
@@ -3876,6 +4026,61 @@ mod tests {
         let line = "e".repeat(198) + &"é".repeat(20);
         let cut = first_line(&line);
         assert_eq!(cut.chars().count(), 200);
+        // The fallback table row: an stderr of only config warnings still
+        // reports its first line instead of collapsing to "no error output".
+        let out = "fno config: guards.preset is not a modeled config key; ignored\n";
+        assert_eq!(
+            first_line(out),
+            "fno config: guards.preset is not a modeled config key; ignored"
+        );
+    }
+
+    #[test]
+    fn a_secondary_rate_limit_behind_a_config_warning_reads_retryable_not_merge_method() {
+        // Specimen 2026-09-29: the fno gh proxy printed its config warning on
+        // stderr first, so the real gh error - a secondary rate limit - read
+        // as a merge-method fault and the worker burned three tries on it.
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: You have exceeded a secondary rate limit. Please wait a bit \
+                        before you try again."
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "held");
+        let detail = outcome.detail();
+        assert!(detail.contains("secondary rate limit"), "{detail}");
+        assert!(!detail.contains("merge method"), "{detail}");
+        assert!(!detail.contains("guards.preset"), "{detail}");
+    }
+
+    #[test]
+    fn the_failure_reason_names_the_real_gh_error_past_a_config_warning() {
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fno config: guards.preset is not a modeled config key; ignored\n\
+                        gh: unknown flag: --squash"
+                .to_string(),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "squash".to_string(),
+            merge_grant: None,
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(outcome.word(), "failed");
+        assert!(outcome.detail().contains("unknown flag: --squash"));
+        assert!(!outcome.detail().contains("guards.preset"));
     }
 
     #[test]

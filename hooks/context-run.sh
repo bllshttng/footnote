@@ -15,10 +15,10 @@ BIN="$(fno_agents_bin "$ROOT")"
 if [[ -z "$BIN" ]]; then
     # No fno-agents usually means a plugin-only install with no fno yet. The
     # front-door hook is the one producer that starts the installer, so run it.
-    if [[ "${1:-}" == "claude-session-start" ]]; then
+    if [[ "${1:-}" == "claude-session-start" || "${1:-}" == "codex-session-start" ]]; then
         bash "$HOOK_DIR/frontdoor-nudge-session-start.sh"
     fi
-    echo "fno: context-run unavailable (fno-agents not found); run fno doctor --fix" >&2
+    echo "fno: fno-agents not found; install footnote: curl -fsSL fno.sh | sh" >&2
     exit 0
 fi
 "$BIN" context-run --group "${1:-}" --plugin-root "$ROOT"

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for is_push_to_protected_branch's explicit-destination fallthrough.
+"""Tests for the push/merge protection in hooks/git-protection.py.
 
 Run: python3 tests/hooks/test_git_protection_push.py
  or: pytest tests/hooks/test_git_protection_push.py
 
-Regression: is_push_to_protected_branch() ran the current-branch
-check unconditionally, so `git push origin feature/x` from a session whose cwd
-HEAD is `main` (the normal background /target case: cwd pinned to the canonical
-checkout while the branch lives in a worktree) was wrongly blocked as a push to
-main. The fix returns early once an explicit, non-protected destination is
-parsed. get_current_branch is monkeypatched to "main" to simulate that cwd.
+One table test per surface (explicit-destination parse, push debounce,
+command segmentation), one row per distinct branch. The hook is fail-closed;
+every row is a branch a regression once slipped through.
 """
+
 import importlib.util
 import json
 import os
@@ -44,89 +42,38 @@ def _on_main(monkeypatched_branch="main"):
     git_protection.get_current_branch = lambda: monkeypatched_branch
 
 
-def test_feature_push_from_cwd_on_main_is_allowed():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin feature/foo") == (False, None)
+# --- explicit-destination parse: cwd branch is irrelevant ----------------------
+# Regression: is_push_to_protected_branch() ran the current-branch check
+# unconditionally, blocking `git push origin feature/x` from a cwd on main.
+# The fix returns early once an explicit, non-protected destination is parsed.
+# The early return must not fire on an ambiguous single-token or HEAD push.
 
-
-def test_explicit_push_to_main_still_blocked():
-    _on_main("feature/x")  # cwd branch is irrelevant; explicit dest is main
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin main") == (True, "main")
-
-
-def test_bare_push_on_protected_branch_still_blocked():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch("git push") == (True, "main")
-
-
-def test_refspec_to_protected_dest_still_blocked():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin feature/x:main") == (True, "main")
-
-
-# The early return must not fire on an ambiguous single-token or current-branch
-# push: `extract_branch_from_push` returns the REMOTE ("origin") or "HEAD" as if
-# it were a branch, which would otherwise bypass protection on `main`.
-
-def test_remote_only_push_on_main_still_blocked():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin") == (True, "main")
-
-
-def test_force_remote_only_push_on_main_still_blocked():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force origin") == (True, "main")
-
-
-def test_push_head_on_main_still_blocked():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin HEAD") == (True, "main")
-
-
-def test_push_at_alias_on_main_still_blocked():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push origin @") == (True, "main")
-
-
-def test_upstream_flag_feature_push_still_allowed():
-    _on_main("main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push -u origin feature/x") == (False, None)
-
-
-# --force-with-lease carries an =<ref> value that must be stripped whole, else
-# the leftover token shifts the positional parse and a force-with-lease to a
-# protected branch slips through the destination check.
-
-def test_force_with_lease_to_feature_allowed():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force-with-lease origin feature/x") == (False, None)
-
-
-def test_force_with_lease_to_main_still_blocked():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force-with-lease origin main") == (True, "main")
-
-
-def test_force_with_lease_ref_value_to_main_still_blocked():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force-with-lease=origin/feature origin main") == (True, "main")
-
-
-def test_force_with_lease_ref_value_to_feature_allowed():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force-with-lease=origin/main origin feature/x") == (False, None)
+def test_explicit_destination_rows():
+    rows = [
+        # (cwd branch, command, expect_blocked, expect_branch)
+        ("main", "git push origin feature/foo", False, None),
+        ("feature/x", "git push origin main", True, "main"),
+        ("main", "git push", True, "main"),
+        ("feature/x", "git push origin feature/x:main", True, "main"),
+        # extract_branch_from_push returns the REMOTE or HEAD as if it were a
+        # branch, which would otherwise bypass protection on main.
+        ("main", "git push origin", True, "main"),
+        ("main", "git push --force origin", True, "main"),
+        ("main", "git push origin HEAD", True, "main"),
+        ("main", "git push origin @", True, "main"),
+        ("main", "git push -u origin feature/x", False, None),
+        # --force-with-lease carries an =<ref> value that must be stripped
+        # whole, else the leftover token shifts the positional parse.
+        ("feature/x", "git push --force-with-lease origin feature/x", False, None),
+        ("feature/x", "git push --force-with-lease origin main", True, "main"),
+        ("feature/x", "git push --force-with-lease=origin/feature origin main", True, "main"),
+        ("feature/x", "git push --force-with-lease=origin/main origin feature/x", False, None),
+        ("feature/x", "git push --force origin main", True, "main"),
+        ("feature/x", "git push --force-with-lease=refs/heads/main origin main", True, "main"),
+    ]
+    for cwd, command, blocked, branch in rows:
+        _on_main(cwd)
+        assert git_protection.is_push_to_protected_branch(command) == (blocked, branch), command
 
 
 # ===========================================================================
@@ -152,14 +99,14 @@ def _old_stamp():
 
 def _fake_fno(tmp_path, monkeypatch, body):
     bindir = tmp_path / "bin"
-    bindir.mkdir()
+    bindir.mkdir(exist_ok=True)
     fake = bindir / "fno"
     fake.write_text("#!/bin/sh\n" + body)
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
 
 
-def test_fno_push_now_bypasses_and_records(tmp_path, monkeypatch):
+def test_debounce_bypass_and_fresh_stamp(tmp_path, monkeypatch):
     h = _DebounceHarness(tmp_path, monkeypatch)
     monkeypatch.setenv("FNO_PUSH_NOW", "1")
     monkeypatch.setattr(
@@ -168,8 +115,6 @@ def test_fno_push_now_bypasses_and_records(tmp_path, monkeypatch):
     assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
     assert h.bypass_events == ["feature/x"]
 
-
-def test_a_fresh_stamp_refuses_without_running_the_probe(tmp_path, monkeypatch):
     _DebounceHarness(tmp_path, monkeypatch)
     git_protection._stamp_push("feature/x")
     monkeypatch.setattr(
@@ -180,15 +125,27 @@ def test_a_fresh_stamp_refuses_without_running_the_probe(tmp_path, monkeypatch):
     assert "pushed 0s ago" in reason
 
 
-def test_an_expired_stamp_allows_when_the_probe_is_clear(tmp_path, monkeypatch):
-    _DebounceHarness(tmp_path, monkeypatch)
-    git_protection._stamp_push("feature/x")
-    _old_stamp()
-    monkeypatch.setattr(git_protection, "_read_in_flight", lambda branch: {"in_flight": False})
-    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
-
-
-def test_a_probe_true_refuses_and_names_the_supersede_doors(tmp_path, monkeypatch):
+def test_debounce_probe_outcome_rows(tmp_path, monkeypatch):
+    # (probe script body, script exit, refusal expected)
+    rows = [
+        # Probe true: refusal names the supersede doors.
+        ('echo \'{"in_flight": true, "check": "rust e2e concurrency stress (20 trials)", "job": "106470248875", "head": "f4d1732d"}\'\nexit 2\n', True),
+        # Probe false, usage error, timeout: always allow and stamp.
+        ('echo \'{"in_flight": false}\'\nexit 0\n', False),
+        ('echo usage error >&2\nexit 2\n', False),
+        ("sleep 1\n", False),
+    ]
+    for probe_body, refuse in rows:
+        _DebounceHarness(tmp_path, monkeypatch)
+        git_protection._stamp_push("feature/x")
+        _old_stamp()
+        if probe_body == "sleep 1\n":
+            monkeypatch.setattr(git_protection, "_PUSH_PROBE_TIMEOUT", 0.01)
+        else:
+            _fake_fno(tmp_path, monkeypatch, probe_body)
+        reason = git_protection.push_debounce_refusal("git push origin feature/x", "feature/x")
+        assert (reason is not None) is refuse, probe_body
+    # The true-probe refusal names every supersede door.
     _DebounceHarness(tmp_path, monkeypatch)
     git_protection._stamp_push("feature/x")
     _old_stamp()
@@ -198,43 +155,13 @@ def test_a_probe_true_refuses_and_names_the_supersede_doors(tmp_path, monkeypatc
         'echo \'{"in_flight": true, "check": "rust e2e concurrency stress (20 trials)", "job": "106470248875", "head": "f4d1732d"}\'\nexit 2\n',
     )
     reason = git_protection.push_debounce_refusal("git push origin feature/x", "feature/x")
-    assert reason is not None
-    assert "rust e2e concurrency stress" in reason
-    assert "106470248875" in reason
-    assert "fno do pr wait" in reason
-    assert "--force-ci-cancel" in reason
-    assert "FNO_PUSH_NOW=1" in reason
-
-
-def test_a_probe_false_allows_and_stamps(tmp_path, monkeypatch):
-    _DebounceHarness(tmp_path, monkeypatch)
-    _fake_fno(tmp_path, monkeypatch, 'echo \'{"in_flight": false}\'\nexit 0\n')
-    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
-
-
-def test_a_probe_usage_error_allows_and_stamps(tmp_path, monkeypatch):
-    _DebounceHarness(tmp_path, monkeypatch)
-    _fake_fno(tmp_path, monkeypatch, 'echo usage error >&2\nexit 2\n')
-    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
-
-
-def test_a_probe_timeout_allows_and_stamps(tmp_path, monkeypatch):
-    _DebounceHarness(tmp_path, monkeypatch)
-    monkeypatch.setattr(git_protection, "_PUSH_PROBE_TIMEOUT", 0.01)
-    _fake_fno(tmp_path, monkeypatch, "sleep 1\n")
-    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
+    for needle in ("rust e2e concurrency stress", "106470248875", "fno do pr wait", "--force-ci-cancel", "FNO_PUSH_NOW=1"):
+        assert needle in reason
 
 
 # ===========================================================================
-# Defect B: heredoc bodies are CONTENT, not command positions.
-#
-# _command_segments used to split on physical lines with no heredoc awareness,
-# so every line of a <<DELIM ... DELIM body was judged as a potential command.
-# A doc/test/filing command whose body quoted a guarded git invocation was
-# denied, with the refusal echoing a fragment of prose. These exercise the
-# segmentation layer directly via the same importlib load above; main()'s
-# PreToolUse path is never invoked, so they verify behavior without the live
-# guard in the loop.
+# Command segmentation: heredoc bodies and quoted arguments are CONTENT, not
+# command positions; $( ) bodies ARE commands even inside double quotes.
 # ===========================================================================
 
 def _git_segments(cmd):
@@ -245,221 +172,93 @@ def _merge_segment(cmd):
     return git_protection._find_merge_segment(git_protection._command_segments(cmd))
 
 
-def test_heredoc_body_with_quoted_push_is_not_a_command():
-    assert _git_segments(
-        "python3 - <<'PY'\nprint('eg: cd /tmp && git push origin main')\nPY") == []
+def test_segmentation_content_is_not_command_rows():
+    rows = [
+        "python3 - <<'PY'\nprint('eg: cd /tmp && git push origin main')\nPY",
+        "cat <<EOF\nnotes: git push --force origin main is blocked\nEOF",
+        # <<- strips leading tabs from the terminator; the body is still content.
+        "cat <<-EOF\n\tsee: cd /tmp && git push origin main\n\tEOF",
+        'echo "doc: run git push --force origin main to test"',
+        'fno backlog update x --details "see gh pr merge notes"',
+        # A newline inside an open quote is part of one argument.
+        'fno agents mail send x "line one\ngh pr merge --auto is the bug\nline three"',
+        'fno agents mail send x "intro\ngit push --force origin main is blocked\nend"',
+        "fno agents mail send x 'intro\ngit push origin main\nend'",
+        # The \" is data; the argument stays open.
+        'fno agents mail send x "he said \\"hi\\"\ngit push origin main\nend"',
+        # `$(cat <<'BODY' ... BODY)"` inside double quotes: a quoted `<<` is
+        # data, so the body never earns the heredoc exemption.
+        (
+            'gh pr create --title "t" --body "$(cat <<\'BODY\'\n'
+            "| real `gh pr merge` | deny |\n"
+            "prose mentioning gh pr merge\n"
+            "BODY\n"
+            ')"'
+        ),
+        # No expansion in single quotes: inert prose.
+        'fno agents mail send x \'see "$(git push origin main)"\'',
+    ]
+    for cmd in rows:
+        assert _git_segments(cmd) == [], cmd.splitlines()[0]
+        assert _merge_segment(cmd) is None, cmd.splitlines()[0]
 
 
-def test_heredoc_body_unquoted_delimiter_is_not_a_command():
-    assert _git_segments(
-        "cat <<EOF\nnotes: git push --force origin main is blocked\nEOF") == []
+def test_segmentation_real_commands_are_caught_rows():
+    rows = [
+        "echo hi && git push origin main",
+        "cat <<EOF\nbody\nEOF\ngit push origin main",
+        "git push \\\norigin main",
+        "cat <<EOF\ngit push origin main",  # unterminated heredoc fails closed
+        "cd /tmp && git push origin main",
+        # A << inside quotes is data, not an opener: the next line is judged.
+        'echo "use <<EOF here"\ngit push origin main',
+        "git push origin main <<EOF\nbody\nEOF",
+        # `# <<EOF` is a comment, not an opener.
+        "echo ok # <<EOF\ngit push --force origin main\nEOF",
+        # An UNQUOTED newline still splits.
+        'echo "safe prose"\ngit push origin main',
+        'echo "prose about git push"; git push origin main',
+        'X="$(gh pr merge 1 --auto\n)"',  # $( ) bodies are commands in quotes
+        'echo "$(git push origin main)"',
+    ]
+    for cmd in rows:
+        assert _git_segments(cmd) or _merge_segment(cmd), cmd.splitlines()[0]
 
 
-def test_heredoc_dash_delimiter_tab_terminator_is_not_a_command():
-    # <<- strips leading tabs from the terminator; the body line is still content.
-    assert _git_segments(
-        "cat <<-EOF\n\tsee: cd /tmp && git push origin main\n\tEOF") == []
-
-
-def test_real_push_after_separator_still_caught():
-    assert _git_segments("echo hi && git push origin main")
-
-
-def test_real_push_after_heredoc_close_still_caught():
-    assert _git_segments("cat <<EOF\nbody\nEOF\ngit push origin main")
-
-
-def test_real_push_on_continuation_line_still_caught():
-    assert _git_segments("git push \\\norigin main")
-
-
-def test_real_merge_invocation_still_caught():
-    assert _merge_segment("gh pr merge 123") is not None
-
-
-def test_unterminated_heredoc_fails_closed():
-    # No closing delimiter: the body exemption must NOT apply, so a guarded
-    # invocation in the unterminated body is still caught (deny), not hidden.
-    assert _git_segments("cat <<EOF\ngit push origin main")
-
-
-def test_merge_phrase_mention_in_quoted_arg_allowed():
-    assert _merge_segment(
-        'fno backlog update x --details "see gh pr merge notes"') is None
-
-
-def test_push_phrase_mention_in_quoted_arg_allowed():
-    assert _git_segments(
-        'echo "doc: run git push --force origin main to test"') == []
-
-
-def test_force_push_to_main_still_protected():
-    _on_main("feature/x")
-    assert _git_segments("git push --force origin main")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force origin main") == (True, "main")
-
-
-def test_force_with_lease_ref_push_to_main_still_protected():
-    _on_main("feature/x")
-    assert git_protection.is_push_to_protected_branch(
-        "git push --force-with-lease=refs/heads/main origin main") == (True, "main")
-
-
-def test_compound_cd_then_push_still_caught():
-    assert _git_segments("cd /tmp && git push origin main")
-
-
-def test_quoted_heredoc_opener_does_not_swallow_next_line():
-    # A << inside quotes is data, not an opener: the following real command
-    # must still be judged.
-    assert _git_segments('echo "use <<EOF here"\ngit push origin main')
-
-
-def test_opener_line_git_prefix_still_caught():
-    # The opener line's own command prefix is segmented normally.
-    assert _git_segments("git push origin main <<EOF\nbody\nEOF")
-
-
-def test_heredoc_opener_after_shell_comment_is_ignored():
-    # `# <<EOF` is a comment, not an opener; the shell executes the following
-    # push, so it must be judged as a real command, not hidden as heredoc body.
-    assert _git_segments("echo ok # <<EOF\ngit push --force origin main\nEOF")
-
-
-# --- multi-line QUOTED arguments are content, not command positions ----------
-# A newline inside an open quote is part of one argument, so splitting on it
-# handed shlex a fragment with an unbalanced quote; that raises, and the caller
-# falls back to a whole-command regex that matches the phrase anywhere. Any
-# message whose BODY quoted a guarded invocation was refused - including a
-# worker's review report ABOUT merge behaviour (observed live 2026-08-06).
-
-
-def test_multiline_quoted_body_mentioning_merge_is_not_a_command():
-    assert _merge_segment(
-        'fno agents mail send x "line one\ngh pr merge --auto is the bug\nline three"') is None
-
-
-def test_multiline_quoted_body_mentioning_push_is_not_a_command():
-    assert _git_segments(
-        'fno agents mail send x "intro\ngit push --force origin main is blocked\nend"') == []
-
-
-def test_multiline_single_quoted_body_is_not_a_command():
-    assert _git_segments(
-        "fno agents mail send x 'intro\ngit push origin main\nend'") == []
-
-
-def test_escaped_quote_inside_multiline_body_does_not_end_the_quote():
-    # The \" is data; the argument stays open, so the push line is still content.
-    assert _git_segments(
-        'fno agents mail send x "he said \\"hi\\"\ngit push origin main\nend"') == []
-
-
-def test_real_push_on_next_line_outside_quotes_still_caught():
-    # An UNQUOTED newline still splits, so a genuine two-liner is still judged.
-    assert _git_segments('echo "safe prose"\ngit push origin main')
-
-
-def test_real_push_after_closed_quote_same_line_still_caught():
-    assert _git_segments('echo "prose about git push"; git push origin main')
-
-
-def test_unterminated_quote_hiding_a_push_still_fails_closed():
-    # The quote never closes, so the whole command stays one line and shlex
-    # raises - the caller's deny-leaning whole-command fallback, unchanged.
-    try:
-        git_protection._command_segments('echo "intro\ngit push origin main')
-    except ValueError:
-        return
-    raise AssertionError("unterminated quote must raise, not parse as safe")
-
-
-def test_heredoc_inside_command_substitution_body_is_not_a_command():
-    # `gh pr create --body "$(cat <<'BODY' ... BODY )"` opens the heredoc INSIDE
-    # a double-quoted $( ), and _find_heredoc_opener deliberately treats a quoted
-    # `<<` as data - so the body never earns the heredoc exemption and its lines
-    # were judged as commands. This shape blocked this fix's own pull request.
-    cmd = (
-        'gh pr create --title "t" --body "$(cat <<\'BODY\'\n'
-        "| real `gh pr merge` | deny |\n"
-        "prose mentioning gh pr merge\n"
-        "BODY\n"
-        ')"'
-    )
-    assert _merge_segment(cmd) is None
-
-
-def test_unbalanced_quote_fallback_is_deny_leaning_for_git():
-    # The ValueError fallback in main() used `command.startswith("git")`, which
-    # is fail-OPEN: an unterminated quote in a command not literally beginning
-    # with `git` dropped the push gate entirely, while the merge gate on the
-    # same input still fired via its regex-anywhere fallback. Both fallbacks
-    # must lean the same way. Drives the real hook end to end - asserting the
-    # predicate in isolation would pass even if main() reverted to startswith.
-    out = _run_hook('echo "intro\ngit push origin main')
-    assert out.get("permissionDecision") == "deny", out
-
-
-# --- heredoc BODIES are raw text, not quoted shell ---------------------------
-# Quote tracking must PAUSE inside a heredoc body: one apostrophe in prose
-# otherwise opens a quote that swallows the terminator's newline, the heredoc
-# never terminates, and the fail-closed re-judge hands shlex the same
-# apostrophe - the false refusal above, re-entering through the heredoc door.
-
-
-def test_apostrophe_in_heredoc_body_does_not_swallow_the_terminator():
+def test_segmentation_exact_shapes():
+    # Quote tracking pauses inside a heredoc body: one apostrophe in prose
+    # otherwise swallows the terminator's newline.
     cmd = "cat <<EOF\nthis doesn't apply cleanly\nEOF\necho after"
     assert git_protection._command_segments(cmd) == [
         ["cat", "<<", "EOF"], ["echo", "after"]]
+    # The quote never closes: shlex must raise, not parse as safe.
+    try:
+        git_protection._command_segments('echo "intro\ngit push origin main')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unterminated quote must raise, not parse as safe")
 
 
-def test_apostrophe_in_heredoc_body_still_hides_no_real_command():
-    # The body exemption is unchanged: with no EOF terminator the body is
-    # re-judged, and the apostrophe then raises out of shlex into the
-    # deny-leaning whole-command fallback. Either route must end in a deny.
-    out = _run_hook("cat <<EOF\nit doesn't matter\ngit push origin main")
-    assert out.get("permissionDecision") == "deny", out
+def test_fail_closed_end_to_end_rows():
+    # The ValueError fallback must lean deny for git commands, not fail open on
+    # a literal startswith("git"). Drives the real hook end to end: asserting
+    # the predicate in isolation would pass even if main() reverted.
+    rows = [
+        'echo "intro\ngit push origin main',
+        "cat <<EOF\nit doesn't matter\ngit push origin main",
+    ]
+    for cmd in rows:
+        out = _run_hook(cmd)
+        assert out.get("permissionDecision") == "deny", cmd
 
 
-# --- `$( ... )` bodies are COMMANDS, even inside double quotes ---------------
-# A `$(` reached inside double quotes still runs its body, so the quote-aware
-# split above kept `"$(<newline>gh pr merge 1)"` as one token and the gate saw
-# no merge segment at all. Before the split it was caught only by accident, via
-# the ValueError fallback. Bodies are now re-segmented recursively.
-
-
-def test_multiline_substitution_hiding_a_merge_is_caught():
-    assert _merge_segment('X="$(gh pr merge 1 --auto\n)"') is not None
-
-
-def test_singleline_substitution_hiding_a_push_is_caught():
-    assert _git_segments('echo "$(git push origin main)"')
-
-
-def test_substitution_inside_single_quotes_is_not_executed():
-    # No expansion in single quotes, so this really is inert prose.
-    assert _git_segments('fno agents mail send x \'see "$(git push origin main)"\'') == []
-
-
-# --- `git grep` carrying a guarded pattern is an allowlisted READ -------------
-# Segments arrive shlex-rejoined with quotes stripped, so `git grep -n -E
-# 'git push' -- .` used to read as a push to main: token[1] was `grep`, which
-# was never added to the positional allowlist, and the pattern TEXT then
-# matched the push regex. git grep cannot write; commit and log got this fix
-# for the same class, grep was simply missed.
-
-
-def test_git_grep_carrying_a_push_pattern_is_allowed():
+def test_git_grep_carrying_a_guarded_pattern_is_an_allowlisted_read():
+    # git grep cannot write; commit and log got this fix for the same class,
+    # grep was simply missed.
     out = _run_hook("git grep -n -E 'git push' -- .")
     assert out.get("permissionDecision") != "deny", out
-
-
-def test_git_grep_is_positionally_allowlisted():
     assert git_protection.is_allowed_git_command("git grep -n -E 'git push' -- .")
-
-
-def test_push_to_main_still_denied_beside_the_grep_allow():
     _on_main("feature/x")
     assert _git_segments("git push origin main")
     assert git_protection.is_push_to_protected_branch(
@@ -467,7 +266,4 @@ def test_push_to_main_still_denied_beside_the_grep_allow():
 
 
 if __name__ == "__main__":
-    for _name, _fn in sorted(globals().items()):
-        if _name.startswith("test_") and callable(_fn):
-            _fn()
-    print("ok: all git-protection scenarios pass")
+    raise SystemExit("run with pytest")

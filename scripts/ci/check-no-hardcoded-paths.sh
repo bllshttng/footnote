@@ -91,6 +91,7 @@ add_violation() {
 #   adapters/providers/dispatch.py (try/except), adapters/providers/staging.py (try/except),
 #   adapters/providers/loader.py (bootstrap: settings loader self-reference)
 #   agents/dispatch_target.py (bootstrap: settings loader self-reference)
+#   agents/registry.py (guard identifies the shared HOME registry despite config overrides)
 #   cost/_register.py, cost/_session_cost.py (moved standalone metric scripts)
 #   graph/_constants.py (uses _state_dir() helper), test_*.py
 # ---------------------------------------------------------------------------
@@ -114,6 +115,7 @@ PY_HITS=$(
     | grep -v 'adapters/providers/staging\.py' \
     | grep -v 'adapters/providers/loader\.py' \
     | grep -v 'agents/dispatch_target\.py' \
+    | grep -v 'agents/registry\.py' \
     | grep -v 'cost/_register\.py' \
     | grep -v 'cost/_session_cost\.py' \
     | grep -v 'doctor\.py' \

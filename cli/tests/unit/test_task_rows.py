@@ -188,8 +188,6 @@ def test_task_list_no_plan_refuses_and_writes_nothing(
 def test_unknown_task_id_exits_2_naming_plan_ids(
     tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from fno.graph import cli as graph_cli
-
     result = _task_update(
         monkeypatch, _live_pid(), "x-t1", "9.9", "--status", "in_progress",
         "--owner", SID_A,
@@ -261,24 +259,103 @@ def test_in_progress_without_session_id_exits_4(
     assert "fno agents spawn" in result.output
 
 
-def test_unprovable_pid_refuses_rather_than_degrading(
+def test_pidless_thread_claim_uses_two_hour_lease(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A pid-less acquire would anchor to the dying CLI process and leave the
-    claim instantly stealable; the verb refuses (exit 4) and writes nothing."""
+    """AC1-HP: a thread claim records missing pid under the bounded lease."""
+    from fno.claims.tasks import TASK_CLAIM_TTL_MS
+
     result = _task_update(
         monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
     )
-    assert result.exit_code == 4
-    assert "FNO_SESSION_PID" in result.output
-    # Positive absence proof: the healthy pid on the SAME path creates the
-    # lockfile, so the instrument ran and the refusal was the pid guard.
-    ok = _task_update(
-        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
-        "--owner", SID_A,
+    assert result.exit_code == 0, result.output
+
+    key = task_key("x-t1", "1.1")
+    lock = claim_path(key, root=claims_root)
+    assert lock.exists(), f"claim lockfile for {key} must exist"
+    claim = claim_status(key, root=claims_root)
+    assert claim["pid"] is None
+    assert claim["pid_unavailable"] is True
+    assert claim["expires_at"] == claim["acquired_at"] + TASK_CLAIM_TTL_MS
+    row = _node_row(tmp_graph, "x-t1", "1.1")
+    assert row["status"] == "in_progress" and row["owner"] == SID_A
+
+
+def test_pidless_task_claim_refuses_peer_by_name(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2-ERR: a live peer cannot take the thread holder's leased claim."""
+    key = task_key("x-t1", "1.1")
+    first = _task_update(
+        monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
     )
-    assert ok.exit_code == 0, ok.output
-    assert claim_path(task_key("x-t1", "1.1"), root=claims_root).exists()
+    assert first.exit_code == 0, first.output
+
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_B,
+    )
+    assert refused.exit_code == 3
+    assert SID_A in refused.output, "refusal names the holder"
+    assert _node_row(tmp_graph, "x-t1", "1.1")["owner"] == SID_A
+    assert claim_status(key, root=claims_root)["holder"] == SID_A
+
+
+def test_task_claim_with_pid_keeps_immediate_liveness(
+    claims_root: Path, tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC3-EDGE: a resolved worker pid still creates a no-TTL claim."""
+    pid = _live_pid()
+    result = _task_update(
+        monkeypatch, pid, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    )
+    assert result.exit_code == 0, result.output
+
+    claim = claim_status(task_key("x-t1", "1.1"), root=claims_root)
+    assert claim["pid"] == pid
+    assert claim["pid_unavailable"] is False
+    assert claim["expires_at"] is None
+
+
+def test_reoffering_done_task_keeps_suspect_pidless_claim(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC4-EDGE: refusing shipped work must preserve our suspect claim."""
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+
+    for marker in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(marker, raising=False)
+
+    key = task_key("x-t1", "1.1")
+    lock = claim_path(key, root=claims_root)
+    first = _task_update(
+        monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    )
+    assert first.exit_code == 0, first.output
+    claim = claim_status(key, root=claims_root)
+    assert claim["state"] == "suspect"
+    assert claim.get("session_id") in (None, "")
+
+    def _mark_done(entries):
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == "x-t1":
+                for task in entry.get("tasks") or []:
+                    if isinstance(task, dict) and task.get("id") == "1.1":
+                        task["status"] = "done"
+                        break
+                break
+        return entries
+
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(tmp_graph, _mark_done)
+
+    refused = _task_update(
+        monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    )
+    assert refused.exit_code == 3
+    assert "re-offering shipped work is refused" in refused.output
+    assert lock.exists(), "the holder's existing claim survives the row refusal"
 
 
 def test_claim_contention_exits_3_within_the_waves_contract(

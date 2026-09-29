@@ -13,6 +13,12 @@ use std::sync::{Arc, Mutex};
 /// The returned guard restores the previous values on drop, so the overrides
 /// never leak into sibling tests under parallel execution.
 fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
+    // Take the env lock before the first global pin: the save and the set
+    // below are process-global writes, and a sibling test's config read must
+    // not observe them mid-flight (the territory EnvGuard discipline).
+    let lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let empty = tmp.join("empty.toml");
     std::fs::write(&empty, "").unwrap();
     let saved = [
@@ -28,14 +34,18 @@ fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
     std::env::set_var("HOME", tmp);
     std::env::set_var("FNO_HOME", tmp);
     std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
-    EnvGuard(saved)
+    EnvGuard { _lock: lock, saved }
 }
 
-struct EnvGuard([(&'static str, Option<String>); 4]);
+struct EnvGuard {
+    // Underscore-prefixed: held for the drop ordering, never read.
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: [(&'static str, Option<String>); 4],
+}
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        for (key, value) in self.0.iter() {
+        for (key, value) in self.saved.iter() {
             match value {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
@@ -134,11 +144,6 @@ fn cand(id: &str, title: &str, blocked_by: &[&str]) -> Candidate {
 #[test]
 fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
     let dir = tempfile::tempdir().unwrap();
-    // hermetic_env mutates process-global env; hold the crate's env lock so
-    // parallel env-holding tests (ac2, a_scope_switch) cannot interleave.
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     // Sidecar file for o/r#1 with plan_path, cwd and two sessions.
     let sidecar_dir = dir.path().join(".fno/sidecar");
@@ -217,6 +222,11 @@ fn graph_fixture(dir: &std::path::Path, entries: Value) -> std::path::PathBuf {
 #[test]
 fn ac4_graph_list_open_excludes_terminal_and_carries_ordering_inputs() {
     let dir = tempfile::tempdir().unwrap();
+    // The readiness overlay resolves the global state root transitively; go
+    // hermetic and declare the root so a sibling's legal env restore can never
+    // land a real $HOME under this read (the p1 flake).
+    let _env = hermetic_env(dir.path());
+    crate::paths::pin_test_claims_root(dir.path());
     let path = graph_fixture(
         dir.path(),
         json!([
@@ -274,9 +284,6 @@ fn a_gh_io_fault_surfaces_as_backend_naming_the_id() {
 #[test]
 fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
@@ -318,9 +325,6 @@ fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
 #[test]
 fn a_scope_switch_never_serves_another_scope_cache() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
@@ -374,6 +378,8 @@ fn the_sidecar_file_reader_honors_its_contract() {
 #[test]
 fn the_graph_backend_projects_only_sidecar_keys() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = hermetic_env(dir.path());
+    crate::paths::pin_test_claims_root(dir.path());
     let path = graph_fixture(
         dir.path(),
         json!([

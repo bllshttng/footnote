@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One event on a pane's `out_tx` channel: real bytes to feed the VT, or a
@@ -848,6 +848,9 @@ impl PtyShell {
             // a hosted TUI re-derives from rows/cols.
             PtyShell::Keeper(keeper) => {
                 let _ = (pixel_width, pixel_height);
+                if e2e_drop_resize_frame() {
+                    return Ok(());
+                }
                 keeper.send_frame(keeper_frame_resize(rows, cols))
             }
         }
@@ -921,6 +924,24 @@ fn keeper_frame_resize(rows: u16, cols: u16) -> Vec<u8> {
     payload.extend_from_slice(&rows.to_le_bytes());
     payload.extend_from_slice(&cols.to_le_bytes());
     keeper_encode(KEEPER_TAG_RESIZE, &payload)
+}
+
+/// E2E fault seam: drop the first N resize frames this process sends
+/// (`FNO_E2E_DROP_RESIZE_FRAME`, default 1), holding panes at their
+/// pre-change sizes the way a full keeper frame queue or a pre-ResizeAck
+/// keeper build would. Counted per process, so the tick's reconciliation
+/// pass re-issues later resizes through and converges.
+fn e2e_drop_resize_frame() -> bool {
+    static DROPPED: AtomicU32 = AtomicU32::new(0);
+    if std::env::var_os("FNO_E2E").is_none() {
+        return false;
+    }
+    let Some(budget) = std::env::var_os("FNO_E2E_DROP_RESIZE_FRAME") else {
+        return false;
+    };
+    let budget: u32 = budget.to_string_lossy().parse().unwrap_or(1);
+    let dropped = DROPPED.fetch_add(1, Ordering::Relaxed);
+    dropped < budget
 }
 
 fn keeper_frame_kill() -> Vec<u8> {

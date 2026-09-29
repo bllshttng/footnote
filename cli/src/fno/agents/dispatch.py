@@ -894,28 +894,6 @@ def _lane_b_worker_binary() -> Optional[Path]:
     return Path(found) if found else None
 
 
-def _lane_b_keeper_socket(name: str) -> Path:
-    """``<state-root>/mux/threads/<name>.sock``: the pane-less keeper's
-    socket, session-keyed beside the pane keepers' ``mux/panes/`` (see
-    docs/state-root-inventory.md for the owner + lifetime row).
-
-    The state root follows the daemon's derivation, not just ``state_dir()``:
-    the Rust registry-side keeper sweep derives the threads dir from the
-    agents root's parent (``FNO_AGENTS_HOME``'s parent when set, else
-    ``state_dir()``), and the spawn must write the socket where that sweep
-    reads it or a restart rebind silently finds nothing.
-
-    The override arm keeps ``FNO_AGENTS_HOME``'s literal spelling - no
-    ``resolve()``: the sweep matches the row's socket path byte-for-byte
-    against a dir built from the raw ``--home`` string, and resolving
-    repoints it through symlinked components (macOS ``/var`` ->
-    ``/private/var``), leaving the socket orphaned at every restart."""
-    override = os.environ.get("FNO_AGENTS_HOME")
-    if override:
-        return Path(override).expanduser().parent / "mux" / "threads" / f"{name}.sock"
-    return paths.state_dir() / "mux" / "threads" / f"{name}.sock"
-
-
 def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
     """Connect to a keeper, send ``Identify``, return its reply dict.
 
@@ -1014,6 +992,7 @@ def _lane_b_thread_spawn(
     """
     from fno.agents.harness_map import render_session_argv, thread_lane
     from fno.harness_identity import scrub_ambient_identity
+    from fno.mail.seed_provenance import scrub_seed_provenance
 
     if thread_lane(harness) != "keeper":
         raise DispatchAskError(
@@ -1082,6 +1061,8 @@ def _lane_b_thread_spawn(
 
             argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
 
+        from fno.agents.keeper_thread import _lane_b_keeper_socket
+
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
         sock.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,6 +1088,7 @@ def _lane_b_thread_spawn(
         # IDENTITY; the keeper passes its own env through to the harness
         # child unchanged, so the scrub has to happen here.
         scrub_ambient_identity(env)
+        scrub_seed_provenance(env)
         # The loop extension's spawn binding: the presence of this variable
         # marks THIS process as one fno spawned into the loop lane, so the
         # global footnote extension gates only here and never hijacks a
@@ -1833,7 +1815,7 @@ def _claude_create_path(
             assert crown_plan is not None  # set by the pre-launch call above
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
-                exclude_name=name if revive else None,
+                exclude_name=name if revive else None, heir=name,
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True

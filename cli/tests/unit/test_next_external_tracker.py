@@ -347,7 +347,20 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     assert r.exit_code == 0, r.output
     doc = json.loads(r.output)
     assert doc["id"] == "EXT-hi"
-    assert read_graph_strict(g) == before
+    # The claim lives only in the claims store: every served row keeps its
+    # pre-run values except the projected claim fields, which now carry the
+    # holder. No mirror row is written anywhere.
+    after = read_graph_strict(g)
+    claim_fields = {
+        "locked_by", "locked_by_harness", "locked_by_harness_session",
+        "locked_at", "session_id",
+    }
+    strip = lambda rs: [
+        {k: v for k, v in row.items() if k not in claim_fields} for row in rs
+    ]
+    assert strip(after) == strip(before)
+    served = {row["id"]: row.get("locked_by") for row in after}
+    assert served["EXT-hi"] == "sess-ext-1"
     # The claim exists in the claims dir under the opaque id.
     claims_root = tmp_path / "claims"
     locks = list(claims_root.rglob("*EXT-hi*"))

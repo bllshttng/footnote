@@ -50,6 +50,15 @@ out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
 [[ -z "$out" ]] || fail "active front door must be silent, got: $out"
 pass "active front door -> silent"
 
+# The reminder cases run the REAL hook in place, so the XDG fallback dir must be
+# pre-stamped to this tree's plugin version: the hook then takes the already-ran
+# path and prints the reminder without ever starting the real installer into the
+# caller's HOME.
+REAL_VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$REPO_ROOT_REAL/.claude-plugin/plugin.json" | head -1)"
+REMIND_XDG="$WORK/xdg-remind"
+mkdir -p "$REMIND_XDG/fno/plugin-install"
+printf '%s' "$REAL_VERSION" > "$REMIND_XDG/fno/plugin-install/postinstall.version"
+
 # --- Case 2: fno-py only (fno exists but has no `mux` verb) -> REMIND ----------
 cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash
@@ -58,14 +67,14 @@ echo "No such command 'mux'." >&2
 exit 2
 FAKE
 chmod +x "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
 grep -q "Install the .fno. front door" <<<"$out" || fail "fno-py-only must remind, got: $out"
 grep -q "cargo install fno" <<<"$out" || fail "reminder must name the fix, got: $out"
 pass "fno-py only -> reminder with fix"
 
 # --- Case 3: no `fno` on PATH at all -> REMIND --------------------------------
 rm -f "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
 grep -q "Install the .fno. front door" <<<"$out" || fail "missing fno must remind, got: $out"
 pass "no fno on PATH -> reminder"
 
@@ -111,11 +120,12 @@ rm -f "$FAKEBIN/fno"
 
 run_hook() { PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PHOOK" 2>/dev/null; }
 
-# Wait up to 10s for the detached installer to release its lock.
+# Wait up to 10s for the detached installer to release its lock. $1 = the data
+# dir to poll (default $DATA).
 wait_unlocked() {
-  local _
+  local dir="${1:-$DATA}" _
   for _ in $(seq 1 50); do
-    [[ -d "$DATA/postinstall.lock" ]] || return 0
+    [[ -d "$dir/postinstall.lock" ]] || return 0
     sleep 0.2
   done
   return 1
@@ -189,13 +199,27 @@ wait_unlocked || fail "reclaimed installer left its lock"
 [[ ! -d "$DATA/postinstall.lock.reclaim" ]] || fail "reclaim mutex left behind"
 pass "lock older than 60 minutes with a live (reused) pid -> reclaimed, installer runs"
 
-# --- Case 9: CLAUDE_PLUGIN_DATA unset -> today's reminder, no installer --------
+# --- Case 9: CLAUDE_PLUGIN_DATA unset -> the XDG fallback dir gets the install -
+# A Codex session carries no CLAUDE_PLUGIN_DATA; the hook must fall back to the
+# XDG state dir and run the installer there, same log, stamp and lock.
 rm -rf "$DATA" "$MARK"
-out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$PHOOK" 2>/dev/null)
+XDG_DIR="$WORK/xdg-state/fno/plugin-install"
+out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/xdg-state" bash "$PHOOK" 2>/dev/null)
+grep -q "Installing the fno CLI" <<<"$out" || fail "no plugin data dir must start the installer in the XDG fallback, got: $out"
+grep -qF "$XDG_DIR/postinstall.log" <<<"$out" || fail "fallback message must name the XDG log, got: $out"
+wait_unlocked "$XDG_DIR" || fail "fallback installer left its lock"
+[[ -e "$MARK" ]] || fail "fallback installer never ran"
+[[ "$(cat "$XDG_DIR/postinstall.version" 2>/dev/null)" == "9.9.9" ]] || fail "fallback stamp does not hold the plugin version"
+grep -q "installer exit 0" "$XDG_DIR/postinstall.log" || fail "fallback log lacks the exit line"
+pass "CLAUDE_PLUGIN_DATA unset -> XDG fallback dir gets the installer"
+
+# --- Case 9b: no CLAUDE_PLUGIN_DATA and no XDG dir writable -> plain reminder --
+rm -rf "$WORK/xdg-state" "$MARK"
+touch "$WORK/not-a-dir"
+out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/not-a-dir" bash "$PHOOK" 2>/dev/null)
 sleep 3
-[[ ! -e "$MARK" ]] || fail "no CLAUDE_PLUGIN_DATA must not start the installer"
-grep -q "Install the .fno. front door" <<<"$out" || fail "no data dir must remind, got: $out"
-! grep -q "already ran" <<<"$out" || fail "no data dir must print only the plain reminder, got: $out"
-pass "CLAUDE_PLUGIN_DATA unset -> plain reminder, no installer"
+[[ ! -e "$MARK" ]] || fail "an unwritable XDG fallback must not start the installer"
+grep -q "Install the .fno. front door" <<<"$out" || fail "unwritable fallback must remind, got: $out"
+pass "unwritable XDG fallback -> plain reminder, no installer"
 
 log "all cases passed"

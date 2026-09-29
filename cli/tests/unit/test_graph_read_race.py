@@ -10,9 +10,7 @@ swallow is reintroduced on the resolution path.
 """
 from __future__ import annotations
 
-import json
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -20,7 +18,6 @@ from fno.graph.fuzzy import resolve_node
 from fno.graph.store import (
     GraphUnreadableError,
     commit_rows_via_store,
-    read_graph_strict,
     read_graph_strict,
 )
 
@@ -30,7 +27,7 @@ def scratch(tmp_path, monkeypatch):
     # The graph lock is derived from the graph path, so a scratch graph in
     # tmp_path automatically locks a scratch sibling -- no real /tmp lock taken.
     g = tmp_path / "graph.json"
-    # This stress fixture deliberately publishes 200 rows. Disable the
+    # This stress fixture deliberately publishes many rows. Disable the
     # unplanned-idea cap so the race assertion remains about reads, not intake.
     (tmp_path / "config.toml").write_text(
         "[backlog]\nmax_open_ideas = 0\n", encoding="utf-8"
@@ -50,17 +47,26 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
     misses: list[str] = []
     read_failures: list[Exception] = []
     stop = threading.Event()
+    ready = threading.Barrier(4)
+    first_write = threading.Event()
+    read_after_first_write = threading.Event()
 
     def writer():
-        for i in range(200):
+        ready.wait()
+        for i in range(64):
             def _mut(entries, i=i):
                 entries.append({"id": f"x-w{i:04x}", "title": f"n{i}",
                                 "status": "ready", "project": "fno", "domain": "code"})
                 return entries
             commit_rows_via_store(scratch, _mut)
+            if i == 0:
+                first_write.set()
+                read_after_first_write.wait(timeout=5)
         stop.set()
 
     def reader():
+        ready.wait()
+        first_write.wait(timeout=5)
         while not stop.is_set():
             try:
                 entries = read_graph_strict(scratch)
@@ -72,6 +78,7 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
             match = resolve_node("x-keep", entries)
             if match.kind != "exact":
                 misses.append(match.kind)
+            read_after_first_write.set()
 
     threads = [threading.Thread(target=writer)] + [
         threading.Thread(target=reader) for _ in range(3)
@@ -83,3 +90,4 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
 
     assert misses == [], f"{len(misses)} false negative(s) for a present node: {misses[:5]}"
     assert read_failures == [], f"{len(read_failures)} spurious read failure(s)"
+    assert read_after_first_write.is_set(), "readers must overlap the write sequence"

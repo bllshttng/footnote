@@ -196,7 +196,11 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
         {
             "id": "session-start-combined",
             "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"],
-        }
+        },
+        {
+            "id": "frontdoor-nudge-session-start",
+            "argv": ["${PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"],
+        },
     ]
     wrapper = (ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
     assert "session-start-using-fno.sh" in wrapper

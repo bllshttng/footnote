@@ -112,8 +112,11 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   _VERIFIED_PACKS="$_VERIFIED_PACKS $SKILL"
   manifest="$SOURCE_ROOT/plugins/$SKILL/plugin.yaml"
   [[ -f "$manifest" ]] || { echo "ERROR: pack manifest not found: $manifest" >&2; exit 1; }
-  _verify_pack "$manifest"
-  rc=$?
+  # `|| rc=$?` keeps set -e from exiting on the function's refusal codes;
+  # a bare call here used to kill the script silently (the refusal branches
+  # below never printed, and the freshness gate showed a bare exit 2).
+  rc=0
+  _verify_pack "$manifest" || rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "ERROR: cannot verify pack $SKILL (no fno or uv available); refusing to bundle unverified" >&2; exit 1
   elif [ "$rc" -ne 0 ]; then

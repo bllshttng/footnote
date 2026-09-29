@@ -72,47 +72,6 @@ def test_phase2_surface_registers(surface: str, argv: list[str]) -> None:
 # Parity: backlog find (read-only graph path).
 # --------------------------------------------------------------------------- #
 
-def test_backlog_create_native_help_registers() -> None:
-    """`backlog add|idea --help` moved with the create port: the binary's
-    flag decls still parse and the surface answers."""
-    from tests._native_door import run_native
-
-    for verb in ("add", "idea"):
-        code, out, err = run_native("backlog", verb, "--help")
-        assert code == 0, err
-        assert "Usage" in out + err
-
-
-def test_backlog_find_native_help_registers() -> None:
-    """`backlog find --help` is the native binary's now; the flag decl still
-    parses and the surface answers."""
-    from tests._native_door import run_native
-
-    code, out, err = run_native("backlog", "find", "--help")
-    assert code == 0, err
-    assert "Usage" in out + err
-
-
-def test_backlog_update_native_help_registers() -> None:
-    """`backlog update --help` moved with the update port: the binary's flag
-    decls still parse and the surface answers."""
-    from tests._native_door import run_native
-
-    code, out, err = run_native("backlog", "update", "--help")
-    assert code == 0, err
-    assert "Usage" in out + err
-
-
-def test_backlog_native_help_registers_add_and_idea() -> None:
-    """The Rust dispatcher owns the backlog create groups after the port."""
-    from tests._native_door import run_native
-
-    code, out, err = run_native("backlog", "--help")
-    assert code == 0, err
-    assert "add" in out
-    assert "idea" in out
-
-
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"

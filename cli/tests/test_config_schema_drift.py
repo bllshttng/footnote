@@ -307,15 +307,14 @@ def test_auto_merge_grant_rust_leg_matches_the_inventory() -> None:
         f"{sorted(expected)} (reader, grant caller, cache-key dispatch "
         f"reader), found {sorted(found)}"
     )
-    py_hits = [
-        p
-        for p in (root / "cli" / "src" / "fno").rglob("*.py")
-        if re.search(
-            r"^def auto_merge_grant\(",
-            p.read_text(encoding="utf-8"),
-            re.MULTILINE,
-        )
-    ]
+    py_hits = []
+    for path in (root / "cli" / "src" / "fno").rglob("*.py"):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        if re.search(r"^def auto_merge_grant\(", source, re.MULTILINE):
+            py_hits.append(path)
     assert len(py_hits) == 1, (
         f"expected exactly one Python auto_merge_grant definition, found {py_hits}"
     )
