@@ -271,7 +271,7 @@ fn starvation_receipts(
 /// observer-only survivors prepended, and one divergence event per missed
 /// row (non-gating).
 #[allow(clippy::too_many_arguments)]
-fn with_observer(
+pub(crate) fn with_observer(
     candidates: Vec<Value>,
     source_entries: &[Value],
     occupied: &BTreeSet<String>,
