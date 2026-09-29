@@ -4038,23 +4038,28 @@ class TestDurableGrantExecution:
             for event in next_deps["events"]
         )
 
-    @pytest.mark.parametrize("raise_error", [False, True])
+    @pytest.mark.parametrize("read_error", ["none", "tool-missing", "deadline"])
     def test_head_bound_hold_parks_when_pr_head_cannot_be_read(
-        self, tmp_path, monkeypatch, raise_error
+        self, tmp_path, monkeypatch, read_error
     ):
         """An unavailable REST head does not turn a head-bound hold into a retry."""
+        from fno.pr_watch.cli import TickDeadlineExceeded
+
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
-        self._fake_merge(
-            monkeypatch, 2,
-            reason="held: worktree_dirty: /w carries uncommitted changes",
-        )
+        self._fake_merge(monkeypatch, 2, reason="held: worktree_dirty: /w carries uncommitted changes")
         def _read_head(_pr, _repo):
-            if raise_error:
+            if read_error == "tool-missing":
                 raise OSError("gh unavailable")
+            if read_error == "deadline":
+                raise TickDeadlineExceeded()
 
         monkeypatch.setattr("fno.pr._merge._pr_head_oid", _read_head)
-        self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        if read_error == "deadline":
+            with pytest.raises(TickDeadlineExceeded):
+                self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        else:
+            self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
         from fno.pr_watch._state import WatermarkStore
 

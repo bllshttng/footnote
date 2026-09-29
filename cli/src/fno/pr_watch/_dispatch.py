@@ -1364,12 +1364,12 @@ def run_execute_queue(
                 _grant("held", pr, cand, grant_fields, reason=reason)
                 if bare.startswith(("checks are red", WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)):
                     entry["parked"] = park = "checks-red" if bare.startswith("checks are red") else bare.split(":", 1)[0]
-                    # Park these head-bound holds until a sweep sees a later PR head.
+                    entry["parked_head"] = None
+                    store.set(key, entry)
                     try:
                         entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
                     except Exception as exc:  # noqa: BLE001 - a failed read still parks
                         log.warning("pr-watch: PR #%d head read failed while parking: %s", pr, exc)
-                        entry["parked_head"] = None
                     store.set(key, entry)
                     emit("pr_watch_parked", {"pr": pr, "reason": park})
                     _notify_parked_pr(
