@@ -498,29 +498,21 @@ mod theme_role_override_tests {
     #[test]
     fn border_override_recolors_every_border_under_any_theme() {
         // AC4-OVERRIDE: the border key recolors modal borders AND the focused
-        // pane frame at once, because both read t.border.
-        for name in crate::theme::THEME_NAMES {
-            let (mut t, _) = Theme::from_name(name);
-            apply_overrides_to(&mut t, None, None, Some("#112233"));
-            assert_eq!(t.border, Color::Rgb(0x11, 0x22, 0x33), "{name}");
-            assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
-        }
-    }
-
-    #[test]
-    fn the_default_value_paints_the_terminal_text_color() {
-        // `default` resolves to Color::Default: the terminal's own text
-        // color, so a border follows the emulator palette (white on a dark
-        // ground, black on paper) under EVERY theme.
-        for name in crate::theme::THEME_NAMES {
-            let (mut t, _) = Theme::from_name(name);
-            apply_overrides_to(&mut t, None, None, Some("default"));
-            assert_eq!(t.border, Color::Default, "{name}");
-            assert_eq!(
-                cell_style(Role::Border, &t).0,
-                Color::Default,
-                "{name}: the border role paints Default"
-            );
+        // pane frame at once, because both read t.border. `default` resolves
+        // to Color::Default, the terminal's own text color, so the border
+        // follows the emulator palette (white on a dark ground, black on
+        // paper) under EVERY theme.
+        for value in ["#112233", "default"] {
+            for name in crate::theme::THEME_NAMES {
+                let (mut t, _) = Theme::from_name(name);
+                apply_overrides_to(&mut t, None, None, Some(value));
+                assert_eq!(
+                    t.border,
+                    parse_override_color(value).unwrap(),
+                    "{name} {value}"
+                );
+                assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
+            }
         }
     }
 }
