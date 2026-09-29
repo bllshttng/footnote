@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use fno_agents::opencode_install::{
-    command_file_name, install, installed_status, manifest_path, uninstall,
+    command_file_name, install, installed_status, manifest_path, status_json, uninstall,
 };
 use fno_agents::provider::{opencode_run_tail, render_verb_seed};
 
@@ -35,15 +35,38 @@ fn write_file(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// A stub `opencode` on PATH whose --version output the test controls, so
+/// the contract classification is deterministic.
+fn stub_opencode(dir: &Path, version: &str) {
+    write_file(
+        &dir.join("opencode"),
+        &format!("#!/bin/sh\ncase \"$1\" in --version) echo {version};; esac\n"),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("opencode"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+}
+
+fn set_path(bin_dir: &Path) {
+    let old = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{old}", bin_dir.display()));
+}
+
 fn scratch(name: &str) -> Scratch {
     let guard = ENV_LOCK.lock().unwrap();
     let base = tmp(name);
     let root = base.join("root");
     let conf = base.join("conf");
     let state = base.join("state");
-    for dir in [&root, &conf, &state] {
+    let bin = base.join("bin");
+    for dir in [&root, &conf, &state, &bin] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    stub_opencode(&bin, "1.14.50");
+    set_path(&bin);
     write_file(
         &root.join(".claude-plugin/plugin.json"),
         r#"{"name":"fno","version":"9.9.9"}"#,
@@ -115,73 +138,137 @@ fn install_writes_the_full_surface() {
     let s = installed("full-surface");
     for verb in ["fno:target.md", "fno:pr.md", "fno:think.md"] {
         assert!(
-            s.conf.join("command").join(verb).is_file(),
+            s.conf.join("commands").join(verb).is_file(),
             "{verb} missing"
         );
     }
-    let target = read(&s.conf.join("command/fno:target.md"));
+    let target = read(&s.conf.join("commands/fno:target.md"));
     assert!(target.contains("description: \"footnote target - the spine\""));
     assert!(target.contains("Load the footnote skill \"target\""));
     assert!(target.contains("$ARGUMENTS"));
-    let archer = read(&s.conf.join("agent/fno:archer.md"));
+    let archer = read(&s.conf.join("agents/fno:archer.md"));
     assert!(archer.contains("mode: subagent"));
     assert!(archer.contains("description: \"TDD executor\""));
     assert!(!archer.contains("model:"), "bare model must be dropped");
     assert!(archer.contains("Archer prompt body"));
-    let scout = read(&s.conf.join("agent/fno:scout.md"));
+    let scout = read(&s.conf.join("agents/fno:scout.md"));
     assert!(scout.contains("model: zai/glm-5.3"));
     assert!(read(&s.conf.join("skills/think/SKILL.md")).contains("skill body"));
     assert!(read(&s.conf.join("skills/think/patterns.md")).contains("patterns"));
     assert!(read(&s.conf.join("plugins/footnote.js")).contains("bridge v9"));
     let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
     assert_eq!(manifest["version"], "9.9.9");
+    assert_eq!(manifest["opencode_contract"], "1.x");
     let files = manifest["files"].as_object().unwrap();
-    assert!(files.contains_key("command/fno:target.md"));
-    assert!(files.contains_key("agent/fno:archer.md"));
+    assert!(files.contains_key("commands/fno:target.md"));
+    assert!(files.contains_key("agents/fno:archer.md"));
     assert!(files.contains_key("skills/think/SKILL.md"));
     assert!(files.contains_key("plugins/footnote.js"));
+    let receipt = serde_json::to_value(install(Path::new("/nonexistent-repo")).unwrap()).unwrap();
+    assert_eq!(receipt["contract"], "1.x");
+    assert_eq!(receipt["opencode_version"], "1.14.50");
 }
 
 #[test]
 fn idempotent_install_changes_no_mtime_and_no_manifest() {
     let s = installed("idempotent");
-    let before = mtime(&s.conf.join("command/fno:target.md"));
+    let before = mtime(&s.conf.join("commands/fno:target.md"));
     let manifest_before = read(&manifest_path(&s.conf));
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
     assert_eq!(receipt.written, 0);
     assert_eq!(receipt.skipped, 8);
-    assert_eq!(mtime(&s.conf.join("command/fno:target.md")), before);
+    assert_eq!(mtime(&s.conf.join("commands/fno:target.md")), before);
     assert_eq!(read(&manifest_path(&s.conf)), manifest_before);
 }
 
 #[test]
 fn upgrade_removes_lost_verb_and_writes_new_one() {
     let s = installed("upgrade");
-    let archer_before = mtime(&s.conf.join("agent/fno:archer.md"));
+    let archer_before = mtime(&s.conf.join("agents/fno:archer.md"));
     std::fs::remove_file(s.root.join("commands/pr.md")).unwrap();
     write_file(
         &s.root.join("commands/review.md"),
         "---\ndescription: review it\n---\nbody\n",
     );
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert!(!s.conf.join("command/fno:pr.md").exists());
-    assert!(s.conf.join("command/fno:review.md").exists());
+    assert!(!s.conf.join("commands/fno:pr.md").exists());
+    assert!(s.conf.join("commands/fno:review.md").exists());
     assert!(receipt.removed >= 1);
-    assert_eq!(mtime(&s.conf.join("agent/fno:archer.md")), archer_before);
+    assert_eq!(mtime(&s.conf.join("agents/fno:archer.md")), archer_before);
+}
+
+/// A lost entry whose bytes were edited after the install is the user's:
+/// kept on disk, named in the receipt, out of the manifest.
+#[test]
+fn upgrade_keeps_a_user_edited_lost_file() {
+    let s = installed("upgrade-edit");
+    write_file(&s.conf.join("commands/fno:pr.md"), "// user edit\n");
+    std::fs::remove_file(s.root.join("commands/pr.md")).unwrap();
+    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(read(&s.conf.join("commands/fno:pr.md")), "// user edit\n");
+    assert!(receipt.kept.contains(&"commands/fno:pr.md".to_string()));
+    let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
+    assert!(!manifest["files"]
+        .as_object()
+        .unwrap()
+        .contains_key("commands/fno:pr.md"));
+}
+
+/// The Sep-11 legacy bridge: a pre-manifest footnote.js whose first line is
+/// the shipped header is footnote's own install - backed up, replaced, and
+/// named in replaced_legacy.
+#[test]
+fn legacy_bridge_with_header_is_backed_up_and_replaced() {
+    let s = scratch("legacy-adopt");
+    write_file(
+        &s.conf.join("plugins/footnote.js"),
+        "// footnote bridge v9\nold bridge body\n",
+    );
+    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(
+        read(&s.conf.join("plugins/footnote.js")),
+        "// footnote bridge v9\n"
+    );
+    assert_eq!(receipt.replaced_legacy.len(), 1, "named in the receipt");
+    let backup = &receipt.replaced_legacy[0].backup;
+    assert!(backup.contains(".fno-backup-"), "{backup}");
+    assert_eq!(
+        read(&s.conf.join(backup)),
+        "// footnote bridge v9\nold bridge body\n"
+    );
+}
+
+/// A pre-manifest footnote.js whose first line is NOT the shipped header
+/// (a different major's bridge or a stranger's file) is the user's: kept,
+/// named, status partial.
+#[test]
+fn foreign_bridge_with_other_header_is_kept() {
+    let s = scratch("legacy-foreign");
+    write_file(
+        &s.conf.join("plugins/footnote.js"),
+        "// totally different plugin\nbody\n",
+    );
+    let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(receipt.status, "partial");
+    assert!(receipt.kept.contains(&"plugins/footnote.js".to_string()));
+    assert_eq!(
+        read(&s.conf.join("plugins/footnote.js")),
+        "// totally different plugin\nbody\n"
+    );
 }
 
 #[test]
 fn uninstall_keeps_user_edited_file_and_names_it() {
     let s = installed("uninstall-edit");
-    write_file(&s.conf.join("command/fno:target.md"), "// user edit\n");
+    write_file(&s.conf.join("commands/fno:target.md"), "// user edit\n");
     let receipt = uninstall().unwrap();
     assert_eq!(receipt.status, "partial");
-    assert!(receipt.kept.contains(&"command/fno:target.md".to_string()));
+    assert!(receipt.kept.contains(&"commands/fno:target.md".to_string()));
     assert_eq!(
-        read(&s.conf.join("command/fno:target.md")),
+        read(&s.conf.join("commands/fno:target.md")),
         "// user edit\n"
     );
-    assert!(!s.conf.join("command/fno:pr.md").exists());
+    assert!(!s.conf.join("commands/fno:pr.md").exists());
     assert!(!manifest_path(&s.conf).exists());
 }
 
@@ -192,8 +279,8 @@ fn bystanders_and_user_config_survive_the_full_cycle() {
     // spelling OpenCode also scans), a decoy agent, a decoy command, and the
     // three config files footnote must never touch.
     write_file(&s.conf.join("skill/decoy/SKILL.md"), "decoy skill\n");
-    write_file(&s.conf.join("agent/decoy.md"), "decoy agent\n");
-    write_file(&s.conf.join("command/decoy.md"), "decoy command\n");
+    write_file(&s.conf.join("agents/decoy.md"), "decoy agent\n");
+    write_file(&s.conf.join("commands/decoy.md"), "decoy command\n");
     write_file(
         &s.conf.join("opencode.json"),
         "{\n  \"theme\": \"decoy\"\n}\n",
@@ -215,8 +302,8 @@ fn bystanders_and_user_config_survive_the_full_cycle() {
     );
     assert_eq!(read(&s.conf.join("AGENTS.md")), "user agents md\n");
     assert_eq!(read(&s.conf.join("skill/decoy/SKILL.md")), "decoy skill\n");
-    assert_eq!(read(&s.conf.join("agent/decoy.md")), "decoy agent\n");
-    assert_eq!(read(&s.conf.join("command/decoy.md")), "decoy command\n");
+    assert_eq!(read(&s.conf.join("agents/decoy.md")), "decoy agent\n");
+    assert_eq!(read(&s.conf.join("commands/decoy.md")), "decoy command\n");
     let receipt = uninstall().unwrap();
     assert_eq!(receipt.status, "uninstalled");
     assert_eq!(
@@ -229,8 +316,8 @@ fn bystanders_and_user_config_survive_the_full_cycle() {
     );
     assert_eq!(read(&s.conf.join("AGENTS.md")), "user agents md\n");
     assert_eq!(read(&s.conf.join("skill/decoy/SKILL.md")), "decoy skill\n");
-    assert_eq!(read(&s.conf.join("agent/decoy.md")), "decoy agent\n");
-    assert_eq!(read(&s.conf.join("command/decoy.md")), "decoy command\n");
+    assert_eq!(read(&s.conf.join("agents/decoy.md")), "decoy agent\n");
+    assert_eq!(read(&s.conf.join("commands/decoy.md")), "decoy command\n");
     assert!(!manifest_path(&s.conf).exists());
 }
 
@@ -284,8 +371,12 @@ fn stale_install_is_named_when_the_source_version_moves() {
     assert_eq!(installed_status()["status"], "installed");
 }
 
+/// The old translator's contract, restated for the permission record: a
+/// denylist carries into 1.x's permission map as deny entries, and an
+/// allowlist installs as a deny-all record with one allow per mapped tool -
+/// never unrestricted.
 #[test]
-fn agent_restrictions_follow_the_translator_contract() {
+fn agent_restrictions_render_as_permission_records() {
     let s = scratch("restriction-parity");
     write_file(
         &s.root.join("agents/reviewer.md"),
@@ -293,25 +384,73 @@ fn agent_restrictions_follow_the_translator_contract() {
     );
     write_file(
         &s.root.join("agents/allowlisted.md"),
-        "---\ndescription: allowlist only\ntools: [\"Read\", \"Grep\"]\n---\nAllowlisted body\n",
+        "---\ndescription: allowlist only\ntools: [\"Read\", \"Grep\", \"Bash\", \"Skill\", \"Edit\"]\n---\nAllowlisted body\n",
+    );
+    write_file(
+        &s.root.join("agents/unmappable.md"),
+        "---\ndescription: nothing maps\ntools: [\"NotebookEdit\"]\n---\nUnmappable body\n",
     );
     install(Path::new("/nonexistent-repo")).unwrap();
 
-    // The denylist carries into OpenCode's disable-only tools record.
-    let reviewer = read(&s.conf.join("agent/fno:reviewer.md"));
+    // The denylist carries into the 1.x permission map as deny entries.
+    let reviewer = read(&s.conf.join("agents/fno:reviewer.md"));
     assert!(reviewer.contains("mode: subagent"));
-    assert!(reviewer.contains("write: false"));
-    assert!(reviewer.contains("edit: false"));
-    assert!(reviewer.contains("bash: false"));
+    assert!(reviewer.contains("permission:\n  edit: deny"));
+    assert!(reviewer.contains("bash: deny"));
 
-    // The allowlist cannot be expressed: the agent is skipped, never
-    // installed unrestricted.
+    // The allowlist installs restricted: deny-all first, allows after.
+    let allowlisted = read(&s.conf.join("agents/fno:allowlisted.md"));
+    assert!(allowlisted.contains("permission:\n  \"*\": deny\n  read: allow\n  grep: allow\n  bash: allow\n  skill: allow\n  edit: allow\n"));
+
+    // An allowlist that maps to nothing skips the agent.
     assert!(
-        !s.conf.join("agent/fno:allowlisted.md").exists(),
-        "an allowlist-carrying agent must not install unrestricted"
+        !s.conf.join("agents/fno:unmappable.md").exists(),
+        "an allowlist mapping to nothing must not install unrestricted"
     );
     let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
     let files = manifest["files"].as_object().unwrap();
-    assert!(files.contains_key("agent/fno:reviewer.md"));
-    assert!(!files.contains_key("agent/fno:allowlisted.md"));
+    assert!(files.contains_key("agents/fno:reviewer.md"));
+    assert!(files.contains_key("agents/fno:allowlisted.md"));
+    assert!(!files.contains_key("agents/fno:unmappable.md"));
+}
+
+/// A stub opencode reporting 2.0.3 flips the contract: the allowlist
+/// renders as a `permissions` rule list denying everything then allowing
+/// shell (bash's 2.x name) and skill.
+#[test]
+fn v2_contract_renders_permissions_list() {
+    let s = scratch("v2-contract");
+    let bin = s.root.parent().unwrap().join("bin2");
+    std::fs::create_dir_all(&bin).unwrap();
+    stub_opencode(&bin, "2.0.3");
+    set_path(&bin);
+    write_file(
+        &s.root.join("agents/allowlisted.md"),
+        "---\ndescription: allowlist only\ntools: [\"Read\", \"Bash\", \"Task\", \"Skill\"]\n---\nAllowlisted body\n",
+    );
+    install(Path::new("/nonexistent-repo")).unwrap();
+    let rendered = read(&s.conf.join("agents/fno:allowlisted.md"));
+    assert!(rendered
+        .contains("permissions:\n  - action: \"*\"\n    resource: \"*\"\n    effect: deny\n"));
+    assert!(rendered.contains("  - action: read\n    resource: \"*\"\n    effect: allow\n"));
+    assert!(rendered.contains("  - action: shell\n    resource: \"*\"\n    effect: allow\n"));
+    assert!(rendered.contains("  - action: subagent\n    resource: \"*\"\n    effect: allow\n"));
+    let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
+    assert_eq!(manifest["opencode_contract"], "2.x");
+    assert_eq!(installed_status()["status"], "installed");
+}
+
+/// A manifest recorded under 1.x beside an opencode now reporting 2.x reads
+/// stale: the dispatch gate refuses until the re-install re-renders.
+#[test]
+fn contract_change_reads_stale() {
+    let s = scratch("contract-change");
+    install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(status_json()["status"], "installed");
+    let bin = s.root.parent().unwrap().join("bin2");
+    std::fs::create_dir_all(&bin).unwrap();
+    stub_opencode(&bin, "2.0.3");
+    set_path(&bin);
+    assert_eq!(installed_status()["status"], "stale");
+    assert_eq!(status_json()["status"], "stale");
 }

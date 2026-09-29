@@ -37,13 +37,19 @@ pub fn manifest_path(conf: &Path) -> PathBuf {
     crate::plugin_install::state_root().join(format!("{MANIFEST_FILE_PREFIX}{}.json", &hash[..12]))
 }
 
-/// OpenCode scans the config dir for commands (singular `command/`), agents
-/// (`agent/`) and skills (`skills/`); `OPENCODE_CONFIG_DIR` moves it, which
-/// is also the test and scratch-install seam.
+/// OpenCode scans the config dir for commands, agents and skills;
+/// `OPENCODE_CONFIG_DIR` moves it (the test and scratch-install seam), then
+/// `$XDG_CONFIG_HOME/opencode`, then the default, matching `opencode debug
+/// paths`.
 pub fn config_dir() -> PathBuf {
     std::env::var_os("OPENCODE_CONFIG_DIR")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|p| !p.is_empty())
+                .map(|x| PathBuf::from(x).join("opencode"))
+        })
         .unwrap_or_else(|| dirs_home().join(".config/opencode"))
 }
 
@@ -95,6 +101,19 @@ fn plugin_version(root: &Path) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The one config-dir-relative path the bridge installs at.
+pub(crate) const BRIDGE_REL: &str = "plugins/footnote.js";
+
+/// True when the two files' first lines are byte-equal: footnote's own
+/// legacy install names itself in its first line, a stranger's plugin does
+/// not.
+fn first_line_matches(existing: &[u8], shipped: &[u8]) -> bool {
+    fn head(b: &[u8]) -> &[u8] {
+        b.split(|c| *c == b'\n').next().unwrap_or(b"")
+    }
+    head(existing) == head(shipped)
 }
 
 /// The first `key: value` in a `---` frontmatter block, quotes stripped.
@@ -153,15 +172,90 @@ fn command_stub(verb: &str, description: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The OpenCode agent file for one shipped `agents/*.md`: the same mapping
-/// the plugin translator performs, as frontmatter OpenCode reads before any
-/// plugin runs. Bare model names are dropped so the child falls back to
-/// OpenCode's default; a `provider/model` string passes through.
-/// Restrictions follow the translator's contract: `disallowedTools` carries
-/// into OpenCode's disable-only `tools` record, and a `tools` allowlist
-/// CANNOT be expressed there, so the agent is skipped rather than installed
-/// unrestricted. `None` means skipped-with-reason (already named on stderr).
-fn agent_file(stem: &str, md: &str) -> Option<Vec<u8>> {
+/// The opencode agent-file contract an install renders against. 1.x reads a
+/// per-agent `permission` record (last matching rule wins); 2.x reads a
+/// `permissions` rule list and renames two tools (bash -> shell, task ->
+/// subagent). `opencode --version` classifies once per install; a missing
+/// binary renders 1.x and says so in the receipt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpencodeContract {
+    V1,
+    V2,
+}
+
+impl OpencodeContract {
+    pub fn label(self) -> &'static str {
+        match self {
+            OpencodeContract::V1 => "1.x",
+            OpencodeContract::V2 => "2.x",
+        }
+    }
+}
+
+fn classify_contract() -> (OpencodeContract, Option<String>) {
+    match Command::new("opencode").arg("--version").output() {
+        Ok(out) if out.status.success() => {
+            let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let contract = if crate::opencode_serve::version_at_least(
+                &reported,
+                crate::opencode_serve::OPENCODE_V2_FLOOR,
+            ) {
+                OpencodeContract::V2
+            } else {
+                OpencodeContract::V1
+            };
+            (contract, Some(reported))
+        }
+        _ => (OpencodeContract::V1, None),
+    }
+}
+
+/// The opencode permission key one claude tool name maps to under the given
+/// contract. `None` drops the name (and is named on stderr) rather than
+/// guessing a permission opencode does not read.
+fn permission_key(name: &str, contract: OpencodeContract) -> Option<&'static str> {
+    let key = match name.to_lowercase().as_str() {
+        "read" => "read",
+        "write" | "edit" | "multiedit" => "edit",
+        "grep" => "grep",
+        "glob" => "glob",
+        "bash" => match contract {
+            OpencodeContract::V1 => "bash",
+            OpencodeContract::V2 => "shell",
+        },
+        "skill" => "skill",
+        "task" => match contract {
+            OpencodeContract::V1 => "task",
+            OpencodeContract::V2 => "subagent",
+        },
+        "webfetch" => "webfetch",
+        "websearch" => "websearch",
+        "todowrite" => "todowrite",
+        _ => return None,
+    };
+    Some(key)
+}
+
+fn bracket_names(value: &str) -> Vec<String> {
+    value
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|x| x.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
+
+/// The OpenCode agent file for one shipped `agents/*.md`, as frontmatter
+/// OpenCode reads before any plugin runs. Bare model names are dropped so the
+/// child falls back to OpenCode's default; a `provider/model` string passes
+/// through. A `tools` allowlist renders as a deny-all `permission` record
+/// (1.x) or `permissions` rule list (2.x) with one allow per mapped tool;
+/// `disallowedTools` renders as deny entries after the allows. A tool name
+/// with no opencode key is dropped and named on stderr; an allowlist that
+/// maps to nothing skips the agent rather than installing it unrestricted.
+/// `None` means skipped-with-reason (already named on stderr).
+fn agent_file(stem: &str, md: &str, contract: OpencodeContract) -> Option<Vec<u8>> {
     let (front, body) = split_frontmatter(md);
     let field = |key: &str| -> Option<String> {
         front
@@ -170,12 +264,6 @@ fn agent_file(stem: &str, md: &str) -> Option<Vec<u8>> {
             .map(|(_, v)| v.trim().to_string())
             .filter(|v| !v.is_empty())
     };
-    if field("tools").map(|v| v.starts_with('[')).unwrap_or(false) {
-        eprintln!(
-            "opencode install: agent {stem} skipped: a tools allowlist cannot be expressed in OpenCode's agent vocabulary; convert it to disallowedTools"
-        );
-        return None;
-    }
     let description = field("description").unwrap_or_else(|| stem.to_string());
     let mut text = format!(
         "---\ndescription: {}\nmode: subagent\n",
@@ -184,21 +272,76 @@ fn agent_file(stem: &str, md: &str) -> Option<Vec<u8>> {
     if let Some(model) = field("model").filter(|m| m.contains('/')) {
         text.push_str(&format!("model: {model}\n"));
     }
-    if let Some(disallowed) = field("disallowedTools").filter(|v| v.starts_with('[')) {
-        let names: Vec<String> = disallowed
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .split(',')
-            .map(|x| x.trim().trim_matches('"').trim_matches('\'').to_lowercase())
-            .filter(|x| !x.is_empty())
-            .collect();
-        if !names.is_empty() {
-            let record = names
-                .iter()
-                .map(|n| format!("{n}: false"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            text.push_str(&format!("tools: {{{record}}}\n"));
+    let allowed = field("tools")
+        .filter(|v| v.starts_with('['))
+        .map(|v| bracket_names(&v));
+    let denied = field("disallowedTools")
+        .filter(|v| v.starts_with('['))
+        .map(|v| bracket_names(&v));
+    let map_keys = |names: &[String], stem: &str| -> Vec<&'static str> {
+        names
+            .iter()
+            .filter_map(|n| {
+                let key = permission_key(n, contract);
+                if key.is_none() {
+                    eprintln!(
+                        "opencode install: agent {stem}: tool {n} has no opencode permission key; dropped from the record"
+                    );
+                }
+                key
+            })
+            .collect()
+    };
+    if let Some(allow) = &allowed {
+        let keys = map_keys(allow, stem);
+        if keys.is_empty() {
+            eprintln!(
+                "opencode install: agent {stem} skipped: its tools allowlist maps to no opencode permission key"
+            );
+            return None;
+        }
+        match contract {
+            OpencodeContract::V1 => {
+                text.push_str("permission:\n  \"*\": deny\n");
+                for key in &keys {
+                    text.push_str(&format!("  {key}: allow\n"));
+                }
+            }
+            OpencodeContract::V2 => {
+                text.push_str(
+                    "permissions:\n  - action: \"*\"\n    resource: \"*\"\n    effect: deny\n",
+                );
+                for key in &keys {
+                    text.push_str(&format!(
+                        "  - action: {key}\n    resource: \"*\"\n    effect: allow\n"
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(deny) = &denied {
+        let keys = map_keys(deny, stem);
+        if !keys.is_empty() {
+            match contract {
+                OpencodeContract::V1 => {
+                    if !allowed.is_some() {
+                        text.push_str("permission:\n");
+                    }
+                    for key in &keys {
+                        text.push_str(&format!("  {key}: deny\n"));
+                    }
+                }
+                OpencodeContract::V2 => {
+                    if !allowed.is_some() {
+                        text.push_str("permissions:\n");
+                    }
+                    for key in &keys {
+                        text.push_str(&format!(
+                            "  - action: {key}\n    resource: \"*\"\n    effect: deny\n"
+                        ));
+                    }
+                }
+            }
         }
     }
     text.push_str("---\n\n");
@@ -223,7 +366,10 @@ fn walk_files(dir: &Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) -> Res
 
 /// Everything one install writes, as `config-dir-relative path -> bytes`,
 /// in a deterministic order so identical trees produce identical manifests.
-fn build_entries(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+fn build_entries(
+    root: &Path,
+    contract: OpencodeContract,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let mut entries = BTreeMap::new();
     let bridge = root.join("cli/src/fno/setup/assets/opencode/footnote.js");
     entries.insert(
@@ -243,7 +389,7 @@ fn build_entries(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
             })
             .unwrap_or_else(|| format!("footnote {verb}"));
         entries.insert(
-            format!("command/{}", command_file_name(verb)),
+            format!("commands/{}", command_file_name(verb)),
             command_stub(verb, &description),
         );
     }
@@ -258,8 +404,8 @@ fn build_entries(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
             };
             let md = std::fs::read_to_string(&path)
                 .map_err(|e| format!("opencode install: {}: {e}", path.display()))?;
-            if let Some(bytes) = agent_file(stem, &md) {
-                entries.insert(format!("agent/fno:{stem}.md"), bytes);
+            if let Some(bytes) = agent_file(stem, &md, contract) {
+                entries.insert(format!("agents/fno:{stem}.md"), bytes);
             }
         }
     }
@@ -293,6 +439,18 @@ pub struct InstallReceipt {
     pub kept: Vec<String>,
     pub removed: usize,
     pub manifest: String,
+    /// The opencode contract the agent files were rendered against, and the
+    /// version opencode reported (None when opencode is not on PATH).
+    pub contract: &'static str,
+    pub opencode_version: Option<String>,
+    /// Pre-manifest bridges footnote replaced, each with its backup path.
+    pub replaced_legacy: Vec<LegacyReplacement>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct LegacyReplacement {
+    pub path: String,
+    pub backup: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -300,6 +458,10 @@ struct Manifest {
     version: String,
     /// config-dir-relative path -> blake3 hex of the bytes footnote wrote.
     files: BTreeMap<String, String>,
+    /// The agent contract the agent files were rendered for, so an opencode
+    /// upgrade across 2.0.0 names a re-install instead of ignored permissions.
+    #[serde(default)]
+    opencode_contract: String,
 }
 
 fn read_manifest(conf: &Path) -> Option<Manifest> {
@@ -320,14 +482,17 @@ fn write_manifest(conf: &Path, manifest: &Manifest) -> Result<(), String> {
 pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
     let root = resolve_source(cwd)?;
     let version = plugin_version(&root);
-    let entries = build_entries(&root)?;
+    let (contract, opencode_version) = classify_contract();
+    let entries = build_entries(&root, contract)?;
     let conf = config_dir();
     let mut manifest: Manifest = read_manifest(&conf).unwrap_or_default();
     manifest.version = version.clone();
+    manifest.opencode_contract = contract.label().to_string();
     let mut written = 0;
     let mut skipped = 0;
     let mut removed = 0;
     let mut kept: Vec<String> = Vec::new();
+    let mut replaced_legacy: Vec<LegacyReplacement> = Vec::new();
     for (rel, bytes) in &entries {
         let dest = conf.join(rel);
         let hash = blake3::hash(bytes).to_hex().to_string();
@@ -345,6 +510,23 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
                 skipped += 1;
                 continue;
             }
+            if rel == BRIDGE_REL && first_line_matches(&existing, bytes) {
+                // A pre-manifest bridge whose first line is the shipped
+                // header is footnote's own legacy install: backed up,
+                // replaced, named in the receipt.
+                let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+                let backup_rel = format!("{BRIDGE_REL}.fno-backup-{stamp}");
+                std::fs::copy(&dest, conf.join(&backup_rel))
+                    .map_err(|e| format!("opencode install: {e}"))?;
+                std::fs::write(&dest, bytes).map_err(|e| format!("opencode install: {e}"))?;
+                manifest.files.insert(rel.clone(), hash);
+                written += 1;
+                replaced_legacy.push(LegacyReplacement {
+                    path: rel.clone(),
+                    backup: backup_rel,
+                });
+                continue;
+            }
             kept.push(rel.clone());
             continue;
         }
@@ -355,7 +537,9 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         manifest.files.insert(rel.clone(), hash);
         written += 1;
     }
-    // Upgrade: entries the new tree no longer ships come off disk.
+    // Upgrade: entries the new tree no longer ships come off disk, but only
+    // when their bytes still match the manifest hash - a file the user edited
+    // since the install is theirs, kept and named (same rule as uninstall).
     let lost: Vec<String> = manifest
         .files
         .keys()
@@ -363,8 +547,20 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         .cloned()
         .collect();
     for rel in &lost {
-        if std::fs::remove_file(conf.join(rel)).is_ok() {
+        let dest = conf.join(rel);
+        let recorded = manifest.files.get(rel).cloned();
+        let is_ours = recorded
+            .map(|h| {
+                std::fs::read(&dest)
+                    .ok()
+                    .map(|b| blake3::hash(&b).to_hex().as_str() == h.as_str())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if is_ours && std::fs::remove_file(&dest).is_ok() {
             removed += 1;
+        } else if dest.is_file() {
+            kept.push(rel.clone());
         }
         manifest.files.remove(rel);
     }
@@ -383,6 +579,9 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         kept,
         removed,
         manifest: manifest_path(&conf).display().to_string(),
+        contract: contract.label(),
+        opencode_version,
+        replaced_legacy,
     })
 }
 
@@ -452,21 +651,23 @@ fn prune_empty_parents(start: &Path, stop: &Path) {
 }
 
 /// The manifest's installed names, grouped the way the catalogs name them.
+/// Reads both the plural (current) and singular (legacy) layouts so an old
+/// manifest still parses.
 fn installed_names(manifest: &Manifest) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let mut commands = BTreeSet::new();
     let mut agents = BTreeSet::new();
     let mut skills = BTreeSet::new();
     for rel in manifest.files.keys() {
-        if let Some(stem) = rel
-            .strip_prefix("command/")
-            .and_then(|r| r.strip_suffix(".md"))
-        {
-            commands.insert(stem.to_string());
-        } else if let Some(stem) = rel
-            .strip_prefix("agent/")
-            .and_then(|r| r.strip_suffix(".md"))
-        {
-            agents.insert(stem.to_string());
+        let command_dir = rel.starts_with("command/") || rel.starts_with("commands/");
+        let agent_dir = rel.starts_with("agent/") || rel.starts_with("agents/");
+        if command_dir {
+            if let Some(stem) = rel.rsplit('/').next().and_then(|r| r.strip_suffix(".md")) {
+                commands.insert(stem.to_string());
+            }
+        } else if agent_dir {
+            if let Some(stem) = rel.rsplit('/').next().and_then(|r| r.strip_suffix(".md")) {
+                agents.insert(stem.to_string());
+            }
         } else if let Some(rest) = rel.strip_prefix("skills/") {
             if let Some(name) = rest.split('/').next() {
                 skills.insert(name.to_string());
@@ -579,12 +780,16 @@ pub fn status_json() -> serde_json::Value {
     let stale: Vec<String> = [stale_commands, stale_agents, stale_skills].concat();
     let source = source_version();
     let behind = matches!((&manifest, &source), (Some(m), Some(sv)) if sv.as_str() != m.version);
+    let (current_contract, _reported) = classify_contract();
+    let contract_changed = manifest.as_ref().is_some_and(|m| {
+        !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label()
+    });
     let status = match &manifest {
         None => "absent",
         Some(_) => {
             if !missing.is_empty() {
                 "partial"
-            } else if behind {
+            } else if behind || contract_changed {
                 "stale"
             } else {
                 "installed"
@@ -625,7 +830,10 @@ pub fn installed_status() -> serde_json::Value {
         Some(m) => {
             let complete = m.files.keys().all(|rel| conf.join(rel).is_file());
             let behind = source.as_deref().is_some_and(|sv| sv != m.version);
-            let stale = complete && behind;
+            let (current_contract, _) = classify_contract();
+            let contract_changed =
+                !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label();
+            let stale = complete && (behind || contract_changed);
             json!({
                 "action": "installed",
                 "status": if !complete {
