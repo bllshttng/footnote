@@ -27,7 +27,6 @@ pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
-        Some("guard-enabled") => guard_enabled_entry(&args[1..]),
         Some("king-guard") => king_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
@@ -36,28 +35,10 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("stop") => stop::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, guard-enabled, king-guard, pipe-guard, pretooluse-bash, prompt, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, king-guard, pipe-guard, pretooluse-bash, prompt, test-run-guard or stop"
             );
             2
         }
-    }
-}
-
-/// `guard-enabled <name>`: exit 0 when the project's guardrail preset runs
-/// that guard, 1 when it does not. The shell gate
-/// (`hooks/lib/guard-gate.sh`) asks this before running a Python guard; the
-/// Rust guards ask `guard_enabled` directly. Transport, not a client verb:
-/// dispatched in `main()` before the runtime builds.
-fn guard_enabled_entry(args: &[String]) -> i32 {
-    let Some(guard) = args.first() else {
-        eprintln!("fno-agents hook guard-enabled: missing guard name");
-        return 2;
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if crate::agents_config::guard_enabled(&cwd, guard) {
-        0
-    } else {
-        1
     }
 }
 
