@@ -1363,30 +1363,23 @@ mod tests {
         (dir, graph)
     }
 
-    /// AC14-HP: a client using the new `db/graph.json` anchor spelling against
-    /// an unmigrated root (the legacy `graph.json` + `graph.db` pair) resolves
-    /// the legacy store; the anchor kind probes the `.db` twin, so the legacy
-    /// `graph.db` must exist for the legacy arm to fire.
+    /// AC14: the anchor resolution ladder at the store path. Unmigrated
+    /// root: a `db/graph.json`-spelled anchor resolves the legacy `graph.db`
+    /// (the anchor kind probes the `.db` twin, so the legacy `graph.db` must
+    /// exist for the legacy arm to fire). Migrated root: an old-spelled
+    /// anchor answers with the moved store.
     #[test]
-    fn a_db_spelled_anchor_on_an_unmigrated_root_opens_the_legacy_store() {
+    fn the_anchor_resolution_answers_unmigrated_and_migrated_roots() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("graph.json"), "{}").unwrap();
         std::fs::write(root.join("graph.db"), b"SQLite format 3\0").unwrap();
         let db = database_path(&root.join("db").join("graph.json"));
-        assert_eq!(db, root.join("graph.db"));
-    }
-
-    /// AC14-EDGE: a migrated root answers an old-spelling anchor with the
-    /// moved store.
-    #[test]
-    fn an_old_spelled_anchor_on_a_migrated_root_opens_the_moved_store() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
+        assert_eq!(db, root.join("graph.db"), "unmigrated: legacy store");
         std::fs::create_dir_all(root.join("db")).unwrap();
         std::fs::write(root.join("db").join("graph.json"), "{}").unwrap();
         let db = database_path(&root.join("graph.json"));
-        assert_eq!(db, root.join("db").join("graph.db"));
+        assert_eq!(db, root.join("db").join("graph.db"), "migrated: moved store");
     }
 
     /// A first write that lands between an opener's unlocked row count and

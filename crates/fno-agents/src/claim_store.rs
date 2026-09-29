@@ -42,7 +42,13 @@ fn root_path(root: Option<&Path>) -> Result<PathBuf, String> {
 }
 
 fn database_path(root: Option<&Path>) -> Result<PathBuf, String> {
-    Ok(crate::state_layout::place(&root_path(root)?, "graph.json").with_extension("db"))
+    Ok(database_path_at(&root_path(root)?))
+}
+
+/// The one claims-store resolver: the layout `place` of the graph anchor at
+/// the given root, swapped to its db sibling.
+fn database_path_at(root_path: &Path) -> PathBuf {
+    crate::state_layout::place(root_path, "graph.json").with_extension("db")
 }
 
 pub fn open(root: Option<&Path>) -> Result<Connection, String> {
@@ -50,10 +56,7 @@ pub fn open(root: Option<&Path>) -> Result<Connection, String> {
     // Shares graph.db with the graph store, so the same migration fence
     // orders this open after any publish under the root.
     crate::state_layout_sqlite::wait_for_fence(&root_path);
-    open_paths(
-        crate::state_layout::place(&root_path, "graph.json").with_extension("db"),
-        claims_dir(root)?,
-    )
+    open_paths(database_path_at(&root_path), claims_dir(root)?)
 }
 
 fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {

@@ -100,7 +100,10 @@ fn table_counts(conn: &Connection) -> Result<BTreeMap<String, i64>, String> {
         .collect();
     let mut out = BTreeMap::new();
     for name in names {
-        let sql = format!("SELECT COUNT(*) FROM \"{name}\"");
+        // sqlite_master names are store-owned identifiers; an embedded
+        // double quote must be doubled or the COUNT reads as new SQL.
+        let quoted = name.replace('"', "\"\"");
+        let sql = format!("SELECT COUNT(*) FROM \"{quoted}\"");
         let n: i64 = conn
             .query_row(&sql, [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
@@ -330,8 +333,14 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
     // write transaction on the copy SOURCE turns every backup step Busy
     // (sqlite reads its own uncommitted state as an unsnapshotted write),
     // so the guard holds RESERVED to park other writers while a second,
-    // transaction-free connection takes the copy.
-    let guard = match Connection::open(legacy) {
+    // transaction-free connection takes the copy. Both opens refuse to
+    // create: a concurrent pass that published first renames the legacy
+    // file away, and a CREATE open here would materialize an empty store
+    // in its place and publish that emptiness over the winner's copy.
+    // READ_WRITE alone: CREATE is a separate default bit, so this open
+    // refuses to materialize a missing store.
+    let no_create = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE;
+    let guard = match Connection::open_with_flags(legacy, no_create) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_file(&fence);
@@ -351,7 +360,7 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
         migrating: migrating.clone(),
     };
     // Copy through the SQLite backup API into db/<name>.migrating.
-    let src = match Connection::open(legacy) {
+    let src = match Connection::open_with_flags(legacy, no_create) {
         Ok(c) => c,
         Err(e) => return drain.fail(&guard, format!("cannot open the copy source: {e}")),
     };
@@ -453,7 +462,10 @@ mod tests {
     }
 
     #[test]
-    fn wal_committed_rows_survive_the_move() {
+    fn the_move_survives_open_wal_and_a_held_write_parks_the_row() {
+        // First branch: rows still in the -wal (the writer connection is
+        // open at move time) land in the published copy, the legacy trio
+        // parks.
         let root = tmp_root("fno-sq-wal");
         let legacy = root.join("graph.db");
         let conn = Connection::open(&legacy).unwrap();
@@ -463,8 +475,6 @@ mod tests {
              INSERT INTO nodes VALUES ('x-1','one');",
         )
         .unwrap();
-        // Rows live in the -wal: the connection is still open at move time,
-        // which is exactly the shape the protocol must survive.
         let row = base_row("graph.db");
         let status = migrate_sqlite_row(&root, &row, true, "t1");
         assert!(matches!(status, Status::Moved), "{status:?}");
@@ -483,16 +493,15 @@ mod tests {
             .exists());
         drop(c);
         std::fs::remove_dir_all(&root).ok();
-    }
 
-    #[test]
-    fn a_held_write_keeps_the_legacy_trio_and_clears_the_fence() {
+        // Second branch: a writer holding BEGIN IMMEDIATE past the busy
+        // timeout parks the row, leaves the legacy trio untouched, and
+        // clears the fence.
         let root = tmp_root("fno-sq-busy");
         let legacy = root.join("graph.db");
         let conn = Connection::open(&legacy).unwrap();
         conn.execute_batch("CREATE TABLE t (a); INSERT INTO t VALUES (1);")
             .unwrap();
-        // Hold an exclusive write transaction past the busy timeout.
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
         let row = base_row("graph.db");
         let status = migrate_sqlite_row(&root, &row, true, "t2");
@@ -508,7 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn both_rows_refuse_and_keep_both_copies() {
+    fn the_both_exist_rule_refuses_rows_and_parks_an_empty_new_copy() {
+        // First branch: rows on both sides refuse and keep both copies.
         let root = tmp_root("fno-sq-both");
         let legacy = root.join("graph.db");
         let conn = Connection::open(&legacy).unwrap();
@@ -526,10 +536,9 @@ mod tests {
         assert!(matches!(status, Status::Refused(_)), "{status:?}");
         assert!(legacy.exists() && new.exists(), "both copies stay");
         std::fs::remove_dir_all(&root).ok();
-    }
 
-    #[test]
-    fn an_empty_new_file_parks_and_the_legacy_wins() {
+        // Second branch: an empty new copy is a fresh-create race; the empty
+        // file parks and the legacy rows win.
         let root = tmp_root("fno-sq-empty");
         let legacy = root.join("graph.db");
         let conn = Connection::open(&legacy).unwrap();
@@ -542,7 +551,6 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE z (a);")
             .unwrap();
-        // z is empty: the fresh-create shape.
         let row = base_row("graph.db");
         let status = migrate_sqlite_row(&root, &row, true, "t4");
         assert!(matches!(status, Status::Moved), "{status:?}");
