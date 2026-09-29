@@ -288,18 +288,20 @@ pub(super) fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor, viewed: 
         &[MenuAction::TabMoveTo],
     );
     if viewed {
+        // Same 2x2 grammar as the row menu's split grid: Left/Right on
+        // top, Up/Down below (the cell you pick IS the direction).
         add(
-            PopupRow::Grid(vec![
-                cell("⬒", "Split Up"),
-                cell("⬓", "Split Down"),
-                cell("◧", "Split Left"),
-                cell("◨", "Split Right"),
-            ]),
+            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
+            &[
+                MenuAction::TabSplit(Dir::Left),
+                MenuAction::TabSplit(Dir::Right),
+            ],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
             &[
                 MenuAction::TabSplit(Dir::Up),
                 MenuAction::TabSplit(Dir::Down),
-                MenuAction::TabSplit(Dir::Left),
-                MenuAction::TabSplit(Dir::Right),
             ],
         );
     } else {
