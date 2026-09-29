@@ -498,24 +498,34 @@ fn fold_claude_transcript(path: &Path, workdir: &str) -> (bool, Option<String>, 
         if rec.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(msg) = rec.get("message").and_then(Value::as_object) else {
+        // Usage reads route through the one owned parser
+        // (context_window::parse_usage_record); a second reader of the
+        // cache fields is the reachable-paths class the baseline holds.
+        let Some(parsed) = crate::context_window::parse_usage_record(&rec) else {
             continue;
         };
-        if let Some(m) = msg.get("model").and_then(Value::as_str) {
-            if m != "<synthetic>" {
-                model = Some(m.to_string());
-            }
+        if parsed.model != "<synthetic>" && !parsed.model.is_empty() {
+            model = Some(parsed.model.clone());
         }
-        let Some(u) = msg.get("usage").and_then(Value::as_object) else {
+        // ContextUsage does not carry output tokens; the pricing fold needs
+        // them, so this one unguarded field is read here.
+        let Some(output) = rec
+            .get("message")
+            .and_then(|m| m.get("usage"))
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(Value::as_u64)
+        else {
             continue;
         };
-        let num = |k: &str| u.get(k).and_then(Value::as_u64);
-        let (Some(input), Some(output)) = (num("input_tokens"), num("output_tokens")) else {
-            continue;
-        };
-        let cache_read = num("cache_read_input_tokens").unwrap_or(0);
-        let cache_write = num("cache_creation_input_tokens").unwrap_or(0);
-        usage = Some(add_usage(usage, (input, output, cache_read, cache_write)));
+        usage = Some(add_usage(
+            usage,
+            (
+                parsed.input_tokens,
+                output,
+                parsed.cache_read_input_tokens,
+                parsed.cache_creation_input_tokens,
+            ),
+        ));
     }
     (cwd_match, model, usage)
 }
