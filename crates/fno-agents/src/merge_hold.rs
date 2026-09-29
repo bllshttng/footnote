@@ -28,6 +28,13 @@ pub fn run(op: &str, payload: &Value) -> String {
     if node.is_empty() {
         return receipt("refused", 2, "payload needs a node id or slug").to_string();
     }
+    // The verdict answers from payload rows when they ride the ask (the
+    // tests' in-memory graphs): no graph read at all on that path.
+    if op.strip_prefix("hold-").unwrap_or(op) == "verdict" {
+        if let Some(rows) = payload.get("entries").and_then(Value::as_array) {
+            return verdict_receipt_rows(node, rows);
+        }
+    }
     let graph = payload
         .get("graph")
         .and_then(Value::as_str)
@@ -45,6 +52,10 @@ pub fn run(op: &str, payload: &Value) -> String {
             return receipt("refused", 2, format!("no node resolves to '{node}'")).to_string();
         }
     };
+    let by_id: BTreeMap<String, Value> = entries
+        .iter()
+        .filter_map(|e| graph_store::entry_id(e).map(|id| (id.to_string(), e.clone())))
+        .collect();
     let node_id = entry
         .get("id")
         .and_then(Value::as_str)
@@ -57,26 +68,41 @@ pub fn run(op: &str, payload: &Value) -> String {
         // reader walks the bounded ancestry and answers with the first
         // hold, fields flattened for the receipt.
         "verdict" => {
-            let by_id: BTreeMap<String, Value> = entries
-                .iter()
-                .filter_map(|e| graph_store::entry_id(e).map(|id| (id.to_string(), e.clone())))
-                .collect();
             let Some(v) = crate::backlog_ready::hold_verdict_receipt(&entry, &by_id) else {
                 return receipt("absent", 0, "").to_string();
             };
-            let mut out = receipt(if v.held { "held" } else { "invalid" }, 0, "");
-            if let Some(obj) = out.as_object_mut() {
-                obj.insert("owner".into(), Value::String(v.owner));
-                obj.insert("guard_reason".into(), Value::String(v.guard_reason));
-                obj.insert("reason".into(), Value::String(v.reason));
-                obj.insert("release_when".into(), Value::String(v.release_when));
-                obj.insert("review_on".into(), Value::String(v.review_on));
-                obj.insert("set_by".into(), Value::String(v.set_by));
-                obj.insert("detail".into(), Value::String(v.detail));
-            }
-            out.to_string()
+            verdict_receipt(&v)
         }
         other => receipt("refused", 2, format!("unknown hold op: {other}")).to_string(),
+    }
+}
+
+/// The verdict receipt body shared by the disk and payload-row paths.
+fn verdict_receipt(v: &crate::backlog_ready::HoldVerdictReceipt) -> String {
+    let mut out = receipt(if v.held { "held" } else { "invalid" }, 0, "");
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("owner".into(), Value::String(v.owner.clone()));
+        obj.insert("guard_reason".into(), Value::String(v.guard_reason.clone()));
+        obj.insert("reason".into(), Value::String(v.reason.clone()));
+        obj.insert("release_when".into(), Value::String(v.release_when.clone()));
+        obj.insert("review_on".into(), Value::String(v.review_on.clone()));
+        obj.insert("set_by".into(), Value::String(v.set_by.clone()));
+        obj.insert("detail".into(), Value::String(v.detail.clone()));
+    }
+    out.to_string()
+}
+
+/// The verdict answered from the ask's own rows: the tests' in-memory
+/// graphs, no graph read at all.
+fn verdict_receipt_rows(node: &str, rows: &[Value]) -> String {
+    let by_id: BTreeMap<String, Value> = rows
+        .iter()
+        .filter_map(|e| graph_store::entry_id(e).map(|id| (id.to_string(), e.clone())))
+        .collect();
+    let entry = by_id.get(node).cloned().unwrap_or(Value::Null);
+    match crate::backlog_ready::hold_verdict_receipt(&entry, &by_id) {
+        Some(v) => verdict_receipt(&v),
+        None => receipt("absent", 0, "").to_string(),
     }
 }
 

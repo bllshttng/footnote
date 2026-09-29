@@ -792,31 +792,14 @@ def harness_session_id() -> str:
 @pytest.fixture(autouse=True)
 def _in_memory_hold_verdict(tmp_path, monkeypatch):
     """The hold verdict answers from the graph on disk (one fno-agents
-    receipt). These tests build in-memory graphs; persist each call's rows
-    so the real reader sees them. A test that stubs the verdict itself
-    overrides this."""
+    receipt). These tests build in-memory graphs; the adapter ships each
+    call's rows IN the payload so the reader answers from them. A test that
+    stubs the verdict itself overrides this."""
 
     import json as _json
-    import sqlite3 as _sqlite3
-
-    def seed(path, rows):
-        # Direct store insert, NOT seed_graph: its strict read spawns the
-        # store keeper, and these tests stub that layer with _Result shapes.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        connection = _sqlite3.connect(path.with_suffix(".db"))
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS entries ("
-            "id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, row TEXT NOT NULL)"
-        )
-        for ordinal, entry in enumerate(rows):
-            connection.execute(
-                "INSERT INTO entries(id, ordinal, row) VALUES (?, ?, ?)",
-                (entry["id"], ordinal, _json.dumps(entry)),
-            )
-        connection.commit()
-        connection.close()
 
     from fno.graph import ladder
+    from fno.rust_binary import call_binary_json as _real_call
 
     real = ladder.dispatch_hold_verdict
 
@@ -824,19 +807,14 @@ def _in_memory_hold_verdict(tmp_path, monkeypatch):
         rows = list(by_id.values())
         if isinstance(entry, dict) and entry not in rows:
             rows = rows + [entry]
-        complete = {}
-        for e in rows:
-            if not isinstance(e, dict) or not e.get("id"):
-                continue
-            row = {"type": "feature", "priority": "p2", "status": "ready", **e}
-            row.setdefault("title", str(row.get("id")))
-            row.setdefault("slug", str(row.get("id")))
-            complete[str(row["id"])] = row
-        graph = tmp_path / "verdict-graph.json"
-        for stale in (graph, graph.with_suffix(".db")):
-            stale.unlink(missing_ok=True)
-        seed(graph, list(complete.values()))
-        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        rows = [e for e in rows if isinstance(e, dict) and e.get("id")]
+
+        def seeded_call(verb, args, *, timeout=None):
+            payload = _json.loads(args[0])
+            payload["entries"] = rows
+            return _real_call(verb, [_json.dumps(payload)], timeout=15)
+
+        monkeypatch.setattr("fno.rust_binary.call_binary_json", seeded_call)
         if not isinstance(entry, dict) or not entry.get("id"):
             # A row the graph cannot carry: read as unheld, as before.
             return None
