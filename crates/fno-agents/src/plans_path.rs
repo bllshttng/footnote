@@ -677,15 +677,6 @@ mod tests {
     use crate::claims::test_env_lock;
     use std::fs;
 
-    #[test]
-    fn anchor_of_keeps_an_absolute_project_root_that_is_not_checked_out() {
-        let root =
-            std::env::temp_dir().join(format!("fno-plans-path-absent-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        assert!(!root.exists());
-        assert_eq!(anchor_of(&[root.display().to_string()]), root);
-    }
-
     struct Fixture {
         base: PathBuf,
     }

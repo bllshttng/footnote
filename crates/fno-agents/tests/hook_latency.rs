@@ -993,10 +993,14 @@ fn latency_stop_king_terminal_repeat() {
     );
 }
 
-/// Court Bash with no write target: allow before any registry read. AC7-HP.
+/// The shared Bash PreToolUse owner preserves the guard contracts and budget.
 #[test]
 #[ignore]
-fn latency_guard_bash_no_write() {
+fn hook_budget_bash_pretooluse_dispatch() {
+    assert_bash_pretooluse_dispatch_order();
+
+    // Keep the no-write King path in the same owner: it must allow before any
+    // registry read, and this sample used to live in a duplicate ignored test.
     let manifest = format!(
         "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
     );
@@ -1022,6 +1026,145 @@ fn latency_guard_bash_no_write() {
             );
         },
     );
+
+    run_fixture(
+        "hook_budget_bash_pretooluse_dispatch",
+        "hooks/pretooluse-bash-dispatch.sh",
+        &FixtureSpec {
+            payload: guard_payload(
+                VISITOR_SID,
+                "Bash",
+                json!({"command": "rg --files | head -4"}),
+            ),
+            manifest: "",
+            claims: &[],
+            extra_env: &[],
+            budget_p90_ms: 1000.0,
+            ceiling_ms: 2500.0,
+            allowed_execs: &[
+                "bash",
+                "cat",
+                "dirname",
+                "fno-agents",
+                "git",
+                "jq",
+                "mktemp",
+                "python3",
+                "pwd",
+                "rm",
+            ],
+            max_git: Some(5),
+        },
+        |code, stdout, stderr| {
+            assert_eq!(code, 0, "{stderr}");
+            let response: Value = serde_json::from_str(stdout.trim())
+                .unwrap_or_else(|error| panic!("{stdout:?} is not JSON: {error}"));
+            assert_eq!(
+                response["hookSpecificOutput"]["permissionDecision"], "deny",
+                "the pipe guard must still refuse: {stdout} {stderr}"
+            );
+            assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[fno pipe guard]"));
+        },
+    );
+}
+
+fn assert_bash_pretooluse_dispatch_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_root();
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let events = temp.path().join("events.jsonl");
+    let payload = json!({
+        "tool_name": "Bash",
+        "cwd": repo,
+        "tool_input": {"command": "rg --files | head -4"}
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .args(["hook", "pretooluse-bash"])
+        .current_dir(&repo)
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_REPO_ROOT", &repo)
+        .env("FNO_EVENTS_PATH", &events)
+        .env("HOME", &home)
+        .env("CARGO_HOME", home.join(".cargo"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("fno-agents hook process");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(serde_json::to_string(&payload).unwrap().as_bytes())
+        .expect("write payload");
+    let output = child.wait_with_output().expect("hook output");
+
+    assert!(
+        output.status.success(),
+        "hook dispatch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("hook JSON");
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("[fno pipe guard]"));
+
+    let rows = std::fs::read_to_string(&events).expect("Python guard events");
+    let python_guards: Vec<String> = rows
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
+        .collect();
+    let native_rows = fno_agents::event_store::query_events(
+        &events,
+        &fno_agents::event_store::EventQuery::of_types(&["guard_decision"]),
+    )
+    .expect("native guard decisions");
+    let native_guards: Vec<String> = native_rows
+        .iter()
+        .filter_map(|row| serde_json::from_str::<Value>(&row.line).ok())
+        .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        python_guards,
+        vec![
+            "bg-process-guard".to_string(),
+            "git-protection".to_string(),
+            "recursive-grep-guard".to_string()
+        ],
+        "Python guards retain their registration order"
+    );
+    assert_eq!(
+        native_guards,
+        vec![
+            "bin-install-guard".to_string(),
+            "pipe-guard".to_string(),
+            "test-run-guard".to_string()
+        ],
+        "native guards retain their registration order"
+    );
+    let mut guards = python_guards;
+    guards.extend(native_guards);
+    guards.sort();
+    let mut expected: Vec<String> = [
+        "bg-process-guard",
+        "bin-install-guard",
+        "git-protection",
+        "pipe-guard",
+        "recursive-grep-guard",
+        "test-run-guard",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    expected.sort();
+    assert_eq!(guards, expected, "every guard must run once");
 }
 
 /// Edit from an uncrowned session: allow (the common case). AC-guard row.
@@ -1141,55 +1284,6 @@ fn latency_guard_court_plan_allow() {
                 "{}",
                 "plan write must allow: {stdout} {stderr}"
             );
-        },
-    );
-}
-
-/// One Bash PreToolUse round trip through the six-guard dispatcher. The name
-/// does not use the quarantined `latency_` prefix, so CI samples this row.
-#[test]
-#[ignore]
-fn hook_budget_bash_pretooluse_dispatch() {
-    run_fixture(
-        "hook_budget_bash_pretooluse_dispatch",
-        "hooks/pretooluse-bash-dispatch.sh",
-        &FixtureSpec {
-            payload: guard_payload(
-                VISITOR_SID,
-                "Bash",
-                json!({"command": "rg --files | head -4"}),
-            ),
-            manifest: "",
-            claims: &[],
-            extra_env: &[],
-            budget_p90_ms: 1000.0,
-            ceiling_ms: 2500.0,
-            allowed_execs: &[
-                "bash",
-                "cat",
-                "dirname",
-                "fno-agents",
-                "git",
-                "jq",
-                "mktemp",
-                "python3",
-                "pwd",
-                "rm",
-            ],
-            max_git: Some(5),
-        },
-        |code, stdout, stderr| {
-            assert_eq!(code, 0, "{stderr}");
-            let response: Value = serde_json::from_str(stdout.trim())
-                .unwrap_or_else(|error| panic!("{stdout:?} is not JSON: {error}"));
-            assert_eq!(
-                response["hookSpecificOutput"]["permissionDecision"], "deny",
-                "the pipe guard must still refuse: {stdout} {stderr}"
-            );
-            assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("[fno pipe guard]"));
         },
     );
 }
