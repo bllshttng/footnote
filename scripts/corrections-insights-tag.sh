@@ -7,7 +7,7 @@
 # correction text in double quotes plus a signal=<category> pair.
 #
 # Tracks a watermark via a content hash so re-runs do not double-ingest.
-# Watermark file: ~/.fno/corrections.log.wm (line-delimited, one hash per line).
+# Watermark file: ~/.fno/logs/corrections.log.wm (line-delimited, one hash per line).
 #
 # Exit 0 on a graceful no-op. Exit 2 when --insights-file is missing.
 # Exit 1 on actual errors (lock failure, missing path, etc).

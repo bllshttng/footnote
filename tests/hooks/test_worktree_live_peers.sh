@@ -363,7 +363,16 @@ cat > "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh"
-cat > "$MISSING_THROTTLE_ROOT/.fno/.worktree-stranded-cache.json" <<'EOF'
+# Seed the cache at the spelling this run's branch reads: the hermetic lane
+# keeps the flat root layout, the ambient lane moved it under state/.
+if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
+  mkdir -p "$MISSING_THROTTLE_ROOT/.fno"
+  MISSING_THROTTLE_CACHE="$MISSING_THROTTLE_ROOT/.fno/.worktree-stranded-cache.json"
+else
+  mkdir -p "$MISSING_THROTTLE_ROOT/.fno/state"
+  MISSING_THROTTLE_CACHE="$MISSING_THROTTLE_ROOT/.fno/state/.worktree-stranded-cache.json"
+fi
+cat > "$MISSING_THROTTLE_CACHE" <<'EOF'
 {"rows":[{"class":"UNKNOWN","node":"x-test","path":"/tmp/test-worktree"}]}
 EOF
 cat > "$MISSING_THROTTLE_BIN/fno" <<'EOF'

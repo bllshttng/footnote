@@ -978,7 +978,7 @@ pub fn run_probe_run(args: &[String]) -> i32 {
     code
 }
 
-fn decide_probe_run(args: &[String]) -> (i32, String) {
+pub(crate) fn decide_probe_run(args: &[String]) -> (i32, String) {
     let mut plan: Option<String> = None;
     let mut key = String::from("done_probes");
     let mut cwd: Option<String> = None;

@@ -305,24 +305,57 @@ fn sync(options: &Options, external: &dyn External) -> (i32, Receipt) {
     if blobs.is_empty() {
         return (4, Receipt::new(action, "empty-slot", None));
     }
-    if blobs.len() > 1 {
-        return (4, Receipt::new(action, "ambiguous-slot", None));
-    }
-    let blob = &blobs[0];
-    let bearer = match oauth(blob).and_then(|oauth| oauth.access_token) {
-        Some(token) => token,
-        None => return (4, Receipt::new(action, "credential-rejected", None)),
+    // The two required logins leave one unscoped and one scoped item whose
+    // tokens differ but prove the SAME account (each item refreshes on its
+    // own). All principals equal -> the latest expiry is the live token; a
+    // principal mismatch or any profile failure keeps today's refusal.
+    let (blob, proven): (&String, Option<Principal>) = if blobs.len() == 1 {
+        (&blobs[0], None)
+    } else {
+        let mut principals: Vec<Principal> = Vec::with_capacity(blobs.len());
+        for item in &blobs {
+            let proof = oauth(item)
+                .and_then(|oauth| oauth.access_token)
+                .ok_or(())
+                .and_then(|token| external.profile(&token).map_err(|_| ()));
+            match proof {
+                Ok(principal) => principals.push(principal),
+                Err(_) => return (4, Receipt::new(action, "ambiguous-slot", None)),
+            }
+        }
+        if principals.iter().any(|p| p != &principals[0]) {
+            return (4, Receipt::new(action, "ambiguous-slot", None));
+        }
+        let mut best = 0usize;
+        let mut best_expiry = oauth(&blobs[0]).and_then(|o| o.expires_at);
+        for (i, item) in blobs.iter().enumerate().skip(1) {
+            let expiry = oauth(item).and_then(|o| o.expires_at);
+            if expiry > best_expiry {
+                best = i;
+                best_expiry = expiry;
+            }
+        }
+        (&blobs[best], Some(principals.swap_remove(best)))
     };
-    let principal = match external.profile(&bearer) {
-        Ok(principal) => principal,
-        Err(ExternalFailure::Rejected) => {
-            return (4, Receipt::new(action, "credential-rejected", None))
-        }
-        Err(ExternalFailure::Malformed) => {
-            return (4, Receipt::new(action, "malformed-profile", None))
-        }
-        Err(ExternalFailure::Unavailable) => {
-            return (4, Receipt::new(action, "profile-unavailable", None))
+    let principal = match proven {
+        Some(principal) => principal,
+        None => {
+            let bearer = match oauth(blob).and_then(|oauth| oauth.access_token) {
+                Some(token) => token,
+                None => return (4, Receipt::new(action, "credential-rejected", None)),
+            };
+            match external.profile(&bearer) {
+                Ok(principal) => principal,
+                Err(ExternalFailure::Rejected) => {
+                    return (4, Receipt::new(action, "credential-rejected", None))
+                }
+                Err(ExternalFailure::Malformed) => {
+                    return (4, Receipt::new(action, "malformed-profile", None))
+                }
+                Err(ExternalFailure::Unavailable) => {
+                    return (4, Receipt::new(action, "profile-unavailable", None))
+                }
+            }
         }
     };
     let matches = matching_records(&options.store, &principal);
@@ -927,6 +960,62 @@ mod tests {
             "Claude Code-credentials".to_string(),
             Some(blob("a", "a-refresh", now_ms())),
         );
+
+        let (code, receipt) = execute("sync", &options(temp.path(), &slot, None), &external);
+        assert_eq!(code, 4);
+        assert_eq!(receipt.verdict, "ambiguous-slot");
+    }
+
+    #[test]
+    fn sync_accepts_two_blobs_of_one_account_and_takes_the_newest() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-same", "org-same");
+        let older = blob("a-access", "a-refresh", now_ms() + 1_000);
+        let newer = blob("b-access", "b-refresh", now_ms() + 2_000);
+        record(temp.path(), "same", &who, &older);
+        let mut external = MockExternal::default();
+        external
+            .keychain
+            .insert(scoped_service(&slot).unwrap(), Some(older.clone()));
+        external
+            .keychain
+            .insert("Claude Code-credentials".to_string(), Some(newer.clone()));
+        external
+            .profiles
+            .insert("a-access".to_string(), Ok(who.clone()));
+        external
+            .profiles
+            .insert("b-access".to_string(), Ok(who.clone()));
+
+        let (code, receipt) = execute("sync", &options(temp.path(), &slot, None), &external);
+        assert_eq!(code, 0);
+        assert_eq!(receipt.verdict, "written");
+        assert_eq!(
+            fs::read_to_string(temp.path().join("same/blob")).unwrap(),
+            newer
+        );
+    }
+
+    #[test]
+    fn sync_still_refuses_two_blobs_of_different_accounts() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let mut external = MockExternal::default();
+        external.keychain.insert(
+            scoped_service(&slot).unwrap(),
+            Some(blob("b", "b-refresh", now_ms())),
+        );
+        external.keychain.insert(
+            "Claude Code-credentials".to_string(),
+            Some(blob("a", "a-refresh", now_ms())),
+        );
+        external
+            .profiles
+            .insert("b".to_string(), Ok(principal("acct-b", "org-b")));
+        external
+            .profiles
+            .insert("a".to_string(), Ok(principal("acct-a", "org-a")));
 
         let (code, receipt) = execute("sync", &options(temp.path(), &slot, None), &external);
         assert_eq!(code, 4);

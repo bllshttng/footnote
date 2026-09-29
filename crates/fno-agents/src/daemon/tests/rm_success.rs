@@ -694,6 +694,57 @@ async fn rm_removes_a_hosted_codex_thread_and_drops_its_actor() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// An UNMAPPED live codex thread (the map lost the handle; the thread itself
+/// still lives in the shared app-server) is not removed with a trivial
+/// teardown: rm re-attaches through the row's durable identity first, and a
+/// refused re-attach keeps the row addressable. Old shape: a trivial
+/// "no-turn" removed the row while the thread kept running, and with the row
+/// gone the session could then be neither stopped nor re-adopted inside the
+/// rm grace window.
+#[tokio::test]
+async fn rm_refuses_an_unmapped_codex_thread_whose_reattach_refuses() {
+    let _guard = crate::path_test_guard();
+    let home = short_home("rmthreadunmapped");
+    let mut row = thread_entry("t-rm-unmapped", AgentStatus::Live, None);
+    row.cwd = "/nonexistent-cwd-for-unmapped-f313".into();
+    row.project_root = row.cwd.clone();
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    assert!(
+        !ctx.codex_threads.lock().await.contains_key("t-rm-unmapped"),
+        "precondition: the map holds no handle for this thread"
+    );
+    let request = Request::new(1, "agent.rm", json!({"name": "t-rm-unmapped"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a codex row must not read the claude roster"),
+        &|_| panic!("rm must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a thread row has no mux ref to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let error = response.error().expect("rm must refuse, not remove");
+    assert_eq!(error.code, ErrorCode::Busy, "{:?}", error.message);
+    assert!(
+        error.message.contains("re-attach refused"),
+        "the refusal names the failed re-attach: {:?}",
+        error.message
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .find("t-rm-unmapped")
+            .is_some(),
+        "the row stays so the thread stays addressable"
+    );
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// A codex thread row whose actor is gone (a daemon restart left the handle
 /// dead) is removed by rm without --force: nothing can be running in a dead
 /// actor, so teardown is already done. Before the fix this refused with

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,8 @@ pub fn decide(
     records: &[Value],
     last_cutover: Option<i64>,
     now: i64,
+    usage: Option<&Map<String, Value>>,
+    threshold_pct: f64,
 ) -> Decision {
     let shared: Vec<&Value> = records
         .iter()
@@ -51,12 +53,20 @@ pub fn decide(
         return Decision::Skip("slot_unproven");
     }
     let accounts = claude_cap.get("accounts").and_then(Value::as_object);
-    if !matches!(
-        accounts
-            .and_then(|rows| rows.get(from))
-            .and_then(Value::as_str),
-        Some("low" | "exhausted")
-    ) {
+    let state = accounts
+        .and_then(|rows| rows.get(from))
+        .and_then(Value::as_str);
+    let exhausted = state == Some("exhausted");
+    // The operator threshold judges the window itself; without a window read
+    // the coarse low/exhausted label is all there is (today's behavior).
+    let worst = usage
+        .and_then(|rows| rows.get(from))
+        .and_then(crate::fallback_chain::Snapshot::from_refresh_row);
+    let eligible = match crate::fallback_chain::worst_binding_used_pct(worst.as_ref(), now as f64) {
+        Some(pct) => exhausted || pct >= threshold_pct,
+        None => matches!(state, Some("low" | "exhausted")),
+    };
+    if !eligible {
         return Decision::Skip("below_threshold");
     }
     if last_cutover.is_some_and(|last| now.saturating_sub(last) < COOLDOWN_S) {
@@ -187,6 +197,8 @@ fn tick_once(
             &records,
             read_last_cutover(home.root()),
             now,
+            refreshed.as_ref(),
+            crate::agents_config::slot_cutover_threshold_pct(config_cwd),
         ) {
             Decision::Skip(reason) => (
                 0,
@@ -224,7 +236,7 @@ fn tick_once(
                             &serde_json::to_string(&stamp).unwrap_or_default(),
                         ) {
                             Ok(()) => {
-                                let detail = format!("{from} at low -> {to}");
+                                let detail = format!("{from} -> {to}");
                                 (1, None, detail.clone(), Some(detail))
                             }
                             Err(error) => {
@@ -295,7 +307,14 @@ mod tests {
             json!({"id": "other", "harness": "claude", "auth": "managed", "global": true, "config_dir": "~/.claude-alt"}),
         );
         assert_eq!(
-            super::decide(&capacity("window", "mismatch"), &rows, None, 1000),
+            super::decide(
+                &capacity("window", "mismatch"),
+                &rows,
+                None,
+                1000,
+                None,
+                90.0
+            ),
             super::Decision::Cutover {
                 from: "readyrule".into(),
                 to: "makers".into()
@@ -314,7 +333,7 @@ mod tests {
         cap["accounts"]["local"] = json!("ok");
         cap["sources"]["local"] = json!("window");
         assert_eq!(
-            super::decide(&cap, &rows, None, 1000),
+            super::decide(&cap, &rows, None, 1000, None, 90.0),
             super::Decision::Cutover {
                 from: "readyrule".into(),
                 to: "makers".into()
@@ -327,7 +346,14 @@ mod tests {
         let mut rows = records();
         rows[0]["global"] = json!(false);
         assert_eq!(
-            super::decide(&capacity("window", "mismatch"), &rows, None, 1000),
+            super::decide(
+                &capacity("window", "mismatch"),
+                &rows,
+                None,
+                1000,
+                None,
+                90.0
+            ),
             super::Decision::Skip("slot_unproven")
         );
     }
@@ -336,7 +362,14 @@ mod tests {
     fn a_stale_or_unusable_target_is_never_selected() {
         for source in ["stale", "refresh:unauthorized"] {
             assert_eq!(
-                super::decide(&capacity(source, "mismatch"), &records(), None, 1000),
+                super::decide(
+                    &capacity(source, "mismatch"),
+                    &records(),
+                    None,
+                    1000,
+                    None,
+                    90.0
+                ),
                 super::Decision::Skip("no_target")
             );
         }
@@ -347,13 +380,85 @@ mod tests {
         let mut cap = capacity("window", "mismatch");
         cap["evidence"]["readyrule"] = json!("mismatch");
         assert_eq!(
-            super::decide(&cap, &records(), None, 1000),
+            super::decide(&cap, &records(), None, 1000, None, 90.0),
             super::Decision::Skip("slot_unproven")
         );
         let cap = capacity("window", "mismatch");
         assert_eq!(
-            super::decide(&cap, &records(), Some(880), 1000),
+            super::decide(&cap, &records(), Some(880), 1000, None, 90.0),
             super::Decision::Skip("cooldown")
+        );
+    }
+
+    #[test]
+    fn threshold_pct_gates_the_window_not_the_hard_coded_low() {
+        let usage = |pct: f64| {
+            json!({
+                "readyrule": {"probed_at": 1000, "partial": false,
+                    "windows": [{"label": "session", "used_pct": pct, "resets_at": null}]}
+            })
+            .as_object()
+            .cloned()
+        };
+        // 95% reads "low" today, but an operator threshold of 99 holds the slot.
+        assert_eq!(
+            super::decide(
+                &capacity("window", "mismatch"),
+                &records(),
+                None,
+                1000,
+                usage(95.0).as_ref(),
+                99.0
+            ),
+            super::Decision::Skip("below_threshold")
+        );
+        assert_eq!(
+            super::decide(
+                &capacity("window", "mismatch"),
+                &records(),
+                None,
+                1000,
+                usage(99.0).as_ref(),
+                99.0
+            ),
+            super::Decision::Cutover {
+                from: "readyrule".into(),
+                to: "makers".into()
+            }
+        );
+        // The default 90 keeps today's behavior: 95% is low enough to switch.
+        assert_eq!(
+            super::decide(
+                &capacity("window", "mismatch"),
+                &records(),
+                None,
+                1000,
+                usage(95.0).as_ref(),
+                90.0
+            ),
+            super::Decision::Cutover {
+                from: "readyrule".into(),
+                to: "makers".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_exhausted_slot_cuts_over_at_any_threshold() {
+        let usage = json!({
+            "readyrule": {"probed_at": 1000, "partial": false,
+                "windows": [{"label": "session", "used_pct": 50.0, "resets_at": null}]}
+        })
+        .as_object()
+        .cloned();
+        let mut cap = capacity("window", "mismatch");
+        cap["accounts"]["readyrule"] = json!("exhausted");
+        assert_eq!(
+            super::decide(&cap, &records(), None, 1000, usage.as_ref(), 99.0),
+            super::Decision::Cutover {
+                from: "readyrule".into(),
+                to: "makers".into()
+            }
         );
     }
 
