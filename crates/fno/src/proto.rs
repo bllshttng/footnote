@@ -349,7 +349,9 @@ fn default_true() -> bool {
 /// v95: `AgentLaunchRequest.worktree` + `branch` (serde default), the
 /// composer's worktree choice the server resolves through `fno-agents
 /// launch-workdir` before the spawn argv is built; floor stays 58.
-pub const PROTO_VERSION: u32 = 95;
+/// v96: `Command::SplitDir(Dir)` replaces `SplitH`/`SplitV` - new variant,
+/// not additive; handshake stops the skew. Floor stays 58.
+pub const PROTO_VERSION: u32 = 96;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1524,8 +1526,12 @@ pub enum AgentBadge {
 /// a layout change can never corrupt state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Command {
-    SplitH,
-    SplitV,
+    /// (v96) Split the focused pane, new pane on `dir`'s side, even halves,
+    /// focus follows. Replaces `SplitH`/`SplitV` (which were Right/Down with
+    /// the direction thrown away); the tab menu's Split rows and the four
+    /// bindable `split-*` actions all send this one variant. New variant, not
+    /// additive; handshake stops the skew.
+    SplitDir(Dir),
     ClosePane,
     /// (v90) Close ONLY the portal seat `seat` - the viewer pane - never the
     /// row it shows: removing a row is not removing a pane, and closing a
@@ -1789,7 +1795,7 @@ pub enum Command {
     /// each id is validated through the exact `AttachAgent` gates (8-hex shape +
     /// catalog membership); an id already paned or already a member is a dedup
     /// no-op; per-id outcomes fold into one partial-success notice. Members are
-    /// written through to `~/.fno/squads.json`.
+    /// written through to `~/.fno/mux/squads.json`.
     RecruitAgents {
         squad: String,
         ids: Vec<String>,
@@ -2951,10 +2957,30 @@ fn resolved_state_root() -> PathBuf {
 /// The root for mux sidecars that are not sockets (`mux-view.json`): the same
 /// resolved state root, so a pinned `FNO_CONFIG` isolates them with the
 /// sockets. `FNO_MUX_DIR` relocates the sockets alone by design and does not
-/// move sidecars.
+/// move sidecars. The sidecars themselves resolve under `mux/` (see
+/// [`mux_sidecar_path`]); this root stays the state root so the resolver can
+/// see both spellings.
 #[cfg(not(test))]
 pub(crate) fn mux_sidecar_root() -> PathBuf {
     resolved_state_root()
+}
+
+/// The server-start move of the `owner = mux` rows: the mux server is their
+/// long-lived writer and migrates them at its own start, before it opens
+/// them. See [`crate::state_layout::migrate_mux_sidecars_at`]. Pub: the
+/// binary's `run_server` calls it; the lib target sees no other caller.
+#[cfg(not(test))]
+pub fn migrate_mux_sidecars() {
+    crate::state_layout::migrate_mux_sidecars_at(&resolved_state_root());
+}
+
+/// The resolved sidecar path: `mux/<file>` when it exists, else the gated
+/// legacy root spelling when it exists, else `mux/<file>` (fresh install).
+/// One seam for both stores; the explicit `legacy_sidecar` read stays as the
+/// stores' last step for a file that appears between the two probes.
+#[cfg(not(test))]
+pub(crate) fn mux_sidecar_path(file: &str) -> PathBuf {
+    crate::state_layout::resolve_sidecar(&resolved_state_root(), file, legacy_fallback_allowed())
 }
 
 /// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
@@ -3904,7 +3930,7 @@ mod tests {
             ClientMsg::Input(b"echo hello\r".to_vec()),
             ClientMsg::Resize { rows: 50, cols: 90 },
             ClientMsg::Detach,
-            ClientMsg::Command(Command::SplitH),
+            ClientMsg::Command(Command::SplitDir(Dir::Right)),
             ClientMsg::Command(Command::FocusDir(Dir::Left)),
             ClientMsg::Command(Command::ResizeDir(Dir::Down)),
             ClientMsg::Command(Command::SelectTab(3)),
@@ -4069,7 +4095,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 95);
+        assert_eq!(PROTO_VERSION, 96);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

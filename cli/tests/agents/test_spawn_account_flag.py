@@ -437,6 +437,9 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    # The fabricated HOME is the point: the seal must resolve roots through
+    # it, so the sandbox pin steps aside for this ambient-on-purpose test.
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
 
     captured = {}
@@ -451,6 +454,14 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
                 stderr="",
             )
         captured["env"] = kw.get("env")
+        # The seal's handshake asks the state-root door first; the fake
+        # binary honors the pin, then answers the client call itself.
+        if "state-root" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=kw["env"]["FNO_STATE_DIR"] + "\n",
+                stderr="",
+            )
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"session_id": "0198c0de-1111-7000-8000-00000000000a"}),

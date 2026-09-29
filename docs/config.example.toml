@@ -270,6 +270,10 @@ max_iterations = 40
 # Wall-clock bound for one suite run under `fno doctor test`; on expiry the run's whole process group is killed, so the deps test binary cargo exec'd dies with it (default 1800).
 timeout_seconds = 1800
 
+[guards]
+# Guardrail preset: strict (every gatable guard), standard (default: the two destructive-write guards stay on), or off. Read in Rust by guard_enabled; FNO_GUARD_PRESET wins over this key. Default standard.
+preset = "standard"
+
 [agents]
 # Seconds a single-flight answer counts as fresh (default 60, one liveness cadence). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.
 single_flight_ttl_seconds = 60
@@ -685,7 +689,7 @@ attach_digest_threshold_min = 10
 hover_focus = true
 # Show the mux status row at the bottom of the terminal (default on).
 status_row = true
-# Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - "theme.brand" and "theme.needs_you" take #rrggbb values that hold under any theme (the tab-bar mark's stamp takes no override).
+# Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - "theme.brand", "theme.needs_you" and "theme.border" take #rrggbb values that hold under any theme, and every role also takes `default` to pin that role to the terminal's own text color (white on a dark ground, black on paper); theme.border recolors every border at once (the pane frame, the modal outlines). The tab-bar mark's stamp takes no override.
 # theme = <unset>   # optional; no default
 # While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on).
 paint_background = true

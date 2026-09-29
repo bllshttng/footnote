@@ -45,10 +45,6 @@ def test_ac1_hp_no_hardcoded_paths_in_tree() -> None:
     """AC1-HP: check-no-hardcoded-paths.sh exits 0 on the current working tree."""
     repo = _repo_root()
     gate = repo / "scripts" / "ci" / "check-no-hardcoded-paths.sh"
-    if not gate.exists():
-        import pytest
-        pytest.skip("gate script not yet created (Task 3.7 pending)")
-
     result = subprocess.run(
         ["bash", str(gate)],
         capture_output=True,

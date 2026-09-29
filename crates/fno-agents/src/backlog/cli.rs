@@ -193,6 +193,11 @@ pub fn run(args: &[String]) -> i32 {
         // done_command delegate) and ride the forward from inside the arm.
         "done" => super::workflows::run_done(resolved.tail),
         "reopen" => super::workflows::run_reopen(resolved.tail),
+        "queue" => super::workflows::run_queue(resolved.tail),
+        "unqueue" => super::workflows::run_unqueue(resolved.tail),
+        "queued" => super::workflows::run_queued(resolved.tail),
+        "contain" => super::workflows::run_contain(resolved.tail),
+        "supersede" => super::workflows::run_supersede(resolved.tail),
         // The worked authority is native end to end: fleet rows, roster
         // reading, reachability, and the session-row fold. The Python twin
         // (statuses.live_worked_node_ids over graph/worked.py) keeps its

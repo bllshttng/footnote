@@ -32,7 +32,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from fno.adapters._shared import create_worktree as _create_worktree
 from fno.adapters.base import AdapterCallResult, AdapterHealth, SpawnResult
 from fno.adapters.providers.error_taxonomy import (
     ErrorClass,
@@ -206,10 +205,6 @@ class HermesCliAdapter:
             "pid": proc.pid,
             "started_at": started_at,
         }
-
-    def create_worktree(self, *, name: str, base: str = "main") -> dict:
-        """Delegate to the shared CLI-agnostic worktree primitive."""
-        return _create_worktree(name=name, base=base)
 
     def call_api(self, *, command: list[str], retries: int = 3) -> AdapterCallResult:
         """Invoke a Hermes subcommand list with retry on transient failures.

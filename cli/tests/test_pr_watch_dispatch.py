@@ -3933,6 +3933,7 @@ class TestDurableGrantExecution:
             return rc
 
         monkeypatch.setattr("fno.pr._merge.run_merge", _merge)
+        monkeypatch.setattr("fno.pr._merge._pr_head_oid", lambda _pr, _repo: "headsha")
         return merge_calls
 
     def _queue(self, tmp_path):
@@ -3987,7 +3988,10 @@ class TestDurableGrantExecution:
     def test_held_consumes_no_failure_budget(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
-        self._fake_merge(monkeypatch, 2)
+        self._fake_merge(
+            monkeypatch, 2,
+            reason="held: checks are pending; require_checks_pass forbids merging without green",
+        )
         self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
         assert len(self._grant_events(deps, "held")) == 1
@@ -3998,27 +4002,55 @@ class TestDurableGrantExecution:
         assert entry["retries"] == 0
         assert not entry.get("parked")
 
-    def test_red_hold_parks_instead_of_looping(self, tmp_path, monkeypatch):
-        """A red check-set holds forever by design: park with the why so the
-        sweep resumes the row on the next push, instead of re-running the
-        whole merge chain on every tick with a dead worker."""
+    @pytest.mark.parametrize(("reason", "park", "read_error"), [
+        ("checks are red; the healer or the worker owns the next push", "checks-red", ""),
+        ("held: worktree_head_mismatch: /w is at a but the PR would merge b; retry after the worker syncs",
+         "worktree_head_mismatch", ""),
+        ("held: worktree_dirty: /w carries uncommitted changes; retry after the worker commits",
+         "worktree_dirty", ""),
+        ("held: worktree_dirty: /w carries uncommitted changes", "worktree_dirty", "tool-missing"),
+        ("held: worktree_dirty: /w carries uncommitted changes", "worktree_dirty", "deadline"),
+    ])
+    def test_head_bound_hold_parks_until_the_pr_head_moves(
+        self, tmp_path, monkeypatch, reason, park, read_error
+    ):
+        """Head-bound holds park once with the REST head and await a push."""
+        from fno.pr_watch.cli import TickDeadlineExceeded
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
-        self._fake_merge(
-            monkeypatch, 2,
-            reason="checks are red; the healer or the worker owns the next push",
-        )
-        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        merge_calls = self._fake_merge(monkeypatch, 2, reason=reason)
+        if read_error:
+            def _read_head(_pr, _repo):
+                if read_error == "tool-missing":
+                    raise OSError("gh unavailable")
+                raise TickDeadlineExceeded()
 
-        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
+            monkeypatch.setattr("fno.pr._merge._pr_head_oid", _read_head)
+        if read_error == "deadline":
+            with pytest.raises(TickDeadlineExceeded):
+                self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        else:
+            counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+
+            assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
         parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
-        assert any(e["data"]["reason"] == "checks-red" for e in parked)
+        assert [e["data"]["reason"] for e in parked] == [park]
         assert len(deps["notifications"]) == 1
         from fno.pr_watch._state import WatermarkStore
 
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
-        assert entry["parked"] == "checks-red"
+        assert entry["parked"] == park
+        assert entry["parked_head"] == (None if read_error else "headsha")
         assert entry["retries"] == 0
+
+        next_deps = _make_tick_deps(tmp_path, candidates=[])
+        counts = self._drain(self._queue(tmp_path), next_deps, monkeypatch, tmp_path)
+        assert counts["skipped"] == 1
+        assert merge_calls == [{"pr": 1, "timeout_s": 135.0}]
+        assert any(
+            event["type"] == "pr_watch_skipped" and event["data"]["reason"] == "parked"
+            for event in next_deps["events"]
+        )
 
     def test_red_hold_parks_on_outcome_prefixed_reason(self, tmp_path, monkeypatch):
         """The authorized-merge receipt renders as 'held: checks are red; ...'

@@ -136,6 +136,15 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
                 crate::operator_notice::notify_operator(title, body, None);
             },
         );
+        let notify = |title: &str, body: &str| {
+            crate::operator_notice::notify_operator(title, body, None);
+        };
+        run_health_tick(
+            &home,
+            &config_cwd,
+            &|id: &str| crate::claude_vault::stored_health_for(&config_cwd, id),
+            &notify,
+        );
     });
 }
 
@@ -269,6 +278,143 @@ fn tick_once(
     }
 }
 
+fn is_shared_managed_claude(record: &Value) -> bool {
+    let claude = record.get("harness").and_then(Value::as_str) == Some("claude")
+        || record.get("cli").and_then(Value::as_str) == Some("claude");
+    let shared_dir = record
+        .get("config_dir")
+        .and_then(Value::as_str)
+        .map_or(true, |dir| dir == "~/.claude");
+    claude
+        && record.get("auth").and_then(Value::as_str) == Some("managed")
+        && record.get("global").and_then(Value::as_bool) == Some(true)
+        && shared_dir
+}
+
+/// Shared-slot managed claude record ids, the merge of the global and the
+/// project config rows, exactly the rows the cutover arm may act on.
+fn shared_slot_ids(config_cwd: &Path) -> Vec<String> {
+    let global_ids: Vec<String> =
+        crate::agents_config::config_lookup_global(&["accounts", "records"])
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|record| {
+                record
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+    crate::agents_config::config_lookup(config_cwd, &["accounts", "records"])
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|record| {
+            let mut record = serde_json::to_value(record).ok()?;
+            let id = record.get("id").and_then(Value::as_str)?.to_string();
+            let merged = record.as_object_mut()?;
+            merged.insert(
+                "global".to_string(),
+                json!(global_ids.iter().any(|g| g == &id)),
+            );
+            is_shared_managed_claude(&record).then_some(id)
+        })
+        .collect()
+}
+
+/// One daemon pass of the early login-dead alert. Runs on the same 120s
+/// cadence as the cutover arm, even while cutover is disabled: the alert is
+/// the only repair hint a standby account gets. A verdict move from good (or
+/// unknown) to bad raises ONE operator notice; verdicts outside the health
+/// vocabulary change nothing.
+pub fn run_health_tick(
+    home: &crate::paths::AgentsHome,
+    config_cwd: &Path,
+    health: &dyn Fn(&str) -> Option<String>,
+    notify: &dyn Fn(&str, &str),
+) {
+    let ids = shared_slot_ids(config_cwd);
+    let _ = home.ensure_root();
+    let state_path = home.root().join("slot-login-health.json");
+    let mut state: serde_json::Map<String, Value> = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let mut checked = 0u64;
+    let mut notices = 0u64;
+    let mut changed = false;
+    for id in ids {
+        let Some(verdict) = health(&id) else {
+            continue;
+        };
+        checked += 1;
+        // Only verdicts the health vocabulary defines may move the state
+        // file; anything else (lock held, store broken, ...) changes nothing.
+        if !is_good_health(&verdict) && !is_bad_health(&verdict) {
+            continue;
+        }
+        let was_bad = state
+            .get(&id)
+            .and_then(Value::as_str)
+            .is_some_and(is_bad_health);
+        if !was_bad && is_bad_health(&verdict) {
+            notify(
+                "claude account login needed",
+                &format!(
+                    "{id} cannot take over the Claude slot: its saved login is dead. Run: fno config accounts use {id}"
+                ),
+            );
+            notices += 1;
+        }
+        if state.get(&id).and_then(Value::as_str) != Some(verdict.as_str()) {
+            state.insert(id.clone(), Value::String(verdict));
+            changed = true;
+        }
+    }
+    if changed {
+        let serialized = serde_json::to_string(&state).unwrap_or_default();
+        let _ = crate::king_ledger::write_atomic(&state_path, &serialized);
+    }
+    let bad: Vec<&str> = state
+        .iter()
+        .filter(|(_, value)| value.as_str().is_some_and(is_bad_health))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let listed = if bad.is_empty() {
+        "none".to_string()
+    } else {
+        bad.join(",")
+    };
+    let detail = format!("checked {checked}; bad: {listed}");
+    let skip = if checked == 0 {
+        Some("nothing_checked")
+    } else {
+        None
+    };
+    let journal = crate::loop_runtime::Journal::new_raw(
+        home.events_jsonl(),
+        crate::daemon::global_events_path(home),
+    );
+    crate::tick_ledger::emit_tick(
+        &journal,
+        "slot_login_health",
+        crate::tick_ledger::SCHED_DAEMON,
+        notices,
+        skip.as_deref(),
+        Some(&detail),
+        SLOT_CUTOVER_INTERVAL_S,
+    );
+}
+
+fn is_bad_health(verdict: &str) -> bool {
+    matches!(verdict, "dead" | "record-missing" | "unproven")
+}
+
+fn is_good_health(verdict: &str) -> bool {
+    matches!(verdict, "fresh" | "refreshed" | "slot-owner" | "live-owner")
+}
+
 fn read_last_cutover(root: &Path) -> Option<i64> {
     let path = root.join("slot-cutover.json");
     let raw = std::fs::read_to_string(path).ok()?;
@@ -283,6 +429,9 @@ mod tests {
     use serde_json::{json, Value};
     use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use super::run_health_tick;
 
     fn records() -> Vec<Value> {
         vec![
@@ -441,25 +590,25 @@ mod tests {
                 to: "makers".into()
             }
         );
-    }
 
-    #[test]
-    fn an_exhausted_slot_cuts_over_at_any_threshold() {
-        let usage = json!({
-            "readyrule": {"probed_at": 1000, "partial": false,
-                "windows": [{"label": "session", "used_pct": 50.0, "resets_at": null}]}
-        })
-        .as_object()
-        .cloned();
-        let mut cap = capacity("window", "mismatch");
-        cap["accounts"]["readyrule"] = json!("exhausted");
-        assert_eq!(
-            super::decide(&cap, &records(), None, 1000, usage.as_ref(), 99.0),
-            super::Decision::Cutover {
-                from: "readyrule".into(),
-                to: "makers".into()
-            }
-        );
+        // Exhausted cuts over at any operator threshold.
+        {
+            let usage = json!({
+                "readyrule": {"probed_at": 1000, "partial": false,
+                    "windows": [{"label": "session", "used_pct": 50.0, "resets_at": null}]}
+            })
+            .as_object()
+            .cloned();
+            let mut cap = capacity("window", "mismatch");
+            cap["accounts"]["readyrule"] = json!("exhausted");
+            assert_eq!(
+                super::decide(&cap, &records(), None, 1000, usage.as_ref(), 99.0),
+                super::Decision::Cutover {
+                    from: "readyrule".into(),
+                    to: "makers".into()
+                }
+            );
+        }
     }
 
     #[test]
@@ -568,6 +717,118 @@ mod tests {
                     std::env::remove_var(key);
                 }
             }
+        }
+    }
+    #[test]
+    fn health_notifies_once_per_dead_transition() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\nglobal = true\n[[accounts.records]]\nid = \"readyrule\"\nharness = \"claude\"\nauth = \"managed\"\nglobal = true\n",
+        )
+        .unwrap();
+        let global = dir.path().join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("config.toml"),
+            "[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\n[[accounts.records]]\nid = \"readyrule\"\nharness = \"claude\"\nauth = \"managed\"\n",
+        )
+        .unwrap();
+        let usage = dir.path().join("usage.json");
+        std::fs::write(&usage, "{}").unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "fno-stub.sh", "#!/bin/sh\nexit 1\n");
+        let _env = SavedEnv::set(&config, &usage, &stub, &global.join("config.toml"));
+        let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
+        let queue = Arc::new(Mutex::new(vec![
+            Some("dead".to_string()),
+            Some("dead".to_string()),
+            Some("fresh".to_string()),
+            Some("dead".to_string()),
+        ]));
+        let health_queue = Arc::clone(&queue);
+        let health = move |id: &str| -> Option<String> {
+            if id == "readyrule" {
+                return Some("fresh".to_string());
+            }
+            let mut queue = health_queue.lock().unwrap();
+            if queue.is_empty() {
+                return None;
+            }
+            queue.remove(0)
+        };
+        let notices: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&notices);
+        let notify = move |title: &str, body: &str| {
+            sink.lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
+        run_health_tick(&home, dir.path(), &health, &notify);
+        run_health_tick(&home, dir.path(), &health, &notify);
+        {
+            let rows = notices.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "claude account login needed");
+            assert!(rows[0].1.contains("makers"));
+            assert!(rows[0].1.contains("fno config accounts use makers"));
+        }
+        let saved_text =
+            std::fs::read_to_string(home.root().join("slot-login-health.json")).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved_text).unwrap();
+        assert_eq!(saved["makers"], "dead");
+        // fresh reads as good: no notice, state updated.
+        run_health_tick(&home, dir.path(), &health, &notify);
+        let saved_text =
+            std::fs::read_to_string(home.root().join("slot-login-health.json")).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved_text).unwrap();
+        assert_eq!(saved["makers"], "fresh");
+        // dead again: one more notice (good -> bad).
+        run_health_tick(&home, dir.path(), &health, &notify);
+        assert_eq!(notices.lock().unwrap().len(), 2);
+
+        // None (lock held, slot unreadable) and "unavailable" change
+        // nothing: no notice, no state file, one quiet tick row.
+        {
+            // The host fn already holds the env lock.
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.toml");
+            std::fs::write(&config, "[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\nglobal = true\n").unwrap();
+            let global = dir.path().join("global");
+            std::fs::create_dir_all(&global).unwrap();
+            std::fs::write(global.join("config.toml"), "schema_version = 1\n").unwrap();
+            let usage = dir.path().join("usage.json");
+            std::fs::write(&usage, "{}").unwrap();
+            let stub = crate::write_exec_stub(dir.path(), "fno-stub.sh", "#!/bin/sh\nexit 1\n");
+            let _env = SavedEnv::set(&config, &usage, &stub, &global.join("config.toml"));
+            let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
+            let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&notices);
+            let notify = move |title: &str, body: &str| {
+                sink.lock().unwrap().push(format!("{title}: {body}"));
+            };
+            // None (lock held / slot unreadable) and "unavailable" both change nothing.
+            let health_none = |id: &str| -> Option<String> {
+                assert_eq!(id, "makers");
+                None
+            };
+            run_health_tick(&home, dir.path(), &health_none, &notify);
+            let health_unavailable = |id: &str| -> Option<String> {
+                assert_eq!(id, "makers");
+                Some("unavailable".to_string())
+            };
+            run_health_tick(&home, dir.path(), &health_unavailable, &notify);
+            assert!(notices.lock().unwrap().is_empty());
+            assert!(!home.root().join("slot-login-health.json").exists());
+            let journal = crate::events::committed_journal_text(&home.events_jsonl());
+            let event: serde_json::Value =
+                serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+            assert_eq!(event["data"]["arm"], "slot_login_health");
+            assert_eq!(event["data"]["skip_reason"], "nothing_checked");
         }
     }
 }

@@ -924,14 +924,36 @@ fn family1_truth_batch_latched(
 /// probes once did.
 const TRUTH_BATCH_PAGE: usize = 24;
 
+// Measured at load 394: one handle took 10.53 s and 34 handles took 22.55
+// s. The fixed Python cold start needs funding before per-handle work is
+// added, while the ceiling still bounds a pathological batch.
+const TRUTH_BATCH_BASE: Duration = Duration::from_secs(20);
+const TRUTH_BATCH_PER_HANDLE: Duration = Duration::from_millis(750);
+const TRUTH_BATCH_CEILING: Duration = Duration::from_secs(60);
+
 fn family1_truth_batch_timeout(handles: usize) -> Duration {
-    const BASE: Duration = Duration::from_secs(20);
-    // Measured at load 394: one handle took 10.53 s and 34 handles took 22.55
-    // s. The fixed Python cold start needs funding before per-handle work is
-    // added, while the ceiling still bounds a pathological batch.
-    const PER_HANDLE: Duration = Duration::from_millis(750);
-    const CEILING: Duration = Duration::from_secs(60);
-    std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
+    std::cmp::min(
+        TRUTH_BATCH_BASE + TRUTH_BATCH_PER_HANDLE * handles as u32,
+        TRUTH_BATCH_CEILING,
+    )
+}
+
+/// How many handles a batch may measure within `bound`, by the same
+/// arithmetic [`family1_truth_batch_timeout`] prices with. The caller-side
+/// half of bounding the probe per handle: a board slice funds a measured
+/// PREFIX of its feed, never a page killed into an empty answer.
+/// `usize::MAX` when the bound clears the ceiling, so a caller feeds
+/// everything; `0` when it cannot fund the interpreter cold start, where a
+/// caller keeps today's shape and lets the page bound decline to spawn
+/// (the run reads timed-out, the receipt the board-budget pins expect).
+pub fn family1_truth_affordable_handles(bound: Duration) -> usize {
+    if bound >= TRUTH_BATCH_CEILING {
+        return usize::MAX;
+    }
+    if bound <= TRUTH_BATCH_BASE {
+        return 0;
+    }
+    ((bound - TRUTH_BATCH_BASE).as_millis() / TRUTH_BATCH_PER_HANDLE.as_millis()) as usize
 }
 
 /// The bound one page may run under: the caller's deadline capped by the
@@ -1172,6 +1194,30 @@ mod tests {
             .unwrap()
             .provider_refusal
             .is_none());
+    }
+
+    /// The affordability helper is the timeout formula's inverse: a feed of
+    /// `n <= affordable` handles self-bounds at or under the bound the
+    /// caller measured, the next handle overshoots it, and the boundaries
+    /// hold (nothing under the cold start, everything at the ceiling). The
+    /// pin keeps the two from drifting apart.
+    #[test]
+    fn affordable_handles_is_the_batch_timeouts_inverse() {
+        let bound = Duration::from_secs(29);
+        let n = family1_truth_affordable_handles(bound);
+        assert_eq!(n, 12);
+        assert!(family1_truth_batch_timeout(n) <= bound);
+        assert!(family1_truth_batch_timeout(n + 1) > bound);
+        // Under the cold start: nothing is affordable. The caller keeps the
+        // feed whole; the page bound declines to spawn and the run reads
+        // timed out, the receipt the board-budget pins expect.
+        assert_eq!(family1_truth_affordable_handles(Duration::from_secs(19)), 0);
+        assert_eq!(family1_truth_affordable_handles(TRUTH_BATCH_BASE), 0);
+        // At or above the ceiling: everything is affordable.
+        assert_eq!(
+            family1_truth_affordable_handles(TRUTH_BATCH_CEILING),
+            usize::MAX
+        );
     }
 
     /// The age's instrument parses off the same wire, and on the

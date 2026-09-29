@@ -264,13 +264,18 @@ pub struct Lifecycle {
     pub reopened_reason: Option<String>,
 }
 
-/// The node lock fields (one node_claims row).
+/// The node claim fields projected from its lockfile.
 #[derive(Clone, Debug, Default)]
 pub struct NodeClaim {
     pub locked_by: Option<String>,
     pub harness: Option<String>,
     pub harness_session: Option<String>,
     pub locked_at: Option<String>,
+    /// A live work claim (any holder but `blueprint-session:`): idea/ready
+    /// read in_progress while it holds. A blueprint claim leases the
+    /// planning window only and projects the holder without moving the
+    /// status word.
+    pub work: bool,
 }
 
 /// The dispatch fields (one node_dispatch row).
@@ -521,12 +526,6 @@ pub struct Node {
     pub extras: Map<String, Value>,
 }
 
-const CLAIM_KEYS: &[&str] = &[
-    "locked_by",
-    "locked_by_harness",
-    "locked_by_harness_session",
-    "locked_at",
-];
 const DISPATCH_KEYS: &[&str] = &["dispatch_verb", "dispatch_brief", "model"];
 const PROVENANCE_KEYS: &[&str] = &[
     "source",
@@ -570,7 +569,6 @@ impl Node {
                 extras.insert(k.clone(), v.clone());
             }
         }
-        let claim_part = split_part(row, CLAIM_KEYS)?;
         let dispatch_part = split_part(row, DISPATCH_KEYS)?;
         let provenance_part = split_part(row, PROVENANCE_KEYS)?;
         let lifecycle_part = split_part(row, LIFECYCLE_KEYS)?;
@@ -636,10 +634,15 @@ impl Node {
                 }
             },
             claim: NodeClaim {
-                locked_by: sub_opt_str(&claim_part, "locked_by"),
-                harness: sub_opt_str(&claim_part, "locked_by_harness"),
-                harness_session: sub_opt_str(&claim_part, "locked_by_harness_session"),
-                locked_at: sub_opt_str(&claim_part, "locked_at"),
+                // The row's own stored lock fields never become the holder of
+                // record: the claim comes only from the live projection
+                // (load_with_claim / project_claim_value). Parsing them here
+                // would serve a released claim's mirror as a live holder.
+                locked_by: None,
+                harness: None,
+                harness_session: None,
+                locked_at: None,
+                work: false,
             },
             dispatch: Dispatch {
                 verb: sub_opt_str(&dispatch_part, "dispatch_verb"),
@@ -1199,6 +1202,42 @@ impl Node {
                 Some(Value::Array(list.iter().map(decision_to_json).collect())),
             );
         }
+        // The lock fields are projection-owned: an absent claim serializes
+        // an explicit null, so the from_json legacy fold cannot resurrect a
+        // claimed_at corpse into a holder timestamp. The put helper skips
+        // nulls; these four may not.
+        out.insert(
+            "locked_by".to_string(),
+            self.claim
+                .locked_by
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        out.insert(
+            "locked_by_harness".to_string(),
+            self.claim
+                .harness
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        out.insert(
+            "locked_by_harness_session".to_string(),
+            self.claim
+                .harness_session
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        out.insert(
+            "locked_at".to_string(),
+            self.claim
+                .locked_at
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
         out
     }
 

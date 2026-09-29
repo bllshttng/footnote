@@ -89,6 +89,16 @@ ALLOWLIST = {
     # at all leaves the node un-dispatchable until TTL with advance skipping
     # it as already-claimed.
     "crates/fno-agents/src/backlog/session_cli.rs",
+    # crates/fno-agents/src/backlog/update_cli.rs apply_mutators: the
+    # operator's explicit `update --locked-by null` clear ("'null' to
+    # release" per update_help.txt). Holder-scoped: it drops the lock only
+    # when the holder is stale (pid dead / TTL expired) or matches the
+    # invoking session, and REFUSES a live foreign holder naming
+    # `fno agents claim release` - the unclaim/requeue contract (x-dd1f
+    # review round; the pre-fix site released whatever holder the record
+    # named). Explicit operator lifecycle boundary, never a helper's own
+    # initiative.
+    "crates/fno-agents/src/backlog/update_cli.rs",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}

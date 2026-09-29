@@ -20,9 +20,17 @@ ROW="${1:?usage: channel_matrix_smoke.sh <row-id>}"
 ROW_KEY="${ROW%-macos}"
 
 fail=0
-pass() { printf 'PASS[%s] %s\n' "$1" "$2"; }
-miss() { printf 'FAIL[%s] %s\n' "$1" "$2"; fail=1; }
-run_capture() { OUT="$("$@" 2>&1)"; RC=$?; }
+pass() {
+  printf 'PASS[%s] %s\n' "$1" "$2"
+}
+miss() {
+  printf 'FAIL[%s] %s\n' "$1" "$2"
+  fail=1
+}
+run_capture() {
+  OUT="$("$@" 2>&1)"
+  RC=$?
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -54,6 +62,9 @@ unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_BIN_HOME
 unset FNO_VERSION FNO_INSTALL_WHEEL FNO_INSTALL_DIR FNO_NO_MODIFY_PATH
 unset CLAUDE_CONFIG_DIR CLAUDE_PLUGIN_DATA CODEX_HOME CODEX_PLUGIN_CACHE
 unset UV_TOOL_DIR UV_TOOL_BIN_DIR
+# The scrub contract: prove the unsets took. An inherited PYTHONPATH would put
+# the source tree ahead of the installed artifact on sys.path.
+[ -z "${PYTHONPATH:-}" ] || { echo "PYTHONPATH survived the clean-machine unset"; exit 1; }
 
 # Refuse a dirty machine: uv, fno or fno-agents resolvable before install means
 # the row would score the runner, not the channel. Every row calls this FIRST,
