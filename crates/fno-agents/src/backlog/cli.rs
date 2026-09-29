@@ -198,6 +198,12 @@ pub fn run(args: &[String]) -> i32 {
         "queued" => super::workflows::run_queued(resolved.tail),
         "contain" => super::workflows::run_contain(resolved.tail),
         "supersede" => super::workflows::run_supersede(resolved.tail),
+        // The worked authority is native end to end: fleet rows, roster
+        // reading, reachability, and the session-row fold. The Python twin
+        // (statuses.live_worked_node_ids over graph/worked.py) keeps its
+        // callers (the next/undispatched occupancy legs) until their doors
+        // go native.
+        "worked" => super::worked::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }
