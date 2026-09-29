@@ -110,7 +110,7 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         tail: None,
         crown_level: None,
         crown_scope: None,
-        crown_name: None,
+        crown_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -602,7 +602,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     };
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
-    assert_eq!(by("king"), "L1 e-0001");
+    assert_eq!(by("lead"), "L1 e-0001");
     assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
 
     // A row whose session id does not match is NOT this event's session,
@@ -620,7 +620,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
             .unwrap()
     };
     assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
-    assert_eq!(by_other("king"), feed_detail::NOT_RECORDED);
+    assert_eq!(by_other("lead"), feed_detail::NOT_RECORDED);
     assert!(by_other("pane").contains("the node's current worker"));
 }
 
@@ -754,7 +754,7 @@ fn the_composed_frame_paints_every_field_and_its_action() {
         "session-id",
         "pane",
         "parent",
-        "king",
+        "lead",
     ] {
         assert!(text.contains(label), "the frame never painted {label}");
     }
