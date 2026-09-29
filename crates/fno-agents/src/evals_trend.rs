@@ -547,13 +547,16 @@ fn cohort_score(rows: &[&Row], prices: Option<&Value>) -> Value {
             .unwrap_or("unverified");
         *lane_statuses.entry(lane_status.to_string()).or_default() += 1;
         let reason = r.raw.get("excluded_reason").and_then(Value::as_str);
-        if let Some(reason) = reason {
-            *by_reason.entry(reason.to_string()).or_default() += 1;
-        }
         if status == "graded" && lane_status != "substituted" && reason.is_none() {
             scored.push(r);
         } else {
             excluded += 1;
+            let why = match reason {
+                Some(reason) => reason,
+                None if lane_status == "substituted" => "substituted",
+                None => status,
+            };
+            *by_reason.entry(why.to_string()).or_default() += 1;
         }
     }
     let accepted = scored.iter().filter(|r| r.pass).count();
