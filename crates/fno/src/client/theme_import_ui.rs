@@ -115,33 +115,16 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
     match state {
         ThemeImportUi::Idle => return (rows, actions),
         ThemeImportUi::Entry(input) => {
-            inert(
-                &mut rows,
-                &mut actions,
-                PopupRow::Header(format!("theme file: {input}")),
-            );
+            inert(&mut rows, PopupRow::Header(format!("theme file: {input}")));
             inert_entry(
                 &mut rows,
-                &mut actions,
                 "a theme file or folder path, or a GitHub file URL",
             );
-            inert_entry(
-                &mut rows,
-                &mut actions,
-                "fno theme files and Ghostty theme files",
-            );
+            inert_entry(&mut rows, "fno theme files and Ghostty theme files");
         }
         ThemeImportUi::Loading { source, .. } => {
-            inert(
-                &mut rows,
-                &mut actions,
-                PopupRow::Header("import theme".into()),
-            );
-            inert_entry(
-                &mut rows,
-                &mut actions,
-                &format!("reading {}...", source_label(source)),
-            );
+            inert(&mut rows, PopupRow::Header("import theme".into()));
+            inert_entry(&mut rows, &format!("reading {}...", source_label(source)));
             selectable(
                 &mut rows,
                 &mut actions,
@@ -156,33 +139,21 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
             skipped,
             ..
         } => {
-            inert(
-                &mut rows,
-                &mut actions,
-                PopupRow::Header(format!("preview: {source}")),
-            );
+            inert(&mut rows, PopupRow::Header(format!("preview: {source}")));
             let mut warned = false;
             for candidate in candidates {
-                inert(
-                    &mut rows,
-                    &mut actions,
-                    PopupRow::Header(candidate.name.clone()),
-                );
+                inert(&mut rows, PopupRow::Header(candidate.name.clone()));
                 if let Some(reason) = &candidate.rename_reason {
-                    inert_entry(&mut rows, &mut actions, reason);
+                    inert_entry(&mut rows, reason);
                 }
                 let ground = if crate::theme::ground_set(&candidate.theme).is_some() {
                     format!("ground: {}", color_text(candidate.theme.base))
                 } else {
                     "ground: none - your terminal keeps its own background".into()
                 };
-                inert_entry(&mut rows, &mut actions, &ground);
+                inert_entry(&mut rows, &ground);
                 if !crate::digest_overlay::paint_background_enabled(cwd) {
-                    inert_entry(
-                        &mut rows,
-                        &mut actions,
-                        "(not painted: mux.paint_background is off)",
-                    );
+                    inert_entry(&mut rows, "(not painted: mux.paint_background is off)");
                 }
                 for (role, color) in role_colors(&candidate.theme) {
                     let set = candidate.spec.iter().any(|(key, _)| key == role);
@@ -201,14 +172,14 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
                 }
                 for warning in &candidate.warnings {
                     warned = true;
-                    inert_entry(&mut rows, &mut actions, &warning.0);
+                    inert_entry(&mut rows, &warning.0);
                 }
             }
             for skipped in skipped {
-                inert_entry(&mut rows, &mut actions, &format!("skipped: {skipped}"));
+                inert_entry(&mut rows, &format!("skipped: {skipped}"));
             }
             if candidates.is_empty() {
-                inert_entry(&mut rows, &mut actions, "no theme files to save");
+                inert_entry(&mut rows, "no theme files to save");
             }
             let save_label = if candidates.len() == 1 {
                 "save and apply".to_string()
@@ -256,14 +227,13 @@ fn color_text(color: crate::proto::Color) -> String {
     }
 }
 
-fn inert(rows: &mut Vec<PopupRow>, _actions: &mut Vec<AuxAction>, row: PopupRow) {
+fn inert(rows: &mut Vec<PopupRow>, row: PopupRow) {
     rows.push(row);
 }
 
-fn inert_entry(rows: &mut Vec<PopupRow>, actions: &mut Vec<AuxAction>, label: &str) {
+fn inert_entry(rows: &mut Vec<PopupRow>, label: &str) {
     inert(
         rows,
-        actions,
         PopupRow::Entry {
             glyph: " ".into(),
             label: label.into(),
