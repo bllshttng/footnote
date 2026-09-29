@@ -325,7 +325,9 @@ pub fn name_crown(
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
                 theme: None,
-                title: live.get(&canon).map(|c| title(c.level as u32, &canon, None)),
+                title: live
+                    .get(&canon)
+                    .map(|c| title(c.level as u32, &canon, None)),
                 pending_succession: None,
             },
         );
@@ -800,10 +802,16 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
-            write_registry(tmp.path(), json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]),
+            );
             name_crown(&store, &registry, "x-aaaa", "barnaby").unwrap();
             carry_succession(&store, "x-aaaa", None).unwrap();
-            write_registry(tmp.path(), json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]),
+            );
             apply_crown_naming(
                 &store,
                 &registry,
@@ -919,7 +927,8 @@ mod tests {
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
-            let shown = set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
+            let shown =
+                set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
             assert_eq!(shown, "Lead of native backlog");
             let dump = snapshot(&store).unwrap();
             let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
@@ -933,20 +942,15 @@ mod tests {
 
         fn a_beat_without_a_theme_refuses_and_names_the_flag() {
             let tmp = tempfile::TempDir::new().unwrap();
-            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
-            let err = apply_crown_naming(
-                &store,
-                &registry,
-                None,
-                None,
-                None,
-                Some(2),
-                "x-aaaa",
-            )
-            .unwrap_err();
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "x-aaaa")
+                .unwrap_err();
             assert!(
                 err.contains("every lead names its theme once per scope"),
                 "{err}"
@@ -980,7 +984,10 @@ mod tests {
 
         fn a_theme_with_a_quote_or_bad_length_refuses() {
             let tmp = tempfile::TempDir::new().unwrap();
-            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
@@ -993,7 +1000,10 @@ mod tests {
 
         fn the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop() {
             let tmp = tempfile::TempDir::new().unwrap();
-            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
@@ -1009,28 +1019,26 @@ mod tests {
 
         fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
             let tmp = tempfile::TempDir::new().unwrap();
-            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
             let store = store_path(tmp.path());
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
             set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
             // The told-to re-scope: the same holder now holds a new scope.
-            write_registry(tmp.path(), json!([crown_row("kestrel", "new-scope", 2, "sess-k")]));
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "new-scope", 2, "sess-k")]),
+            );
             keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
             let dump = snapshot(&store).unwrap();
             let rec = &dump["crowns"]["new-scope"];
             assert!(rec.get("theme").is_none() || rec["theme"].is_null());
             assert_eq!(rec["title"], json!("Lead of new-scope"));
-            let err = apply_crown_naming(
-                &store,
-                &registry,
-                None,
-                None,
-                None,
-                Some(2),
-                "new-scope",
-            )
-            .unwrap_err();
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "new-scope")
+                .unwrap_err();
             assert!(err.contains("--theme"), "{err}");
         }
         an_unnamed_live_crown_cannot_complete_checkin();
@@ -1624,6 +1632,4 @@ mod tests {
         .unwrap();
         assert!(reverted.is_empty(), "{reverted:?}");
     }
-
-
 }

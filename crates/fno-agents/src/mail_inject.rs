@@ -1632,10 +1632,8 @@ fn sender_crown_at(registry_path: &Path, from_session: Option<&str>) -> Vec<Stri
         return Vec::new();
     };
     let scope = row.crown_scope.as_deref().unwrap_or("?");
-    let theme = crate::crown_names::theme_for(
-        &registry_path.with_file_name("crown_names.json"),
-        scope,
-    );
+    let theme =
+        crate::crown_names::theme_for(&registry_path.with_file_name("crown_names.json"), scope);
     let mut accepted = vec![
         crate::crown_names::title(level as u32, scope, theme.as_deref()),
         crate::crown_names::title(level as u32, scope, None),

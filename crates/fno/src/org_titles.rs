@@ -51,13 +51,14 @@ mod tests {
             )
             .unwrap();
             let map = titles(&path);
-            assert_eq!(map.get("x-aaaa").map(String::as_str), Some("Lead of native backlog"));
+            assert_eq!(
+                map.get("x-aaaa").map(String::as_str),
+                Some("Lead of native backlog")
+            );
             assert!(!map.contains_key("fno"));
         }
         a_missing_or_malformed_store_reads_as_no_title();
         titles_read_from_the_store_and_skip_records_without_one();
     }
     use super::*;
-
-
 }

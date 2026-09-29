@@ -727,9 +727,8 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
                 })
                 .map(|(s, _, _)| s.clone())
                 .unwrap_or_default();
-            let theme = crate::paths::AgentsHome::from_env_opt().and_then(|home| {
-                crate::crown_names::theme_for(&home.crown_names_json(), &scope)
-            });
+            let theme = crate::paths::AgentsHome::from_env_opt()
+                .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), &scope));
             let rank = crate::crown_names::title(*level as u32, &scope, theme.as_deref());
             r.owner = Some(format!("{rank} ({holder})"));
         } else if let Some(p) = parent {

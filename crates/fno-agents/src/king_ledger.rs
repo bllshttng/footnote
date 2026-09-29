@@ -383,8 +383,7 @@ fn needs_user(board: Option<&Value>) -> NeedsUser {
         .cloned()
         .unwrap_or(Value::Null);
     let status = s_str(&queue, "status").unwrap_or("");
-    if crate::king_board::unreadable_status(status) || crate::king_board::not_read_status(status)
-    {
+    if crate::king_board::unreadable_status(status) || crate::king_board::not_read_status(status) {
         let err = s_str(&queue, "error").unwrap_or("");
         let reason = if status == "over_budget" {
             format!("operator_question not read: {err}")

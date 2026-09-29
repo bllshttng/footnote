@@ -519,7 +519,10 @@ mod tests {
             Role::AgentsAlias(Org::Forward(os(&["agents", "court", "-J"])))
         );
         assert_eq!(
-            decide_role(&os(&["agents", "org", "promote", "folio", "--scope", "fno"]), false),
+            decide_role(
+                &os(&["agents", "org", "promote", "folio", "--scope", "fno"]),
+                false
+            ),
             Role::AgentsAlias(Org::Forward(os(&[
                 "agents", "crown", "folio", "--scope", "fno"
             ])))
@@ -532,7 +535,10 @@ mod tests {
             decide_role(&os(&["agents", "promote", "x"]), false),
             Role::AgentsAlias(Org::Refuse(_))
         ));
-        assert_eq!(decide_role(&os(&["agents", "whoami"]), false), Role::Forward);
+        assert_eq!(
+            decide_role(&os(&["agents", "whoami"]), false),
+            Role::Forward
+        );
     }
 
     #[test]

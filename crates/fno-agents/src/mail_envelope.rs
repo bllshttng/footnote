@@ -30,11 +30,13 @@ fn live_entry_for_address<'a>(
 fn crown_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
     let level = row.crown_level?;
     let scope = row.crown_scope.as_deref().unwrap_or("?");
-    let theme = crate::crown_names::theme_for(
-        &registry_path.with_file_name("crown_names.json"),
+    let theme =
+        crate::crown_names::theme_for(&registry_path.with_file_name("crown_names.json"), scope);
+    Some(crate::crown_names::title(
+        level as u32,
         scope,
-    );
-    Some(crate::crown_names::title(level as u32, scope, theme.as_deref()))
+        theme.as_deref(),
+    ))
 }
 
 fn attr<'a>(input: &'a Value, key: &str) -> Option<&'a str> {

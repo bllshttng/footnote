@@ -601,10 +601,24 @@ mod tests {
             status: GoalStatus::Paused,
             usage: GoalUsage::default(),
         };
-        assert!(verify_goal(&goal, "$fno:reign x-aaaa", "x-aaaa", GoalStatus::Paused, "resume").is_ok());
+        assert!(verify_goal(
+            &goal,
+            "$fno:reign x-aaaa",
+            "x-aaaa",
+            GoalStatus::Paused,
+            "resume"
+        )
+        .is_ok());
         let lead = crate::codex_thread::lead_objective("x-aaaa");
         assert!(verify_goal(&goal, &lead, "x-aaaa", GoalStatus::Paused, "resume").is_ok());
-        assert!(verify_goal(&goal, "$fno:reign x-bbbb", "x-bbbb", GoalStatus::Paused, "resume").is_err());
+        assert!(verify_goal(
+            &goal,
+            "$fno:reign x-bbbb",
+            "x-bbbb",
+            GoalStatus::Paused,
+            "resume"
+        )
+        .is_err());
     }
 
     #[test]

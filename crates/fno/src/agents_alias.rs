@@ -69,7 +69,10 @@ fn rundown_out_arg() -> Option<OsString> {
         return None;
     }
     Some(OsString::from(
-        root.join("pages").join("rundown.html").display().to_string(),
+        root.join("pages")
+            .join("rundown.html")
+            .display()
+            .to_string(),
     ))
 }
 
@@ -187,7 +190,6 @@ pub fn classify(args: &[OsString]) -> Option<Org> {
     Some(Org::Forward(args.to_vec()))
 }
 
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -219,8 +221,12 @@ mod tests {
 
         fn org_promote_forwards_the_crown_argv() {
             assert_eq!(
-                classify(&osv(&["agents", "org", "promote", "folio", "--scope", "fno"])),
-                Some(Org::Forward(osv(&["agents", "crown", "folio", "--scope", "fno"])))
+                classify(&osv(&[
+                    "agents", "org", "promote", "folio", "--scope", "fno"
+                ])),
+                Some(Org::Forward(osv(&[
+                    "agents", "crown", "folio", "--scope", "fno"
+                ])))
             );
         }
 
@@ -255,9 +261,7 @@ mod tests {
             for action in ACTIONS {
                 assert_eq!(
                     classify(&osv(&["agents", "org", action, "--flag"])),
-                    Some(Org::Forward(osv(&[
-                        "agents", "king", action, "--flag"
-                    ])))
+                    Some(Org::Forward(osv(&["agents", "king", action, "--flag"])))
                 );
             }
         }
@@ -352,6 +356,4 @@ mod tests {
     fn osv(texts: &[&str]) -> Vec<OsString> {
         texts.iter().map(OsString::from).collect()
     }
-
-
 }
