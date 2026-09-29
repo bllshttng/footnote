@@ -1769,9 +1769,9 @@ mod verdict_tests {
 
     #[test]
     fn run_end_to_end_degraded_from_inputs() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // No lock take here: input_tree's DeclaredRoot::declare takes the env
+        // lock and the returned pin holds it for the test's lifetime; a
+        // second take deadlocks (paths.rs note on declare_held).
         let (_pin, root, manifest, journal) =
             input_tree("[king]\ncheckin_interval = \"30m\"\ncompaction_ceiling = 3\n");
         assert_eq!(
@@ -1818,9 +1818,6 @@ mod verdict_tests {
 
     #[test]
     fn a_garbage_ceiling_config_refuses_the_read_instead_of_reading_absent() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         // Same posture the count flags had: a mistyped ceiling must not
         // degrade into an absent bound that prints as a clean reading. The
         // refusal is a config refusal now, exit 1 naming the key.
