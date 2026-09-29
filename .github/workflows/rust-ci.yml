@@ -7,12 +7,16 @@ name: rust-ci
 
 # PR re-pushes share a group keyed by head_ref and cancel their own running
 # run. Main pushes share a group keyed by ref, so a new main push supersedes
-# only the queued main run and never cancels the running one.
+# only the queued main run and never cancels the running one. The nightly
+# schedule run gets its own group so a nightly never makes a main push queue
+# behind it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
+  schedule:
+    - cron: '41 8 * * *'
   workflow_dispatch:
   push:
     branches: [main]
@@ -132,21 +136,22 @@ jobs:
       - name: Run the release version table test
         run: bash tests/ci/test_release_version.sh
 
+      - name: Run the release notes drafter table test
+        run: bash tests/ci/test_draft_release_notes.sh
+
   stress:
     name: rust e2e concurrency stress (20 trials)
-    # Pull requests only, like the `fmt` job above. The push trigger at the top
-    # of this file carries no `paths:` filter, so without this the 20 trials -
-    # about 24 minutes - would run on EVERY commit to main, which contradicts
-    # the path-triggered rationale below and buys nothing: the same trials
-    # already ran on the PR that produced that commit.
-    if: github.event_name == 'pull_request'
+    # Nightly and manual dispatch only. The 20 trials ran 32 minutes on PR
+    # 2712 and alone set that PR's wall clock, so they no longer ride the PR
+    # path: a determinism claim checked every night is the same claim, and PR
+    # CI stops paying for it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     # The determinism claim this workflow's --test-threads=1 steps make is a
     # claim about REPEATED runs, so something has to repeat them. That used to
     # ride the cli-ci smoke shard, where the 20-trial default cost 756s of a
-    # 1800s cap and killed the shard at 30 minutes. The denominator belongs
-    # here instead: this workflow is path-triggered on crates/**, on
-    # preflight.sh and on the harness itself, so the trials run exactly when
-    # the thing they measure can have changed, and they run beside the other
+    # 1800s cap and killed the shard at 30 minutes, and then the PR path,
+    # where the trials set the PR wall clock. The denominator belongs here:
+    # nightly, with workflow_dispatch for an on-demand run beside the other
     # jobs rather than serially inside someone else's budget.
     #
     # The cap is SET from measurement, not raised to absorb slack. Two
@@ -279,9 +284,10 @@ jobs:
     # green. Known expected warning: `serial` 0.4.0 (RUSTSEC-2017-0008) via
     # portable-pty 0.8 -- clears when the dep-refresh node ab-e784d8ff bumps
     # portable-pty to 0.9 (which swaps serial for the maintained serial2).
-    # No cron trigger: advisories on untouched deps surface on the next
-    # crates/** push, which is frequent enough here. Runs locally as
-    # `cargo audit` from crates/fno-agents (cargo install cargo-audit).
+    # The nightly schedule added above runs audit too, so advisories on
+    # untouched deps surface daily instead of waiting for the next crates/**
+    # push. Runs locally as `cargo audit` from crates/fno-agents
+    # (cargo install cargo-audit).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
