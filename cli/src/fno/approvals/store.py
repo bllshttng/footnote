@@ -37,6 +37,7 @@ from fno.approvals.models import (
     Refusal,
     RefusalReason,
     RefusedError,
+    _unavailable_refusal,
     classify_effect,
     utcnow,
 )
@@ -237,12 +238,7 @@ class EffectStore:
         try:
             out = verb_call("authorized-merge", payload)
         except VerbUnavailable as exc:
-            _refuse(
-                RefusalReason.STORE_UNAVAILABLE,
-                f"the effect store door is unavailable ({exc}); the request is not recorded",
-                fields=["request_id"],
-                recovery="Check the fno-agents binary, then retry; the retry re-files it.",
-            )
+            _unavailable_refusal(f"the effect store door is unavailable ({exc})")
         if out.get("result") == "refused":
             if out.get("reason") == "denied_effect_class":
                 _refuse(
@@ -251,10 +247,8 @@ class EffectStore:
                     fields=["effect_class"],
                     recovery="Denied classes need an explicit policy and adapter contract first.",
                 )
-            _refuse(
-                RefusalReason.STORE_UNAVAILABLE,
-                out.get("detail", "the effect store door refused the request"),
-                fields=["request_id"],
+            _unavailable_refusal(
+                out.get("detail", "the effect store door refused the request")
             )
         return request
 
