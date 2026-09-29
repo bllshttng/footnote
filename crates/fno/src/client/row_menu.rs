@@ -225,3 +225,109 @@ mod tests {
         );
     }
 }
+
+// (5.1) The tab-strip context menu builder, moved under the file-budget
+// gate; the split/join face gate lives in the `viewed` arm.
+/// (5.1) The tab-strip context menu for one tab cell, resolved through
+/// the SAME `tab_cell_at` the drag pickup uses (LD-A: one hit test per
+/// surface, so a drag and a click can never disagree about where a tab is).
+/// Every item binds an existing wire command; nothing here needs a server
+/// change, because a tab-bar cell sits in no pane rect and was never
+/// forwarded. Destructive items sit last, after a `Rule`.
+///
+/// Save/apply layout are deliberately ABSENT: `ControlVerb::LayoutGet` /
+/// `LayoutApply` ride one-shot `ClientMsg::Control` connections (`fno mux
+/// pane ...`), which an attached TUI client cannot send, so a menu item for
+/// them would bind to a verb this socket can never carry. That needs a
+/// `Command` surface and is filed rather than faked.
+pub(super) fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor, viewed: bool) -> RowMenu {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<MenuAction> = Vec::new();
+    let mut add = |row: PopupRow, acts: &[MenuAction]| {
+        rows.push(row);
+        actions.extend_from_slice(acts);
+    };
+    let cell = |glyph: &str, label: &str| GridCell {
+        glyph: glyph.into(),
+        label: label.into(),
+    };
+    // The split grid and the join grid are the two faces of one placement
+    // decision: the picked cell IS the side of the focused pane the new or
+    // joined pane lands on. The menu's own tab picks the face - Split on the
+    // viewed tab (joining a tab into itself never made sense), Join on any
+    // other. No hint: no prefix binding names these (the split family's
+    // chords live in the key table, join's gesture is the tab drag), and
+    // LD9 forbids a literal chord standing in for one.
+    add(
+        PopupRow::Header(tab_group_label(
+            tab_label_text(&tab.name, idx, tab.named),
+            tab.panes.len(),
+        )),
+        &[],
+    );
+    add(PopupRow::Rule, &[]);
+    // Every tab verb answers a bare in-menu key from the same
+    // registry its hint reads: n for New tab, the angle brackets for the
+    // reorder pair - app vocabulary beside the prefix chords (prefix+c, and
+    // prefix+< / prefix+> mean the same moves from outside the menu).
+    add(entry_acc("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
+    add(
+        entry_acc("✎", "Rename", "rename-tab"),
+        &[MenuAction::TabRename],
+    );
+    add(
+        entry_acc("◧", "Move left", "move-tab-left"),
+        &[MenuAction::TabReorder(-1)],
+    );
+    add(
+        entry_acc("◨", "Move right", "move-tab-right"),
+        &[MenuAction::TabReorder(1)],
+    );
+    add(
+        entry_acc("⇥", "Move to…", "move-tab-to"),
+        &[MenuAction::TabMoveTo],
+    );
+    if viewed {
+        // Same 2x2 grammar as the row menu's split grid: Left/Right on
+        // top, Up/Down below (the cell you pick IS the direction).
+        add(
+            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
+            &[
+                MenuAction::TabSplit(Dir::Left),
+                MenuAction::TabSplit(Dir::Right),
+            ],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
+            &[
+                MenuAction::TabSplit(Dir::Up),
+                MenuAction::TabSplit(Dir::Down),
+            ],
+        );
+    } else {
+        add(
+            PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
+            &[
+                MenuAction::TabJoin(Dir::Left),
+                MenuAction::TabJoin(Dir::Right),
+            ],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Join Up"), cell("⬓", "Join Down")]),
+            &[MenuAction::TabJoin(Dir::Up), MenuAction::TabJoin(Dir::Down)],
+        );
+    }
+    add(PopupRow::Rule, &[]);
+    // `✕ Close`, not `✕ Close tab`: one shape with the row menu's `✕ Remove`,
+    // so the two destructive affordances read as one vocabulary. The prefix
+    // `&` chord is untouched; in-menu the entry answers the scoped `x`.
+    add(
+        entry_acc("✕", "Close", "close-tab"),
+        &[MenuAction::TabClose],
+    );
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: MenuTarget::Tab(tab.id),
+        actions,
+    }
+}
