@@ -953,18 +953,19 @@ mod tests {
         // Branch: a reappeared legacy event-family store imports by
         // event_id into the published store, then parks.
         let published = root.join("db").join("events.db");
-        let c = rusqlite::Connection::open(&published).unwrap();
-        c.execute_batch(
-            "CREATE TABLE events (seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL);
-             INSERT INTO events VALUES (1, 'e-1');",
+        let mut c = rusqlite::Connection::open(&published).unwrap();
+        crate::event_store::ensure_schema(&mut c, &published).unwrap();
+        c.execute(
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source) VALUES (1, 'e-1', x'01', 0, 'x', 't')",
+            [],
         )
         .unwrap();
         drop(c);
         let straggler = root.join("events.db");
-        let c = rusqlite::Connection::open(&straggler).unwrap();
+        let mut c = rusqlite::Connection::open(&straggler).unwrap();
+        crate::event_store::ensure_schema(&mut c, &straggler).unwrap();
         c.execute_batch(
-            "CREATE TABLE events (seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL);
-             INSERT INTO events VALUES (1, 'e-1'), (2, 'e-2');",
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source) VALUES (1, 'e-1', x'01', 0, 'x', 't'), (2, 'e-2', x'02', 0, 'x', 't');",
         )
         .unwrap();
         drop(c);
