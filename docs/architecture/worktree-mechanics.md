@@ -4,6 +4,14 @@ The always-loaded half lives in [.claude/rules/worktrees.md](../../.claude/rules
 
 When you edit the hook, remove or prune a worktree, or trace why a location gate fired, read this first.
 
+## Branch names
+
+A node's work branches at `<kind>/<node>-<mini-slug>`, for example `feature/x-93c9-install-channels` (x-93c9, 2026-09-28). The kind comes from the node row: type `bug` gives `bugfix/`, type `chore` or `docs` (or a docs domain) gives `chore/`, everything else gives `feature/`. The mini-slug is up to 4 words of the node's immutable slug, `[a-z0-9]` only, with the joined tail capped at 30 chars; the node id stays whole so the branch maps back. Slug words that would parse as a second node id (`fix-dead`, `beef`) drop from the tail, which makes the round trip exact: every scanner reads exactly the node back.
+
+The one mint, resolver and parser live in `crates/fno-agents/src/node_branch.rs`. Ask it with `fno backlog get <id> --field _branch`. `worktree ensure` and the Codex-native `target start` path call that door and fall back to `feature/<name>` when it answers nothing (an older deployed binary, a non-node name). The resolver reuses an already-present accepted branch, local heads first then origin, so re-dispatching a node whose legacy `feature/<id>` branch is out opens no second PR and an open PR is never renamed.
+
+Every reader parses both shapes through the one scanner (`node_branch::node_ids`), so the old `feature/<id>` shape needs no sunset. Worktree directories stay the bare node id.
+
 ## The refusal shape
 
 Both creation paths honor `policy = "never"`. The `WorktreeCreate` hook resolves the policy through `fno agents workspace worktree policy`, so there is one resolver and no second precedence implementation.
