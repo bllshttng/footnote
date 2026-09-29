@@ -28,13 +28,11 @@ def test_pytest_timeout_is_a_dev_dependency() -> None:
     assert any(str(dep).startswith("pytest-timeout") for dep in dev), dev
 
 
-def test_ini_timeout_lets_a_shard_absorb_two_hangs() -> None:
+def test_ini_timeout_and_hang_guards() -> None:
     timeout = _config()["tool"]["pytest"]["ini_options"]["timeout"]
     assert isinstance(timeout, (int, float)), timeout
-    assert 0 < timeout <= _PER_TEST_BOUND_SECONDS, timeout
+    assert timeout == 120, timeout
 
-
-def test_no_test_builds_a_fork_default_pool() -> None:
     tests = Path(__file__).resolve().parents[1]
     pool = re.compile(r"\b(?:multiprocessing|mp)\.Pool\(")
     hits = [
@@ -49,9 +47,6 @@ def test_no_test_builds_a_fork_default_pool() -> None:
         + ", ".join(hits)
     )
 
-
-def test_every_timeout_marker_is_under_the_bound() -> None:
-    tests = Path(__file__).resolve().parents[1]
     marker = re.compile(r"mark\.timeout\(([^)]*)\)")
     for path in tests.rglob("*.py"):
         for line_number, line in enumerate(path.read_text().splitlines(), 1):
