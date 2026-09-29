@@ -78,6 +78,7 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import (
+    build_heir_owner,
     calling_agent_row,
     crown_validation_error,
     journal_spawn_crown,
@@ -4417,11 +4418,12 @@ def dispatch_spawn_pane(
         crown_asked_grantor = crown_grantor_val
         crown_outcome: Optional[str] = None
         crown_cleared: list = []
+        crown_reowned: list = []
         king_loop_armed: Optional[bool] = None
         king_unarmed_reason = ""
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, crown_outcome, crown_cleared, king_loop_armed, king_unarmed_reason
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, crown_outcome, crown_cleared, crown_reowned, king_loop_armed, king_unarmed_reason
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4481,8 +4483,9 @@ def dispatch_spawn_pane(
                 crown_grantor_val = None
             if crown_level is not None and crown_scope:
                 assert crown_plan is not None  # set by the pre-launch call above
-                rows, crown_outcome, crown_cleared = settle_spawn_crown(
+                rows, crown_outcome, crown_cleared, crown_reowned = settle_spawn_crown(
                     rows, scope=crown_scope, plan=crown_plan, heir=name,
+                    heir_owner=build_heir_owner(provider, stored_session_uuid, str(cwd)),
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True
@@ -4631,6 +4634,7 @@ def dispatch_spawn_pane(
                 level=crown_asked_level,
                 scope=crown_asked_scope,
                 grantor=crown_asked_grantor,
+                reowned=crown_reowned,
             )
             if crown_declined and _declined_scope:
                 print(

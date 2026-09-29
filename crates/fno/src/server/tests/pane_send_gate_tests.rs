@@ -80,7 +80,7 @@ fn pane_send_dnd_refuses_plain_and_accepts_hold_pass() {
 
 #[test]
 fn pane_send_addresses_the_session_uuid_not_the_name() {
-    // The measured x-48fc shape: a succession heir renamed after spawn
+    // The measured succession shape: a heir renamed after spawn
     // (kestrel-heir -> bob) leaves the pane label stale while the registry
     // row carries the same session uuid. Addressing by uuid must land -
     // the label is display, not identity - and a different uuid must

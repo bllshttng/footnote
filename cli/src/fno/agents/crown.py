@@ -684,6 +684,14 @@ def emit_crown_vacated(
     )
 
 
+def build_heir_owner(harness, session_id, cwd) -> Optional[dict]:
+    # None when the heir has no session id: an unaddressable heir re-creates
+    # the orphan the reown exists to prevent.
+    if not session_id:
+        return None
+    return {"kind": "session", "harness": harness, "session_id": session_id, "cwd": cwd}
+
+
 def settle_spawn_crown(
     rows: list,
     *,
@@ -691,17 +699,19 @@ def settle_spawn_crown(
     plan: dict,
     exclude_name: Optional[str] = None,
     heir: Optional[str] = None,
-) -> "tuple[list, str, list]":
+    heir_owner: Optional[dict] = None,
+) -> "tuple[list, str, list, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
     ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
     launch. Rust checks its holder identities against the rows this write sees
     and returns indexes to clear. If Rust is unavailable or its answer is
     malformed, the spawn declines without changing any row. Returns
-    ``(rows, outcome, vacated)``: outcome is
+    ``(rows, outcome, vacated, reowned)``: outcome is
     ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
-    dropping the crown fields when declined), and ``vacated`` lists
-    ``(row_before_clear, cause)`` to journal once the write commits.
+    dropping the crown fields when declined); ``vacated`` lists
+    ``(row_before_clear, cause)`` to journal once the write commits;
+    ``reowned`` names the live children re-owned to ``heir_owner``.
     """
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
@@ -716,11 +726,19 @@ def settle_spawn_crown(
         marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
         marks += [(i, "succession") for i in answer["vacate_rows"]]
         vacated = [(rows[i], cause) for i, cause in marks]
+        reown_indexes = [int(i) for i in answer.get("reown_rows", [])]
+        [rows[i] for i in reown_indexes]  # an out-of-range index declines, like the marks
     except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
-        return rows, "declined", []
+        return rows, "declined", [], []
     for index, _ in marks:
         rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
-    return rows, outcome, vacated
+    reowned = []
+    for index in reown_indexes if heir_owner is not None else []:
+        provenance = dict(rows[index].spawn_provenance or {})
+        provenance["owner"] = dict(heir_owner or {})
+        rows[index] = replace(rows[index], spawn_provenance=provenance)
+        reowned.append(rows[index].name)
+    return rows, outcome, vacated, reowned
 
 
 def plan_spawn_crown(
@@ -839,18 +857,22 @@ def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
     return armed
 
 
-def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
-    """Journal one committed spawn write: a vacate line per cleared holder plus
-    the grant line. A declined launch moved no crown and writes nothing."""
+def journal_spawn_crown(
+    outcome: Optional[str], vacated: list, *, name, level, scope, grantor, reowned=None
+) -> None:
+    """Journal one committed spawn write: a vacate line per cleared holder, one
+    reown line per court child that followed the crown, plus the grant line."""
     for row, cause in vacated:
         emit_crown_vacated(
             scope=scope, level=row.crown_level, holder=row.name,
             holder_session=row.harness_session_id, grantor=row.crown_grantor,
             cause=cause, successor=name if cause == "succession" else None,
         )
-    if outcome in ("granted", "succeeded"):
-        from fno.agents import events
+    from fno.agents import events
 
+    for child in reowned or []:
+        events.emit("agent_court_reowned", scope=scope, successor=name, child=child)
+    if outcome in ("granted", "succeeded"):
         events.emit(
             "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
             vacated_scope=None, vacated_level=None, stranded_subordinates=[],
