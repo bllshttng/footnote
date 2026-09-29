@@ -1378,8 +1378,13 @@ mod tests {
         assert_eq!(db, root.join("graph.db"), "unmigrated: legacy store");
         std::fs::create_dir_all(root.join("db")).unwrap();
         std::fs::write(root.join("db").join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("db").join("graph.db"), b"SQLite format 3\0").unwrap();
         let db = database_path(&root.join("graph.json"));
-        assert_eq!(db, root.join("db").join("graph.db"), "migrated: moved store");
+        assert_eq!(
+            db,
+            root.join("db").join("graph.db"),
+            "migrated: moved store"
+        );
     }
 
     /// A first write that lands between an opener's unlocked row count and
