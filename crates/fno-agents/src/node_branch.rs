@@ -366,8 +366,8 @@ mod tests {
     fn mint_drops_a_slug_word_holding_another_id_and_a_trailing_one_char_word() {
         let row = feature("x-aaaa", "extend-reverse-map-x-bbbb");
         assert_eq!(mint(&row).unwrap(), "feature/x-aaaa-extend-reverse-map");
-        let row = feature("x-ba40", "bug-w3-x-ff83-unified-only");
-        assert_eq!(mint(&row).unwrap(), "feature/x-ba40-bug-w3");
+        let row = feature("x-bbbb", "bug-w3-x-dddd-unified-only");
+        assert_eq!(mint(&row).unwrap(), "feature/x-bbbb-bug-w3");
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
             feature("x-aaaa", "fix-dead-beef"),
             feature("x-aaaa", "added-cache"),
             feature("x-aaaa", "extend-reverse-map-x-bbbb"),
-            feature("x-ba40", "bug-w3-x-ff83-unified-only"),
+            feature("x-bbbb", "bug-w3-x-dddd-unified-only"),
             feature("x-aaaa", "x-aaaa"),
             feature("x-aaaa", ""),
             node("x-eeee", "bug", "wrong-close-on-the-board"),

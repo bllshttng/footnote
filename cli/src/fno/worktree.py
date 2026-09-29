@@ -1,7 +1,7 @@
 """Worktree helpers with live callers.
 
 The walker's worktree-manager class, its ``<prefix>/<slug>-<node>`` mint,
-and the runtime/adapters worktree minters are gone (x-93c9): branch naming
+and the runtime/adapters worktree minters are gone: branch naming
 is the one Rust resolver (``crates/fno-agents/src/node_branch.rs``),
 reached through ``fno backlog get <id> --field _branch``, and ``worktree
 ensure`` (``fno.worktree_cli.cli``) owns the live create/reuse path. What

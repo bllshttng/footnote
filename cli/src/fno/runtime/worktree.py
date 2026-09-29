@@ -1,6 +1,6 @@
 """Worktree listing for the runtime surface.
 
-The walker-era create/remove minters are gone (x-93c9); ``list_worktrees``
+The walker-era create/remove minters are gone; ``list_worktrees``
 is the one survivor, feeding provenance/runtime_attempts.py. Path
 convention: ``~/.fno/worktrees/{project_id}-{name}/``. The legacy
 ``.claude/worktrees/{name}/`` shape is still detected so existing

@@ -6,7 +6,7 @@ When you edit the hook, remove or prune a worktree, or trace why a location gate
 
 ## Branch names
 
-A node's work branches at `<kind>/<node>-<mini-slug>`, for example `feature/x-93c9-install-channels`. The kind comes from the node row. Type `bug` gives `bugfix/`. Type `chore` or `docs` (or a docs domain) gives `chore/`. Everything else gives `feature/`. The mini-slug is up to 4 words of the node's immutable slug. Words keep only `[a-z0-9]`, and the joined tail caps at 30 chars. The node id stays whole, so the branch maps back. A slug word that parses as a second node id (`fix-dead`, `beef`) drops from the tail. Every scanner then reads exactly the node back.
+A node's work branches at `<kind>/<node>-<mini-slug>`, for example `feature/x-aaaa-install-channels`. The kind comes from the node row. Type `bug` gives `bugfix/`. Type `chore` or `docs` (or a docs domain) gives `chore/`. Everything else gives `feature/`. The mini-slug is up to 4 words of the node's immutable slug. Words keep only `[a-z0-9]`, and the joined tail caps at 30 chars. The node id stays whole, so the branch maps back. A slug word that parses as a second node id (`fix-dead`, `beef`) drops from the tail. Every scanner then reads exactly the node back.
 
 The one mint, resolver and parser live in `crates/fno-agents/src/node_branch.rs`. Ask the resolver with `fno backlog get <id> --field _branch`. When the door answers nothing (an older deployed binary, a non-node name), `worktree ensure` and the Codex-native `target start` path fall back to `feature/<name>`. The resolver reuses an already-present accepted branch, local heads first, origin second. A re-dispatch over a legacy `feature/<id>` branch reuses it and opens no second PR. An open PR is never renamed.
 
