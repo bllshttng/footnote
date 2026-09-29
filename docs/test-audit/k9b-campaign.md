@@ -28,11 +28,11 @@ ambient default).
 | src/court_overlay.rs | 33 | 11 | parse, glance, expanded fleet, census, refusal, census degrade, fold failure, ttl, panel lifecycle |
 | src/client/questions.rs | 33 | 11 | block layout, page, detail nav, answer keys, submit, detail keys nav, toggle toast, apply result, block hit |
 | src/proto.rs | 29 | 8 | backlog verb baseline, codec roundtrip, agent-row backcompat, placement backcompat, wire skew, reader, socket |
-| src/digest_overlay.rs | 29 | 13 | theme overrides, config reader, config layer, key reader, json lines, user theme |
+| src/digest_overlay.rs | 29 | 14 | theme overrides, config reader, config layer, key reader, json lines, user theme |
 | src/pty.rs | 29 | 18 | keeper shape, keeper argv, fd limit, fd ceiling, shell integration, zsh hop (the 12 PTY_GATE tests stay standalone) |
 | src/client_tests/feed_view_tests.rs | 29 | 8 | render, hit, click, width, header, detail fields |
 
-Packet total: -161 (6.6% of the 2,433 suite).
+Packet total: -139 (5.7% of the 2,433 suite).
 
 ## Kept unmerged
 
@@ -45,5 +45,11 @@ The keep rule stops each file at its honest floor.
 
 Scoped green lanes per file on the file's own module path (the
 `server::tests::server_restore_tests::` lesson: filename-based filters
-match zero tests when the mod is nested). Duplicate body-local `use`
-lines removed where a family merged (E0252 class).
+match zero tests when the mod is nested). Lane counts match the table:
+restore 11+1 ignored, board 16, court 11, questions 11, pty 18,
+proto 29 with its nested file modules, digest 14, feed 8. Assert
+proofs per family: 564 of 564 asserts kept across the six later files,
+133 of 133 across restore, 89 of 89 across board. Duplicate body-local
+`use` lines removed where a family merged (E0252 class). Three
+questions keepers hold tokio families: the merged fn is async and the
+keeper's own `#[tokio::test]` line heads it.
