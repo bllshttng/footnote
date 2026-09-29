@@ -4482,7 +4482,7 @@ def dispatch_spawn_pane(
             if crown_level is not None and crown_scope:
                 assert crown_plan is not None  # set by the pre-launch call above
                 rows, crown_outcome, crown_cleared = settle_spawn_crown(
-                    rows, scope=crown_scope, plan=crown_plan,
+                    rows, scope=crown_scope, plan=crown_plan, heir=name,
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True
