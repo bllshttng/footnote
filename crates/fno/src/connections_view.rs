@@ -1580,10 +1580,6 @@ mod tests {
         .expect("valid combos json")
     }
 
-
-
-
-
     fn ready_view() -> ConnectionsView {
         let mut v = ConnectionsView::new();
         v.apply_read(ReadOutcome::Ok {
@@ -1662,10 +1658,6 @@ mod tests {
         assert!(v.active_account.is_none(), "non-claude account not routed");
     }
 
-
-
-
-
     #[test]
     fn order_tab_shows_members_in_order_with_active_badge() {
         let mut v = ready_view();
@@ -1737,7 +1729,6 @@ mod tests {
 
     // AC1-UI: no zero-feedback keypress - an unbound key rings the bell.
 
-
     // AC2-HP: `u` on a non-active account runs `providers use <id>`.
     #[test]
     fn use_key_rows() {
@@ -1761,7 +1752,6 @@ mod tests {
         assert!(!v.acting);
         assert!(v.notice.as_deref().unwrap().contains("already active"));
     }
-
 
     // single-flight: a second action while acting is a no-op notice, not a spawn.
     #[test]
@@ -1803,7 +1793,6 @@ mod tests {
         assert!(v.confirm.is_none());
         assert!(v.notice.as_deref().unwrap().contains("cancelled"));
     }
-
 
     #[test]
     fn expand_tilde_expands_leading_and_bare_home() {
@@ -1918,7 +1907,6 @@ mod tests {
     // The opt-in isolated path: an explicit own CLAUDE_CONFIG_DIR (a separate
     // config dir), tilde-expanded before the spawn.
 
-
     #[test]
     fn wizard_lifecycle_rows() {
         let mut v = ready_view();
@@ -1974,7 +1962,6 @@ mod tests {
         assert!(v.pending.is_empty());
     }
 
-
     #[test]
     fn api_key_wizard_builds_add_verb_with_glm_preset() {
         let mut v = ready_view();
@@ -1997,8 +1984,6 @@ mod tests {
             other => panic!("expected Run, got {other:?}"),
         }
     }
-
-
 
     // ── Task 1.5: Order tab (reorder / activate / remove / new) ─────────────
 
@@ -2058,8 +2043,6 @@ mod tests {
 
     // AC2-FR: Esc on a dirty reorder reverts, no verb runs.
 
-
-
     // space activates the selected combo (combos use).
     #[test]
     fn combo_rows() {
@@ -2112,7 +2095,6 @@ mod tests {
 
     // AC2-EDGE: a dangling member flags the combo and refuses activate.
 
-
     #[test]
     fn combo_form_rows() {
         let mut v = order_view();
@@ -2152,7 +2134,6 @@ mod tests {
         assert_eq!(v.combo_sel, 1);
         assert_eq!(v.member_sel, 0); // reset
     }
-
 
     // ── identity readout (AC3) + aligned columns (AC4) ──────────────────────
 

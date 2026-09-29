@@ -1729,7 +1729,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn a_receipt_never_prints_a_blank_version() {
         // An absent Version header verifies (identity keys on name and
@@ -1783,9 +1782,6 @@ mod tests {
         }
     }
 
-
-
-
     #[test]
     fn stale_wheel_rows() {
         // AC1-EDGE: readable version -> named version + source-install fallback.
@@ -1829,9 +1825,6 @@ mod tests {
         assert!(stale_wheel_message(false, Some("0.3.0")).is_none());
         assert!(stale_wheel_message(false, Some("1.0.0")).is_none());
     }
-
-
-
 
     /// A unique temp dir laid out as a valid fno checkout (`cli/pyproject.toml`).
     fn valid_checkout() -> PathBuf {
@@ -1878,9 +1871,6 @@ mod tests {
         );
     }
 
-
-
-
     #[test]
     fn install_source_failure_rows() {
         // US3/AC3-FR: a set-but-invalid pin errors naming config.dev.source and
@@ -1897,7 +1887,6 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         assert!(install_source(None, Some(root.to_str().unwrap())).is_err());
     }
-
 
     #[test]
     fn expand_tilde_expands_leading_home() {
@@ -1936,7 +1925,6 @@ mod tests {
         assert_eq!(parse_dev_source("[other]\nkey = 1\n"), None);
         assert_eq!(parse_dev_source("[dev]\nsource = \"\"\n"), None);
     }
-
 
     #[test]
     fn locate_failure_rows() {
@@ -2014,7 +2002,6 @@ mod tests {
         assert!(count_pyc(&root.join("nope")).is_err());
         fs::remove_dir_all(&root).ok();
     }
-
 
     #[test]
     fn install_wheel_retry_rows() {
@@ -2593,8 +2580,6 @@ mod tests {
         assert!(m.contains("FNO_BOOTSTRAP_WHEEL"), "{m}");
     }
 
-
-
     #[test]
     fn credential_rows() {
         // FNO_BOOTSTRAP_WHEEL can be an authenticated URL, and this message is
@@ -2695,11 +2680,6 @@ mod tests {
         assert_eq!(canonical_source("/no/such/wheel.whl"), "/no/such/wheel.whl");
     }
 
-
-
-
-
-
     #[test]
     fn cached_failure_rows() {
         // AC: the fast-fail must preserve the original diagnosis, say it is a
@@ -2749,9 +2729,6 @@ mod tests {
         assert!(decide_cached_failure(&local, 1030, &source_key("/home/me/other/cli")).is_none());
     }
 
-
-
-
     #[test]
     fn cached_failure_failopen_rows() {
         // A negative cache that can wedge the bootstrap shut is worse than the
@@ -2773,7 +2750,6 @@ mod tests {
                 .unwrap();
         assert_eq!(msg, "line one\nline two\nline three");
     }
-
 
     #[test]
     fn failure_stamp_rows() {
@@ -2800,7 +2776,6 @@ mod tests {
         assert_ne!(failure_stamp_path(), sentinel_path());
     }
 
-
     #[test]
     fn strip_ansi_rows() {
         // matches the real `uv tool dir` colorized output shape
@@ -2809,7 +2784,6 @@ mod tests {
 
         assert_eq!(strip_ansi("/plain/path"), "/plain/path");
     }
-
 
     // --: the packaged-sibling resolution arm ------------------------
 

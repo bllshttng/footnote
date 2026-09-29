@@ -2008,8 +2008,6 @@ mod tests {
         assert_eq!(pane.link_at(0, 20), None);
     }
 
-
-
     #[test]
     fn link_refusal_rows() {
         // A pane's output chooses this URI. `open(1)` would act on file:// and
@@ -2035,7 +2033,6 @@ mod tests {
         assert_eq!(span.uri, "https://ok.example");
         assert_eq!(span.cells, (4..8).map(|c| (0, c)).collect::<Vec<_>>());
     }
-
 
     // -- hover affordance: the shared span behind click and hover ---------------
 
@@ -2128,15 +2125,6 @@ mod tests {
         assert_eq!(top.cells.len(), 25);
     }
 
-
-
-
-
-
-
-
-
-
     #[test]
     fn vt_mode_rows() {
         let mut pane = Pane::new(4, 20);
@@ -2202,6 +2190,16 @@ mod tests {
         let clear = String::from_utf8(mode_diff(kitty, plain)).unwrap();
         assert!(clear.contains("\x1b[=0;1u"), "{clear:?}");
 
+        // Resize clamps a degenerate PTY size to a 1x1 grid instead of
+        // panicking or zeroing the grid: the only behavioral guard for the
+        // clamp contract after the standalone test left in the upstream
+        // reshape.
+        let mut pane = Pane::new(24, 80);
+        pane.resize(0, 0);
+        pane.feed(b"q");
+        assert_eq!(pane.size(), (1, 1));
+        let frame = pane.frame();
+        assert_eq!(frame.cells.len(), 1);
     }
     // -- OSC 133 scanner (Task 1.1) --------------------------------------------
 
@@ -2266,9 +2264,6 @@ mod tests {
         assert_eq!(pass, b"\x1b]0;my title\x07hello");
     }
 
-
-
-
     #[test]
     fn osc133_guard_rows() {
         // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
@@ -2291,8 +2286,6 @@ mod tests {
         pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07out\x1b]133;D;0\x07");
         assert_eq!(pane.text(), "$ out");
     }
-
-
 
     // -- OSC 133 block store (Task 1.2) ----------------------------------------
 
@@ -2357,9 +2350,6 @@ mod tests {
         pane.feed(b"\x1b]133;D;0\x07");
         assert_eq!(pane.read_block(BlockSel::Last).unwrap().text, long);
     }
-
-
-
 
     #[test]
     fn block_bound_rows() {
@@ -2447,10 +2437,6 @@ mod tests {
         );
     }
 
-
-
-
-
     #[test]
     fn strip_ansi_rows() {
         // AC1-ERR: CSI color, a non-133 OSC title, a 2-byte escape, and invalid
@@ -2482,10 +2468,6 @@ mod tests {
         // Unterminated nF escape at the buffer end is dropped, not leaked.
         assert_eq!(strip_ansi(b"ok\x1b("), "ok");
     }
-
-
-
-
 
     #[test]
     fn scroll_rows() {
@@ -2544,9 +2526,6 @@ mod tests {
     }
 
     // -- US1 scroll ------------------------------------------------------------
-
-
-
 
     // -- US2 selection ---------------------------------------------------------
 
@@ -2616,9 +2595,6 @@ mod tests {
         pane.resize(2, 10);
         assert!(!pane.has_selection(), "selection cleared on resize");
     }
-
-
-
 
     // -- Block navigation ---------------------------------------------
 
@@ -2736,9 +2712,6 @@ mod tests {
         assert_eq!(pane.block_select(BlockDir::Prev), Some(2));
     }
 
-
-
-
     #[test]
     fn rerun_rows() {
         // AC-HP (Change 4): rerun resolves the command line to re-send - the
@@ -2799,8 +2772,6 @@ mod tests {
         assert_eq!(pane.rerun_command(), None);
     }
 
-
-
     #[test]
     fn takeover_rows() {
         // The `.`=here take-over reap gate. Only a shell that has drawn a prompt and run
@@ -2855,8 +2826,6 @@ mod tests {
         );
         assert!(!ran.is_pristine_idle_shell(), "Idle is not pristine");
     }
-
-
 
     // -- Turn blocks (hook-emitted markers) -------------------------------------
 
@@ -2954,7 +2923,6 @@ mod tests {
         assert_eq!(pane.block_select(BlockDir::Prev), Some(0));
         assert_eq!(pane.rerun_command().as_deref(), Some("ls"));
     }
-
 
     #[test]
     fn unbalanced_turn_markers_degrade_never_corrupt() {
@@ -3081,8 +3049,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn search_edge_rows() {
         // Boundaries: an empty query is a clear, not a scan that matches every row.
@@ -3115,9 +3081,6 @@ mod tests {
         assert!(!pane.has_selection());
         assert_eq!(pane.search_step(BlockDir::Next), None);
     }
-
-
-
 
     #[test]
     fn search_step_re_anchors_when_older_matches_age_out() {

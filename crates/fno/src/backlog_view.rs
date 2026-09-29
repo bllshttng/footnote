@@ -1211,8 +1211,6 @@ mod tests {
         assert!(gate.failure());
     }
 
-
-
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
     }
@@ -1257,7 +1255,6 @@ mod tests {
         ))
         .is_empty());
     }
-
 
     /// The graph as five projects' work plus one unscoped node, the shape the
     /// operator actually reads.
@@ -1322,10 +1319,6 @@ mod tests {
         assert_eq!(q.total(), 3);
     }
 
-
-
-
-
     #[test]
     fn scope_wire_rows() {
         // Same process-global env var as the resolve tests above: serialize
@@ -1383,8 +1376,6 @@ mod tests {
         // lane renders.
         assert_eq!(parse_board_scope(""), BoardScope::Projects(HashSet::new()));
     }
-
-
 
     #[test]
     fn workspace_projects_reads_the_config_block_or_refuses() {
@@ -1529,8 +1520,6 @@ mod tests {
         assert_eq!(ids, vec!["x-non", "x-pad"]);
     }
 
-
-
     #[test]
     fn every_refusal_reason_names_the_board_it_actually_produces() {
         let _env_lock = lock_board_scope_env();
@@ -1577,7 +1566,6 @@ mod tests {
             None => std::env::remove_var(key),
         }
     }
-
 
     #[test]
     fn external_backend_selected_follows_the_python_resolution() {
@@ -1754,8 +1742,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn board_order_rows() {
         // fno before (unscoped); within fno, ranked before unranked; then prio.
@@ -1790,7 +1776,6 @@ mod tests {
             "named lane first; blank-project last"
         );
     }
-
 
     #[test]
     fn malformed_document_is_none_not_empty() {
@@ -1977,7 +1962,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn lanes_render_in_canonical_board_order() {
         // The overlay reads left-to-right as a lifecycle, so the lane list must
@@ -2103,7 +2087,6 @@ mod tests {
         );
     }
 
-
     /// AC4-HP: an unchanged stamp AND an unchanged claim overlay derive
     /// nothing - three ticks, one derivation. This is the test that failed
     /// before the derivation memoized on its inputs.
@@ -2158,8 +2141,6 @@ mod tests {
     /// AC4-EDGE, failure half: a corrupt cached document memoizes the failed
     /// derivation, and the memoized failure still increments the counter
     /// every tick, so the stale marker arrives after STALE_AFTER_FAILED_READS.
-
-
 
     // ---- claims overlay -----------------------------------------
 
@@ -2273,8 +2254,6 @@ mod tests {
         assert!(st.tick(s, || None, Some(&b)).is_none());
         assert!(st.tick(s, || None, None).is_none());
     }
-
-
 
     #[test]
     fn sweep_parse_takes_only_live_node_and_dispatch_claims() {

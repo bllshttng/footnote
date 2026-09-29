@@ -1948,9 +1948,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
-
-
     #[test]
     fn bridge_status_is_valid_json_the_browser_keys_on() {
         let s = bridge_status("disconnected");
@@ -2189,7 +2186,6 @@ console.log("evictedRowCount: 18 cases ok");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
     }
 
-
     /// The route serves the vendored page behind the token, from a state
     /// root with no graph.html in it: the page is built in, so no render
     /// step exists to run first, and no 404 can name one.
@@ -2343,7 +2339,6 @@ console.log("backlog page helpers: 12 cases ok");
         }
     }
 
-
     #[test]
     fn nav_fragment_rows() {
         for (page, name) in [
@@ -2378,8 +2373,6 @@ console.log("backlog page helpers: 12 cases ok");
         assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
         assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
-
-
 
     #[tokio::test]
     async fn crown_requires_token_and_serves_private_file_without_cache() {
@@ -2679,9 +2672,6 @@ console.log("backlog page helpers: 12 cases ok");
             "a pane that keeps updating survives the eviction sweep"
         );
     }
-
-
-
 
     #[test]
     fn rev_is_stale_only_flags_known_different_revs() {

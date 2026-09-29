@@ -2920,8 +2920,6 @@ mod tests {
         assert_eq!(unattributable, 0);
     }
 
-
-
     #[test]
     fn a_registered_row_with_a_full_uuid_short_id_attaches_by_its_job_id() {
         // The register path once wrote the FULL uuid into short_id, and
@@ -3563,8 +3561,6 @@ unheard_of_field = true
         );
     }
 
-
-
     #[test]
     fn full_harness_session_ids_remain_distinct_for_same_prefix() {
         let raw = reg(
@@ -3720,8 +3716,6 @@ unheard_of_field = true
         assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
     }
 
-
-
     // ---- Union merge + dual-doc ReaderState (task 1.2) ----
 
     fn worker(short: &str, name: &str, cwd: &str) -> RosterWorker {
@@ -3787,8 +3781,6 @@ unheard_of_field = true
         );
         assert!(merged.iter().all(|r| !r.external));
     }
-
-
 
     // ReaderState: two mtime-gated docs, merged change gate, per-source
     // last-good on a torn write vs empty on a vanished file (AC1-ERR, AC2-FR).
@@ -4023,8 +4015,6 @@ config_dir = "~/.claude-alt"
         let empty_dir = "[[providers.records]]\nid = \"a\"\nconfig_dir = \"\"\n";
         assert!(parse_isolated_dirs(empty_dir, None).is_empty());
     }
-
-
 
     #[test]
     fn isolated_roster_workers_tagged_by_account(/* AC1-EDGE */) {
@@ -4522,11 +4512,6 @@ config_dir = "~/.claude-alt"
         assert!(badges.is_empty());
     }
 
-
-
-
-
-
     #[test]
     fn newest_fire_wins_and_missing_events_empty() {
         let t = Tmp::new("newest");
@@ -4603,7 +4588,6 @@ config_dir = "~/.claude-alt"
             .is_empty());
     }
 
-
     #[test]
     fn reconcile_holds_a_record_observed_unknown() {
         // codex P2: a tracked id observed as Unknown (present but indeterminate)
@@ -4617,7 +4601,6 @@ config_dir = "~/.claude-alt"
         assert_eq!(out.len(), 1, "an unknown-observed record is not deleted");
         assert_eq!(out[0].state, ExternalState::Unknown);
     }
-
 
     #[test]
     fn reconcile_state_rows() {
@@ -4690,9 +4673,6 @@ config_dir = "~/.claude-alt"
         );
         assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
     }
-
-
-
 
     // (US4 resolve_branch family) moved verbatim into its own module: this file is over the
     // shrink-only line, and test motion is the sanctioned shrink.

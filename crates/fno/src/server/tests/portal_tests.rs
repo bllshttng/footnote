@@ -371,7 +371,6 @@ fn reaching_an_occupied_portal_repoints_only_that_index() {
     );
 }
 
-
 #[test]
 fn every_viewer_death_parks_its_portal_on_no_signal() {
     // AC1-HP (x-3349, re-ruled as the TV model). A portal outlives its
@@ -719,10 +718,6 @@ fn thread_pane_open_rows() {
     core.reap_pane(pid);
 }
 
-
-
-
-
 #[test]
 fn thread_pane_ctl_rows() {
     // The control door reaches by name while the slot is keyed by the
@@ -842,7 +837,6 @@ fn thread_pane_ctl_rows() {
     assert!(core.portals.is_empty(), "no thread pane minted");
 }
 
-
 #[test]
 fn thread_pane_tier_rows() {
     // A paneless codex row (Follow) tails its transcript; a gemini row
@@ -947,10 +941,6 @@ fn thread_pane_tier_rows() {
     assert!(notices.iter().any(|t| t.contains("more than one row")));
     assert!(core.portals.is_empty(), "no slot recorded on a refusal");
 }
-
-
-
-
 
 #[test]
 fn portal_new_rows() {
@@ -1108,11 +1098,6 @@ fn portal_new_rows() {
         "no index was repointed"
     );
 }
-
-
-
-
-
 
 #[test]
 fn tab_capture_rows() {
@@ -1273,8 +1258,6 @@ fn tab_capture_rows() {
     assert_eq!(core.portals.len(), 2, "both portals still open");
     assert!(core.session.find_pane(seats[1]).is_some());
 }
-
-
 
 #[test]
 fn portal_refusal_rows() {
@@ -1696,7 +1679,6 @@ fn portal_new_split_cmd(id: &str) -> Command {
     }
 }
 
-
 #[tokio::test]
 async fn portal_new_split_on_a_claude_row_survives_the_reentry_replay() {
     // (x-4572, AC2-ERR) A claude row's first reach pass parks; the replay
@@ -1789,9 +1771,6 @@ async fn portal_new_split_on_a_claude_row_survives_the_reentry_replay() {
     );
     core.reap_pane(seat); // don't leak the stand-in child
 }
-
-
-
 
 // ---- (x-d545) the remembered tab outlives its viewer ----
 
@@ -1988,8 +1967,6 @@ fn close_pane_rows() {
     core.reap_pane(b_pid);
 }
 
-
-
 /// A live paneless claude row (the Drive tier): harness claude plus an
 /// attach id is exactly the shape the re-entry resolver owns.
 fn claude_row(name: &str, attach: &str) -> RegistryAgent {
@@ -2158,7 +2135,6 @@ async fn portal_ctl_reaches_a_paneless_row_whose_key_also_matches_a_hosted_row()
     assert!(core.portals.get(&1).is_some_and(|e| e.seat == new_pid));
     core.reap_pane(new_pid); // don't leak the stand-in child
 }
-
 
 // ---- (x-a9b4) portals survive the restart: capture, hold, fill ----------
 
@@ -2478,9 +2454,6 @@ fn restore_seat_rows() {
     );
 }
 
-
-
-
 #[test]
 fn a_surviving_viewer_rearmed_live_still_focuses_without_a_second_viewer() {
     // AC2-EDGE: a viewer that genuinely survived the restart re-adopts
@@ -2638,9 +2611,6 @@ fn held_fill_refusal_rows() {
     assert!(core.portal_seat_is_viewer(seat), "a real viewer is live");
 }
 
-
-
-
 #[test]
 fn held_reach_rows() {
     // AC6-HP: the held seat at portal 1 shows a shell; focusing it swaps
@@ -2776,10 +2746,6 @@ fn held_reach_rows() {
         "the seat is still the held portal"
     );
 }
-
-
-
-
 
 #[test]
 fn the_notice_latch_holds_through_the_restart_path() {
@@ -3181,9 +3147,6 @@ fn close_portal_refusal_rows() {
     );
 }
 
-
-
-
 #[test]
 fn pane_list_names_the_portal_and_never_reads_a_seat_pristine() {
     // AC9-HP. The pane listing carries `portal` on a live seat and
@@ -3452,7 +3415,3 @@ fn title_claim_rows() {
     core.reap_pane(seat0);
     core.reap_pane(seat1);
 }
-
-
-
-

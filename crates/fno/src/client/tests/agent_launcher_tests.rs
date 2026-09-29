@@ -190,7 +190,6 @@ fn arrow_reaches_the_dock_whole_or_scanner_rejoined() {
     );
 }
 
-
 #[test]
 fn chip_walk_rows() {
     let mut v = view_with_launcher();
@@ -252,7 +251,6 @@ fn chip_walk_rows() {
     ));
 }
 
-
 #[test]
 fn enter_inserts_newline_in_message_and_never_submits() {
     let mut v = view_with_launcher();
@@ -289,7 +287,6 @@ fn paste_rows() {
     let rest = esc.fold(&full[1..]);
     assert_eq!(rest, vec![super::agent_launcher::LKey::Char('\u{1f600}')]);
 }
-
 
 #[test]
 fn submit_refusal_rows() {
@@ -457,7 +454,6 @@ fn draft_staleness_rows() {
     }
 }
 
-
 #[test]
 fn launched_pane_update_returns_the_focus_pane_and_the_seed_note() {
     let mut v = view_with_launcher();
@@ -547,8 +543,6 @@ fn wrap_rows() {
     let (r, c) = super::agent_launcher::wrapped_cursor("abcdefgh", 8, 4);
     assert_eq!((r, c), (1, 4), "cursor at the very end");
 }
-
-
 
 /// A Starting attempt whose update is lost must stay escapable: Esc during
 /// Submitting cancels the attempt and returns the sheet to Editing (retry
@@ -786,9 +780,6 @@ fn motion_over_the_project_chip_shows_the_cwd_line_and_a_press_outside_closes_th
     assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
 }
 
-
-
-
 #[test]
 fn chip_paint_rows() {
     let area = RtRect::new(0, 0, 6, 1);
@@ -819,7 +810,6 @@ fn chip_paint_rows() {
         "the caret stays visible: {painted}"
     );
 }
-
 
 #[test]
 fn chips_carry_values_not_axis_names() {
@@ -1026,8 +1016,6 @@ fn model_picker_rows() {
     ));
 }
 
-
-
 /// The regression behind the model-floor contract: a claude account with no
 /// pinned model
 /// emptied the Model tab, because the catalog read every harness but
@@ -1121,8 +1109,6 @@ fn model_floor_rows() {
         "the pin keeps its route"
     );
 }
-
-
 
 /// The regression that forced the tab rewrite: the unavailable row's LABEL
 /// used to be ellipsized to fit the long error hint, so "model list
@@ -1318,8 +1304,6 @@ fn pill_rows() {
     assert_eq!(draft.pills.len(), 1, "the pill stores");
 }
 
-
-
 #[test]
 fn the_flags_picker_lists_the_harness_launch_flags() {
     // AC10-HP: `--` at a word start opens the picker over the harness's
@@ -1362,7 +1346,6 @@ fn the_flags_picker_lists_the_harness_launch_flags() {
     );
 }
 
-
 #[test]
 fn a_chip_owned_typed_flag_still_refuses_at_submit() {
     // AC11-ERR: `--cwd /x` committed verbatim refuses at submit, naming the
@@ -1390,7 +1373,6 @@ fn a_chip_owned_typed_flag_still_refuses_at_submit() {
         other => panic!("expected the chip refusal, got {other:?}"),
     }
 }
-
 
 #[test]
 fn where_picker_lists_local_and_the_placement_rows() {
@@ -1590,7 +1572,6 @@ fn picker_filter_rows() {
     assert!(l.picker.is_none(), "the pick closed the picker");
 }
 
-
 #[test]
 fn at_opens_the_node_picker_and_picking_inserts_the_id() {
     // Change 7: `@` in the message opens a node picker over the layout's
@@ -1764,10 +1745,6 @@ fn open_with_rows() {
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
 }
-
-
-
-
 
 #[test]
 fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
@@ -2045,9 +2022,6 @@ fn sheet_paint_rows() {
     let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
     l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
 }
-
-
-
 
 #[test]
 fn a_picker_open_across_the_catalog_landing_refreshes_on_input() {
@@ -2327,7 +2301,6 @@ fn git_policy_refusal_rows() {
     }
 }
 
-
 #[test]
 fn picking_a_non_current_branch_checks_the_box() {
     // AC8-EDGE: the Branch picker lists main first, then the project's local
@@ -2383,7 +2356,6 @@ fn picking_a_non_current_branch_checks_the_box() {
         "the chip shows the picked branch"
     );
 }
-
 
 #[test]
 fn the_harness_preselect_is_claude_then_codex_never_alphabetical() {

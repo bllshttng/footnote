@@ -5452,7 +5452,14 @@ mod tests {
         // parser must accept its own instrument's remedy. One grammar covers
         // selector, --session override and bare id across the reference verbs.
         let rows: &[(&[&str], Option<&str>, PaneCmd)] = &[
-            (&["kill", "main:76"], Some("main"), PaneCmd::Kill { pane: 76, hand_off_to: None }),
+            (
+                &["kill", "main:76"],
+                Some("main"),
+                PaneCmd::Kill {
+                    pane: 76,
+                    hand_off_to: None,
+                },
+            ),
             (
                 &["kill", "--session", "other", "main:76"],
                 Some("other"),

@@ -44,7 +44,6 @@ fn m(id: &str) -> StoredMember {
     }
 }
 
-
 #[test]
 fn default_test_store_never_targets_the_user_home() {
     super::clear_test_path();
@@ -201,12 +200,6 @@ fn legacy_shape_rows() {
         "a None-portal slot must carry no portal key: {raw}"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn roundtrip_rows() {
@@ -372,8 +365,6 @@ fn valid_worker_name_gate() {
     assert!(!valid_worker_name(&"x".repeat(65)), "overlong");
     assert!(!valid_worker_name("héllo"), "non-ascii");
 }
-
-
 
 #[test]
 fn retire_session_members_tombstones_only_the_matching_identity() {
@@ -591,7 +582,6 @@ fn four_squad_store_on_disk_loads_whole() {
     assert!(loaded.squads.iter().any(|sq| sq.name == "x-bbbb"));
 }
 
-
 #[test]
 fn quarantine_rows() {
     // AC1-ERR: invalid JSON is renamed aside, not fatal.
@@ -652,10 +642,6 @@ fn quarantine_rows() {
     assert!(parse_seed(Some(future.clone()), false).is_err());
     assert!(parse_seed(Some(future), true).unwrap().squads.is_empty());
 }
-
-
-
-
 
 #[test]
 fn store_key_rows() {
@@ -745,7 +731,6 @@ fn store_key_rows() {
         "distinct origins derive distinct keys"
     );
 }
-
 
 #[test]
 fn load_repair_rows() {
@@ -874,9 +859,6 @@ fn load_repair_rows() {
     assert_eq!(row.members.len(), 2);
     assert_eq!(row.created_at, "2026-09-01T09:00:00Z");
 }
-
-
-
 
 /// The reaped-row rule: a journal-spawned name that a SUCCESSFUL
 /// registry read does not carry is dead evidence. The inversion this
@@ -1371,8 +1353,6 @@ fn mutate_rows() {
     assert_eq!(load().squads.len(), 1, "no row minted without identity");
 }
 
-
-
 #[test]
 fn collapse_rows() {
     // AC-HP2: the backlog rows carry distinct random keys (the old
@@ -1540,10 +1520,6 @@ fn collapse_rows() {
     assert!(loaded.squads.iter().any(|r| r.name == "two"));
 }
 
-
-
-
-
 #[test]
 fn write_onto_a_corrupt_file_fails_loud_and_never_clobbers() {
     // gemini review: the write path must NOT clobber unreadable content. A
@@ -1636,7 +1612,6 @@ fn lc(id: &str) -> Option<ExternalLifecycle> {
         .into_iter()
         .find(|r| r.attach_id == id)
 }
-
 
 #[test]
 fn begin_stop_rows() {
@@ -1746,11 +1721,6 @@ fn begin_stop_rows() {
     );
 }
 
-
-
-
-
-
 #[test]
 fn reconcile_rows() {
     // Lost-update guard (code review): a record a concurrent operator action
@@ -1827,8 +1797,6 @@ fn reconcile_rows() {
     assert_eq!(loaded.squads.len(), 2, "squads survive a lifecycle write");
     assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopped);
 }
-
-
 
 #[test]
 fn prune_predicate_matrix() {
@@ -2035,14 +2003,6 @@ fn stamp_parser_matches_a_known_epoch() {
         Some(1_709_164_800)
     );
 }
-
-
-
-
-
-
-
-
 
 #[test]
 fn prune_rows() {
@@ -2470,8 +2430,3 @@ fn member_reap_rows() {
     );
     assert!(after.squads[0].members.is_empty());
 }
-
-
-
-
-

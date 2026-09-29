@@ -1363,8 +1363,6 @@ mod tests {
         }
     }
 
-
-
     // -- split ------------------------------------------------------------
 
     #[test]
@@ -1510,10 +1508,6 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
-
-
-
-
     #[test]
     fn tree_split_refusal_rows() {
         let mut tab = Tab {
@@ -1573,7 +1567,6 @@ mod tests {
         assert!(matches!(err, SplitError::TooSmall { .. }), "{err:?}");
         assert_eq!(tab, before, "tree must be unchanged on refusal");
     }
-
 
     // -- navigate -----------------------------------------------------------
 
@@ -1640,7 +1633,6 @@ mod tests {
         };
         assert_eq!(navigate(&node, viewport, 3, Dir::Left), Some(1));
     }
-
 
     // -- close ----------------------------------------------------------
 
@@ -1727,7 +1719,6 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
-
     #[test]
     fn tree_close_edge_rows() {
         let mut tab = Tab {
@@ -1751,7 +1742,6 @@ mod tests {
         assert!(!close(&mut tab, VIEWPORT, 999));
         assert_eq!(tab, before);
     }
-
 
     // -- resize -----------------------------------------------------------
 
@@ -1981,10 +1971,6 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
-
-
-
-
     #[test]
     fn tree_set_seam_pos_refusal_rows() {
         // f32::clamp panics on a NaN bound, and `lo > hi` cannot catch one -
@@ -2067,7 +2053,6 @@ mod tests {
         assert!(!set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
     }
 
-
     #[test]
     fn tree_set_seam_pos_resolves_a_seam_flanked_by_nested_panes() {
         // A seam runs past every pane in the children it separates, so naming
@@ -2098,7 +2083,6 @@ mod tests {
         assert_eq!(ratios(&via_top, &[0]), vec![0.5, 0.5]);
         check_invariants(&via_top).unwrap();
     }
-
 
     // -- replace_leaf (open-here) --------------------------------
 
@@ -2172,9 +2156,6 @@ mod tests {
         assert!(replace_leaf(&mut tab, 2, 9));
         assert_eq!(tab.focus, 1);
     }
-
-
-
 
     // -- move_leaf -------------------------------------------------
 
@@ -2368,14 +2349,6 @@ mod tests {
         );
         assert_eq!(tab, before);
     }
-
-
-
-
-
-
-
-
 }
 
 #[cfg(test)]
@@ -2611,9 +2584,6 @@ mod detach_graft_tests {
         assert_ne!(new_focus, 3);
     }
 
-
-
-
     #[test]
     fn tree_graft_rows() {
         let mut dst = tab_1234();
@@ -2650,8 +2620,6 @@ mod detach_graft_tests {
         assert_eq!(before, dst, "destination unchanged on min-size refusal");
     }
 
-
-
     #[test]
     fn tree_move_round_trip_rows() {
         // AC1-FR substrate: split_at inserts beside an arbitrary target and
@@ -2674,7 +2642,6 @@ mod detach_graft_tests {
         assert_eq!(before, after, "pane set preserved across detach+graft");
         check_invariants(&t).unwrap();
     }
-
 
     #[test]
     fn tree_anchored_candidate_rows() {
@@ -2731,6 +2698,4 @@ mod detach_graft_tests {
         );
         assert_eq!(t.root, before.root);
     }
-
-
 }

@@ -2338,11 +2338,6 @@ mod tests {
         );
     }
 
-
-
-
-
-
     #[test]
     fn meta_rows_name_the_live_prefix() {
         // The literal-prefix row is built from `prefix()`, so it cannot keep
@@ -2847,10 +2842,6 @@ mod tests {
         );
     }
 
-
-
-
-
     const RESIZE_R: Event = Event::Cmd(Command::ResizeDir(Dir::Right));
 
     #[test]
@@ -3010,15 +3001,6 @@ mod tests {
             );
         }
     }
-
-
-
-
-
-
-
-
-
 
     #[test]
     fn pane_id_chord_is_rebindable_and_repeats_without_prefix() {
