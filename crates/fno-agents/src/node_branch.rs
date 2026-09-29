@@ -149,13 +149,15 @@ pub(crate) fn mint(row: &Value) -> Option<String> {
     let id = row.get("id").and_then(Value::as_str)?;
     let k = kind(row);
     let mut words = mini_words(id, row_slug(row));
-    loop {
-        let name = if words.is_empty() {
+    let named = |words: &[String]| {
+        if words.is_empty() {
             format!("{k}/{id}")
         } else {
             format!("{k}/{id}-{}", words.join("-"))
-        };
-        if node_ids(&name) == vec![id.to_string()] {
+        }
+    };
+    loop {
+        if node_ids(&named(&words)) == vec![id.to_string()] {
             break;
         }
         if words.pop().is_none() {
@@ -165,11 +167,7 @@ pub(crate) fn mint(row: &Value) -> Option<String> {
     if words.last().is_some_and(|w| w.chars().count() == 1) {
         words.pop();
     }
-    Some(if words.is_empty() {
-        format!("{k}/{id}")
-    } else {
-        format!("{k}/{id}-{}", words.join("-"))
-    })
+    Some(named(&words))
 }
 
 /// The branch names a node's work may already live on, in preference order:
