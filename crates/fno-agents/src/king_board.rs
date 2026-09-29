@@ -600,9 +600,22 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 if bound.is_zero() {
                     return SourceRead::over_budget(spent_err);
                 }
-                match crate::backlog::worked::json_rows() {
-                    Ok(rows) => SourceRead::ok(Value::Array(rows)),
-                    Err(reason) => SourceRead::err(format!("worked: {reason}")),
+                // The fold is in-process, so the subprocess read's kill at
+                // the slice becomes a race: the fold runs on its own thread
+                // and this one abandons it at the bound rather than joining
+                // forever. The abandoned thread holds only read locks and
+                // its result is dropped when it lands late.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::backlog::worked::json_rows());
+                });
+                match rx.recv_timeout(bound) {
+                    Ok(Ok(rows)) => SourceRead::ok(Value::Array(rows)),
+                    Ok(Err(reason)) => SourceRead::err(format!("worked: {reason}")),
+                    Err(_) => SourceRead::err(format!(
+                        "worked: killed at its {:.1}s slice of the board budget; the source did not fail",
+                        bound.as_secs_f64()
+                    )),
                 }
             })
         });

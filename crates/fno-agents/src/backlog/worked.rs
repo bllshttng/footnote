@@ -959,16 +959,23 @@ fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>,
 // The verb
 // ---------------------------------------------------------------------------
 
+/// The strict authority both spellings serve: the graph rows and the
+/// worked fold over them. Strict, like the python twin's
+/// read_graph_strict: a corrupt graph is an unreadable authority, never
+/// an empty fleet.
+fn authority() -> Result<(Vec<Value>, Vec<(String, Vec<String>)>), String> {
+    let graph = super::settings::graph_path();
+    let entries = crate::graph_store::read_rows_strict(&graph)
+        .map_err(|_| "the graph is unreadable".to_string())?;
+    let worked = live_worked_node_ids(&entries)?;
+    Ok((entries, worked))
+}
+
 /// The `--json` rows, in-process: the same payload `run --json` prints,
 /// without a process. The king board reads this directly because the Python
 /// worked leg is a refusing tombstone.
 pub(crate) fn json_rows() -> Result<Vec<Value>, String> {
-    let graph = super::settings::graph_path();
-    // Strict, like the python twin's read_graph_strict: a corrupt graph is
-    // an unreadable authority, never an empty fleet.
-    let entries = crate::graph_store::read_rows_strict(&graph)
-        .map_err(|_| "the graph is unreadable".to_string())?;
-    let worked = live_worked_node_ids(&entries)?;
+    let (entries, worked) = authority()?;
     let by_id: BTreeMap<&str, &Value> = entries
         .iter()
         .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
@@ -1033,13 +1040,8 @@ pub fn run(args: &[String]) -> i32 {
             }
         };
     }
-    let graph = super::settings::graph_path();
-    let Ok(entries) = crate::graph_store::read_rows_strict(&graph) else {
-        eprintln!("Error: worked authority unavailable: the graph is unreadable");
-        return 1;
-    };
-    let worked = match live_worked_node_ids(&entries) {
-        Ok(worked) => worked,
+    let (entries, worked) = match authority() {
+        Ok(pair) => pair,
         Err(reason) => {
             eprintln!("Error: worked authority unavailable: {reason}");
             return 1;
