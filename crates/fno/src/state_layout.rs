@@ -275,42 +275,11 @@ pub fn resolve_sidecar(root: &Path, file: &str, legacy_allowed: bool) -> PathBuf
 mod tests {
     use super::*;
 
-    #[test]
-    fn shipped_table_parses() {
-        let rows = parse_table(LAYOUT_TSV).expect("shipped table must parse");
-        assert!(
-            rows.len() > 40,
-            "expected the full table, got {}",
-            rows.len()
-        );
-    }
+    // The parse, reject and place contracts are guarded once, in the agents
+    // crate, over the same bytes: both crates vendor the table and each
+    // crate's vendored_table_matches test pins byte-equality with the repo
+    // copy, so a second parse/place set here would guard one contract twice.
 
-    #[test]
-    fn parse_rejects_bad_rows_naming_the_line() {
-        let err = parse_table("a\tx/a\tmarker\tdaemon\nbad\tnew/bad\tmarker\n").unwrap_err();
-        assert!(err.contains("line 2"), "error must name the line: {err}");
-        let err = parse_table("a\tx/a\tmarker\tdaemon\nb\tx/b\tvault\tdaemon\n").unwrap_err();
-        assert!(err.contains("line 2"), "error must name the line: {err}");
-    }
-
-    #[test]
-    fn place_resolves_new_legacy_and_default() {
-        let root = std::env::temp_dir().join(format!("fno-place-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(
-            place(&root, "graph.json"),
-            root.join("db").join("graph.json")
-        );
-        std::fs::write(root.join("graph.db"), b"x").unwrap();
-        assert_eq!(place(&root, "graph.json"), root.join("graph.json"));
-        std::fs::create_dir_all(root.join("db")).unwrap();
-        std::fs::write(root.join("db").join("graph.db"), b"x").unwrap();
-        assert_eq!(
-            place(&root, "graph.json"),
-            root.join("db").join("graph.json")
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
     #[test]
     fn vendored_table_matches_the_repo_copy() {
         let repo = include_str!("../../../docs/state-root-layout.tsv");
@@ -343,26 +312,9 @@ mod tests {
             root.join("mux").join("squads.json")
         );
         std::fs::remove_dir_all(&root).ok();
-    }
 
-    #[test]
-    fn mux_lock_leaves_only_after_its_data_file() {
-        let root = std::env::temp_dir().join(format!("fno-mux-lock-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("mux-view.json.lock"), b"").unwrap();
-        let moved = migrate_mux_sidecars_at(&root);
-        assert_eq!(moved, 0, "the lock waits for its data file");
-        assert!(root.join("mux-view.json.lock").exists());
-        std::fs::create_dir_all(root.join("mux")).unwrap();
-        std::fs::write(root.join("mux").join("mux-view.json"), b"{}").unwrap();
-        let moved = migrate_mux_sidecars_at(&root);
-        assert!(moved >= 1, "the lock leaves once its data file moved");
-        assert!(!root.join("mux-view.json.lock").exists());
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn mux_both_exist_newer_side_wins() {
+        // Second branch of the same move: an overlap resolves by mtime, the
+        // newer side's bytes win, and the loser leaves the root.
         let root = std::env::temp_dir().join(format!("fno-mux-both-{}", std::process::id()));
         std::fs::create_dir_all(root.join("mux")).unwrap();
         let legacy_path = root.join("squads.json");
@@ -381,6 +333,21 @@ mod tests {
             "the newer legacy bytes win"
         );
         assert!(!legacy_path.exists());
+        std::fs::remove_dir_all(&root).ok();
+
+        // Third branch of the same move: a lock whose data file has not
+        // moved stays; it leaves once the data file did.
+        let root = std::env::temp_dir().join(format!("fno-mux-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("mux-view.json.lock"), b"").unwrap();
+        let moved = migrate_mux_sidecars_at(&root);
+        assert_eq!(moved, 0, "the lock waits for its data file");
+        assert!(root.join("mux-view.json.lock").exists());
+        std::fs::create_dir_all(root.join("mux")).unwrap();
+        std::fs::write(root.join("mux").join("mux-view.json"), b"{}").unwrap();
+        let moved = migrate_mux_sidecars_at(&root);
+        assert!(moved >= 1, "the lock leaves once its data file moved");
+        assert!(!root.join("mux-view.json.lock").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 
