@@ -5447,96 +5447,61 @@ mod tests {
     }
 
     #[test]
-    fn pane_positional_takes_a_session_colon_pane_selector() {
+    fn pane_positional_parse_rows_session_and_cmd_pairs() {
         // The daemon's pane-worker refusals print exactly `main:76`; the
-        // parser must accept its own instrument's remedy.
-        let parsed = pane_args(&["kill", "main:76"]).expect("selector must parse");
-        assert_eq!(parsed.session.as_deref(), Some("main"));
-        assert_eq!(
-            parsed.cmd,
-            PaneCmd::Kill {
-                pane: 76,
-                hand_off_to: None
-            }
-        );
-    }
-
-    #[test]
-    fn pane_explicit_session_flag_beats_the_selector_session() {
-        let parsed = pane_args(&["kill", "--session", "other", "main:76"]).expect("must parse");
-        assert_eq!(parsed.session.as_deref(), Some("other"));
-        assert_eq!(
-            parsed.cmd,
-            PaneCmd::Kill {
-                pane: 76,
-                hand_off_to: None
-            }
-        );
-    }
-
-    #[test]
-    fn pane_bare_id_still_parses_with_no_session() {
-        let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
-        assert_eq!(parsed.session, None);
-        assert_eq!(
-            parsed.cmd,
-            PaneCmd::Kill {
-                pane: 76,
-                hand_off_to: None
-            }
-        );
-    }
-
-    #[test]
-    fn pane_focus_accepts_a_session_colon_pane_selector() {
-        let parsed = pane_args(&["focus", "main:76"]).expect("selector must parse");
-        assert_eq!(parsed.session.as_deref(), Some("main"));
-        assert_eq!(
-            parsed.cmd,
-            PaneCmd::Focus {
-                target: FocusTarget::Pane(76)
-            }
-        );
-    }
-
-    #[test]
-    fn pane_focus_rejects_a_non_numeric_session_colon_pane_selector() {
-        assert_eq!(
-            pane_args(&["focus", "main:x"]).unwrap_err(),
-            r#"pane id needs a number, got "main:x""#
-        );
-    }
-
-    #[test]
-    fn pane_focus_explicit_session_flag_beats_the_selector_session() {
-        let parsed = pane_args(&["focus", "--session", "other", "main:76"]).expect("must parse");
-        assert_eq!(parsed.session.as_deref(), Some("other"));
-        assert_eq!(
-            parsed.cmd,
-            PaneCmd::Focus {
-                target: FocusTarget::Pane(76)
-            }
-        );
+        // parser must accept its own instrument's remedy. One grammar covers
+        // selector, --session override and bare id across the reference verbs.
+        let rows: &[(&[&str], Option<&str>, PaneCmd)] = &[
+            (&["kill", "main:76"], Some("main"), PaneCmd::Kill { pane: 76, hand_off_to: None }),
+            (
+                &["kill", "--session", "other", "main:76"],
+                Some("other"),
+                PaneCmd::Kill {
+                    pane: 76,
+                    hand_off_to: None,
+                },
+            ),
+            (
+                &["kill", "76"],
+                None,
+                PaneCmd::Kill {
+                    pane: 76,
+                    hand_off_to: None,
+                },
+            ),
+            (
+                &["focus", "main:76"],
+                Some("main"),
+                PaneCmd::Focus {
+                    target: FocusTarget::Pane(76),
+                },
+            ),
+            (
+                &["focus", "--session", "other", "main:76"],
+                Some("other"),
+                PaneCmd::Focus {
+                    target: FocusTarget::Pane(76),
+                },
+            ),
+        ];
+        for (tokens, session, cmd) in rows {
+            let parsed = pane_args(tokens).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+            assert_eq!(parsed.session.as_deref(), *session, "{tokens:?}");
+            assert_eq!(&parsed.cmd, cmd, "{tokens:?}");
+        }
     }
 
     #[test]
     fn pane_help_names_the_two_pane_reference_forms() {
         // The verb-position help request renders the pane group's help now
-        // (clap); its after_help carries the pane reference line.
-        let help = crate::cli_args::pane_group_help();
-        assert!(help.contains("<pane-id>"), "{help}");
-        assert!(help.contains("<session>:<pane-id>"), "{help}");
-        assert!(help.contains("--session overrides"), "{help}");
-    }
-
-    #[test]
-    fn pane_run_help_documents_the_worker_flag() {
-        // the flag is the capture funnel's front door, so the run
-        // verb's own help names it and what it records. The group help
-        // (after_help) and the -h inside the run tail reach the same text.
-        let group_help = crate::cli_args::pane_group_help();
-        let tail_help = parse_pane_args(&op_of("run"), &os(&["--help"])).unwrap_err();
-        for help in [group_help, tail_help] {
+        // (clap); its after_help carries the pane reference line. The run
+        // tail's own -h reaches the same text, plus the worker flag contract.
+        let group = crate::cli_args::pane_group_help();
+        assert!(group.contains("<pane-id>"), "{group}");
+        assert!(group.contains("<session>:<pane-id>"), "{group}");
+        assert!(group.contains("--session overrides"), "{group}");
+        let tail = parse_pane_args(&op_of("run"), &os(&["--help"])).unwrap_err();
+        for help in [group, tail] {
             assert!(help.contains("--worker"), "{help}");
             assert!(
                 help.contains("idle row"),
@@ -5571,18 +5536,22 @@ mod tests {
 
     #[test]
     fn pane_malformed_selector_names_the_raw_token() {
-        assert_eq!(
-            pane_args(&["kill", "main:x"]).unwrap_err(),
-            r#"pane id needs a number, got "main:x""#
-        );
-        assert_eq!(
-            pane_args(&["kill", "main:"]).unwrap_err(),
-            r#"pane id needs a number, got "main:""#
-        );
-        assert_eq!(
-            pane_args(&["kill", ":76"]).unwrap_err(),
-            r#"pane id needs a number, got ":76""#
-        );
+        // Same refusal shape for every verb and every malformed spelling.
+        let rows: &[(&[&str], &str)] = &[
+            (
+                &["kill", "main:x"],
+                r#"pane id needs a number, got "main:x""#,
+            ),
+            (&["kill", "main:"], r#"pane id needs a number, got "main:""#),
+            (&["kill", ":76"], r#"pane id needs a number, got ":76""#),
+            (
+                &["focus", "main:x"],
+                r#"pane id needs a number, got "main:x""#,
+            ),
+        ];
+        for (tokens, expected) in rows {
+            assert_eq!(&pane_args(tokens).unwrap_err(), expected, "{tokens:?}");
+        }
     }
 
     #[test]
@@ -5678,7 +5647,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_selector_prefers_the_pane_hosted_spelling() {
+    fn resolve_selector_duplicate_identity_tie_breaks() {
         // One identity, two rows: the pane-hosted spelling wins so a paneless
         // duplicate never masks the live pane.
         let mut paneless = reg_row("wake-cac9965a", Some("aaaa1111"));
@@ -5690,10 +5659,7 @@ mod tests {
             other => panic!("expected Found, got {other:?}"),
         }
         assert!(hosted.mux.is_some());
-    }
 
-    #[test]
-    fn resolve_selector_prefers_a_live_row_over_a_stale_pane_ref() {
         // No writer clears `mux` on exit, so an exited row can carry a dead
         // pane ref: a live pane-hosted spelling of the same identity wins.
         let mut dead = reg_row("t-x919-finish", Some("aaaa1111"));
@@ -5708,10 +5674,7 @@ mod tests {
             }
             other => panic!("expected Found, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn resolve_selector_refuses_a_paneless_live_row_over_a_stale_pane_ref() {
         // A live paneless row and an exited row disagree about the mux ref.
         // The stale ref is not a safe fallback: selecting it can address a
         // different worker after the pane id was reused.
