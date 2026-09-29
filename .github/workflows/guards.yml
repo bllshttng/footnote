@@ -142,6 +142,17 @@ jobs:
           # FNO_AGENTS_FRONT instead.
           if [ "$CI" = true ]; then cp target/debug/fno-agents "$HOME/.cargo/bin/"; fi
 
+      # The authoring gate is prose in three skill files; this step is the
+      # machine refusal. The base is the merge base, so removals bank no
+      # credit: each change measures against its own base, the same rule as
+      # scripts/ci/check_flag_registry.py, and the census can only fall.
+      - name: Test declarations are shrink-only
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        env:
+          TEST_BASE: ${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
+        run: fno-agents test-delta --base "$TEST_BASE" --max-net 0
+
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}
         working-directory: cli

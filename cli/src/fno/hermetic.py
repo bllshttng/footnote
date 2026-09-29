@@ -200,7 +200,7 @@ _ENVIRONMENT: tuple[str, ...] = (
     "XDG_STATE_HOME",  # pinned into the sandbox below
     "XDG_CACHE_HOME",  # a cache, preserved at its real value
     "CARGO_HOME",  # ditto
-    "UV_CACHE_DIR",  # toolchain cache, preserved at its real value
+    "UV_CACHE_DIR",  # ditto: resolved at its real value by the cache pins
     # The toolchain binary itself (rustup shims set it); the cargo_build_dirs
     # lane reads it first, before PATH and ~/.cargo/bin/cargo. A developer's
     # value names the same toolchain the caches above resolve, so a test

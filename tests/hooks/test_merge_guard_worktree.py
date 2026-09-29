@@ -464,8 +464,8 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
 
 
 def test_state_writes_land_under_fno_home():
-    """A blocked protected push writes git-protection.json under FNO_HOME and
-    creates nothing under a harness state dir in the sandbox (AC2-HP)."""
+    """A blocked protected push writes state/git-protection.json under FNO_HOME
+    and creates nothing under a harness state dir in the sandbox (AC2-HP)."""
     with tempfile.TemporaryDirectory() as td:
         fno = Path(td) / ".fno"
         out, _ = _run_hook_subprocess("git push origin main", fno)
