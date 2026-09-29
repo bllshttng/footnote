@@ -3274,118 +3274,16 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_truth_batch_is_capped_by_the_board_budget_and_reads_unmeasured() {
-        // The truth probe's own 20s-to-60s page bound used to run OUTSIDE the
-        // board budget. With a holder seeded (a stale claim) and a `fno` stub
-        // whose truth batch sleeps 30s, the board must cap the batch at what
-        // remains of its own 2,000ms budget, return inside ~2.75s, and read
-        // the holder UNMEASURED - never no-evidence.
-        let _env = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _guard = HOME_LOCK.lock().unwrap();
-        let _restore = EnvRestore::take(&[
-            "FNO_AGENTS_HOME",
-            "FNO_SPACES_DIR",
-            "HOME",
-            "FNO_CLAIMS_ROOT",
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
-        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
-        std::env::set_var("HOME", dir.path());
-        // Declared directly, not through the skip-if-unset pin: a parallel
-        // test's leaked root must not send the claims scan at a dead dir.
-        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
-        // ONE stale claim: off-host holder with an expired TTL reads stale,
-        // and a dead-stated holder is exactly the token the board probes.
-        let now_ms = crate::claims::now_ms();
-        let lock = crate::claims::claim_path("node:king-truth-holder", Some(dir.path())).unwrap();
-        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        std::fs::write(
-            &lock,
-            serde_json::json!({
-                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
-                "key": "node:king-truth-holder",
-                "holder": "claude:t-2440-truth",
-                "acquired_at": now_ms - 3_600_000,
-                "host": "board-test-off-host",
-                "pid_unavailable": true,
-                "expires_at": now_ms - 1_800_000,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        // The truth batch shells to bare `fno` on PATH; stub it to sleep 30s.
-        let stub_dir = dir.path().join("stub-bin");
-        std::fs::create_dir_all(&stub_dir).unwrap();
-        let stub = crate::write_exec_stub(
-            &stub_dir,
-            "fno",
-            "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
-        );
-        let prev_py = std::env::var_os("FNO_PY");
-        let prev_path = std::env::var_os("PATH");
-        let prev_bin = std::env::var_os("FNO_BIN");
-        // Non-truth fno-py reads answer at once.
-        std::env::set_var("FNO_PY", &stub);
-        // The truth batch execs through scrape::fno_bin, which under
-        // cfg!(test) answers only a declared FNO_BIN: pin the same stub
-        // PATH pins.
-        std::env::set_var("FNO_BIN", &stub);
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                stub_dir.display(),
-                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
-            ),
-        );
-
-        let start = std::time::Instant::now();
-        let payload = read_board(&BoardOpts {
-            budget_ms: 2_000,
-            // Pin the board to the temp space: the unset default reads the
-            // test process's cwd, whose real journals and canonical checkout
-            // the needs fold would sync whole, unbudgeted.
-            cwd: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        });
-        let elapsed = start.elapsed();
-
-        match prev_py {
-            Some(v) => std::env::set_var("FNO_PY", v),
-            None => std::env::remove_var("FNO_PY"),
-        }
-        match prev_path {
-            Some(v) => std::env::set_var("PATH", v),
-            None => std::env::remove_var("PATH"),
-        }
-        match prev_bin {
-            Some(v) => std::env::set_var("FNO_BIN", v),
-            None => std::env::remove_var("FNO_BIN"),
-        }
-        assert!(
-            elapsed < std::time::Duration::from_millis(2_750),
-            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
-        );
-        let err = payload["sources"]["holder_activity"]["error"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            err.contains("timed out"),
-            "the holder must read unmeasured, got holder_activity error: {err:?}"
-        );
-    }
-
-    #[test]
     fn a_timed_out_truth_batch_on_a_quiet_board_reads_not_read_never_unreadable() {
         // At load 335 on 12 cores the truth batch timed out on budget and the
         // claim-dependent queues read unreadable, so a quiet board blocked
         // completion on about ten consecutive stops with nothing to act on.
         // A timeout against the board's own deadline is the board stopping,
         // not the source failing: the queues must read not-read, the flag
-        // must stay off, and the receipt must name the read.
+        // must stay off, and the receipt must name the read. The board also
+        // returns inside budget plus the serialization reserve, and the
+        // holder reads unmeasured by the "timed out" receipt word - never
+        // no-evidence.
         let _env = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3446,11 +3344,13 @@ mod tests {
             ),
         );
 
+        let start = std::time::Instant::now();
         let payload = read_board(&BoardOpts {
             budget_ms: 2_000,
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
+        let elapsed = start.elapsed();
 
         match prev_py {
             Some(v) => std::env::set_var("FNO_PY", v),
@@ -3476,6 +3376,20 @@ mod tests {
                 .any(|q| q.contains("stale_claim not read: truth probe: batch of")),
             "the receipt must name the timed-out read: {:?}",
             parsed.blind_queues
+        );
+        // The board must return inside budget plus the serialization
+        // reserve, and the holder must read unmeasured by the receipt word,
+        // never no-evidence.
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_750),
+            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
+        );
+        let err = payload["sources"]["holder_activity"]["error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            err.contains("timed out"),
+            "the holder must read unmeasured, got holder_activity error: {err:?}"
         );
     }
 
