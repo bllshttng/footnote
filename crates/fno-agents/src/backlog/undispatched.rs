@@ -16,18 +16,6 @@ const OBSERVER_COMMAND: &str = "fno backlog undispatched --json";
 const USAGE: &str =
     "usage: fno-agents backlog undispatched [--project P] [--roadmap-id R] [--parent ID] [--mission M]";
 
-fn validate_rows(value: &Value, source: &str) -> Result<Vec<Value>, String> {
-    let Some(rows) = value.as_array() else {
-        return Err(format!("{source} unreadable: expected a list"));
-    };
-    for row in rows {
-        if !row.is_object() {
-            return Err(format!("{source} unreadable: expected object rows"));
-        }
-    }
-    Ok(rows.clone())
-}
-
 /// Transitive children of `parent_id` over the `parent` edge.
 fn descendants(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
     let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -52,7 +40,6 @@ fn descendants(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
     }
     found
 }
-
 
 fn has_pr(entry: &Value) -> bool {
     if truthy(entry.get("pr_number")) {
@@ -222,7 +209,6 @@ pub(crate) fn classify_planned_unclaimed(
         rows.push(row);
     }
 
-
     // One ordering for both queues: the shared selection key over the FULL
     // graph, with the row id as the textual tiebreak (the python tuple's
     // second term). Live claims feed the epic-progress term only.
@@ -231,21 +217,24 @@ pub(crate) fn classify_planned_unclaimed(
         .filter(|(_, state)| state.as_str() == "live")
         .map(|(id, _)| id.clone())
         .collect();
-    let by_id_ref: BTreeMap<String, Value> = by_id.clone();
-    let child_progress = epics_with_child_progress(&by_id_ref);
+    let child_progress = epics_with_child_progress(&by_id);
     let dependents = dependents_fanout(entries);
-    let effective_priority = make_effective_priority(&by_id_ref, &child_progress);
-    let orphans = orphan_ids(entries, &by_id_ref);
-    let epic_in_progress = in_progress_epic_ids(entries, &by_id_ref, &child_progress, &live);
+    let effective_priority = make_effective_priority(&by_id, &child_progress);
+    let orphans = orphan_ids(entries, &by_id);
+    let epic_in_progress = in_progress_epic_ids(entries, &by_id, &child_progress, &live);
     let now_ms = crate::claims::now_ms();
     let mut keyed: Vec<(Vec<crate::backlog_ready::Term>, String, Value)> = rows
         .into_iter()
         .map(|row| {
-            let id = row.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-            let entry = by_id_ref.get(&id).cloned().unwrap_or(Value::Null);
+            let id = row
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let entry = by_id.get(&id).cloned().unwrap_or(Value::Null);
             let key = selection_sort_key(
                 &entry,
-                &by_id_ref,
+                &by_id,
                 &child_progress,
                 &dependents,
                 &effective_priority,
@@ -266,7 +255,6 @@ pub(crate) fn classify_planned_unclaimed(
         "rows": rows,
     }))
 }
-
 
 /// Observer-only rows before the normal selector frontier: (merged, missed).
 pub(crate) fn prepend_missed_rows(
@@ -306,7 +294,10 @@ pub fn run(args: &[String]) -> i32 {
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
-        let takes_value = matches!(arg, "--project" | "-p" | "--roadmap-id" | "--parent" | "--mission");
+        let takes_value = matches!(
+            arg,
+            "--project" | "-p" | "--roadmap-id" | "--parent" | "--mission"
+        );
         let ignored = matches!(arg, "--all" | "-A" | "--json" | "-J");
         let help = matches!(arg, "-h" | "--help");
         if help {
@@ -386,6 +377,9 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    println!("{}", serde_json::to_string_pretty(&receipt).unwrap_or_else(|_| "{}".into()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&receipt).unwrap_or_else(|_| "{}".into())
+    );
     0
 }

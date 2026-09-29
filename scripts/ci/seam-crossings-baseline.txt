@@ -69,6 +69,7 @@ crossing	crates/fno-agents/src/route_slot.rs	let mut cmd = std::process::Command
 crossing	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	let bin = fno_bin();
 crossing	crates/fno-agents/src/scratch.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/select_read.rs	let fno_py: OsString = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/spawn_gate.rs	let _ = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	let mut cmd = Command::new(crate::scrape::fno_bin());

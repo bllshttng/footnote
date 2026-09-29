@@ -1602,7 +1602,7 @@ pub(crate) enum Term {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct OrdF64(f64);
+pub(crate) struct OrdF64(f64);
 
 impl Eq for OrdF64 {}
 
@@ -1907,7 +1907,7 @@ pub fn select(entries: &[Value], opts: &ReadyOpts) -> Result<ReadyReply, NoSuchP
 /// The sort tables the board mode reads, built once per read from the full
 /// graph. The key's other three inputs (child progress, fan-out, orphans)
 /// stay local to [`order_by_selection_key`]: nothing reads them back.
-struct KeyTables {
+pub(crate) struct KeyTables {
     effective_priority: BTreeMap<String, String>,
     epic_in_progress: BTreeSet<String>,
 }

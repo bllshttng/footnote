@@ -6,15 +6,13 @@
 //! `get`, `find`, and `undispatched` arms make.
 
 use crate::backlog_ready::{
-    configured_staleness_days, detect_project, descendants_of, dispatch_node_summary, find_node_index,
-    select, selection_guards, truthy, NoSuchParent, ReadyOpts,
+    configured_staleness_days, descendants_of, detect_project, dispatch_node_summary,
+    find_node_index, select, selection_guards, truthy, NoSuchParent, ReadyOpts,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 const EXTERNAL_SELECTION_TTL: &str = "15m";
-const UNMEASURABLE_LABEL_MARK: &str = "(unmeasurable:";
 const USAGE: &str = "usage: fno-agents backlog next [--project P] [--all] [--ideas] [--include-deferred] [--roadmap-id R] [--parent ID] [--mission M] [--claim SESSION]";
 
 struct Opts {
@@ -88,7 +86,6 @@ fn parse_opts(args: &[String]) -> Option<Opts> {
     Some(o)
 }
 
-
 fn live_claimed_node_ids() -> Result<BTreeSet<String>, String> {
     match crate::claims::list(Some("node:"), None, false) {
         Ok(records) => Ok(records
@@ -120,7 +117,10 @@ fn first_dead_ancestor(
     is_dead: impl Fn(&Value) -> bool,
 ) -> Option<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut cur = entry.get("parent").and_then(Value::as_str).map(str::to_string);
+    let mut cur = entry
+        .get("parent")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mut steps = 0usize;
     while let Some(id) = cur {
         if steps >= 64 {
@@ -136,11 +136,13 @@ fn first_dead_ancestor(
         if is_dead(anc) {
             return Some(id);
         }
-        cur = anc.get("parent").and_then(Value::as_str).map(str::to_string);
+        cur = anc
+            .get("parent")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
     None
 }
-
 
 fn has_unmerged_open_pr(entry: &Value) -> bool {
     if truthy(entry.get("completed_at")) {
@@ -265,7 +267,6 @@ fn starvation_receipts(
     out
 }
 
-
 /// Selector-only safety guards reapplied to the observer's rows, the
 /// observer-only survivors prepended, and one divergence event per missed
 /// row (non-gating).
@@ -294,7 +295,12 @@ fn with_observer(
         .collect();
     let containers = container_ids(source_entries);
     let mut safe_rows: Vec<Value> = Vec::new();
-    for row in observer.get("rows").and_then(Value::as_array).into_iter().flatten() {
+    for row in observer
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let Some(id) = row.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -320,7 +326,7 @@ fn with_observer(
         .cloned()
         .unwrap_or_else(|| json!(0));
     let safe_observer = json!({ "rows": safe_rows, "entries_scanned": scanned });
-    let (mut merged, missed) =
+    let (merged, missed) =
         crate::backlog::undispatched::prepend_missed_rows(candidates, &safe_observer);
     if !missed.is_empty() {
         let mut scope = format!(
@@ -356,85 +362,6 @@ fn with_observer(
     }
     merged
 }
-
-
-pub fn run(args: &[String]) -> i32 {
-    let Some(o) = parse_opts(args) else {
-        eprintln!("{USAGE}");
-        return 2;
-    };
-    if crate::backlog::workflows::active_backend_name() != "graph" {
-        return crate::backlog::cli::forward_to_python("next", args);
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let repo_root = crate::backlog::create_cli::repo_root(&cwd);
-    let now_ms = crate::claims::now_ms();
-    let config_dir = crate::claude_roster::config_dir();
-    let staleness_days =
-        configured_staleness_days(&config_dir).unwrap_or(21).max(1);
-    let fno_dir = super::settings::graph_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| cwd.clone());
-    let held = crate::needs::held_map(&fno_dir, &cwd);
-
-    // One strict read for the prelude AND selection: the working graph, read
-    // at most once for project detection AND parent resolution.
-    let need_prelude = (o.project.is_none() && !o.all) || o.parent.is_some() || o.claim.is_some();
-    let pre_entries = if need_prelude {
-        let graph = super::settings::graph_path();
-        match crate::graph_store::read_rows_strict(&graph) {
-            Ok(rows) => Some(rows),
-            Err(error) => {
-                eprintln!("Error: graph unreadable: {error}; selection refused");
-                return 1;
-            }
-        }
-    } else {
-        None
-    };
-    let mut project_filter = o.project.clone();
-    if project_filter.is_none() && !o.all {
-        let Some(entries) = &pre_entries else {
-            eprintln!("Error: graph unreadable: the prelude is empty; selection refused");
-            return 1;
-        };
-        project_filter = detect_project(entries, &repo_root);
-    }
-    let mut parent_target_id: Option<String> = None;
-    if let Some(parent) = &o.parent {
-        let Some(entries) = &pre_entries else {
-            eprintln!("Error: graph unreadable: the prelude is empty; selection refused");
-            return 1;
-        };
-        let (idx, _fuzzy) = find_node_index(entries, parent);
-        let Some(idx) = idx else {
-            eprintln!("Error: no such node '{parent}'");
-            return 1;
-        };
-        let target_id = entries[idx]
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or(parent)
-            .to_string();
-        if descendants_of(entries, &target_id).is_empty() {
-            eprintln!("no children under {target_id}");
-        }
-        parent_target_id = Some(target_id);
-    }
-
-    // Dispatch occupancy plus the observer receipt, read ONCE per selection.
-    let prepare = |entries: &[Value]| -> Result<(BTreeSet<String>, Value), String> {
-        let claimed = live_claimed_node_ids()?;
-        let worked = crate::backlog::worked::live_worked_node_ids(entries)?;
-        let observer = classify_observer(entries, &claimed, &worked, &o, &project_filter, &parent_target_id)?;
-        let mut occupied = claimed.clone();
-        for (node_id, _workers) in &worked {
-            occupied.insert(node_id.clone());
-        }
-        Ok((occupied, observer))
-    };
-
 
 fn classify_observer(
     entries: &[Value],
@@ -521,9 +448,90 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
     lines
 }
 
+pub fn run(args: &[String]) -> i32 {
+    let Some(o) = parse_opts(args) else {
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    if crate::backlog::workflows::active_backend_name() != "graph" {
+        return crate::backlog::cli::forward_to_python("next", args);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let repo_root = crate::backlog::create_cli::repo_root(&cwd);
+    let now_ms = crate::claims::now_ms();
+    let config_dir = crate::claude_roster::config_dir();
+    let staleness_days = configured_staleness_days(&config_dir).unwrap_or(21).max(1);
+    let fno_dir = super::settings::graph_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| cwd.clone());
+    let held = crate::needs::held_map(&fno_dir, &cwd);
 
+    // One strict read for the prelude AND selection: the working graph, read
+    // at most once for project detection AND parent resolution.
+    let need_prelude = (o.project.is_none() && !o.all) || o.parent.is_some() || o.claim.is_some();
+    let pre_entries = if need_prelude {
+        let graph = super::settings::graph_path();
+        match crate::graph_store::read_rows_strict(&graph) {
+            Ok(rows) => Some(rows),
+            Err(error) => {
+                eprintln!("Error: graph unreadable: {error}; selection refused");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    let mut project_filter = o.project.clone();
+    if project_filter.is_none() && !o.all {
+        let Some(entries) = &pre_entries else {
+            eprintln!("Error: graph unreadable: the prelude is empty; selection refused");
+            return 1;
+        };
+        project_filter = detect_project(entries, &repo_root);
+    }
+    let mut parent_target_id: Option<String> = None;
+    if let Some(parent) = &o.parent {
+        let Some(entries) = &pre_entries else {
+            eprintln!("Error: graph unreadable: the prelude is empty; selection refused");
+            return 1;
+        };
+        let (idx, _fuzzy) = find_node_index(entries, parent);
+        let Some(idx) = idx else {
+            eprintln!("Error: no such node '{parent}'");
+            return 1;
+        };
+        let target_id = entries[idx]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or(parent)
+            .to_string();
+        if descendants_of(entries, &target_id).is_empty() {
+            eprintln!("no children under {target_id}");
+        }
+        parent_target_id = Some(target_id);
+    }
+
+    // Dispatch occupancy plus the observer receipt, read ONCE per selection.
+    let prepare = |entries: &[Value]| -> Result<(BTreeSet<String>, Value), String> {
+        let claimed = live_claimed_node_ids()?;
+        let worked = crate::backlog::worked::live_worked_node_ids(entries)?;
+        let observer = classify_observer(
+            entries,
+            &claimed,
+            &worked,
+            &o,
+            &project_filter,
+            &parent_target_id,
+        )?;
+        let mut occupied = claimed.clone();
+        for (node_id, _workers) in &worked {
+            occupied.insert(node_id.clone());
+        }
+        Ok((occupied, observer))
+    };
     let mut result: Option<Value> = None;
-    let mut selection_claimed: BTreeSet<String> = BTreeSet::new();
+    let selection_claimed: BTreeSet<String>;
     let entries_for_receipts: Vec<Value>;
     if let Some(claim) = &o.claim {
         let Some(pre) = &pre_entries else {
@@ -539,8 +547,15 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
         };
         selection_claimed = occupied.clone();
         let candidates = match select_rows(
-            pre, &o, &project_filter, &parent_target_id, &repo_root, &occupied,
-            staleness_days, now_ms, &held,
+            pre,
+            &o,
+            &project_filter,
+            &parent_target_id,
+            &repo_root,
+            &occupied,
+            staleness_days,
+            now_ms,
+            &held,
         ) {
             Ok(rows) => rows,
             Err(reason) => {
@@ -549,8 +564,18 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
             }
         };
         let merged = with_observer(
-            candidates, pre, &occupied, &observer, project_filter.as_deref(), o.all,
-            o.mission.as_deref(), o.roadmap_id.as_deref(), now_ms, staleness_days, &held, "fno backlog next",
+            candidates,
+            pre,
+            &occupied,
+            &observer,
+            project_filter.as_deref(),
+            o.all,
+            o.mission.as_deref(),
+            o.roadmap_id.as_deref(),
+            now_ms,
+            staleness_days,
+            &held,
+            "fno backlog next",
         );
         let ttl = crate::claims::parse_ttl_ms(EXTERNAL_SELECTION_TTL);
         for winner in &merged {
@@ -558,7 +583,6 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
                 continue;
             };
             let key = format!("node:{node_id}");
-            let root = crate::claims_root::claims_root_for(&key);
             let opts = crate::claims::AcquireOpts {
                 ttl_ms: ttl,
                 ..Default::default()
@@ -600,8 +624,15 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
         };
         selection_claimed = occupied.clone();
         let candidates = match select_rows(
-            &entries, &o, &project_filter, &parent_target_id, &repo_root, &occupied,
-            staleness_days, now_ms, &held,
+            &entries,
+            &o,
+            &project_filter,
+            &parent_target_id,
+            &repo_root,
+            &occupied,
+            staleness_days,
+            now_ms,
+            &held,
         ) {
             Ok(rows) => rows,
             Err(reason) => {
@@ -610,15 +641,24 @@ fn stranded_next_receipts(receipts: &[(String, String)]) -> Vec<String> {
             }
         };
         let merged = with_observer(
-            candidates, &entries, &occupied, &observer, project_filter.as_deref(), o.all,
-            o.mission.as_deref(), o.roadmap_id.as_deref(), now_ms, staleness_days, &held, "fno backlog next",
+            candidates,
+            &entries,
+            &occupied,
+            &observer,
+            project_filter.as_deref(),
+            o.all,
+            o.mission.as_deref(),
+            o.roadmap_id.as_deref(),
+            now_ms,
+            staleness_days,
+            &held,
+            "fno backlog next",
         );
         if let Some(first) = merged.first() {
             result = Some(dispatch_node_summary(first));
         }
         entries_for_receipts = entries;
     }
-
 
     // Zero-silent-starvation receipts: advisory stderr, never breaking the
     // stdout contract.
