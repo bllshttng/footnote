@@ -2813,8 +2813,7 @@ class TestTickRecordsAndDeadline:
         assert notify_rows and notify_rows[-1].get("skip_reason") == "notify_off"
 
     def test_ritual_timeout_follows_the_phase_deadline(self):
-        """AC6-EDGE (x-c79d): the cold ritual's subprocess timeout is the
-        sweep slice minus its reserve, never the bare 300s default."""
+        """A cold ritual stays within its attempt cap and phase deadline."""
         import time as _time
 
         from fno.pr_watch import _dispatch as d
@@ -2824,7 +2823,7 @@ class TestTickRecordsAndDeadline:
             assert d._ritual_timeout() <= 110
         finally:
             d.set_phase_deadline(None)
-        assert d._ritual_timeout() == 300.0
+        assert d._ritual_timeout() == 135.0
 
     def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
         """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
@@ -4033,7 +4032,7 @@ class TestDurableGrantExecution:
         next_deps = _make_tick_deps(tmp_path, candidates=[])
         counts = self._drain(self._queue(tmp_path), next_deps, monkeypatch, tmp_path)
         assert counts["skipped"] == 1
-        assert merge_calls == [{"pr": 1, "timeout_s": 300.0}]
+        assert merge_calls == [{"pr": 1, "timeout_s": 135.0}]
         assert any(
             event["type"] == "pr_watch_skipped" and event["data"]["reason"] == "parked"
             for event in next_deps["events"]
@@ -4439,8 +4438,9 @@ class TestScanResumesLeastRecentlyPolled:
         monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
         reads = self._counting_reads(deps, clock)
 
-        self._tick(tmp_path, deps, monkeypatch, store_path,
-                   deadline=clock["t"] + 110.0)
+        self._tick(
+            tmp_path, deps, monkeypatch, store_path, deadline=clock["t"] + 110.0
+        )
 
         assert reads == prs, f"every state-backed candidate is rich-read: {reads}"
         # The merge phase drains a granted row for PR 11 straight from the

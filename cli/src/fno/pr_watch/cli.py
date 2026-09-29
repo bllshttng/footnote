@@ -424,9 +424,8 @@ _STRANDED_FLOOR_S = 10.0
 #: Skipping under it costs nothing - the next tick starts the scan over.
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
-#: Each phase has a measured cap, bounded by tick time. Merge runs before
-#: the sweep, uncapped: its drain self-stops at its own floor. The fit test
-#: proves _MERGE_FLOOR_S.
+#: Merge's 245s cap reserves the 150s sweep after the worst settings + wake
+#: caps on a 480s tick, while leaving room for the 90s queue read + merge floor.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
@@ -448,11 +447,11 @@ _FLEET_CAP_S: dict[str, float] = {
     "recovery": 90,
     "watchdog": 30,
 }
-_PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S}
+_PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S, "merge": 245.0}
 
-#: The grant-queue read measured 38s under a 21-worker fleet; on a fresh
-#: wall a slice-derived timeout would let one hung read hold ~400s.
-_GRANT_QUEUE_READ_TIMEOUT_S = 120.0
+#: The grant-queue read measured 38s under a 21-worker fleet; 90s bounds a
+#: stalled read while retaining margin over that observed high.
+_GRANT_QUEUE_READ_TIMEOUT_S = 90.0
 
 
 class TickDeadlineExceeded(BaseException):
@@ -1436,8 +1435,8 @@ def tick() -> None:
         # follows as the one arm that resumes per-PR across ticks.
         sweep_started = True
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
-        # One merge can outlast any fixed slice, so merge takes what remains
-        # of the wall ahead of the sweep; its own floor stops the drain.
+        # Merge runs ahead of the sweep, with a 245s phase cap and 135s
+        # per-ritual timeout so a slow authorization cannot consume the tick.
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
