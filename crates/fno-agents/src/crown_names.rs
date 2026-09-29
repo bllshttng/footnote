@@ -217,6 +217,29 @@ pub fn live_names(
     Ok(live_names_in(&store, &live))
 }
 
+/// Scope -> stored people title for every record that counts as live (the
+/// same liveness rule [`live_names`] applies). A record with no title yet is
+/// skipped, so the fold stamp reads `null` and the ledger falls back.
+pub fn live_titles(
+    store_path: &Path,
+    registry_path: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    let store = read(store_path)?;
+    let live = live_index(registry_path)?;
+    Ok(store
+        .crowns
+        .iter()
+        .filter_map(|(scope, rec)| {
+            let crown = live.get(scope)?;
+            let bound = rec.holder_session.as_deref();
+            if bound.is_some() && bound != crown.holder_session.as_deref() {
+                return None;
+            }
+            Some((scope.clone(), rec.title.clone()?))
+        })
+        .collect())
+}
+
 /// Name an un-named live crown. Refusals (pattern, a duplicate live name,
 /// an already-named crown) name the holder so the king can pick again.
 /// Success writes regnal 1 bound to the live holder's session and answers
@@ -484,6 +507,21 @@ pub fn theme_for(store_path: &Path, scope: &str) -> Option<String> {
     let canon = crate::territory::canonical_scope(scope);
     let store = read(store_path).ok()?;
     store.crowns.get(&canon)?.theme.clone()
+}
+
+/// Every stored theme keyed by canonical scope, tolerant (a missing or
+/// malformed file reads as empty) - the once-per-fold read the feed's
+/// crown rows and owner text render from.
+pub fn theme_map(store_path: &Path) -> BTreeMap<String, String> {
+    let store = match read(store_path) {
+        Ok(s) => s,
+        Err(_) => return BTreeMap::new(),
+    };
+    store
+        .crowns
+        .into_iter()
+        .filter_map(|(scope, rec)| rec.theme.map(|t| (scope, t)))
+        .collect()
 }
 
 /// The stored people title over `scope`, tolerant like [`theme_for`].
