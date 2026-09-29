@@ -535,15 +535,17 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     counting hooks. Order matters too: git-protection.py runs first, so a
     refusal it already owns is never re-decided here.
     """
+    # (file, interpreter, guard-gate name). The preset-gated guards ride the
+    # guard-gate wrapper; the always-on shell guards stay direct.
     guards = [
-        ("hooks/git-protection.py", "python3"),
-        ("hooks/bin-install-guard.sh", "bash"),
-        ("hooks/bg-process-guard.py", "python3"),
-        ("hooks/pipe-guard.sh", "bash"),
-        ("hooks/recursive-grep-guard.py", "python3"),
-        ("hooks/test-run-guard.sh", "bash"),
+        ("hooks/git-protection.py", "python3", "git-protection"),
+        ("hooks/bin-install-guard.sh", "bash", None),
+        ("hooks/bg-process-guard.py", "python3", "bg-process"),
+        ("hooks/pipe-guard.sh", "bash", None),
+        ("hooks/recursive-grep-guard.py", "python3", "recursive-grep"),
+        ("hooks/test-run-guard.sh", "bash", None),
     ]
-    for guard, _interp in guards:
+    for guard, _interp, _gate in guards:
         assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
 
     for path, root_var, matcher in (
@@ -564,7 +566,14 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        expected = [f"{interp} ${{{root_var}}}/{guard}" for guard, interp in guards]
+        expected = [
+            (
+                f"bash ${{{root_var}}}/hooks/lib/guard-gate.sh {gate} {interp} ${{{root_var}}}/{guard}"
+                if gate
+                else f"bash ${{{root_var}}}/{guard}"
+            )
+            for guard, interp, gate in guards
+        ]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )

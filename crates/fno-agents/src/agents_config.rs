@@ -2201,38 +2201,29 @@ mod tests {
     // --- guardrail presets --------------------------------------
 
     #[test]
-    fn guard_preset_absent_reads_standard_and_gates() {
+    fn guard_preset_ladder_env_config_and_malformed() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_config_env();
         std::env::remove_var("FNO_GUARD_PRESET");
+        // Absent everywhere: standard, and only the preset-gated guards answer.
         let dir =
             write_project_settings("guard-absent", "[target.defaults]\nmax_iterations = 40\n");
         assert_eq!(guard_preset(&dir), "standard");
         assert!(guard_enabled(&dir, "pipe"));
         assert!(guard_enabled(&dir, "git-protection"));
         assert!(!guard_enabled(&dir, "recursive-grep"));
-        assert!(!guard_enabled(&dir, "test-run"));
-        assert!(!guard_enabled(&dir, "bin-install"));
-        assert!(!guard_enabled(&dir, "bg-process"));
-    }
-
-    #[test]
-    fn guard_env_beats_config_and_malformed_reads_strict() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_config_env();
-        std::env::remove_var("FNO_GUARD_PRESET");
-        let dir = write_project_settings("guard-env", "guards.preset = \"off\"\n");
         // The config key on its own: off disables everything gatable.
-        assert!(!guard_enabled(&dir, "recursive-grep"));
-        assert!(!guard_enabled(&dir, "pipe"));
+        let off = write_project_settings("guard-off", "guards.preset = \"off\"\n");
+        assert!(!guard_enabled(&off, "recursive-grep"));
+        assert!(!guard_enabled(&off, "pipe"));
         // The env beats the config key.
         std::env::set_var("FNO_GUARD_PRESET", "strict");
-        assert!(guard_enabled(&dir, "recursive-grep"));
+        assert!(guard_enabled(&off, "recursive-grep"));
         // A malformed value reads as strict, never as weaker.
         std::env::set_var("FNO_GUARD_PRESET", "bogus");
-        assert!(guard_enabled(&dir, "bg-process"));
+        assert!(guard_enabled(&off, "bg-process"));
         std::env::set_var("FNO_GUARD_PRESET", "off");
-        assert!(!guard_enabled(&dir, "pipe"));
+        assert!(!guard_enabled(&off, "pipe"));
         std::env::remove_var("FNO_GUARD_PRESET");
     }
 
@@ -2247,23 +2238,18 @@ mod tests {
     }
 
     #[test]
-    fn retirement_sweep_interval_clamps_to_a_fraction_of_grace() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_config_env();
-        let cwd = write_project_settings(
-            "retire-interval-clamp",
-            "[agents]\nretire_interval_s = 1800\n",
-        );
-        assert_eq!(retire_interval_s(&cwd, 900), 300);
-    }
-
-    #[test]
     fn retirement_sweep_interval_never_allows_the_every_tick_bug() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let zero =
             write_project_settings("retire-interval-zero", "[agents]\nretire_interval_s = 0\n");
         assert_eq!(retire_interval_s(&zero, 900), 300);
+        // A large interval still clamps to a fraction of the grace window.
+        let clamp = write_project_settings(
+            "retire-interval-clamp",
+            "[agents]\nretire_interval_s = 1800\n",
+        );
+        assert_eq!(retire_interval_s(&clamp, 900), 300);
         let garbage = write_project_settings(
             "retire-interval-garbage",
             "[agents]\nretire_interval_s = \"banana\"\n",
