@@ -2258,6 +2258,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         );
         return (0, out, String::new());
     }
+    // The effect ops are the effect-classification door the ported Python
+    // approvals callers route through, the same transport the grant ops use:
+    // `{"op": "effect-classify"|"effect-submit"|"effect-verdict", ...}`.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("effect-"))
+    {
+        let out = crate::effect_gate::run_op(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     // The status ops are the pr-status fact readers riding this verb's
     // payload, the same transport the hold and grant ops use:
     // `{"op": "status-merge-blocker"|"status-failure-cause", ...}`.
