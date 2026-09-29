@@ -76,6 +76,12 @@ impl Scratch {
             .env("FNO_CLAUDE_DAEMON_DIR", self.0.join("iso-daemon"))
             .env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"))
             .env("FNO_CLAIMS_ROOT", &home)
+            // The FNO_* strip above removed any inherited FNO_BIN; a scratch
+            // Python leg (claims, the event store) resolves its native
+            // writer through it, and a runner with no `fno` on PATH would
+            // answer EventStoreUnavailable. The test's own binary IS a real
+            // fno, so pin it explicitly.
+            .env("FNO_BIN", env!("CARGO_BIN_EXE_fno"))
             .env(
                 "FNO_MUX_ADMISSION_NAMESPACE",
                 self.0.file_name().unwrap_or_default(),
