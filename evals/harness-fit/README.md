@@ -36,6 +36,19 @@ The dollar ceiling is **$200.00 total across Run 0 and Run 1**. When the next at
 
 Report per-task paired results with bootstrap intervals (`fno doctor evals report --by-cohort`).
 
+## Amendment 1 (2026-09-29, before any result)
+
+This commit lands before the first results commit. It settles six points the first declaration left open. `manifest.json` carries the same values under `amendment_1`.
+
+- Repeats. Run 0 is one pass per arm over the 89 Terminal-Bench 2 tasks, paired by task. The 3-repeat rule applies to Run 1 only. Terminal-Bench 2 already gives n = 89 per arm.
+- Run 0 timeout. Each Terminal-Bench 2 task keeps its own agent timeout at `timeout_multiplier: 1.0`, the published protocol. Run 0 rates then compare with the public board. The 45-minute budget applies to Run 1.
+- Terminus 2 model. Terminus 2 runs glm-5.3-flash through z.ai like every other arm. The model stays fixed, so this arm measures the harness. The Sonnet price row is gone.
+- Prices. glm-5.3-flash costs 0.15 USD per 1M input tokens, 0.03 per 1M cached input and 0.50 per 1M output (z.ai pricing page, read 2026-09-29). z.ai lists no cache-write charge and bills written tokens as input, so cache write is 0.15. The report prices by the exact model string, so every string an arm can report carries the same rates.
+- Concurrency. One Harbor job runs at a time with 4 concurrent trials. The Docker VM has 12 CPUs and 16 GB. Run 1 runs one attempt at a time beside Run 0.
+- Stop-rule check. Harbor starts a whole arm at once, so the check runs per job. Before each job, spent dollars plus 3 times the arm's smoke cost per task times 89 must stay under the ceiling. Before each Run 1 lane, spent dollars plus 3 times the lane's projection must stay under it.
+
+Harbor 0.23.0 runs through `uvx`. The zcode arm needs a Harbor adapter. That adapter lives in the run workspace, not in this repo.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
