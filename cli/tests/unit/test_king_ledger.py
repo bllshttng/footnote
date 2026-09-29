@@ -65,11 +65,11 @@ def test_build_gathers_folds_and_skips_the_fold_when_no_crowns(monkeypatch):
     assert calls == {}
 
 
-def test_default_ledger_path_is_the_state_dir_sibling(tmp_path, monkeypatch):
+def test_default_ledger_path_is_the_graph_page_sibling(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     from fno.king.ledger import default_ledger_path
 
-    assert default_ledger_path() == tmp_path / ".fno" / "reign.html"
+    assert default_ledger_path() == tmp_path / ".fno" / "pages" / "reign.html"
 
 
 def test_relay_hands_the_native_renderer_court_graph_and_out(
