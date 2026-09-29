@@ -3,7 +3,8 @@
 //! Keep the former registration order. Rust guards run in-process; the three
 //! Python guards keep their existing owners and run as children with the same
 //! stdin and environment. A denial from any guard is returned after all six
-//! have recorded their decision.
+//! have recorded their decision. The guardrail preset owns whether a guard
+//! runs at all: a preset-disabled guard answers nothing and emits no row.
 
 use serde_json::Value;
 use std::io::Write;
@@ -27,39 +28,61 @@ pub fn run(_args: &[String]) -> i32 {
         .or_else(crate::provider::plugin_root);
     let mut refusals = Vec::new();
 
-    if let Some(root) = plugin_root.as_deref() {
-        if let Some(reason) = run_python_guard(&root, "bg-process-guard.py", &raw) {
-            refusals.push(reason);
+    // One config resolution for the whole chain: guard_enabled re-walks the
+    // config candidates per call, and this hook runs on every Bash turn.
+    let preset = crate::agents_config::guard_preset(&cwd);
+
+    if crate::agents_config::preset_runs(preset, "bg-process") {
+        if let Some(root) = plugin_root.as_deref() {
+            if let Some(reason) = run_python_guard(&root, "bg-process-guard.py", &raw) {
+                refusals.push(reason);
+            }
+        } else {
+            eprintln!("pretooluse-bash: plugin root unavailable; skipping bg-process-guard");
         }
-    } else {
-        eprintln!("pretooluse-bash: plugin root unavailable; skipping bg-process-guard");
     }
 
-    let bin_refusal = super::bin_install_guard::judge(&payload);
-    super::emit_guard_decision(&cwd, "bin-install-guard", "Bash", bin_refusal.is_some());
-    refusals.extend(bin_refusal);
-
-    if let Some(root) = plugin_root.as_deref() {
-        if let Some(reason) = run_python_guard(&root, "git-protection.py", &raw) {
-            refusals.push(reason);
-        }
-    } else {
-        eprintln!("pretooluse-bash: plugin root unavailable; skipping git-protection guard");
+    if crate::agents_config::preset_runs(preset, "bin-install") {
+        let bin_refusal = super::bin_install_guard::judge(&payload);
+        super::emit_guard_decision(&cwd, "bin-install-guard", "Bash", bin_refusal.is_some());
+        refusals.extend(bin_refusal);
     }
 
-    let pipe_refusal = super::pipe_guard::judge(&payload);
-    super::emit_guard_decision(&cwd, "pipe-guard", "Bash", pipe_refusal.is_some());
-    refusals.extend(pipe_refusal);
-
-    if let Some(root) = plugin_root.as_deref() {
-        if let Some(reason) = run_python_guard(&root, "recursive-grep-guard.py", &raw) {
-            refusals.push(reason);
+    if crate::agents_config::preset_runs(preset, "git-protection") {
+        if let Some(root) = plugin_root.as_deref() {
+            if let Some(reason) = run_python_guard(&root, "git-protection.py", &raw) {
+                refusals.push(reason);
+            }
+        } else {
+            eprintln!("pretooluse-bash: plugin root unavailable; skipping git-protection guard");
         }
-    } else {
-        eprintln!("pretooluse-bash: plugin root unavailable; skipping recursive-grep-guard");
     }
 
-    let test = super::test_run_guard::evaluate(&payload);
+    if crate::agents_config::preset_runs(preset, "pipe") {
+        let pipe_refusal = super::pipe_guard::judge(&payload);
+        super::emit_guard_decision(&cwd, "pipe-guard", "Bash", pipe_refusal.is_some());
+        refusals.extend(pipe_refusal);
+    }
+
+    if crate::agents_config::preset_runs(preset, "recursive-grep") {
+        if let Some(root) = plugin_root.as_deref() {
+            if let Some(reason) = run_python_guard(&root, "recursive-grep-guard.py", &raw) {
+                refusals.push(reason);
+            }
+        } else {
+            eprintln!("pretooluse-bash: plugin root unavailable; skipping recursive-grep-guard");
+        }
+    }
+
+    let test = if crate::agents_config::preset_runs(preset, "test-run") {
+        super::test_run_guard::evaluate(&payload)
+    } else {
+        super::test_run_guard::Evaluation {
+            should_log: false,
+            refusal: None,
+            stage: "preset-disabled",
+        }
+    };
     if test.should_log {
         super::emit_guard_decision(
             &process_cwd,

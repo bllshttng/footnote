@@ -135,10 +135,8 @@ markers = [
     "real_flight: opt a test out of the fake-flight fixture, so the real native gate is exercised",
     "dev_build: needs this checkout's fno-agents build; tests/test-dev-build-suites.sh runs these with the build present",
 ]
-# A hung test must name itself. Measured 2026-09-17: six smoke-pytest shards
-# were killed by the job cap at 914-918s with no failing assertion and no test
-# name anywhere in the log, while 1121 passing shards topped out at 778s. The
-# value is earned, not picked: across six passing shards the widest gap between
-# two progress lines was 101.6s, and that line covers 72 tests across four
-# xdist workers, so no single test comes near half of this.
-timeout = 300
+# A hung test must name itself and cost little. Across 36 green shard steps on
+# 2026-09-26..27, median duration was 294s, p95 406s, max 613s. At 120s a p95
+# shard absorbs two hangs in 646s; 300s allowed only one. The guard keeps this
+# ceiling and every timeout marker at or under one fifth of the 720s step cap.
+timeout = 120

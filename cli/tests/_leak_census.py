@@ -59,8 +59,13 @@ def reap_rooted(
     from fno.agents.orphans import iter_processes
 
     normalized = [os.path.abspath(str(r)) for r in roots]
+    try:
+        process_rows = list(iter_processes(reaper))
+    except KeyError:
+        # A process can disappear while psutil builds its metadata snapshot.
+        process_rows = list(iter_processes(reaper))
     matched = [
-        row for row in iter_processes(reaper)
+        row for row in process_rows
         if _matches(row.get("cwd"), normalized, match_component)
     ]
 

@@ -648,6 +648,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         # always green. It is exercised deliberately, in BOTH lanes, by
         # tests/ci/test_hermetic_lanes.sh, which is where the assertion belongs.
         "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup "
+        "-m 'not slow_e2e' "
         "--ignore=tests/unit/test_ambient_canary.py",
     ),
     ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),

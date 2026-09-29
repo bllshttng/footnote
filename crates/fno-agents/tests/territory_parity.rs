@@ -159,6 +159,9 @@ fn assert_case(label: &str, fixture: &Fixture, rust: impl FnOnce() -> Value) -> 
     // operator's machine.
     std::env::set_var("FNO_CONFIG", fixture.tmp.path().join("config.toml"));
     std::env::set_var("FNO_HOME", fixture.tmp.path());
+    // The live count reads the claims root, so pin it to the fixture too or
+    // the row quietly describes the operator's live claims.
+    std::env::set_var("FNO_CLAIMS_ROOT", fixture.tmp.path());
     let rust = rust();
     let golden = Golden {
         exit: Some(0),
@@ -207,11 +210,27 @@ fn drain_receipt_per_project_disabled() {
     });
 }
 
+/// The live count reads claim lockfiles - the one holder answer this port
+/// projects - so the fixture seeds the claim the registry row implies: w-1
+/// live on e-1a. A registry row alone reads live 0 by design.
+fn seed_live_node_claim(fixture: &Fixture, node: &str) {
+    let dir = fixture.tmp.path().join(".fno/claims");
+    std::fs::create_dir_all(&dir).unwrap();
+    let now = fno_agents::claims::now_ms();
+    let yaml = format!(
+        "schema_version: 1\nkey: \"node:{node}\"\nholder: \"target-session:t-fixture\"\nacquired_at: {now}\npid: {}\nhost: test-host\nexpires_at: {}\nreason: \"territory parity fixture\"\n",
+        std::process::id(),
+        now + 900_000
+    );
+    std::fs::write(dir.join(format!("node%3A{node}.lock")), yaml).unwrap();
+}
+
 #[test]
 fn rows_projection() {
     let plan = tempfile::TempDir::new().unwrap();
     let plan_doc = plan.path().join("idea-plan.md");
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
     let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
+    seed_live_node_claim(&fixture, "e-1a");
     assert_case("rows_projection", &fixture, || rust_rows(&fixture));
 }

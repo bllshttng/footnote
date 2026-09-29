@@ -83,3 +83,9 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
     from fno.graph.store import sweep_orphaned_keepers
 
     sweep_orphaned_keepers(timeout=15.0)
+
+@pytest.fixture(autouse=True)
+def _in_memory_hold_verdict(tmp_path, monkeypatch):
+    from fno.tests.hold_verdict_adapter import install
+
+    install(tmp_path, monkeypatch)

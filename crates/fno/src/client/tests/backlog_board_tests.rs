@@ -645,42 +645,11 @@ fn ux_shot_backlog_node_detail() {
     write_shot(&frame, "ux-shot-backlog-detail", "the node detail overlay");
 }
 
-// The same three frames under the user's theme (Catppuccin): the panel
-// must stay on the theme's bg with its palette slots - the pale-fill
-// regression shot.
-#[test]
-fn ux_shot_backlog_sideline_column_catppuccin() {
-    use crate::frame_html::write_shot;
-    let mut view = sideline_backlog_view();
-    view.theme = crate::theme::Theme::from_name("catppuccin").0;
-    let frame = view.compose();
-    write_shot(
-        &frame,
-        "ux-shot-backlog-sideline-catppuccin",
-        "the backlog sideline, catppuccin",
-    );
-}
-
-#[test]
-fn ux_shot_backlog_node_detail_catppuccin() {
-    use crate::frame_html::write_shot;
-    let mut view = sideline_backlog_view();
-    view.theme = crate::theme::Theme::from_name("catppuccin").0;
-    if let Some(b) = view.backlog_board.as_mut() {
-        b.detail = Some(node_detail::NodeDetailOverlay {
-            node_id: "x-1".into(),
-            trail: vec![],
-            sel: 0,
-            scroll: 0,
-        });
-    }
-    let frame = view.compose();
-    write_shot(
-        &frame,
-        "ux-shot-backlog-detail-catppuccin",
-        "the node detail overlay, catppuccin",
-    );
-}
+// The same frames under the user's theme (Catppuccin) were evidence shots
+// with no assertion behind them; the palette contract lives in
+// `backlog_panel_cells_carry_distinct_attributes` and the theme's own
+// tests. Removed under the shrink-only test cap: the two variants guarded
+// no contract of their own.
 
 // ----: D6 proof - every edit key works from the board AND the detail ----
 
@@ -993,4 +962,68 @@ fn tag_facet_hides_while_empty_and_shows_with_values() {
         .map(|(_, name)| name)
         .collect();
     assert!(names.contains(&"tag"), "a tagged row reveals the facet");
+}
+
+// The paint memos must rebuild only when their key moves. A build
+// counter makes the contract mechanical: same key, one build; any key
+// field, a rebuild. Both slots answer to the same contract, so one test
+// walks both.
+#[test]
+fn memo_rebuilds_only_when_the_key_moves() {
+    let b = board_with(board_inputs());
+    let builds = std::cell::Cell::new(0);
+    let body_key = |gen: u64, row: usize| crate::client::backlog_board::BodyKey {
+        gen,
+        lane: 0,
+        col: 0,
+        row,
+        w: 120,
+        list: false,
+        query: None,
+        errors: 0,
+        columns: vec!["ready".into()],
+    };
+    let detail_key =
+        |mtime: Option<std::time::SystemTime>| crate::client::backlog_board::DetailKey {
+            gen: 1,
+            node: "x-1".into(),
+            sel: None,
+            w: 80,
+            doc: Some(("x-1".into(), "/plans/x-1.md".into(), mtime, String::new())),
+        };
+    let build = |builds: &std::cell::Cell<usize>| {
+        builds.set(builds.get() + 1);
+        (Vec::new(), Vec::new(), None)
+    };
+    let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
+    let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
+    assert_eq!(builds.get(), 1, "same key reads the memo");
+    let _ = b.board_body_cached(body_key(0, 1), || build(&builds));
+    assert_eq!(builds.get(), 2, "a moved cursor rebuilds");
+    let _ = b.board_body_cached(body_key(1, 1), || build(&builds));
+    assert_eq!(builds.get(), 3, "a new read rebuilds");
+    // The detail slot keys on the document identity: a doc re-read (mtime
+    // or node move) rebuilds even with the same node and read.
+    let _ = b.detail_lines_cached(detail_key(None), || build(&builds));
+    let _ = b.detail_lines_cached(detail_key(None), || build(&builds));
+    assert_eq!(builds.get(), 4, "same identity reads the memo");
+    let later = std::time::SystemTime::now();
+    let _ = b.detail_lines_cached(detail_key(Some(later)), || build(&builds));
+    assert_eq!(builds.get(), 5, "a re-read doc rebuilds");
+}
+
+// The cheap reading. The window flushes on 30s and the line names
+// count, avg and max, so a paint-cost regression moves a readable number.
+#[test]
+fn paint_stats_flush_reports_count_avg_max() {
+    let mut s = crate::client::backlog_board::PaintStats::new();
+    assert!(!s.due(), "an empty window never flushes");
+    s.record(1500);
+    s.record(2500);
+    assert!(!s.due(), "inside the window holds");
+    let line = s.take_line();
+    assert!(line.contains("2 paints"), "{line}");
+    assert!(line.contains("avg 2.0ms"), "{line}");
+    assert!(line.contains("max 2.5ms"), "{line}");
+    assert_eq!(s.count, 0, "take resets the window");
 }

@@ -115,6 +115,36 @@ def _invoke(args, input_text=None):
     return CliRunner().invoke(app, args, input=input_text)
 
 
+def _native_supersede(g, *args: str):
+    """The supersede leaf answers natively; drive the dev binary over the
+    same store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    import pytest as _pytest
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        _pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "supersede", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 THREE_GROUPS = [
     {"slug": "1", "title": "Group 1: foundation", "waves": "1-3", "blocked_by_groups": []},
     {"slug": "2", "title": "Group 2: api", "waves": "4-5", "blocked_by_groups": ["1"]},
@@ -2913,10 +2943,10 @@ def test_supersede_releases_its_contained_children(graph_env, monkeypatch):
     assert next(e for e in entries if e["id"] == "ab-kid00001")["contained_in"] == unit
 
     _seed_children(g, _node("ab-new00001", status="ready"))
-    assert _invoke(
-        ["backlog", "supersede", "ab-new00001", "--replaces", unit,
-         "--cause", "regrouped", "--surface", "x.py"]
-    ).exit_code == 0
+    assert _native_supersede(
+        g, "ab-new00001", "--replaces", unit,
+        "--cause", "regrouped", "--surface", "x.py",
+    )[0] == 0
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None, "child left pointing at a dead unit"
@@ -3121,10 +3151,10 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
     _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-new00001"))
     assert _decompose(BARE_ONE).exit_code == 0
     unit = _child(read_entries(), "one")["id"]
-    assert _invoke([
-        "backlog", "supersede", "ab-new00001", "--replaces", unit,
+    assert _native_supersede(
+        g, "ab-new00001", "--replaces", unit,
         "--cause", "reshaped", "--surface", "x.py",
-    ]).exit_code == 0
+    )[0] == 0
 
     result = _decompose(ADOPT_ONE)
     assert result.exit_code == 2, result.output
@@ -3184,10 +3214,10 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
     _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-new00001"))
     assert _decompose(BARE_ONE).exit_code == 0
     unit = _child(read_entries(), "one")["id"]
-    assert _invoke([
-        "backlog", "supersede", "ab-new00001", "--replaces", unit,
+    assert _native_supersede(
+        g, "ab-new00001", "--replaces", unit,
         "--cause", "reshaped", "--surface", "x.py",
-    ]).exit_code == 0
+    )[0] == 0
 
     # Model what `_apply_completion_fields` does on close: stamp completed_at
     # and clear deferred_at, leaving superseded_by behind.

@@ -117,6 +117,11 @@ run "Fixes x-aaaa" "feature/x-aaaa" \
   && pass "colonless Fixes line passes" \
   || fail "colonless Fixes line should pass"
 
+# the minted shape: <kind>/<node>-<mini-slug> binds like feature/<node> did.
+run "Fixes x-cccc" "bugfix/x-cccc-wrong-close" \
+  && pass "minted-shape branch passes" \
+  || fail "minted-shape branch should pass"
+
 # compact legacy ids are still valid closure claims.
 if OUTPUT=$(PR_BODY="Fixes xd863 x664b" PR_HEAD_REF="feature/xd863" bash "$GATE"); then
   [[ "$OUTPUT" == *"all present in the exact trailer"* ]] \

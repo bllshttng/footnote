@@ -32,8 +32,8 @@ pub struct Theme {
     /// byte-identical while an override still reaches every border.
     pub border: Color,
     pub title: Color,
-    /// The brand accent: selection, the active tab, the focused frame, the
-    /// `[no]` stamp's surroundings. `Indexed(3)` under `terminal` because index
+    /// The brand accent: selection, the active tab, the focused frame's name
+    /// label, the `[no]` stamp's surroundings. `Indexed(3)` under `terminal` because index
     /// 3 follows the emulator's own palette, so it is the one color that
     /// cannot clash.
     pub brand: Color,
@@ -345,34 +345,35 @@ fn theme_footnote_superscript() -> Theme {
         name: "footnote-superscript",
         inherit_from: "",
         inherit: false,
-        border: rgb(0xff, 0x34, 0x34),    // brand red
-        title: rgb(0xe8, 0xe8, 0xe8),     // text
-        brand: rgb(0xff, 0x34, 0x34),     // brand red
+        border: rgb(0xe8, 0xe8, 0xe8), // text (the monochrome ruling)
+        title: rgb(0xe8, 0xe8, 0xe8),  // text
+        brand: rgb(0xe8, 0xe8, 0xe8),  // text
         needs_you: rgb(0xc5, 0xb7, 0x84), // needs-you yellow
-        sel: rgb(0x2b, 0x2b, 0x2b),       // surface0
-        dim: rgb(0xb4, 0xb4, 0xb4),       // subtext0
-        chip: rgb(0xe1, 0xa6, 0xa3),      // red accent
-        stamp: rgb(0xe8, 0xe8, 0xe8),     // off-white stamp label
-        base: rgb(0x14, 0x14, 0x14),      // base: the theme ground
+        sel: rgb(0x2b, 0x2b, 0x2b),    // surface0
+        dim: rgb(0xb4, 0xb4, 0xb4),    // subtext0
+        chip: rgb(0xe1, 0xa6, 0xa3),   // red accent
+        stamp: rgb(0xe8, 0xe8, 0xe8),  // off-white stamp label
+        base: rgb(0x14, 0x14, 0x14),   // base: the theme ground
     }
 }
 
 /// The footnote brand theme, light twin (Footnote Paper: the same palette
-/// with the lightness ladder flipped).
+/// with the lightness ladder flipped). The ink is the dark twin's ground:
+/// one mirror pair (e8e8e8 on 141414, 141414 on f7f7f7 paper), swapped.
 fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
         inherit_from: "",
         inherit: false,
-        border: rgb(0xe0, 0x01, 0x19),    // brand red
-        title: rgb(0x29, 0x29, 0x29),     // text
-        brand: rgb(0xe0, 0x01, 0x19),     // brand red
+        border: rgb(0x14, 0x14, 0x14), // the dark twin's ground (the mirror pair)
+        title: rgb(0x14, 0x14, 0x14),  // text
+        brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
-        sel: rgb(0xd7, 0xd7, 0xd7),       // surface0
-        dim: rgb(0x50, 0x50, 0x50),       // subtext0
-        chip: rgb(0x96, 0x53, 0x51),      // red accent
-        stamp: rgb(0x29, 0x29, 0x29),     // ink stamp label
-        base: rgb(0xf7, 0xf7, 0xf7),      // base: the theme ground
+        sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
+        dim: rgb(0x50, 0x50, 0x50),    // subtext0
+        chip: rgb(0x96, 0x53, 0x51),   // red accent
+        stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
+        base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
     }
 }
 
@@ -726,15 +727,16 @@ mod tests {
     }
 
     #[test]
-    fn borders_paint_the_theme_brand_and_the_three_themes_drop_orange() {
+    fn borders_paint_the_theme_brand_and_the_three_themes_pick_a_signature_accent() {
         // The ruling: every border paints the running theme's brand. Each
         // named theme's border field names its own brand value, and the
         // three orange-family brands become each palette's signature accent
         // (catppuccin blue, tokyo-night blue, gruvbox aqua); the footnote
-        // themes keep their red.
+        // themes went monochrome: their text color (superscript) and their
+        // ink (paper).
         let expected = [
-            ("footnote-superscript", (0xff, 0x34, 0x34)),
-            ("footnote-paper", (0xe0, 0x01, 0x19)),
+            ("footnote-superscript", (0xe8, 0xe8, 0xe8)),
+            ("footnote-paper", (0x14, 0x14, 0x14)),
             ("catppuccin", (0x89, 0xb4, 0xfa)),
             ("tokyo-night", (0x7a, 0xa2, 0xf7)),
             ("gruvbox", (0x8e, 0xc0, 0x7c)),

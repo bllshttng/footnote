@@ -7,7 +7,7 @@ Welcome. This guide covers the dev environment, how to run the tests and gates l
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Most contributors also have `jq`, `gh` (authenticated), and `git`.
 
 ```bash
-git clone https://github.com/bllshttng/fno.git
+git clone https://github.com/bllshttng/footnote.git
 cd footnote
 uv tool install ./cli      # puts `fno` on your PATH
 fno --version

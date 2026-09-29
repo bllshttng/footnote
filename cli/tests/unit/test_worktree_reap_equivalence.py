@@ -318,11 +318,11 @@ def test_gate_binary_emits_the_grammar_the_callers_parse(tmp_path: Path, native_
 
 # -- the node-token scanners agree across languages ---------------------------
 #
-# The done-node arm resolves branch tokens in Rust (scan_node_tokens); the PR
-# closure produces them in Python (closure.branch_node_ids). The port copied
-# the shape, so a future edit to one copy would drift the two silently. Each
-# case builds a tree whose branch names the tokens and asserts the gate's
-# evidence equals exactly what the Python producer lists.
+# The done-node arm resolves branch tokens in Rust (node_branch::node_ids);
+# the PR closure produces them in Python (closure.branch_node_ids). The port
+# copied the shape, so a future edit to one copy would drift the two
+# silently. Each case builds a tree whose branch names the tokens and asserts
+# the gate's evidence equals exactly what the Python producer lists.
 
 TOKEN_CASES = [
     # non-overlap: once x-cccc is consumed, "-1234" is not letter-led
@@ -333,6 +333,9 @@ TOKEN_CASES = [
     ("repro/x-ab123-repro", ["x-ab123"]),
     # compact legacy ids have no hyphen separator
     ("feature/xd863", ["xd863"]),
+    # the minted shape: kind prefix + mini-slug tail
+    ("bugfix/x-cccc-wrong-close", ["x-cccc"]),
+    ("feature/x-cccc-install-channels", ["x-cccc"]),
 ]
 
 

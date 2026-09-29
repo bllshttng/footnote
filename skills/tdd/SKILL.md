@@ -13,14 +13,14 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
 
 ## The cycle
 
-0. **Authoring gate:** load [test-audit](../test-audit/SKILL.md) in authoring mode and answer its four questions before writing the test. Prefer extending the owning test or a table-driven case. A new test file requires a named reason the existing owner cannot cover the contract. Record all four answers in the task result. A test matching a junk pattern does not get written.
+0. **Authoring gate:** load [test-audit](../test-audit/SKILL.md) in authoring mode and answer its four questions before writing the test. Prefer extending the owning test or a table-driven case. A new test file requires a named reason the existing owner cannot cover the contract. Record all four answers in the task result. A test matching a junk pattern does not get written. The suite is shrink-only: net test declarations must not rise. The gate is `fno-agents test-delta --max-net 0`, enforced at pr create and pr push. An added test pays for itself by deleting one that guards no contract of its own (docs/test-audit/README.md, Keep rule).
 1. **RED:** write ONE minimal test for the next acceptance criterion (one behavior per test, clear name, real assertions). Only a change with those surfaces carries database and UI assertions.
 2. **Verify RED (mandatory):** run the test. It must FAIL - not error - because the behavior is missing, with the expected failure message. A test that passes immediately tests existing behavior: write a different test. A test that errors: fix the error until it fails correctly.
 3. **GREEN:** write the simplest code that passes. Nothing beyond what the test requires.
 4. **Verify GREEN (mandatory):** the test passes and the other tests still pass. Still failing? Fix the implementation, not the test.
 5. **REFACTOR:** only after green, keep tests passing, add no behavior.
 
-**Scope.** The cycle runs the tests covering the files you changed (`fno doctor test <test files>`), never the whole suite: CI runs every suite on every PR. When a whole-suite local run is genuinely needed, start it as a background task: it queues on `test:suite` and the turn never blocks.
+**Scope.** Run the project's own test command over the files you changed. When the fno CLI is installed, `fno doctor test <test files>` pins the worktree env and returns the real exit code. Without it, run the project's runner directly. Never the whole suite locally: CI runs every suite on every PR. When a whole-suite local run is genuinely needed, start it as a background task: it queues on `test:suite` and the turn never blocks.
 6. **Commit** the pair.
 
 ## Acceptance criteria become tests

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run after pick-target. Creates state + worktree + locks graph node.
-# Pass --dry-run to skip actual graph mutation and worktree creation.
+# Run after pick-target. Creates state + worktree + claims the node lockfile.
+# Pass --dry-run to skip claim acquisition and worktree creation.
 set -euo pipefail
 
 DRY_RUN=false
@@ -24,14 +24,14 @@ slug="e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 cd "$REPO_ROOT/cli"
 
 if [[ "$DRY_RUN" == "true" ]]; then
-  echo "DRY-RUN: skipping state init, worktree create, and graph lock" >&2
+  echo "DRY-RUN: skipping state init, worktree create, and node claim" >&2
   echo "DRY-RUN: would init state at $REPO_ROOT/.fno/e2e-state.md" >&2
   echo "DRY-RUN: would create worktree $slug" >&2
-  echo "DRY-RUN: would lock graph node $node_id with session-$slug" >&2
+  echo "DRY-RUN: would claim node:$node_id with target-session:$slug" >&2
 else
   uv run fno-py state init --type target --output "$REPO_ROOT/.fno/e2e-state.md" >&2
   uv run fno-py runtime worktree --action create --name "$slug" >&2
-  uv run fno-py graph update --id "$node_id" --locked-by "session-$slug" >&2
+  uv run fno-py agents claim acquire "node:$node_id" --holder "target-session:$slug" --ttl 2h >&2
 fi
 
 echo "Session initialized: $slug" >&2

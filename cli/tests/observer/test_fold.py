@@ -343,7 +343,13 @@ def test_default_real_state_paths_tracks_sqlite_graph_store(tmp_path):
     paths = isolation.default_real_state_paths(Path("/repo"))
     assert paths["graph_json"] == Path.home() / ".fno" / "graph.json"
     db = tmp_path / "graph.json"
-    seed_graph(db, [{"id": "x-isolate1", "title": "sandbox", "session_id": "eval-leak"}])
+    # A finished row keeps its session: the projection voids an open row's
+    # session mirror (the claim store owns holders), so the leak the scanner
+    # can really see is the finisher session on a completed row.
+    seed_graph(db, [{
+        "id": "x-isolate1", "title": "sandbox", "session_id": "eval-leak",
+        "completed_at": "2026-01-01T00:00:00+00:00",
+    }])
     result = isolation.check_isolation({"eval-leak"}, {"graph_json": db})
     assert result.verdict == "violated"
 
