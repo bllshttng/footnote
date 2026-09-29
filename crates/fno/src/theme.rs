@@ -358,21 +358,22 @@ fn theme_footnote_superscript() -> Theme {
 }
 
 /// The footnote brand theme, light twin (Footnote Paper: the same palette
-/// with the lightness ladder flipped).
+/// with the lightness ladder flipped). The ink is the dark twin's ground:
+/// one mirror pair (e8e8e8 on 141414, 141414 on f7f7f7 paper), swapped.
 fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
         inherit_from: "",
         inherit: false,
-        border: rgb(0x29, 0x29, 0x29),    // ink (the monochrome ruling)
-        title: rgb(0x29, 0x29, 0x29),     // text
-        brand: rgb(0x29, 0x29, 0x29),     // ink
+        border: rgb(0x14, 0x14, 0x14), // the dark twin's ground (the mirror pair)
+        title: rgb(0x14, 0x14, 0x14),  // text
+        brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
-        sel: rgb(0xd7, 0xd7, 0xd7),       // surface0
-        dim: rgb(0x50, 0x50, 0x50),       // subtext0
-        chip: rgb(0x96, 0x53, 0x51),      // red accent
-        stamp: rgb(0x29, 0x29, 0x29),     // ink stamp label
-        base: rgb(0xf7, 0xf7, 0xf7),      // base: the theme ground
+        sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
+        dim: rgb(0x50, 0x50, 0x50),    // subtext0
+        chip: rgb(0x96, 0x53, 0x51),   // red accent
+        stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
+        base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
     }
 }
 
@@ -735,7 +736,7 @@ mod tests {
         // ink (paper).
         let expected = [
             ("footnote-superscript", (0xe8, 0xe8, 0xe8)),
-            ("footnote-paper", (0x29, 0x29, 0x29)),
+            ("footnote-paper", (0x14, 0x14, 0x14)),
             ("catppuccin", (0x89, 0xb4, 0xfa)),
             ("tokyo-night", (0x7a, 0xa2, 0xf7)),
             ("gruvbox", (0x8e, 0xc0, 0x7c)),
