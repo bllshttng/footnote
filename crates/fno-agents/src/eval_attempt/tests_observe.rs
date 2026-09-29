@@ -102,6 +102,18 @@ fn observe_claude_no_transcript_reads_unverified_with_null_usage() {
         "out: {out}"
     );
     assert_eq!(out["usage"], Value::Null);
+    // A harness with no reader reads the same way.
+    let lane = json!({"name": "x", "harness": "pi", "model": "m", "effort": "high"});
+    let out = observe(&observe_payload(lane, json!({})));
+    assert_eq!(out["lane_status"], "unverified");
+    assert!(
+        out["lane_reason"]
+            .as_str()
+            .unwrap()
+            .contains("no transcript reader for harness 'pi'"),
+        "out: {out}"
+    );
+    assert_eq!(out["usage"], Value::Null);
 }
 
 #[test]
@@ -178,18 +190,4 @@ fn observe_opencode_reads_session_and_sums_tokens() {
     assert_eq!(out["usage"]["cache_read"], 6);
     assert_eq!(out["usage"]["cache_write"], 1);
     assert_eq!(out["usage_source"], "opencode-store");
-}
-
-#[test]
-fn observe_unsupported_harness_reads_unverified() {
-    let lane = json!({"name": "x", "harness": "pi", "model": "m", "effort": "high"});
-    let out = observe(&observe_payload(lane, json!({})));
-    assert_eq!(out["lane_status"], "unverified");
-    assert!(
-        out["lane_reason"]
-            .as_str()
-            .unwrap()
-            .contains("no transcript reader for harness 'pi'"),
-        "out: {out}"
-    );
 }

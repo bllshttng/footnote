@@ -180,10 +180,8 @@ fn measured_cost_with_prices() {
     assert_eq!(c["cost"]["measured"], true);
     assert_eq!(c["cost"]["dollars_total"], json!(3.0));
     assert_eq!(c["cost"]["dollars_per_accepted"], json!(3.0));
-}
-
-#[test]
-fn by_cohort_cli_flag_runs_and_bad_prices_is_usage() {
+    // The CLI surface: --by-cohort defaults to --mode report, and malformed
+    // --prices is a usage exit.
     let tmp = TempDir::new().unwrap();
     let h = write_history(
         &tmp,
