@@ -309,6 +309,8 @@ fn run_opencode(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.current_dir(cwd);
+    // opencode resolves its project from $PWD, not the process cwd.
+    cmd.env("PWD", cwd);
     crate::claims::stamp_command_env(&mut cmd, Some(agent_self), "opencode", None);
     // Own process group so SIGTERM/SIGKILL/SIGINT reach opencode's subshells.
     unsafe {

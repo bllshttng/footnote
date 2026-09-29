@@ -536,6 +536,8 @@ fn spawn_attach_writer(
         }
     }
     cmd.current_dir(cwd);
+    // opencode resolves its project from $PWD, not the process cwd.
+    cmd.env("PWD", cwd);
     crate::claims::stamp_command_env(&mut cmd, Some(name), "opencode", Some(session_id));
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("FORCE_COLOR");
