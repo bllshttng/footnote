@@ -190,164 +190,168 @@ pub fn classify(args: &[OsString]) -> Option<Org> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_forward_and_refusal_answers_at_the_front_door() {
+        fn org_bare_and_flags_forward_the_court_argv() {
+            assert_eq!(
+                classify(&osv(&["agents", "org"])),
+                Some(Org::Forward(osv(&["agents", "court"])))
+            );
+            assert_eq!(
+                classify(&osv(&["agents", "org", "-J"])),
+                Some(Org::Forward(osv(&["agents", "court", "-J"])))
+            );
+            assert_eq!(
+                classify(&osv(&["agents", "org", "-n", "--json"])),
+                Some(Org::Forward(osv(&["agents", "court", "-n", "--json"])))
+            );
+        }
+
+        fn org_help_is_native_and_names_the_actions() {
+            match classify(&osv(&["agents", "org", "--help"])) {
+                Some(Org::Help(text)) => {
+                    assert!(text.contains("promote"), "{text}");
+                    assert!(text.contains("rundown"), "{text}");
+                }
+                other => panic!("expected Help, got {other:?}"),
+            }
+        }
+
+        fn org_promote_forwards_the_crown_argv() {
+            assert_eq!(
+                classify(&osv(&["agents", "org", "promote", "folio", "--scope", "fno"])),
+                Some(Org::Forward(osv(&["agents", "crown", "folio", "--scope", "fno"])))
+            );
+        }
+
+        fn org_rundown_appends_the_default_out_only_when_absent() {
+            let default = Some(OsString::from("/s/pages/rundown.html"));
+            assert_eq!(
+                rundown_argv(&osv(&[]), default.clone()),
+                osv(&["agents", "king", "ledger", "--out", "/s/pages/rundown.html"])
+            );
+            assert_eq!(
+                rundown_argv(&osv(&["--out", "/x.html"]), default.clone()),
+                osv(&["agents", "king", "ledger", "--out", "/x.html"])
+            );
+            assert_eq!(
+                rundown_argv(&osv(&["--out=/x.html"]), default),
+                osv(&["agents", "king", "ledger", "--out=/x.html"])
+            );
+        }
+
+        fn org_vacancies_and_fold_forward_the_old_sweeps() {
+            assert_eq!(
+                classify(&osv(&["agents", "org", "vacancies", "--json"])),
+                Some(Org::Forward(osv(&["agents", "court-orphans", "--json"])))
+            );
+            assert_eq!(
+                classify(&osv(&["agents", "org", "fold", "fno"])),
+                Some(Org::Forward(osv(&["agents", "court-fold", "fno"])))
+            );
+        }
+
+        fn every_lifecycle_action_forwards_the_king_action() {
+            for action in ACTIONS {
+                assert_eq!(
+                    classify(&osv(&["agents", "org", action, "--flag"])),
+                    Some(Org::Forward(osv(&[
+                        "agents", "king", action, "--flag"
+                    ])))
+                );
+            }
+        }
+
+        fn an_unknown_org_word_refuses_listing_the_actions() {
+            match classify(&osv(&["agents", "org", "frobnicate"])) {
+                Some(Org::Refuse(message)) => {
+                    assert!(message.contains("checkin"), "{message}");
+                    assert!(message.contains("rundown"), "{message}");
+                }
+                other => panic!("expected Refuse, got {other:?}"),
+            }
+        }
+
+        fn every_old_spelling_forwards_unchanged_with_a_notice() {
+            for (verb, instead) in OLD {
+                assert_eq!(
+                    classify(&osv(&["agents", verb, "-J"])),
+                    Some(Org::Forward(osv(&["agents", verb, "-J"])))
+                );
+                let notice = old_spelling_notice(verb).unwrap();
+                assert!(notice.contains(instead), "{notice}");
+                assert!(notice.contains("one release"), "{notice}");
+            }
+        }
+
+        fn bare_promote_refuses_naming_the_group_form() {
+            match classify(&osv(&["agents", "promote", "x"])) {
+                Some(Org::Refuse(message)) => {
+                    assert!(message.contains("fno agents org promote"), "{message}");
+                }
+                other => panic!("expected Refuse, got {other:?}"),
+            }
+        }
+
+        fn argv_this_module_does_not_own_is_none() {
+            assert_eq!(classify(&osv(&["mux", "ls"])), None);
+            assert_eq!(classify(&osv(&["agents", "whoami"])), None);
+            assert_eq!(classify(&osv(&["agents", "spawn", "n"])), None);
+            assert_eq!(classify(&osv(&[])), None);
+        }
+
+        fn spawn_promote_rewrites_the_head_only() {
+            assert_eq!(
+                rewrite_spawn(&osv(&[
+                    "agents",
+                    "spawn",
+                    "--promote",
+                    "x-aaaa",
+                    "--succeed",
+                    "--",
+                    "/fno:lead x-aaaa",
+                    "--promote",
+                    "kept",
+                ])),
+                Some(osv(&[
+                    "agents",
+                    "spawn",
+                    "--crown",
+                    "x-aaaa",
+                    "--succeed",
+                    "--",
+                    "/fno:lead x-aaaa",
+                    "--promote",
+                    "kept",
+                ]))
+            );
+            assert_eq!(
+                rewrite_spawn(&osv(&["agents", "spawn", "--promote=x-aaaa"])),
+                Some(osv(&["agents", "spawn", "--crown=x-aaaa"]))
+            );
+            assert_eq!(
+                rewrite_spawn(&osv(&["agents", "spawn", "n", "--argv", "--promote", "x"])),
+                None
+            );
+            assert_eq!(rewrite_spawn(&osv(&["agents", "spawn", "n"])), None);
+        }
+        org_bare_and_flags_forward_the_court_argv();
+        org_help_is_native_and_names_the_actions();
+        org_promote_forwards_the_crown_argv();
+        org_rundown_appends_the_default_out_only_when_absent();
+        org_vacancies_and_fold_forward_the_old_sweeps();
+        every_lifecycle_action_forwards_the_king_action();
+        an_unknown_org_word_refuses_listing_the_actions();
+        every_old_spelling_forwards_unchanged_with_a_notice();
+        bare_promote_refuses_naming_the_group_form();
+        argv_this_module_does_not_own_is_none();
+        spawn_promote_rewrites_the_head_only();
+    }
     use super::*;
 
     fn osv(texts: &[&str]) -> Vec<OsString> {
         texts.iter().map(OsString::from).collect()
     }
 
-    #[test]
-    fn org_bare_and_flags_forward_the_court_argv() {
-        assert_eq!(
-            classify(&osv(&["agents", "org"])),
-            Some(Org::Forward(osv(&["agents", "court"])))
-        );
-        assert_eq!(
-            classify(&osv(&["agents", "org", "-J"])),
-            Some(Org::Forward(osv(&["agents", "court", "-J"])))
-        );
-        assert_eq!(
-            classify(&osv(&["agents", "org", "-n", "--json"])),
-            Some(Org::Forward(osv(&["agents", "court", "-n", "--json"])))
-        );
-    }
 
-    #[test]
-    fn org_help_is_native_and_names_the_actions() {
-        match classify(&osv(&["agents", "org", "--help"])) {
-            Some(Org::Help(text)) => {
-                assert!(text.contains("promote"), "{text}");
-                assert!(text.contains("rundown"), "{text}");
-            }
-            other => panic!("expected Help, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn org_promote_forwards_the_crown_argv() {
-        assert_eq!(
-            classify(&osv(&["agents", "org", "promote", "folio", "--scope", "fno"])),
-            Some(Org::Forward(osv(&["agents", "crown", "folio", "--scope", "fno"])))
-        );
-    }
-
-    #[test]
-    fn org_rundown_appends_the_default_out_only_when_absent() {
-        let default = Some(OsString::from("/s/pages/rundown.html"));
-        assert_eq!(
-            rundown_argv(&osv(&[]), default.clone()),
-            osv(&["agents", "king", "ledger", "--out", "/s/pages/rundown.html"])
-        );
-        assert_eq!(
-            rundown_argv(&osv(&["--out", "/x.html"]), default.clone()),
-            osv(&["agents", "king", "ledger", "--out", "/x.html"])
-        );
-        assert_eq!(
-            rundown_argv(&osv(&["--out=/x.html"]), default),
-            osv(&["agents", "king", "ledger", "--out=/x.html"])
-        );
-    }
-
-    #[test]
-    fn org_vacancies_and_fold_forward_the_old_sweeps() {
-        assert_eq!(
-            classify(&osv(&["agents", "org", "vacancies", "--json"])),
-            Some(Org::Forward(osv(&["agents", "court-orphans", "--json"])))
-        );
-        assert_eq!(
-            classify(&osv(&["agents", "org", "fold", "fno"])),
-            Some(Org::Forward(osv(&["agents", "court-fold", "fno"])))
-        );
-    }
-
-    #[test]
-    fn every_lifecycle_action_forwards_the_king_action() {
-        for action in ACTIONS {
-            assert_eq!(
-                classify(&osv(&["agents", "org", action, "--flag"])),
-                Some(Org::Forward(osv(&[
-                    "agents", "king", action, "--flag"
-                ])))
-            );
-        }
-    }
-
-    #[test]
-    fn an_unknown_org_word_refuses_listing_the_actions() {
-        match classify(&osv(&["agents", "org", "frobnicate"])) {
-            Some(Org::Refuse(message)) => {
-                assert!(message.contains("checkin"), "{message}");
-                assert!(message.contains("rundown"), "{message}");
-            }
-            other => panic!("expected Refuse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn every_old_spelling_forwards_unchanged_with_a_notice() {
-        for (verb, instead) in OLD {
-            assert_eq!(
-                classify(&osv(&["agents", verb, "-J"])),
-                Some(Org::Forward(osv(&["agents", verb, "-J"])))
-            );
-            let notice = old_spelling_notice(verb).unwrap();
-            assert!(notice.contains(instead), "{notice}");
-            assert!(notice.contains("one release"), "{notice}");
-        }
-    }
-
-    #[test]
-    fn bare_promote_refuses_naming_the_group_form() {
-        match classify(&osv(&["agents", "promote", "x"])) {
-            Some(Org::Refuse(message)) => {
-                assert!(message.contains("fno agents org promote"), "{message}");
-            }
-            other => panic!("expected Refuse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn spawn_promote_rewrites_the_head_only() {
-        assert_eq!(
-            rewrite_spawn(&osv(&[
-                "agents",
-                "spawn",
-                "--promote",
-                "x-aaaa",
-                "--succeed",
-                "--",
-                "/fno:lead x-aaaa",
-                "--promote",
-                "kept",
-            ])),
-            Some(osv(&[
-                "agents",
-                "spawn",
-                "--crown",
-                "x-aaaa",
-                "--succeed",
-                "--",
-                "/fno:lead x-aaaa",
-                "--promote",
-                "kept",
-            ]))
-        );
-        assert_eq!(
-            rewrite_spawn(&osv(&["agents", "spawn", "--promote=x-aaaa"])),
-            Some(osv(&["agents", "spawn", "--crown=x-aaaa"]))
-        );
-        assert_eq!(
-            rewrite_spawn(&osv(&["agents", "spawn", "n", "--argv", "--promote", "x"])),
-            None
-        );
-        assert_eq!(rewrite_spawn(&osv(&["agents", "spawn", "n"])), None);
-    }
-
-    #[test]
-    fn argv_this_module_does_not_own_is_none() {
-        assert_eq!(classify(&osv(&["mux", "ls"])), None);
-        assert_eq!(classify(&osv(&["agents", "whoami"])), None);
-        assert_eq!(classify(&osv(&["agents", "spawn", "n"])), None);
-        assert_eq!(classify(&osv(&[])), None);
-    }
 }

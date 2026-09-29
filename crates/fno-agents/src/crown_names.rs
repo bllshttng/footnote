@@ -778,6 +778,275 @@ pub fn crown_line_text(name: Option<&str>, title_txt: &str, scope: &str) -> Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_checkin_naming_and_theme_flows() {
+        fn an_unnamed_live_crown_cannot_complete_checkin() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
+            let err = apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                None,
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("every live crown needs a name"), "{err}");
+        }
+
+        fn a_successor_checkin_carries_the_name_into_its_registry_label() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            write_registry(tmp.path(), json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]));
+            name_crown(&store, &registry, "x-aaaa", "barnaby").unwrap();
+            carry_succession(&store, "x-aaaa", None).unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]));
+            apply_crown_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let rows = crate::state::load_registry(&registry).unwrap();
+            assert_eq!(rows.entries[0].name, "barnaby");
+        }
+
+        fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([
+                    crown_row("king-a", "x-aaaa", 2, "sess-a"),
+                    crown_row("king-b", "fno", 1, "sess-b"),
+                ]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("barnaby"), "{err}");
+            assert!(err.contains("x-aaaa"), "{err}");
+        }
+
+        fn naming_an_already_named_crown_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-b", "fno", 1, "sess-b")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("ernest"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("already named"), "{err}");
+        }
+
+        fn combining_the_two_naming_flags_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            assert!(apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                Some("a"),
+                Some("old"),
+                None,
+                None,
+                "fno"
+            )
+            .is_err());
+        }
+
+        fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
+            assert_eq!(
+                crown_line_text(
+                    Some("Kestrel"),
+                    "Lead of native backlog",
+                    "x-dddd,x-eeee,x-ffff"
+                ),
+                "Kestrel, Lead of native backlog (x-dddd,x-eeee,x-ffff)"
+            );
+            assert_eq!(
+                crown_line_text(None, "L1 fno", "fno"),
+                "unnamed lead - name it once: fno agents org checkin --name <name>"
+            );
+        }
+
+        fn a_themed_l2_checkin_records_theme_and_title() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-dddd,x-eeee,x-ffff", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
+            let shown = set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
+            assert_eq!(shown, "Lead of native backlog");
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
+            assert_eq!(rec["theme"], json!("native backlog"));
+            assert_eq!(rec["title"], json!("Lead of native backlog"));
+            assert_eq!(
+                stored_title(&store, "x-dddd,x-eeee,x-ffff").as_deref(),
+                Some("Lead of native backlog")
+            );
+        }
+
+        fn a_beat_without_a_theme_refuses_and_names_the_flag() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                None,
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("every lead names its theme once per scope"),
+                "{err}"
+            );
+            assert!(err.contains("--theme"), "{err}");
+        }
+
+        fn an_l1_refuses_a_theme_and_titles_by_project() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("folio", "fno", 1, "sess-f")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "fno", "folio").unwrap();
+            let err = set_theme(&store, &registry, "fno", "native backlog").unwrap_err();
+            assert!(err.contains("takes the project name"), "{err}");
+            assert_eq!(title(1, "fno", None), "Head of fno");
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["crowns"]["fno"]["title"], json!("Head of fno"));
+        }
+
+        fn titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form() {
+            assert_eq!(title(0, "fno", None), "Chief of fno");
+            assert_eq!(title(0, "fno", Some("ReadyRule")), "Chief of ReadyRule");
+            assert_eq!(title(2, "x-aaaa", None), "Lead of x-aaaa");
+            assert_eq!(title(7, "fno", Some("native backlog")), "L7 fno");
+            assert_eq!(
+                legacy_label(2, "x-dddd,x-eeee,x-ffff"),
+                "L2 x-dddd,x-eeee,x-ffff"
+            );
+        }
+
+        fn a_theme_with_a_quote_or_bad_length_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            for bad in ["na\"tive", "na<ti", "x"] {
+                let err = set_theme(&store, &registry, "x-aaaa", bad).unwrap_err();
+                assert!(err.contains("2-40 characters"), "{err}");
+            }
+            assert!(set_theme(&store, &registry, "x-aaaa", "o'brien-team").is_ok());
+        }
+
+        fn the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            assert_eq!(
+                set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap(),
+                "Lead of native backlog"
+            );
+            let err = set_theme(&store, &registry, "x-aaaa", "other theme").unwrap_err();
+            assert!(err.contains("native backlog"), "{err}");
+            assert!(err.contains("set once per scope"), "{err}");
+        }
+
+        fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            // The told-to re-scope: the same holder now holds a new scope.
+            write_registry(tmp.path(), json!([crown_row("kestrel", "new-scope", 2, "sess-k")]));
+            keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["new-scope"];
+            assert!(rec.get("theme").is_none() || rec["theme"].is_null());
+            assert_eq!(rec["title"], json!("Lead of new-scope"));
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                None,
+                Some(2),
+                "new-scope",
+            )
+            .unwrap_err();
+            assert!(err.contains("--theme"), "{err}");
+        }
+        an_unnamed_live_crown_cannot_complete_checkin();
+        a_successor_checkin_carries_the_name_into_its_registry_label();
+        a_duplicate_live_name_refuses_naming_and_names_the_holder();
+        naming_an_already_named_crown_refuses();
+        combining_the_two_naming_flags_refuses();
+        the_crown_line_leads_and_the_unnamed_line_teaches_the_flag();
+        a_themed_l2_checkin_records_theme_and_title();
+        a_beat_without_a_theme_refuses_and_names_the_flag();
+        an_l1_refuses_a_theme_and_titles_by_project();
+        titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form();
+        a_theme_with_a_quote_or_bad_length_refuses();
+        the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop();
+        a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one();
+    }
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
@@ -1356,270 +1625,5 @@ mod tests {
         assert!(reverted.is_empty(), "{reverted:?}");
     }
 
-    #[test]
-    fn an_unnamed_live_crown_cannot_complete_checkin() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
-        let err = apply_crown_naming(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            None,
-            None,
-            None,
-            Some(1),
-            "fno",
-        )
-        .unwrap_err();
-        assert!(err.contains("every live crown needs a name"), "{err}");
-    }
 
-    #[test]
-    fn a_successor_checkin_carries_the_name_into_its_registry_label() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        write_registry(tmp.path(), json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]));
-        name_crown(&store, &registry, "x-aaaa", "barnaby").unwrap();
-        carry_succession(&store, "x-aaaa", None).unwrap();
-        write_registry(tmp.path(), json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]));
-        apply_crown_naming(
-            &store,
-            &registry,
-            None,
-            None,
-            Some("native backlog"),
-            Some(2),
-            "x-aaaa",
-        )
-        .unwrap();
-        let rows = crate::state::load_registry(&registry).unwrap();
-        assert_eq!(rows.entries[0].name, "barnaby");
-    }
-
-    #[test]
-    fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(
-            tmp.path(),
-            json!([
-                crown_row("king-a", "x-aaaa", 2, "sess-a"),
-                crown_row("king-b", "fno", 1, "sess-b"),
-            ]),
-        );
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        apply_crown_naming(
-            &store,
-            &registry,
-            Some("barnaby"),
-            None,
-            Some("native backlog"),
-            Some(2),
-            "x-aaaa",
-        )
-        .unwrap();
-        let err = apply_crown_naming(
-            &store,
-            &registry,
-            Some("barnaby"),
-            None,
-            None,
-            Some(1),
-            "fno",
-        )
-        .unwrap_err();
-        assert!(err.contains("barnaby"), "{err}");
-        assert!(err.contains("x-aaaa"), "{err}");
-    }
-
-    #[test]
-    fn naming_an_already_named_crown_refuses() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("king-b", "fno", 1, "sess-b")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        apply_crown_naming(
-            &store,
-            &registry,
-            Some("barnaby"),
-            None,
-            None,
-            Some(1),
-            "fno",
-        )
-        .unwrap();
-        let err = apply_crown_naming(
-            &store,
-            &registry,
-            Some("ernest"),
-            None,
-            None,
-            Some(1),
-            "fno",
-        )
-        .unwrap_err();
-        assert!(err.contains("already named"), "{err}");
-    }
-
-    #[test]
-    fn combining_the_two_naming_flags_refuses() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        assert!(apply_crown_naming(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            Some("a"),
-            Some("old"),
-            None,
-            None,
-            "fno"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
-        assert_eq!(
-            crown_line_text(
-                Some("Kestrel"),
-                "Lead of native backlog",
-                "x-dddd,x-eeee,x-ffff"
-            ),
-            "Kestrel, Lead of native backlog (x-dddd,x-eeee,x-ffff)"
-        );
-        assert_eq!(
-            crown_line_text(None, "L1 fno", "fno"),
-            "unnamed lead - name it once: fno agents org checkin --name <name>"
-        );
-    }
-
-    #[test]
-    fn a_themed_l2_checkin_records_theme_and_title() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(
-            tmp.path(),
-            json!([crown_row("kestrel", "x-dddd,x-eeee,x-ffff", 2, "sess-k")]),
-        );
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
-        let shown = set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
-        assert_eq!(shown, "Lead of native backlog");
-        let dump = snapshot(&store).unwrap();
-        let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
-        assert_eq!(rec["theme"], json!("native backlog"));
-        assert_eq!(rec["title"], json!("Lead of native backlog"));
-        assert_eq!(
-            stored_title(&store, "x-dddd,x-eeee,x-ffff").as_deref(),
-            Some("Lead of native backlog")
-        );
-    }
-
-    #[test]
-    fn a_beat_without_a_theme_refuses_and_names_the_flag() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
-        let err = apply_crown_naming(
-            &store,
-            &registry,
-            None,
-            None,
-            None,
-            Some(2),
-            "x-aaaa",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("every lead names its theme once per scope"),
-            "{err}"
-        );
-        assert!(err.contains("--theme"), "{err}");
-    }
-
-    #[test]
-    fn an_l1_refuses_a_theme_and_titles_by_project() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("folio", "fno", 1, "sess-f")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "fno", "folio").unwrap();
-        let err = set_theme(&store, &registry, "fno", "native backlog").unwrap_err();
-        assert!(err.contains("takes the project name"), "{err}");
-        assert_eq!(title(1, "fno", None), "Head of fno");
-        let dump = snapshot(&store).unwrap();
-        assert_eq!(dump["crowns"]["fno"]["title"], json!("Head of fno"));
-    }
-
-    #[test]
-    fn titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form() {
-        assert_eq!(title(0, "fno", None), "Chief of fno");
-        assert_eq!(title(0, "fno", Some("ReadyRule")), "Chief of ReadyRule");
-        assert_eq!(title(2, "x-aaaa", None), "Lead of x-aaaa");
-        assert_eq!(title(7, "fno", Some("native backlog")), "L7 fno");
-        assert_eq!(
-            legacy_label(2, "x-dddd,x-eeee,x-ffff"),
-            "L2 x-dddd,x-eeee,x-ffff"
-        );
-    }
-
-    #[test]
-    fn a_theme_with_a_quote_or_bad_length_refuses() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
-        for bad in ["na\"tive", "na<ti", "x"] {
-            let err = set_theme(&store, &registry, "x-aaaa", bad).unwrap_err();
-            assert!(err.contains("2-40 characters"), "{err}");
-        }
-        assert!(set_theme(&store, &registry, "x-aaaa", "o'brien-team").is_ok());
-    }
-
-    #[test]
-    fn the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
-        set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
-        assert_eq!(
-            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap(),
-            "Lead of native backlog"
-        );
-        let err = set_theme(&store, &registry, "x-aaaa", "other theme").unwrap_err();
-        assert!(err.contains("native backlog"), "{err}");
-        assert!(err.contains("set once per scope"), "{err}");
-    }
-
-    #[test]
-    fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]));
-        let store = store_path(tmp.path());
-        let registry = registry_path(tmp.path());
-        name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
-        set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
-        // The told-to re-scope: the same holder now holds a new scope.
-        write_registry(tmp.path(), json!([crown_row("kestrel", "new-scope", 2, "sess-k")]));
-        keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
-        let dump = snapshot(&store).unwrap();
-        let rec = &dump["crowns"]["new-scope"];
-        assert!(rec.get("theme").is_none() || rec["theme"].is_null());
-        assert_eq!(rec["title"], json!("Lead of new-scope"));
-        let err = apply_crown_naming(
-            &store,
-            &registry,
-            None,
-            None,
-            None,
-            Some(2),
-            "new-scope",
-        )
-        .unwrap_err();
-        assert!(err.contains("--theme"), "{err}");
-    }
 }
