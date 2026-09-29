@@ -48,7 +48,8 @@ def test_receipt_collects_grounding_without_writes(
     retro.write_text("# Retro\n")
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
-    (home / ".fno" / "lesson-candidates.jsonl").write_text("{}\n{}\n")
+    (home / ".fno" / "history").mkdir(parents=True, exist_ok=True)
+    (home / ".fno" / "history" / "lesson-candidates.jsonl").write_text("{}\n{}\n")
     graph = [
         {
             "id": "x-4007",

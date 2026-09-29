@@ -614,7 +614,7 @@ fn find_nodes_for_pr(rows: &[Value], pr: i64, repo: Option<&str>) -> Vec<String>
 }
 /// Best-effort `owner/repo` for this checkout: git origin, parsed. None on
 /// every failure; the caller degrades to unscoped resolution.
-fn resolve_current_repo_slug() -> Option<String> {
+pub(crate) fn resolve_current_repo_slug() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .output()

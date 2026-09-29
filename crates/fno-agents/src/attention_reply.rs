@@ -170,6 +170,12 @@ pub fn tick_answers(
     let mut acted: u64 = 0;
     let mut detail: Vec<String> = Vec::new();
     for (item_id, sink, answer) in &answers {
+        if delivered.contains(item_id) {
+            // The terminal delivery row exists; a re-walk appends a fresh
+            // delivery row every beat (the live store held 5,343 rows for
+            // one question, measured 2026-09-28).
+            continue;
+        }
         if std::time::Instant::now() >= deadline {
             detail.push(format!("ladder: budget spent, {} deferred", answers.len()));
             break;
@@ -748,6 +754,49 @@ mod tests {
     fn journal() -> String {
         let home = crate::paths::AgentsHome::from_env();
         crate::event_store::journal_text(&crate::provider_cap::questions_path(&home), &[])
+    }
+
+    #[test]
+    fn ac2_edge_a_delivered_answer_never_reenters_the_ladder() {
+        let _root = crate::paths::DeclaredRoot::declare("reply_delivered_skip");
+        let items = vec![ready_item("q-done", None, Some("s1"))];
+        record_answer("q-done");
+        let mut io = FakeIo {
+            posture: "outstanding: q-done answered; mail to w1: delivered (hosted)".into(),
+            clears: 0,
+        };
+        let state_dir = tempfile::tempdir().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let runner = &|_argv: &[String]| (0, String::new(), String::new());
+        let (acted1, _d1) = tick_answers(
+            &items,
+            Path::new("."),
+            state_dir.path(),
+            deadline,
+            &mut io,
+            runner,
+        );
+        assert_eq!(
+            acted1,
+            2,
+            "clear + delivery: {acted1} journal={}",
+            journal()
+        );
+        let (acted2, _d2) = tick_answers(
+            &items,
+            Path::new("."),
+            state_dir.path(),
+            deadline,
+            &mut io,
+            runner,
+        );
+        assert_eq!(
+            acted2,
+            0,
+            "the delivered answer never re-enters: {}",
+            journal()
+        );
+        assert_eq!(io.clears, 1, "no second clear");
     }
 
     #[test]

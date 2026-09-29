@@ -73,6 +73,11 @@ mkdir -p "$UV_TOOLS" "$UV_BIN" "$CACHE" "$WORK" "$BASE_TMP/home"
 # path is the launch gate). HOME pristine so nothing resolves back to a real
 # install. cwd is repo-less (AC6-EDGE).
 cd "$WORK" || { echo "FAIL[env] cd to $WORK failed"; exit 1; }
+# The curl|sh channel inherits the caller's SHELL; uv's `tool update-shell`
+# refuses without one ("the current shell could not be determined", rc=2).
+# Pin the shell the real channel always provides, so check 3b exercises the
+# uv profile-edit path instead of accidentally testing the manual fallback.
+export SHELL="${SHELL:-/bin/bash}"
 export UV_TOOL_DIR="$UV_TOOLS" UV_TOOL_BIN_DIR="$UV_BIN" \
        XDG_CACHE_HOME="$CACHE" HOME="$BASE_TMP/home" \
        FNO_INSTALL_WHEEL="$WHEEL"
@@ -110,8 +115,16 @@ fi
 # on a uv too old for `tool update-shell`, so on such a uv the assertion would
 # false-fail though the installer behaved correctly (the fallback is exercised).
 if uv tool update-shell --help >/dev/null 2>&1; then
-  if printf '%s' "$OUT" | grep -qi 'update-shell'; then
+  # Two honest passes: uv edited the profile (the success line), or uv
+  # refused and the installer named why. The Linux runner images ship pwsh,
+  # which uv's update-shell cannot edit and refuses the whole edit over
+  # ("updating PowerShell is currently unsupported", run 36459620721), so a
+  # runner can never produce the success arm. Each arm asserts its own
+  # marker; a bare tool-name grep would pass on the failure line alone.
+  if printf '%s' "$OUT" | grep -qi "added .*profile.*via 'uv tool update-shell'"; then
     pass "path-update-shell" "default path ran 'uv tool update-shell' to fix PATH"
+  elif printf '%s' "$OUT" | grep -qi "uv tool update-shell failed: error:"; then
+    pass "path-update-shell" "uv could not edit the profile here; the installer named why and surfaced the manual hint"
   else
     miss "path-update-shell" "default path did not report a 'uv tool update-shell' profile edit"
   fi
@@ -182,5 +195,13 @@ else
 fi
 
 echo "---"
-if [ "$fail" -ne 0 ]; then echo "fno.sh smoke: FAILED"; exit 1; fi
+if [ "$fail" -ne 0 ]; then
+  # A failed check prints only its own line. Dump the installer's full
+  # captured output so the next diagnosis reads the real error instead of
+  # guessing from check names.
+  echo "--- installer output (provision run):"
+  printf '%s\n' "$PROVISION_OUT"
+  echo "fno.sh smoke: FAILED"
+  exit 1
+fi
 echo "fno.sh smoke: all checks passed"

@@ -30,11 +30,11 @@ for t in capability-lane-blueprint capability-lane-implementation capability-lan
 done
 ```
 
-Each run appends one history row per task-run to `~/.fno/evals-history.jsonl`, carrying `experiment_id` (the `--cohort` id), `requested_lane`, and the `lane_status`/observed fields ([docs/evals.md](../evals.md#lanes)).
+Each run appends one history row per task-run to `~/.fno/history/evals-history.jsonl`, carrying `experiment_id` (the `--cohort` id), `requested_lane`, and the `lane_status`/observed fields ([docs/evals.md](../evals.md#lanes)).
 
 ## Reading the result
 
-There is no cohort-comparison command yet. Read `~/.fno/evals-history.jsonl` directly (`--experiment_id` filters to one cohort) and compare pass rates by hand across the two cohort ids. Folding this into one `fno doctor evals report` view, with a promotion recommendation, is deferred follow-up work.
+There is no cohort-comparison command yet. Read `~/.fno/history/evals-history.jsonl` directly (`--experiment_id` filters to one cohort) and compare pass rates by hand across the two cohort ids. Folding this into one `fno doctor evals report` view, with a promotion recommendation, is deferred follow-up work.
 
 A `lane_status` of `substituted` on any row means capacity served a different harness than requested. Exclude that row before comparing lanes. It is not a real sample of the lane you meant to qualify.
 

@@ -38,13 +38,32 @@ CWD = Path("/tmp")
         (
             "codex",
             "workspace-write:on-request",
-            ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "on-request",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ],
+        ),
+        (
+            "codex",
+            "workspace-write:never",
+            [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ],
         ),
         ("opencode", "auto", ["--auto"]),
         ("agy", "skip", ["--dangerously-skip-permissions"]),
     ],
 )
-def test_mapping_accepts_provider_native_values(provider, mode, expected):
+def test_mapping_accepts_provider_native_values(rust_door, provider, mode, expected):
     assert permission_pane_tokens(provider, mode) == expected
 
 
@@ -58,10 +77,39 @@ def test_mapping_accepts_provider_native_values(provider, mode, expected):
         ("claude", ""),  # empty value required
     ],
 )
-def test_mapping_fail_closed_on_unmappable(provider, mode):
+def test_mapping_fail_closed_on_unmappable(rust_door, provider, mode):
     with pytest.raises(DispatchAskError) as exc:
         permission_pane_tokens(provider, mode)
     assert exc.value.exit_code == 2
+
+
+@pytest.mark.dev_build
+def test_codex_refusal_names_the_overlay_key(rust_door):
+    """AC5-HP: a claude word refused for codex teaches the config key that
+    fixes it, so the operator reads the repair at spawn time."""
+    with pytest.raises(DispatchAskError) as exc:
+        permission_pane_tokens("codex", "bypassPermissions")
+    assert "agents.*.harness.codex.permission_mode" in str(exc.value)
+
+
+@pytest.mark.dev_build
+def test_codex_pane_bounded_default_rides_the_rust_owner(rust_door, monkeypatch, tmp_path):
+    """AC3-HP: with no mode and no yolo, the pane's bounded default IS the
+    thread lane's workspace-write:never pair, tokens straight from
+    permission_pane_tokens - pane and thread start from one posture, and the
+    network override rides with it."""
+    monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
+    argv = build_pane_argv("codex", "hi", tmp_path, False, None, None)
+    assert argv[:5] == ["codex", "--remote", "unix://", "-C", str(tmp_path)]
+    i = argv.index("--sandbox")
+    assert argv[i : i + 6] == [
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+    ]
 
 
 # --- agy pane posture: default bypass, explicit mode replaces it -------------

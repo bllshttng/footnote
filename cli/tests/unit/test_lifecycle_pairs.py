@@ -58,10 +58,22 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     Pair("backlog", "retract", "undefer"),
     Pair("backlog", "queue", "unqueue"),
     Pair("backlog", "supersede", "unsupersede"),
-    Pair("backlog", "done", "reopen"),
+    Pair(
+        "backlog",
+        "done",
+        None,
+        "correction is reopen, a verb the native binary serves after the "
+        "python leg retired",
+    ),
     # reconcile closes nodes off merged PRs, so it reaches the same terminal
-    # state `done` does and is corrected by the same verb.
-    Pair("backlog", "reconcile", "reopen"),
+    # state `done` does and is corrected by the same native reopen.
+    Pair(
+        "backlog",
+        "reconcile",
+        None,
+        "correction is reopen, a verb the native binary serves after the "
+        "python leg retired",
+    ),
     Pair("backlog", "archive", "unarchive"),
     # An edit path would make the record deniable, which is the property the
     # demand signal exists to prevent. A later correction is a progress note.
@@ -116,7 +128,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "ready", "reconcile", "reconcile-findings", "requeue", "retro",
-        "relatedness", "remove", "render-views", "reopen", "reprioritize", "retract", "roadmap",
+        "relatedness", "remove", "render-views", "reprioritize", "retract", "roadmap",
         "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede",
         "version", "view", "worked",

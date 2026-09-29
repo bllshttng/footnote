@@ -27,9 +27,6 @@ jobs:
     name: binary ${{ matrix.target.name }}
     runs-on: ${{ matrix.target.runs-on }}
     timeout-minutes: 45
-    # Windows is built but not released this phase; let its failure not fail
-    # the job, so a caller's publish leg still runs on the released tarballs.
-    continue-on-error: ${{ matrix.target.name == 'windows-x64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,8 +39,6 @@ jobs:
           - { name: macos-x64, runs-on: macos-14, rust-target: x86_64-apple-darwin }
           - { name: linux-x64, runs-on: ubuntu-latest, rust-target: x86_64-unknown-linux-musl }
           - { name: linux-arm64, runs-on: ubuntu-24.04-arm, rust-target: aarch64-unknown-linux-musl }
-          # windows-x64: built (toolchain exercised) but not released this phase.
-          - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,12 +80,14 @@ jobs:
       - name: Package tarball
         shell: bash
         run: |
-          ext=""
-          [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
+          # tar's -C is cumulative: a second relative -C resolves from inside
+          # the first, so the fno leg chdir'd into
+          # crates/fno-agents/target/.../crates/fno/target/... and failed to
+          # open. Anchor both dirs at the workspace.
           tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
-            -C "crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
-              "fno-agents${ext}" "fno-agents-daemon${ext}" "fno-agents-worker${ext}" \
-            -C "crates/fno/target/${{ matrix.target.rust-target }}/release" "fno${ext}"
+            -C "$PWD/crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
+              "fno-agents" "fno-agents-daemon" "fno-agents-worker" \
+            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

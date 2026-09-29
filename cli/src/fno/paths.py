@@ -1074,8 +1074,8 @@ def evals_history() -> Path:
         return _guard_state_path(_resolve(override))
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return state_dir() / "evals-history.jsonl"
-    return _guard_state_path(_resolve("~/.fno/") / "evals-history.jsonl")
+        return state_dir() / "history" / "evals-history.jsonl"
+    return _guard_state_path(_resolve("~/.fno/") / "history" / "evals-history.jsonl")
 
 
 def benchmarks_json() -> Path:
@@ -1691,7 +1691,7 @@ _PLUGIN_MARKER_RELPATH = "hooks/helpers/init-target-state.sh"
 def _plugin_root_pointer() -> Path:
     # ~/.fno (or $FNO_HOME). Computed inline - paths.py has no
     # fno_home() helper, and reading the env fresh each call (no cache)
-    # matches the session-start hook's ${FNO_HOME:-$HOME/.fno}
+    # matches the session-start hook's ${FNO_HOME:-$HOME/.fno}/install
     # exactly, so the hook-written pointer and this reader always agree.
     home = os.environ.get("FNO_HOME")
     base = Path(home).expanduser() if home else Path.home() / ".fno"

@@ -26,6 +26,7 @@ from fno.graph.strand import (
     _stranded_next_receipts,
     _sweep_reparent_stranded_orphans,
 )
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -281,12 +282,12 @@ def _seed_stranded_family(g: Path) -> tuple[str, str, list[str]]:
 
 def test_canonical_done_refuses_over_live_children(tmp_graph):
     _grand, parent, kids = _seed_stranded_family(tmp_graph)
-    r = runner.invoke(
-        app, ["backlog", "done", parent], catch_exceptions=False
-    )
-    assert r.exit_code == 1, r.output
+    # The canonical close is native; the refusal (and the kid names) ride
+    # stderr through the door.
+    r = run_native_create(tmp_graph, "done", parent)
+    assert r.exit_code == 1, r.output + r.stderr
     for kid in kids:
-        assert kid in r.output
+        assert kid in r.stderr
     rows = _by_id_file(tmp_graph)
     assert not rows[parent].get("completed_at")  # nothing closed
     for kid in kids:
@@ -320,12 +321,10 @@ def test_canonical_done_force_reparents_to_nearest_live_ancestor(tmp_graph):
         cwd=str(tmp_graph.parent),
     )
     assert note.returncode == 0, note.stderr
-    r = runner.invoke(
-        app,
-        ["backlog", "done", parent, "--force", "--reason", "deliberate close"],
-        catch_exceptions=False,
-    )
-    assert r.exit_code == 0, r.output
+    # The canonical close is native; the force + reparent receipt ride the
+    # door over the same store.
+    r = run_native_create(tmp_graph, "done", parent, "--force", "--reason", "deliberate close")
+    assert r.exit_code == 0, r.output + r.stderr
     rows = _by_id_file(tmp_graph)
     assert rows[parent]["completed_at"]
     for kid in kids:

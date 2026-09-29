@@ -46,11 +46,11 @@ git -C "$REPO" commit -qm "seed: the shipped skill"
 
 # Temp home: ~/.claude as a git repo (TARGET_DIR), ~/.fno with the log and
 # two real postmortem files.
-mkdir -p "$D/home/.claude/proposed-patches" "$D/home/.fno/postmortems"
+mkdir -p "$D/home/.claude/proposed-patches" "$D/home/.fno/logs" "$D/home/.fno/postmortems"
 git -C "$D/home/.claude" init -q
 git -C "$D/home/.claude" config user.email fixture@example.com
 git -C "$D/home/.claude" config user.name fixture
-LOG="$D/home/.fno/corrections.log"
+LOG="$D/home/.fno/logs/corrections.log"
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 printf '# first failure\n' > "$D/home/.fno/postmortems/pm-1.md"
 printf '# second failure\n' > "$D/home/.fno/postmortems/pm-2.md"

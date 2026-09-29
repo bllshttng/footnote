@@ -673,7 +673,7 @@ def dispatch_notifications(
 
 
 def _default_history_path() -> Path:
-    return _paths.state_dir() / "health-history.jsonl"
+    return _paths.state_dir() / "history" / "health-history.jsonl"
 
 
 def append_history(

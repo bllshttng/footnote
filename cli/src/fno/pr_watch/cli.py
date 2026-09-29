@@ -1293,10 +1293,14 @@ def tick() -> None:
                     else:
                         skip = "no_trigger"
                     note = wake_summary.get("note")
+                    from collections import Counter
+                    rc = Counter(str(i.get("refusal") or "?") for i in wake_summary.get("refused") or [])
+                    refused_s = ",".join(f"{k}:{rc[k]}" for k in sorted(rc))
                     detail = (
                         f"crowns={crowns} evaluated={evaluated}/{crowns}"
                         f" truth_reads={truth_reads}"
                         + (f" woke={woke}" if woke else "")
+                        + (f" refused={refused_s}" if refused_s else "")
                         + (f" note={note}" if note else "")
                     )
                     _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,

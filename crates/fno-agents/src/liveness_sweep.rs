@@ -249,15 +249,30 @@ where
         }
         // A Codex thread hosted by THIS daemon is owned by its actor: the
         // stale registry pid must not settle it. A row no longer hosted is
-        // settled by its rollout: the rollout file on disk is the durable
-        // object, so its presence means Orphaned (resumable later, by a human
-        // or a resume verb), its absence means the thread never got far enough
-        // to persist anything and is Exited. Before the actor rewrite this arm
-        // always returned None, so a permanently dead thread read Live forever.
+        // settled by its rollout, through the shared liveness ladder: a
+        // rollout written within the freshness window is a positive running
+        // marker (the app-server keeps writing it while the thread turns),
+        // so it neither demotes the row nor lets a stale Orphaned stamp
+        // stand - measured 2026-09-28: the sweep stamped Orphaned over a
+        // rollout written one second earlier, and every status-filtered
+        // census dropped a working session. A quiet rollout means resumable
+        // (Orphaned), its absence means the thread never got far enough to
+        // persist anything (Exited). Before the actor rewrite this arm
+        // always returned None, so a permanently dead thread read Live
+        // forever.
         if is_codex_thread_entry(entry) {
             let hosted = thread_hosted(entry);
+            let measured = liveness(entry);
+            let alive = hosted || measured == RowLiveness::Alive;
             let new_status = if hosted {
                 None
+            } else if measured == RowLiveness::Alive {
+                if entry.status == AgentStatus::Orphaned {
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Live)
+                } else {
+                    None
+                }
             } else if rollout_exists(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Orphaned)
@@ -268,11 +283,11 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
-                // Hosted = the actor answers for it: a positive running
-                // marker, so the measurement is served fresh instead of
-                // keeping a stale stored word standing. A rollout means
-                // resumable, not running; nothing on disk is gone.
-                new_liveness: if hosted {
+                // Hosted or a fresh rollout = the actor answers for it, so
+                // the measurement is served fresh instead of keeping a stale
+                // stored word standing. A quiet rollout means resumable, not
+                // running; nothing on disk is gone.
+                new_liveness: if alive {
                     Some("alive")
                 } else {
                     match new_status {

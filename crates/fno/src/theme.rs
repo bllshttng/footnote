@@ -55,6 +55,10 @@ pub struct Theme {
     /// `Default` under `terminal` - the emulator's own scheme IS the ground
     /// there, and fno paints nothing over it.
     pub base: Color,
+    /// The built-in a user theme inherited from, naming its 16-slot OSC
+    /// palette table ([`terminal16_slot`]). Empty for the built-ins. A user
+    /// theme keeps its parent's palette slots unless the parent has none.
+    pub inherit_from: &'static str,
 }
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
@@ -141,6 +145,24 @@ impl Theme {
                     "unknown mux theme {name:?}, using footnote-superscript"
                 ))),
             ),
+        }
+    }
+
+    /// Resolve a theme by name across the built-ins AND a user theme table
+    /// (config `[mux.themes.<name>]`, materialized by
+    /// [`crate::digest_overlay::user_themes`]). Built-ins resolve first, so a
+    /// user theme cannot shadow a shipped name. An unknown name still falls
+    /// back to the default carrying the same warning [`Theme::from_name`]
+    /// returns.
+    pub fn from_name_in(name: &str, user: &[(String, Theme)]) -> (Theme, Option<KeymapWarning>) {
+        let trimmed = name.trim();
+        let (t, warn) = Self::from_name(trimmed);
+        if warn.is_none() {
+            return (t, None);
+        }
+        match user.iter().find(|(n, _)| n.as_str() == trimmed) {
+            Some((_, t)) => (*t, None),
+            None => (t, warn),
         }
     }
 
@@ -295,6 +317,7 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",
+        inherit_from: "",
         inherit: true,
         // Indexed(3), the brand: the pane-frame outline reads this field
         // directly (cell_style never does under `inherit` - byte-identity),
@@ -320,6 +343,7 @@ fn theme_terminal() -> Theme {
 fn theme_footnote_superscript() -> Theme {
     Theme {
         name: "footnote-superscript",
+        inherit_from: "",
         inherit: false,
         border: rgb(0xff, 0x34, 0x34),    // brand red
         title: rgb(0xe8, 0xe8, 0xe8),     // text
@@ -338,6 +362,7 @@ fn theme_footnote_superscript() -> Theme {
 fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
+        inherit_from: "",
         inherit: false,
         border: rgb(0xe0, 0x01, 0x19),    // brand red
         title: rgb(0x29, 0x29, 0x29),     // text
@@ -354,6 +379,7 @@ fn theme_footnote_paper() -> Theme {
 fn theme_catppuccin() -> Theme {
     Theme {
         name: "catppuccin",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x89, 0xb4, 0xfa),    // blue (the theme's primary)
         title: rgb(0x89, 0xb4, 0xfa),     // blue
@@ -370,6 +396,7 @@ fn theme_catppuccin() -> Theme {
 fn theme_tokyo_night() -> Theme {
     Theme {
         name: "tokyo-night",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x7a, 0xa2, 0xf7),    // blue (the theme's primary)
         title: rgb(0x7a, 0xa2, 0xf7),     // blue
@@ -386,6 +413,7 @@ fn theme_tokyo_night() -> Theme {
 fn theme_gruvbox() -> Theme {
     Theme {
         name: "gruvbox",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x8e, 0xc0, 0x7c), // aqua (the theme's signature accent)
         title: rgb(0x83, 0xa5, 0x98),  // blue
@@ -450,11 +478,19 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
     if i >= 16 {
         return None;
     }
-    match theme.name {
-        "footnote-superscript" => Some(DARK[i]),
-        "footnote-paper" => Some(LIGHT[i]),
-        _ => None,
-    }
+    // A user theme rides its parent's 16-slot table (`inherit_from`); a
+    // theme with neither its own name nor a slot-defining parent paints no
+    // palette and only the OSC 11/10 ground.
+    let table = match theme.name {
+        "footnote-superscript" => Some(&DARK),
+        "footnote-paper" => Some(&LIGHT),
+        _ => match theme.inherit_from {
+            "footnote-superscript" => Some(&DARK),
+            "footnote-paper" => Some(&LIGHT),
+            _ => None,
+        },
+    };
+    table.map(|t| t[i])
 }
 
 /// The `#rrggbb` string of an RGB color, for the hex a swatch shows beside

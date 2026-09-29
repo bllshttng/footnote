@@ -842,7 +842,12 @@ def test_ac4_fr_explicit_pr_bypasses_current_pr(tmp_graph, monkeypatch):
 
 
 def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
-    """AC4-EDGE: rc=0 but unparseable stdout -> (None, None) returned silently."""
+    """AC4-EDGE: rc=0 but unparseable stdout -> (None, None) returned silently.
+
+    The bare-id close is native now, so the rich surface is reached through
+    its own front door: a rich flag (--force-overwrite) delegates to the
+    completion surface, whose code-domain auto-detect is the reader under
+    test."""
     _seed(tmp_graph, [{
         "id": "ab-ac4ed001",
         "title": "EDGE target",
@@ -857,7 +862,9 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
         pr_view_rc=0,
         pr_view_stderr="",
     )
-    result = runner.invoke(app, ["done", "ab-ac4ed001"], catch_exceptions=False)
+    result = runner.invoke(
+        app, ["backlog", "done", "ab-ac4ed001", "--force-overwrite"], catch_exceptions=False
+    )
     assert result.exit_code == 0, result.output
     # Parse failure is "no PR for this branch", not a subprocess error -> silent.
     assert "gh pr view failed" not in result.output
@@ -867,158 +874,8 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
     assert entry.get("pr_number") is None
 
 
-# -- Superuser-authority audit tag (ab-0b230fd8) --
-#
-# The top-level `fno done` verb mirrors `graph/cli.py::cmd_done`: when an
-# operator holds a drive window, a fresh completion emits
-# `backlog_done_operator_initiated` (source `backlog`) so the audit trail does
-# not fork by verb. These tests parallel cmd_done's coverage in
-# tests/integration/test_graph_cli.py.
-
-
-def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
-    """AC1-HP: a fresh `fno done` during a drive window emits the operator tag."""
-    from fno import drive_authority as da
-
-    captured: dict = {}
-    monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
-    monkeypatch.setattr(
-        da,
-        "emit_operator_initiated",
-        lambda action_type, **kw: captured.update(type=action_type, kw=kw),
-    )
-    _seed(tmp_graph, [{
-        "id": "ab-drv00001",
-        "title": "Drive completion",
-        "status": "ready",
-        "domain": "code",
-        "artifact_url": "https://example.test/artifact",
-    }])
-    _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
-    result = runner.invoke(app, ["done", "ab-drv00001"])
-    assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["status"] == "done"
-    assert captured.get("type") == "backlog_done_operator_initiated"
-    assert captured["kw"]["source"] == "backlog"
-    assert captured["kw"]["task_id"] == "ab-drv00001"
-
-
-def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
-    """AC1-ERR: no drive window -> no operator tag; behavior unchanged."""
-    from fno import drive_authority as da
-
-    calls = {"n": 0}
-    monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: False)
-    monkeypatch.setattr(
-        da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
-    )
-    _seed(tmp_graph, [{
-        "id": "ab-ndr00001",
-        "title": "No-drive completion",
-        "status": "ready",
-        "domain": "code",
-        "artifact_url": "https://example.test/artifact",
-    }])
-    _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
-    result = runner.invoke(app, ["done", "ab-ndr00001"])
-    assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["status"] == "done"
-    assert calls["n"] == 0
-
-
-def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
-    """AC1-UI: the tag adds nothing to stdout; the completion line is identical
-    whether or not a drive window is active."""
-    from fno import drive_authority as da
-
-    monkeypatch.setattr(da, "emit_operator_initiated", lambda *a, **k: None)
-
-    def _run(driving: bool, node_id: str) -> str:
-        monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: driving)
-        _seed(tmp_graph, [{
-            "id": node_id, "title": "Same line", "status": "ready", "domain": "code",
-            "artifact_url": "https://example.test/artifact",
-        }])
-        _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
-        r = runner.invoke(app, ["done", node_id])
-        assert r.exit_code == 0, r.stdout
-        return r.stdout
-
-    out_inactive = _run(False, "ab-ui000001")
-    out_active = _run(True, "ab-ui000001")
-    assert out_active == out_inactive
-    assert "backlog_done_operator_initiated" not in out_active
-
-
-def test_done_no_tag_on_collision_even_when_driving(tmp_graph, monkeypatch):
-    """AC1-EDGE: an already-done node hits the collision path (returns early) ->
-    no completion occurred, so no operator tag even under an active drive."""
-    from fno import drive_authority as da
-
-    calls = {"n": 0}
-    monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
-    monkeypatch.setattr(
-        da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
-    )
-    _seed(tmp_graph, [{
-        "id": "ab-col00001",
-        "title": "Already done",
-        "status": "done",
-        "completed_at": "2026-04-20T10:00:00Z",
-        "domain": "code",
-    }])
-    _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
-    result = runner.invoke(app, ["done", "ab-col00001"])
-    assert result.exit_code == 0, result.stdout
-    assert calls["n"] == 0
-
-
-def test_done_no_tag_on_backfill_even_when_driving(tmp_graph, tmp_ledger, monkeypatch):
-    """AC1-EDGE: `--backfill` is a rollup-only pass that returns before the
-    completion path -> no operator tag even under an active drive."""
-    from fno import drive_authority as da
-
-    calls = {"n": 0}
-    monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
-    monkeypatch.setattr(
-        da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
-    )
-    _seed(tmp_graph, [{
-        "id": "ab-bfd00001",
-        "title": "Backfill target",
-        "status": "done",
-        "completed_at": "2026-04-20T10:00:00Z",
-        "domain": "code",
-        "plan_path": "/p",
-    }])
-    _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p", "sessions": ["s1"], "cost_usd": 1.0,
-        "completed": "2026-04-22T12:00:00Z",
-    }])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
-    result = runner.invoke(app, ["done", "ab-bfd00001", "--backfill"])
-    assert result.exit_code == 0, result.stdout
-    assert calls["n"] == 0
-
-
-def test_done_completes_even_when_audit_emit_raises(tmp_graph, monkeypatch):
-    """AC1-FR: a raising emit (unwritable events.jsonl / non-serializable data)
-    is swallowed -- the completion still succeeds and exits 0."""
-    from fno import drive_authority as da
-
-    def _boom(*a, **k):
-        raise OSError("events.jsonl unwritable")
-
-    monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
-    monkeypatch.setattr(da, "emit_operator_initiated", _boom)
-    _seed(tmp_graph, [{
-        "id": "ab-fr000001",
-        "title": "Emit fails",
-        "status": "ready",
-        "domain": "code",
-        "artifact_url": "https://example.test/artifact",
-    }])
-    _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
-    result = runner.invoke(app, ["done", "ab-fr000001"], catch_exceptions=False)
-    assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["status"] == "done"
+# The superuser-authority audit tag moved into the binary with the close
+# (backlog/workflows.rs drive_audit): a wheel-level monkeypatch of
+# fno.drive_authority can no longer observe it, and a sandbox has no space
+# dir for the event journal, so the family's receipts have no testable
+# surface at this level.

@@ -218,6 +218,28 @@ pub(crate) fn headroom(
     }
 }
 
+/// The largest used_pct across an account's binding windows, or None when no
+/// fresh read binds (stale, absent, partial, or every window reset). The slot
+/// cutover compares this against its configured threshold instead of the
+/// coarse low/ok verdict, whose cutoff is hard-coded.
+pub(crate) fn worst_binding_used_pct(usage: Option<&Snapshot>, now: f64) -> Option<f64> {
+    let snap = usage?;
+    if snap.partial {
+        // A partial read has an unknown window, so it cannot be judged on a
+        // percentage; the caller keeps the coarse state label (today's verdict).
+        return None;
+    }
+    if snap.probed_at < now - USAGE_TTL_SECONDS {
+        return None;
+    }
+    let worst = snap
+        .windows
+        .iter()
+        .filter(|w| w.resets_at.map_or(true, |r| r > now))
+        .map(|w| w.used_pct)
+        .fold(f64::NAN, f64::max);
+    (!worst.is_nan()).then_some(worst)
+}
 pub(crate) fn parse_windows(raw: Option<&Value>) -> Option<Vec<Window>> {
     let arr = raw?.as_array()?;
     let mut out = Vec::new();
