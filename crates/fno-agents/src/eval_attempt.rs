@@ -438,6 +438,343 @@ fn export_train(
     Ok(json!({"exported": count, "train_tasks": train.len(), "out": out_path}))
 }
 
+/// --- the observe door: native identity + usage readback --------------------
+///
+/// One attempt's lane evidence read back from the harness's own transcript
+/// store, replacing the Python registry read (`runner.py::_observe_worker` /
+/// `_lane_evidence`). The store is only read. A transcript that cannot be
+/// found or read leaves `lane_status` at `unverified` with a reason and
+/// `usage` at null, never zero (AC10-EDGE).
+use crate::claude_drive::claude_projects_dir;
+use std::path::{Path, PathBuf};
+
+struct Observed {
+    harness: &'static str,
+    model: Option<String>,
+    session_id: String,
+    usage: Option<Value>,
+    source: &'static str,
+}
+
+type UsageSum = (u64, u64, u64, u64); // input, output, cache_read, cache_write
+
+fn add_usage(acc: Option<UsageSum>, next: UsageSum) -> UsageSum {
+    match acc {
+        None => next,
+        Some((i, o, r, w)) => (i + next.0, o + next.1, r + next.2, w + next.3),
+    }
+}
+
+fn usage_json(u: UsageSum) -> Value {
+    json!({"input": u.0, "output": u.1, "cache_read": u.2, "cache_write": u.3})
+}
+
+/// Window on the attempt: a transcript's last write lands between the spawn
+/// and the observe call, so anything older than the start (minus skew) or in
+/// the future (plus skew, a pinned-clock test artifact) cannot be it. The
+/// workdir match below is the real identity; this only bounds the scan.
+fn in_window(mtime_s: f64, started: f64, now: f64) -> bool {
+    mtime_s + 300.0 >= started && mtime_s <= now + 300.0
+}
+
+/// One claude transcript folded for identity: whether any record carries
+/// `cwd` == *workdir*, the last non-synthetic assistant model, and the usage
+/// summed over every assistant record (the attempt's whole transcript).
+fn fold_claude_transcript(path: &Path, workdir: &str) -> (bool, Option<String>, Option<UsageSum>) {
+    let Ok(f) = std::fs::File::open(path) else {
+        return (false, None, None);
+    };
+    let mut cwd_match = false;
+    let mut model: Option<String> = None;
+    let mut usage: Option<UsageSum> = None;
+    for line in std::io::BufRead::lines(std::io::BufReader::new(f)) {
+        let Ok(line) = line else { continue };
+        let Ok(rec) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if !cwd_match && rec.get("cwd").and_then(Value::as_str) == Some(workdir) {
+            cwd_match = true;
+        }
+        if rec.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(msg) = rec.get("message").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(m) = msg.get("model").and_then(Value::as_str) {
+            if m != "<synthetic>" {
+                model = Some(m.to_string());
+            }
+        }
+        let Some(u) = msg.get("usage").and_then(Value::as_object) else {
+            continue;
+        };
+        let num = |k: &str| u.get(k).and_then(Value::as_u64);
+        let (Some(input), Some(output)) = (num("input_tokens"), num("output_tokens")) else {
+            continue;
+        };
+        let cache_read = num("cache_read_input_tokens").unwrap_or(0);
+        let cache_write = num("cache_creation_input_tokens").unwrap_or(0);
+        usage = Some(add_usage(usage, (input, output, cache_read, cache_write)));
+    }
+    (cwd_match, model, usage)
+}
+
+fn observe_claude(root: &Path, workdir: &str, started: f64, now: f64) -> Option<Observed> {
+    let mut best: Option<(
+        std::time::SystemTime,
+        PathBuf,
+        Option<String>,
+        Option<UsageSum>,
+    )> = None;
+    for dir in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        for file in std::fs::read_dir(dir.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = file.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            // A dotted stem is a sibling artifact, never a transcript.
+            if stem.contains('.') {
+                continue;
+            }
+            let path = file.path();
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let Ok(mtime) = modified.duration_since(std::time::UNIX_EPOCH) else {
+                continue;
+            };
+            if !in_window(mtime.as_secs_f64(), started, now) {
+                continue;
+            }
+            let (cwd_match, model, usage) = fold_claude_transcript(&path, workdir);
+            if !cwd_match {
+                continue;
+            }
+            let newer = best.as_ref().map_or(true, |(b, _, _, _)| modified > *b);
+            if newer {
+                best = Some((modified, path, model, usage));
+            }
+        }
+    }
+    let (_, path, model, usage) = best?;
+    let session_id = path.file_stem()?.to_string_lossy().into_owned();
+    Some(Observed {
+        harness: "claude",
+        model,
+        session_id,
+        usage: usage.map(usage_json),
+        source: "claude-transcript",
+    })
+}
+
+fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> Option<Observed> {
+    const SESSION_SQL: &str = "SELECT id, time_updated FROM session \
+         WHERE directory = ?1 AND parent_id IS NULL";
+    const MESSAGE_SQL: &str =
+        "SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created";
+    let mut best: Option<(i64, String)> = None;
+    for db in dbs {
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            continue;
+        };
+        let Ok(mut stmt) = conn.prepare(SESSION_SQL) else {
+            continue;
+        };
+        let Ok(rows) = stmt.query_map([workdir], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }) else {
+            continue;
+        };
+        for (id, updated_ms) in rows.flatten() {
+            let mtime_s = updated_ms.max(0) as f64 / 1000.0;
+            if !in_window(mtime_s, started, now) {
+                continue;
+            }
+            if best.as_ref().map_or(true, |(b, _)| updated_ms > *b) {
+                best = Some((updated_ms, id));
+            }
+        }
+    }
+    let (_, session_id) = best?;
+    let mut model: Option<String> = None;
+    let mut usage: Option<UsageSum> = None;
+    for db in dbs {
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            continue;
+        };
+        let Ok(mut stmt) = conn.prepare(MESSAGE_SQL) else {
+            continue;
+        };
+        let Ok(rows) = stmt.query_map([&session_id], |r| r.get::<_, String>(0)) else {
+            continue;
+        };
+        for data in rows.flatten() {
+            let Ok(msg) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            if let Some(m) = msg.get("modelID").and_then(Value::as_str) {
+                model = Some(m.to_string());
+            }
+            let Some(tokens) = msg.get("tokens") else {
+                continue;
+            };
+            let num = |k: &str| tokens.get(k).and_then(Value::as_u64);
+            let (Some(input), Some(output)) = (num("input"), num("output")) else {
+                continue;
+            };
+            let cache = tokens.get("cache");
+            let cache_read = cache
+                .and_then(|c| c.get("read"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cache_write = cache
+                .and_then(|c| c.get("write"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            usage = Some(add_usage(usage, (input, output, cache_read, cache_write)));
+        }
+    }
+    Some(Observed {
+        harness: "opencode",
+        model,
+        session_id,
+        usage: usage.map(usage_json),
+        source: "opencode-store",
+    })
+}
+
+/// The `{"op": "observe"}` payload's lane evidence. Mirrors the Python
+/// `_lane_evidence` field-for-field and adds `usage`/`usage_source`. The
+/// requested-vs-observed substitution rule is unchanged: a harness or model
+/// mismatch reads `substituted`, never silently ok.
+pub fn observe(payload: &Value) -> Value {
+    let Some(lane) = payload.get("lane").and_then(Value::as_object) else {
+        return json!({});
+    };
+    let get = |k: &str| {
+        lane.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (requested_lane, requested_harness, requested_model, requested_effort) =
+        (get("name"), get("harness"), get("model"), get("effort"));
+    let mut fields = json!({
+        "requested_lane": requested_lane,
+        "requested_harness": requested_harness,
+        "requested_model": requested_model,
+        "requested_effort": requested_effort,
+        "observed_harness": Value::Null,
+        "observed_model": Value::Null,
+        "observed_model_basis": Value::Null,
+        "observed_effort": Value::Null,
+        "observed_session_id": Value::Null,
+        "substituted": false,
+        "lane_status": "unverified",
+        "lane_reason": Value::Null,
+        "usage": Value::Null,
+        "usage_source": Value::Null,
+    });
+    let attempted = payload
+        .get("attempted")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let spawned = payload
+        .get("spawned")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !attempted {
+        fields["lane_status"] = json!("not-applicable");
+        return fields;
+    }
+    if !spawned {
+        fields["lane_status"] = json!("unavailable");
+        return fields;
+    }
+    let now = payload
+        .get("now_epoch")
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0)
+        });
+    let started = payload
+        .get("started_epoch")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let workdir = payload
+        .get("workdir")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let observed = match requested_harness.as_str() {
+        "claude" => {
+            let root = payload
+                .get("projects_root")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(claude_projects_dir);
+            observe_claude(&root, workdir, started, now)
+        }
+        "opencode" => {
+            let dbs: Vec<PathBuf> = payload
+                .get("opencode_dbs")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_else(crate::opencode_transcript::opencode_stores);
+            observe_opencode(&dbs, workdir, started, now)
+        }
+        _ => None,
+    };
+    match observed {
+        None => {
+            let reason = match requested_harness.as_str() {
+                "claude" => "no claude transcript for this workdir".to_string(),
+                "opencode" => "no opencode session for this workdir".to_string(),
+                other => format!("no transcript reader for harness '{other}'"),
+            };
+            fields["lane_reason"] = json!(reason);
+        }
+        Some(o) => {
+            fields["observed_harness"] = json!(o.harness);
+            fields["observed_model"] = o.model.clone().map(Value::String).unwrap_or(Value::Null);
+            fields["observed_session_id"] = json!(o.session_id);
+            let substituted = (!requested_harness.is_empty() && o.harness != requested_harness)
+                || (!requested_model.is_empty()
+                    && o.model.as_deref() != Some(requested_model.as_str()));
+            fields["substituted"] = json!(substituted);
+            fields["lane_status"] = json!(if substituted { "substituted" } else { "ok" });
+            if let Some(u) = o.usage {
+                fields["usage"] = u;
+                fields["usage_source"] = json!(o.source);
+            }
+        }
+    }
+    fields
+}
+
 pub fn run_evals_attempt(args: &[String]) -> i32 {
     let mut row_json: Option<String> = None;
     let mut rows_path: Option<String> = None;
@@ -527,6 +864,13 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
         let mut buf = String::new();
         if std::io::stdin().read_to_string(&mut buf).is_ok() {
             if let Ok(v) = serde_json::from_str::<Value>(&buf) {
+                if v.get("op").and_then(Value::as_str) == Some("observe") {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&observe(&v)).unwrap_or_default()
+                    );
+                    return 0;
+                }
                 if v.get("op").and_then(Value::as_str) == Some("classify") {
                     if let Some(row) = v.get("row") {
                         let rev = v.get("expected_rev").and_then(Value::as_str);
@@ -696,3 +1040,6 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_observe;

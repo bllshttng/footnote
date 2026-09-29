@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.registry import AgentEntry, RegistryVersionError, write_registry
 from fno.evals import history as _history
 from fno.evals.bank import GradeCheck, TaskSpec
 from fno.evals.grading import grade
@@ -426,31 +425,6 @@ def _never_called_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResu
 _LANE = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
 
 
-def test_observe_worker_reads_a_real_registry_row(tmp_path, monkeypatch) -> None:
-    """The row round-trips through write_registry and load_registry, so a
-    renamed AgentEntry field fails here instead of degrading to unverified."""
-    reg = tmp_path / "registry.json"
-    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
-    write_registry([AgentEntry(
-        name="eval-worker-9", cwd="/tmp/proj", log_path="/tmp/proj.log", harness="codex",
-        model="gpt-6-astra", model_basis="verified", effort="high", harness_session_id="s1",
-    )], path=reg)
-    observed = _runner._observe_worker("eval-worker-9")
-    assert observed == {"harness": "codex", "model": "gpt-6-astra", "model_basis": "verified",
-                        "effort": "high", "harness_session_id": "s1"}
-    assert _runner._observe_worker("no-such-worker") is None
-
-
-def test_observe_worker_lets_a_malformed_registry_raise(tmp_path, monkeypatch) -> None:
-    """A damaged registry aborts the repeat with the real fault; only shape
-    drift on an existing row degrades to None."""
-    reg = tmp_path / "registry.json"
-    reg.write_text("{not json", encoding="utf-8")
-    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
-    with pytest.raises(RegistryVersionError):
-        _runner._observe_worker("eval-worker-9")
-
-
 def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) -> None:
     root = _git_repo(tmp_path)
     hp = tmp_path / "hist.jsonl"
@@ -459,10 +433,16 @@ def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) ->
         (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
         return SpawnResult(True, worker_name="eval-worker-1")
 
-    def observe(name: str):
-        assert name == "eval-worker-1"
-        return {"harness": "codex", "model": "gpt-6-astra", "model_basis": "verified",
-                "effort": "high", "harness_session_id": "sess-1"}
+    def observe(lane, workdir, started_wall, *, attempted, spawned, worker_name):
+        assert worker_name == "eval-worker-1"
+        assert attempted and spawned
+        return {"requested_lane": "astra-high", "requested_harness": "codex",
+                "requested_model": "gpt-6-astra", "requested_effort": "high",
+                "observed_harness": "codex", "observed_model": "gpt-6-astra",
+                "observed_model_basis": "verified", "observed_effort": "high",
+                "observed_session_id": "sess-1",
+                "substituted": False, "lane_status": "ok",
+                "usage": None, "usage_source": None}
 
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
@@ -489,8 +469,14 @@ def test_lane_edge_substitution_is_labeled_and_excluded(tmp_path: Path) -> None:
         (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
         return SpawnResult(True, worker_name="eval-worker-2")
 
-    def observe(name: str):
-        return {"harness": "claude", "model": "claude-sonnet-5", "effort": "medium"}
+    def observe(lane, workdir, started_wall, *, attempted, spawned, worker_name):
+        return {"requested_lane": "astra-high", "requested_harness": "codex",
+                "requested_model": "gpt-6-astra", "requested_effort": "high",
+                "observed_harness": "claude", "observed_model": "claude-sonnet-5",
+                "observed_model_basis": None, "observed_effort": "medium",
+                "observed_session_id": None,
+                "substituted": True, "lane_status": "substituted",
+                "usage": None, "usage_source": None}
 
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
@@ -511,16 +497,24 @@ def test_lane_err_unavailable_never_grades_a_substitute_as_requested(tmp_path: P
     def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
         return SpawnResult(False, "spawn exit 2: account lacks model")
 
-    def _boom(name: str):
-        raise AssertionError("no worker ran; observe must not be called")
+    seen: dict = {}
+
+    def observe(lane, workdir, started_wall, *, attempted, spawned, worker_name):
+        seen.update(attempted=attempted, spawned=spawned)
+        return {"requested_lane": "astra-high", "requested_harness": "codex",
+                "requested_model": "gpt-6-astra", "requested_effort": "high",
+                "observed_harness": None, "observed_model": None,
+                "substituted": False, "lane_status": "unavailable",
+                "usage": None, "usage_source": None}
 
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
-                       lane=_LANE, observe=_boom)
+                       lane=_LANE, observe=observe)
     assert not results[0].passed
+    assert seen == {"attempted": True, "spawned": False}, "the door still learns the spawn refused"
     row = _rows(hp)[0]
     assert row["lane_status"] == "unavailable"
-    assert "observed_model" not in row
+    assert row["observed_model"] is None
     assert row["requested_model"] == "gpt-6-astra"
 
 
@@ -532,19 +526,23 @@ def test_lane_grade_only_task_records_not_applicable_never_unavailable(tmp_path:
 
     task = _task(grade=[GradeCheck("exit", command="true")])  # no prompt: grade-only
     results = run_task(task, repeat=1, repo_root=root, history_path=hp,
-                       spawn=_never_called_spawn, lane=_LANE)
+                       spawn=_never_called_spawn, lane=_LANE,
+                       observe=lambda lane, w, s, *, attempted, spawned, worker_name:
+                           {"requested_lane": "astra-high", "requested_harness": "codex",
+                            "requested_model": "gpt-6-astra", "requested_effort": "high",
+                            "observed_model": None, "observed_harness": None,
+                            "lane_status": "not-applicable"})
     assert results[0].passed
     row = _rows(hp)[0]
     assert row["lane_status"] == "not-applicable"
     assert row["requested_lane"] == "astra-high"
-    assert "observed_model" not in row
+    assert row["observed_model"] is None
 
 
 def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverified(tmp_path: Path) -> None:
-    """The real default spawn (--substrate headless) never leaves a lookupable
-    registry row (claude never writes one; codex tears its own down on
-    success), so a successful run with no observation must read unverified,
-    never a false unavailable that reads like the lane refused capacity."""
+    """A spawned attempt whose store holds no transcript for the attempt
+    workdir reads unverified, never a false unavailable that reads like the
+    lane refused capacity."""
     root = _git_repo(tmp_path)
     hp = tmp_path / "hist.jsonl"
 
@@ -552,8 +550,15 @@ def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverifie
         (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
         return SpawnResult(True, worker_name="eval-worker-3")
 
-    def observe(name: str):
-        return None  # headless: nothing left to look up
+    def observe(lane, workdir, started_wall, *, attempted, spawned, worker_name):
+        # The door's own unverified answer: a spawned attempt whose store holds
+        # no transcript for the attempt workdir.
+        return {"requested_lane": "astra-high", "requested_harness": "codex",
+                "requested_model": "gpt-6-astra", "requested_effort": "high",
+                "observed_model": None, "observed_harness": None,
+                "lane_status": "unverified",
+                "lane_reason": "no claude transcript for this workdir",
+                "usage": None}
 
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
@@ -562,7 +567,32 @@ def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverifie
     row = _rows(hp)[0]
     assert row["lane_status"] == "unverified"
     assert row["requested_lane"] == "astra-high"
-    assert "observed_model" not in row
+    assert row["observed_model"] is None
+
+
+def test_lane_door_unavailable_writes_unverified_never_a_crash(tmp_path, monkeypatch) -> None:
+    """AC10-EDGE: an unreachable door degrades the row to unverified with the
+    named reason, never crashes the repeat and never guesses a lane status."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    def spawn(prompt, workdir, timeout_s):
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True, worker_name="eval-worker-4")
+
+    def fake_verb_call(verb, payload, **kwargs):
+        from fno.rust_binary import VerbUnavailable
+
+        raise VerbUnavailable("binary missing")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb_call)
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn, lane=_LANE)
+    row = _rows(hp)[0]
+    assert results[0].passed
+    assert row["lane_status"] == "unverified"
+    assert row["lane_reason"] == "observe door unavailable"
+    assert row["usage"] is None
 
 
 def _worktree_count(root: Path) -> int:
