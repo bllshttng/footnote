@@ -211,7 +211,7 @@ pub(crate) fn guard_preset(cwd: &Path) -> &'static str {
         return normalize_guard_preset(&v.to_string_lossy());
     }
     match config_lookup(cwd, &["guards", "preset"]) {
-        Some(v) => normalize_guard_preset(&v.to_string()),
+        Some(v) => normalize_guard_preset(v.as_str().unwrap_or("bogus")),
         None => "standard",
     }
 }
