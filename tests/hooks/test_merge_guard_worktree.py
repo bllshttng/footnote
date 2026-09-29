@@ -464,13 +464,14 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
 
 
 def test_state_writes_land_under_fno_home():
-    """A blocked protected push writes git-protection.json under FNO_HOME and
-    creates nothing under a harness state dir in the sandbox (AC2-HP)."""
+    """A blocked protected push writes git-protection.json under the FNO_HOME
+    state dir (the state-root move put hook state under state/) and creates
+    nothing under a harness state dir in the sandbox (AC2-HP)."""
     with tempfile.TemporaryDirectory() as td:
         fno = Path(td) / ".fno"
         out, _ = _run_hook_subprocess("git push origin main", fno)
         assert '"permissionDecision": "deny"' in out
-        assert (fno / "git-protection.json").exists()
+        assert (fno / "state" / "git-protection.json").exists()
         assert not (Path(td) / ".claude").exists()
 
 
@@ -890,7 +891,8 @@ def test_unwritable_state_does_not_crash_the_deny_path():
     with tempfile.TemporaryDirectory() as td:
         fno = Path(td) / ".fno"
         fno.mkdir(parents=True)
-        (fno / "git-protection.json").mkdir()   # a directory where a file goes
+        (fno / "state").mkdir()
+        (fno / "state" / "git-protection.json").mkdir()   # a directory where a file goes
         out, _ = _run_hook_subprocess("git push origin main", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out
         assert "Traceback" not in out
@@ -1003,7 +1005,8 @@ def test_unrecordable_override_fails_closed():
     arrange by putting a directory at the log path."""
     with tempfile.TemporaryDirectory() as td:
         fno, _ = _with_marker(td)
-        (fno / "merge-gate-overrides.log").mkdir()
+        (fno / "logs").mkdir()
+        (fno / "logs" / "merge-gate-overrides.log").mkdir()
         out, _ = _run_hook_subprocess("gh pr merge 9 --squash", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out
 
@@ -1025,7 +1028,7 @@ def test_merge_marker_allows_merge_and_is_consumed():
         out1, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
         assert '"permissionDecision": "allow"' in out1
         assert not marker.exists(), "marker must be single-use"
-        log = fno / "merge-gate-overrides.log"
+        log = fno / "logs" / "merge-gate-overrides.log"
         assert log.exists() and "123" in log.read_text()
         out2, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
         assert '"permissionDecision": "deny"' in out2
@@ -1039,7 +1042,7 @@ def test_override_log_entry_cannot_be_forged_with_a_newline():
         out, _ = _run_hook_subprocess(
             'gh pr merge 123 --body "x\n2099-01-01 forged entry"', fno, cwd=td)
         assert '"permissionDecision": "allow"' in out
-        lines = [ln for ln in (fno / "merge-gate-overrides.log")
+        lines = [ln for ln in (fno / "logs" / "merge-gate-overrides.log")
                  .read_text().splitlines() if ln.strip()]
         assert len(lines) == 1, f"expected 1 log line, got {lines}"
         assert "forged entry" in lines[0], "content kept, just flattened"

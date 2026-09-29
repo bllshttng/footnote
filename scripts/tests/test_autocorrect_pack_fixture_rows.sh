@@ -27,10 +27,10 @@ summary() {
 
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
-mkdir -p "$D/fno/postmortems" "$D/claude"
+mkdir -p "$D/fno/postmortems" "$D/fno/logs" "$D/claude"
 
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-LOG="$D/fno/corrections.log"
+LOG="$D/fno/logs/corrections.log"
 
 real_pm="$D/fno/postmortems/real-pm.md"
 printf '# postmortem body\nsome finding\n' > "$real_pm"
