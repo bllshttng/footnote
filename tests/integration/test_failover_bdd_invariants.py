@@ -114,7 +114,9 @@ def test_invariant_1_atomic_settings_under_concurrent_access(settings_path: Path
         t.join()
     assert corrupt == []
     final = yaml.safe_load(settings_path.read_text())
-    assert final["config"]["providers"]["active"] in targets
+    # The write lifts the legacy config wrapper, so the flat block is what a
+    # read sees afterwards.
+    assert final["providers"]["active"] in targets
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +140,10 @@ def test_invariant_2_single_swap_persists_new_active(settings_path: Path, tmp_pa
 
     assert r.decision is SwapDecision.SWAPPED
     final = yaml.safe_load(settings_path.read_text())
-    # Active flipped to second provider per priority order
-    assert final["config"]["providers"]["active"] == r.new_provider_id
-    assert final["config"]["providers"]["active"] != "claude-anthropic"
+    # Active flipped to second provider per priority order; the write
+    # migrates the pre-rename block to top-level accounts.
+    assert final["accounts"]["active"] == r.new_provider_id
+    assert final["accounts"]["active"] != "claude-anthropic"
 
 
 # ---------------------------------------------------------------------------
