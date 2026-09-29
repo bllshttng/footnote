@@ -111,6 +111,9 @@ mod tests {
         assert_eq!(newest_reading(&[absent]).unwrap()["state"], "unmeasured");
         let (_dir, stale) = journal_with(&[sample_row(now - chrono::Duration::hours(2), 144)]);
         assert_eq!(newest_reading(&[stale]).unwrap()["state"], "unmeasured");
-        assert_eq!(beat_line(&serde_json::json!({"state": "unmeasured"})), "machine: unmeasured");
+        assert_eq!(
+            beat_line(&serde_json::json!({"state": "unmeasured"})),
+            "machine: unmeasured"
+        );
     }
 }
