@@ -49,6 +49,14 @@ This commit lands before the first results commit. It settles six points the fir
 
 Harbor 0.23.0 runs through `uvx`. The zcode arm needs a Harbor adapter. That adapter lives in the run workspace, not in this repo.
 
+## Amendment 2 (2026-09-29, after the smokes, before any Run 0 or Run 1 result)
+
+The smokes are not results: they check that each arm reaches z.ai. They exposed three measurement gaps, so these rules land first.
+
+- Rate limits. z.ai answered smoke requests with error 1302, "Rate limit reached for requests". The fleet shares the same coding-plan account. A trial that ends in a timeout, with a 1302 error in its agent log, is an infrastructure failure. It is excluded and counted by reason. run-0.md also prints each arm's rate with those trials scored, as a check on the exclusion.
+- Reasoning tokens. z.ai bills reasoning tokens as output. Harbor's opencode adapter counts only visible output: one smoke step reported 14 output tokens beside 31,986 reasoning tokens. Where an arm's log reports reasoning apart from output, the report adds it to output.
+- Token source. Run 0 tokens come from Harbor's per-trial agent context. A trial whose arm reported no usage reads `unmeasured`, never zero.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
