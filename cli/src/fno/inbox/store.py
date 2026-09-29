@@ -1045,7 +1045,6 @@ def append_to_thread(
     finally:
         _release_lock(lock)
 
-    # Same tool-boundary contract as write_new_thread.
     from fno.mail.budget import is_control
 
     if is_control(body):

@@ -1,8 +1,4 @@
-"""PR-state watcher: headless dispatch + impure tick orchestrator.
-
-``fire_skill`` routes one PR through ``fno agents spawn --substrate headless``; ``tick``
-is the impure orchestrator that ties together discovery, state, decisions,
-and dispatch for one poll interval.
+"""PR-state watcher: headless dispatch + the impure tick orchestrator.
 
 All I/O dependencies are injectable (runner, emit, store, claim,
 reviewers_for, post_merge_readiness_fn) so the entire tick is unit-testable
@@ -1316,8 +1312,7 @@ def run_execute_queue(
     slowest = 0.0
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
-        # The scoped merge freeze: an off-list PR skips with a receipt naming
-        # the freeze; the merge owner's own gate refuses it on the merge path.
+        # An off-list PR skips; the merge owner's gate refuses the merge too.
         freeze_why = merge_freeze_refusal(pr)
         if freeze_why:
             _grant("held", pr, cand, grant_fields, reason=freeze_why)

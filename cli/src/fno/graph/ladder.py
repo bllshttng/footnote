@@ -266,16 +266,12 @@ def dispatch_hold_verdict(
     state = (
         DispatchHoldState.HELD if receipt.get("outcome") == "held" else DispatchHoldState.INVALID
     )
+    fields = {
+        k: str(receipt.get(k) or "")
+        for k in ("reason", "release_when", "review_on", "set_by", "detail")
+    }
     return DispatchHoldVerdict(
-        str(receipt.get("owner") or "unknown"),
-        DispatchHold(
-            state,
-            reason=str(receipt.get("reason") or ""),
-            release_when=str(receipt.get("release_when") or ""),
-            review_on=str(receipt.get("review_on") or ""),
-            set_by=str(receipt.get("set_by") or ""),
-            detail=str(receipt.get("detail") or ""),
-        ),
+        str(receipt.get("owner") or "unknown"), DispatchHold(state, **fields)
     )
 
 
