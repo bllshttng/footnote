@@ -1545,13 +1545,32 @@ mod tests {
     /// modal without any error naming the field. That silence is why both
     /// spellings are asserted rather than assumed.
     #[test]
-    fn parse_accounts_reads_canonical_harness_key_and_legacy_cli() {
+    fn parse_accounts_rows() {
         let canonical = parse_accounts(
             br#"[{"id":"ccm","name":"CCM","harness":"claude","auth":"managed","priority":10,"active":true,"headroom":"ok","snapshot":"2h"}]"#,
         )
         .expect("canonical `harness` key must parse");
         assert_eq!(canonical[0].harness, "claude");
         assert_eq!(sample_accounts()[0].harness, "claude");
+
+        let accts = sample_accounts();
+        assert_eq!(accts.len(), 3);
+        assert!(accts[0].active);
+        assert_eq!(accts[2].headroom, "unknown");
+        assert_eq!(accts[2].snapshot, None);
+
+        // A minimal row (no priority/active/headroom/snapshot) parses.
+        let accts =
+            parse_accounts(br#"[{"id":"x","cli":"codex","auth":"managed"}]"#).expect("parses");
+        assert_eq!(accts[0].headroom, "unknown");
+        assert!(!accts[0].active);
+        assert_eq!(accts[0].priority, 0);
+
+        assert!(parse_accounts(b"[{not json").is_none());
+        assert!(parse_combos(b"nope").is_none());
+
+        assert_eq!(parse_accounts(b"[]").unwrap().len(), 0);
+        assert_eq!(parse_combos(b"[]").unwrap().len(), 0);
     }
 
     fn sample_combos() -> Vec<ComboRow> {
@@ -1559,37 +1578,6 @@ mod tests {
             br#"[{"name":"main","strategy":"fallback","members":["ccm","ccr","glm"],"active":true}]"#,
         )
         .expect("valid combos json")
-    }
-
-    #[test]
-    fn parses_account_rows_including_unknown_headroom() {
-        let accts = sample_accounts();
-        assert_eq!(accts.len(), 3);
-        assert!(accts[0].active);
-        assert_eq!(accts[2].headroom, "unknown");
-        assert_eq!(accts[2].snapshot, None);
-    }
-
-    #[test]
-    fn missing_optional_fields_default() {
-        // A minimal row (no priority/active/headroom/snapshot) parses.
-        let accts =
-            parse_accounts(br#"[{"id":"x","cli":"codex","auth":"managed"}]"#).expect("parses");
-        assert_eq!(accts[0].headroom, "unknown");
-        assert!(!accts[0].active);
-        assert_eq!(accts[0].priority, 0);
-    }
-
-    #[test]
-    fn torn_json_fails_quiet() {
-        assert!(parse_accounts(b"[{not json").is_none());
-        assert!(parse_combos(b"nope").is_none());
-    }
-
-    #[test]
-    fn empty_arrays_parse_clean() {
-        assert_eq!(parse_accounts(b"[]").unwrap().len(), 0);
-        assert_eq!(parse_combos(b"[]").unwrap().len(), 0);
     }
 
     fn ready_view() -> ConnectionsView {
@@ -1617,7 +1605,7 @@ mod tests {
     // piece 1: set-active-account (`s`) is a session-local spawn-routing
     // toggle, distinct from `use` (the global slot-swap). AC1-HP / AC1-UI / AC1-ERR.
     #[test]
-    fn set_active_marks_and_routes_new_spawns(/* AC1-HP + AC1-UI */) {
+    fn set_active_rows() {
         let mut v = ready_view();
         v.acct_sel = 1; // ccr, NOT the globally-active ccm
         let id = v.accounts[1].id.clone();
@@ -1626,20 +1614,14 @@ mod tests {
         assert_eq!(v.active_account.as_deref(), Some(id.as_str()));
         // The billing marker repaints immediately (no zero-feedback keypress).
         assert!(v.render().join("\n").contains('$'));
-    }
 
-    #[test]
-    fn set_active_toggles_back_to_default(/* AC1-UI toggle-off */) {
         let mut v = ready_view();
         v.acct_sel = 1;
         v.on_key(b's'); // set ccr active for spawns
         let off = v.on_key(b's'); // same row again -> clear to default
         assert_eq!(off, ConnIntent::SetActiveAccount(None));
         assert_eq!(v.active_account, None);
-    }
 
-    #[test]
-    fn set_active_on_non_account_row_bells(/* AC1-ERR */) {
         let mut v = ready_view();
         v.pending.push(PendingLogin {
             id: "x".into(),
@@ -1649,10 +1631,7 @@ mod tests {
         v.acct_sel = v.accounts.len(); // the synthetic pending row (not an account)
         assert_eq!(v.on_key(b's'), ConnIntent::Bell);
         assert!(v.active_account.is_none());
-    }
 
-    #[test]
-    fn seeded_active_account_paints_marker_on_open() {
         // The client seeds the modal with its current active account so the
         // marker is correct on first paint (survives modal close/reopen).
         let id = sample_accounts()[0].id.clone();
@@ -1663,10 +1642,7 @@ mod tests {
         });
         assert!(v.render().join("\n").contains('$'));
         assert_eq!(v.active_account.as_deref(), Some(id.as_str()));
-    }
 
-    #[test]
-    fn set_active_refuses_a_non_claude_account(/* codex P2 */) {
         // A codex/gemini account is not spawn-routable (mux dispatch is
         // claude-only); selecting it must not mark it active.
         let mut v = ConnectionsView::new();
@@ -1727,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_switch_and_selection_move() {
+    fn nav_rows() {
         let mut v = ready_view();
         assert_eq!(v.on_key(b'j'), ConnIntent::Redraw);
         assert_eq!(v.acct_sel, 1);
@@ -1737,17 +1713,10 @@ mod tests {
         assert_eq!(v.on_key(b'k'), ConnIntent::Bell);
         assert_eq!(v.on_key(b'\t'), ConnIntent::Redraw);
         assert_eq!(v.tab, Tab::Order);
-    }
 
-    // AC1-UI: no zero-feedback keypress - an unbound key rings the bell.
-    #[test]
-    fn unbound_key_rings_bell() {
         let mut v = ready_view();
         assert_eq!(v.on_key(b'z'), ConnIntent::Bell);
-    }
 
-    #[test]
-    fn apply_read_clamps_stale_selection() {
         let mut v = ready_view();
         v.acct_sel = 2;
         // A refresh returning fewer accounts must not leave the cursor OOB.
@@ -1758,9 +1727,11 @@ mod tests {
         assert_eq!(v.acct_sel, 0);
     }
 
+    // AC1-UI: no zero-feedback keypress - an unbound key rings the bell.
+
     // AC2-HP: `u` on a non-active account runs `providers use <id>`.
     #[test]
-    fn use_key_runs_use_verb_for_inactive_account() {
+    fn use_key_rows() {
         let mut v = ready_view();
         v.acct_sel = 1; // ccr, not active
         let intent = v.on_key(b'u');
@@ -1774,10 +1745,7 @@ mod tests {
             ])
         );
         assert!(v.acting); // single-flight guard armed
-    }
 
-    #[test]
-    fn use_key_on_active_account_is_a_noop_notice() {
         let mut v = ready_view();
         v.acct_sel = 0; // ccm is active
         assert_eq!(v.on_key(b'u'), ConnIntent::Redraw);
@@ -1799,7 +1767,7 @@ mod tests {
 
     // AC1-ERR path: remove stages a confirm; Enter runs remove, other key cancels.
     #[test]
-    fn remove_requires_confirm_then_runs() {
+    fn remove_confirm_rows() {
         let mut v = ready_view();
         v.acct_sel = 1; // ccr
         assert_eq!(v.on_key(b'd'), ConnIntent::Redraw);
@@ -1816,10 +1784,7 @@ mod tests {
             ])
         );
         assert!(v.confirm.is_none());
-    }
 
-    #[test]
-    fn remove_confirm_any_other_key_cancels() {
         let mut v = ready_view();
         v.acct_sel = 1;
         v.on_key(b'd');
@@ -1872,7 +1837,7 @@ mod tests {
     // in the shared slot (NO CLAUDE_CONFIG_DIR override, no dir step, no
     // per-account dir), so all accounts reuse one config (the token-swap model).
     #[test]
-    fn login_wizard_claude_shared_spawns_plain_login_no_dir() {
+    fn wizard_spawn_rows() {
         let mut v = ready_view();
         assert_eq!(v.on_key(b'a'), ConnIntent::Redraw);
         assert!(v.wizard.is_some());
@@ -1892,12 +1857,7 @@ mod tests {
         assert!(v.pending[0].dir.is_empty()); // shared slot -> register snapshots ~/.claude
         let out = v.render().join("\n");
         assert!(out.contains("ccm2") && out.contains("claude") && out.contains("…login pending"));
-    }
 
-    // The opt-in isolated path: an explicit own CLAUDE_CONFIG_DIR (a separate
-    // config dir), tilde-expanded before the spawn.
-    #[test]
-    fn login_wizard_claude_isolated_uses_own_dir() {
         let mut v = ready_view();
         v.on_key(b'a');
         type_str(&mut v, "ccm2");
@@ -1922,10 +1882,7 @@ mod tests {
             other => panic!("expected SpawnLogin, got {other:?}"),
         }
         assert_eq!(v.pending[0].dir, expected_dir);
-    }
 
-    #[test]
-    fn login_wizard_codex_spawns_codex_login_no_dir_step() {
         let mut v = ready_view();
         v.on_key(b'a');
         type_str(&mut v, "cdx");
@@ -1947,8 +1904,11 @@ mod tests {
         assert!(v.pending[0].dir.is_empty());
     }
 
+    // The opt-in isolated path: an explicit own CLAUDE_CONFIG_DIR (a separate
+    // config dir), tilde-expanded before the spawn.
+
     #[test]
-    fn register_pending_row_uses_config_dir_env() {
+    fn wizard_lifecycle_rows() {
         let mut v = ready_view();
         v.pending.push(PendingLogin {
             id: "ccm2".into(),
@@ -1973,10 +1933,7 @@ mod tests {
             }
         );
         assert!(v.acting);
-    }
 
-    #[test]
-    fn apply_read_prunes_registered_pending() {
         let mut v = ready_view();
         v.pending.push(PendingLogin {
             id: "ccr".into(), // ccr already a real account in sample
@@ -1988,6 +1945,20 @@ mod tests {
             combos: sample_combos(),
         });
         // ccr became a real record -> its pending row drops.
+        assert!(v.pending.is_empty());
+
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "Bad");
+        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // stays on Id
+        assert_eq!(v.wizard.as_ref().unwrap().step, WizardStep::Id);
+        assert!(v.notice.as_deref().unwrap().contains("lowercase"));
+
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "x");
+        assert_eq!(v.on_key(0x1b), ConnIntent::Redraw);
+        assert!(v.wizard.is_none());
         assert!(v.pending.is_empty());
     }
 
@@ -2014,26 +1985,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wizard_rejects_invalid_id_before_advancing() {
-        let mut v = ready_view();
-        v.on_key(b'a');
-        type_str(&mut v, "Bad");
-        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // stays on Id
-        assert_eq!(v.wizard.as_ref().unwrap().step, WizardStep::Id);
-        assert!(v.notice.as_deref().unwrap().contains("lowercase"));
-    }
-
-    #[test]
-    fn wizard_esc_cancels() {
-        let mut v = ready_view();
-        v.on_key(b'a');
-        type_str(&mut v, "x");
-        assert_eq!(v.on_key(0x1b), ConnIntent::Redraw);
-        assert!(v.wizard.is_none());
-        assert!(v.pending.is_empty());
-    }
-
     // ── Task 1.5: Order tab (reorder / activate / remove / new) ─────────────
 
     fn order_view() -> ConnectionsView {
@@ -2044,7 +1995,7 @@ mod tests {
 
     // AC4-HP: J/K buffer locally; Enter commits exactly one combos update.
     #[test]
-    fn reorder_buffers_then_commits_one_update() {
+    fn reorder_rows() {
         let mut v = order_view();
         // members: [ccm, ccr, glm]; cursor on member 0 (ccm). Move it down twice.
         assert_eq!(v.member_sel, 0);
@@ -2071,11 +2022,7 @@ mod tests {
         );
         assert!(v.dirty_order.is_none());
         assert!(v.acting);
-    }
 
-    // AC2-FR: Esc on a dirty reorder reverts, no verb runs.
-    #[test]
-    fn esc_discards_dirty_reorder_before_closing() {
         let mut v = order_view();
         v.on_key(b'J'); // dirty
         assert!(v.dirty_order.is_some());
@@ -2083,26 +2030,22 @@ mod tests {
         assert!(v.dirty_order.is_none());
         // A second Esc (nothing dirty) closes.
         assert_eq!(v.on_key(0x1b), ConnIntent::Close);
-    }
 
-    #[test]
-    fn tab_switch_abandons_dirty_reorder() {
         let mut v = order_view();
         v.on_key(b'J');
         assert!(v.dirty_order.is_some());
         v.on_key(b'\t'); // -> Accounts, abandons reorder
         assert!(v.dirty_order.is_none());
-    }
 
-    #[test]
-    fn commit_with_no_dirty_is_a_bell() {
         let mut v = order_view();
         assert_eq!(v.on_key(b'\r'), ConnIntent::Bell);
     }
 
+    // AC2-FR: Esc on a dirty reorder reverts, no verb runs.
+
     // space activates the selected combo (combos use).
     #[test]
-    fn space_activates_combo() {
+    fn combo_rows() {
         let mut v = order_view();
         let intent = v.on_key(b' ');
         assert_eq!(
@@ -2115,11 +2058,7 @@ mod tests {
                 "main".into()
             ])
         );
-    }
 
-    // AC2-EDGE: a dangling member flags the combo and refuses activate.
-    #[test]
-    fn dangling_member_flagged_and_activate_refused() {
         let mut v = ConnectionsView::new();
         let combos = parse_combos(
             br#"[{"name":"main","strategy":"fallback","members":["ccm","gone"],"active":false}]"#,
@@ -2137,10 +2076,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("dangling member gone"));
-    }
 
-    #[test]
-    fn remove_combo_confirms_then_runs() {
         let mut v = order_view();
         assert_eq!(v.on_key(b'd'), ConnIntent::Redraw);
         assert!(v.confirm.is_some());
@@ -2157,8 +2093,10 @@ mod tests {
         );
     }
 
+    // AC2-EDGE: a dangling member flags the combo and refuses activate.
+
     #[test]
-    fn new_combo_form_builds_add_verb() {
+    fn combo_form_rows() {
         let mut v = order_view();
         assert_eq!(v.on_key(b'n'), ConnIntent::Redraw);
         assert!(v.combo_input.is_some());
@@ -2178,10 +2116,7 @@ mod tests {
                 "ccr,glm".into(),
             ])
         );
-    }
 
-    #[test]
-    fn h_l_switch_combo_and_reset_member_cursor() {
         let mut v = ConnectionsView::new();
         let combos = parse_combos(
             br#"[{"name":"a","strategy":"fallback","members":["ccm","ccr"],"active":false},
@@ -2206,7 +2141,7 @@ mod tests {
     /// `<marker> <id>  ...  identity=<cell>`, with a footer line that must be
     /// skipped.
     #[test]
-    fn parse_identity_cells_reads_the_list_rows() {
+    fn identity_cells_rows() {
         let cells = parse_identity_cells(
             b"* makers  [claude] managed  priority=10  headroom=ok  usage=3m  identity=readyrule\n\
               \x20 ccr  [claude] managed  priority=20  headroom=low  identity=-\n\
@@ -2227,33 +2162,12 @@ mod tests {
                 ("glm".to_string(), "?unbound-principal".to_string()),
             ]
         );
-    }
 
-    // A listing with rows but no `  identity=` column states nothing: no cells
-    // parse, which load_all renders as a named phase-2 miss (`?` everywhere).
-    #[test]
-    fn parse_identity_cells_refuses_output_without_the_column() {
         let out = b"* makers  [claude] managed  priority=10  headroom=ok\n\
                     \x20 ccr  [claude] managed  priority=20\n\
                     quota observation is OFF: nothing probes.\n";
         assert!(parse_identity_cells(out).is_none());
-    }
 
-    fn identity_cells() -> Vec<(String, String)> {
-        vec![
-            (
-                "ccm".to_string(),
-                "!serves ccr !expired-credential".to_string(),
-            ),
-            ("ccr".to_string(), "ccr".to_string()),
-            ("glm".to_string(), "-".to_string()),
-        ]
-    }
-
-    // AC3-HP: phase-1 rows render a pending placeholder, phase 2 fills the
-    // list's own cells in without touching the selection or an unsaved order.
-    #[test]
-    fn identity_placeholder_until_phase_two_then_tokens() {
         let mut v = ready_view();
         let out = v.render().join("\n");
         assert!(out.contains('…')); // every identity cell pending
@@ -2279,12 +2193,7 @@ mod tests {
         let glm_row = out.lines().find(|l| l.contains("glm")).expect("glm row");
         assert!(glm_row.trim_end().ends_with('-'), "dash cell: {glm_row}");
         assert!(!out.contains("?api-key-route"));
-    }
 
-    // AC2-EDGE: a phase-1 id absent from the phase-2 output reads `?` while
-    // the rows that did land show their cells.
-    #[test]
-    fn a_row_missing_from_phase_two_reads_question_mark() {
         let mut v = ready_view();
         v.apply_read(ReadOutcome::Identity(vec![(
             "ccr".to_string(),
@@ -2304,9 +2213,29 @@ mod tests {
         assert!(ccr_row.contains("ccr"));
     }
 
+    // A listing with rows but no `  identity=` column states nothing: no cells
+    // parse, which load_all renders as a named phase-2 miss (`?` everywhere).
+
+    fn identity_cells() -> Vec<(String, String)> {
+        vec![
+            (
+                "ccm".to_string(),
+                "!serves ccr !expired-credential".to_string(),
+            ),
+            ("ccr".to_string(), "ccr".to_string()),
+            ("glm".to_string(), "-".to_string()),
+        ]
+    }
+
+    // AC3-HP: phase-1 rows render a pending placeholder, phase 2 fills the
+    // list's own cells in without touching the selection or an unsaved order.
+
+    // AC2-EDGE: a phase-1 id absent from the phase-2 output reads `?` while
+    // the rows that did land show their cells.
+
     // AC3-ERR: a failed/late phase 2 renders every cell `?` and stays Ready.
     #[test]
-    fn identity_failure_marks_cells_and_stays_ready() {
+    fn identity_failure_rows() {
         let mut v = ready_view();
         v.apply_read(ReadOutcome::IdentityFailed("identity: timed out".into()));
         assert_eq!(v.state, ModalState::Ready);
@@ -2315,12 +2244,7 @@ mod tests {
             assert!(line.contains('?'), "cell must read ?: {line}");
         }
         assert!(!out.contains("!serves"));
-    }
 
-    // AC4-HP: a header row and aligned columns; the name clamps; exactly one
-    // blank line at each seam.
-    #[test]
-    fn aligned_columns_header_and_seams() {
         let mut v = ready_view();
         let long: String = "a-very-long-account-name".into();
         v.accounts[0].id = long.clone();
@@ -2340,12 +2264,7 @@ mod tests {
         assert!(out
             .iter()
             .any(|l| l.contains('…') && l.contains("a-very-long")));
-    }
 
-    // AC4-EDGE: an empty list prints no header; an all-empty column is sized
-    // to its header label (no negative pad).
-    #[test]
-    fn empty_list_no_header_and_empty_column_sized_to_label() {
         let mut v = ConnectionsView::new();
         v.apply_read(ReadOutcome::Ok {
             accounts: vec![],
@@ -2363,4 +2282,10 @@ mod tests {
         // renders at all and the SNAP header exists even with no values
         assert!(out.contains("SNAP"));
     }
+
+    // AC4-HP: a header row and aligned columns; the name clamps; exactly one
+    // blank line at each seam.
+
+    // AC4-EDGE: an empty list prints no header; an all-empty column is sized
+    // to its header label (no negative pad).
 }
