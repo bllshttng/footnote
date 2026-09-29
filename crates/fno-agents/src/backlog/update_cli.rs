@@ -1329,32 +1329,49 @@ fn apply_mutators(
                 }
             }
             None => {
-                // Clearing drops the row mirror and releases the claim
-                // holder-verified; a foreign live holder stays put.
+                // Clearing drops the row mirror and releases the invoking
+                // holder's own claim. A foreign live holder stays put and the
+                // refusal names the claim verb (the unclaim/requeue
+                // contract); an override there is `claim release --force`.
+                let key = format!("node:{node_id}");
+                let (state, record) = crate::claims::status(&key, None);
+                if let Some(record) = record {
+                    let held = matches!(
+                        state,
+                        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+                    );
+                    let self_holder = crate::claims::resolve_identity().0.unwrap_or_default();
+                    if held && record.holder != self_holder {
+                        return Err(refused(
+                            format!(
+                                "error: {node_id} is held by live claim holder '{}'. Release it \
+                                 first: fno agents claim release node:{node_id} --holder {}",
+                                record.holder, record.holder
+                            ),
+                            3,
+                        ));
+                    }
+                    crate::claims::release(&key, &record.holder, None, None)
+                        .map_err(|e| refused(format!("error: claim release failed: {e}"), 2))?;
+                }
                 let obj = rows[idx].as_object_mut().expect("row is an object");
                 obj.insert("locked_by".into(), Value::Null);
                 obj.insert("locked_at".into(), Value::Null);
                 obj.insert("locked_by_harness".into(), Value::Null);
                 obj.insert("locked_by_harness_session".into(), Value::Null);
-                let key = format!("node:{node_id}");
-                let (_, record) = crate::claims::status(&key, None);
-                if let Some(record) = record {
-                    let _ = crate::claims::release(&key, &record.holder, None, None);
-                }
             }
         }
     }
-    if let Some(v) = &args.locked_by_harness {
-        rows[idx].as_object_mut().expect("row is an object").insert(
-            "locked_by_harness".into(),
-            null_if(v).map(|s| json!(s)).unwrap_or(Value::Null),
-        );
-    }
-    if let Some(v) = &args.locked_by_harness_session {
-        rows[idx].as_object_mut().expect("row is an object").insert(
-            "locked_by_harness_session".into(),
-            null_if(v).map(|s| json!(s)).unwrap_or(Value::Null),
-        );
+    // The claim store owns the harness stamp; a direct mirror write is the
+    // retired second answerer (the merge that resurrected this write is the
+    // same shape the session-add deletion fixed). Refuse, never drop.
+    if args.locked_by_harness.is_some() || args.locked_by_harness_session.is_some() {
+        return Err(refused(
+            "error: --locked-by-harness/--locked-by-harness-session are retired: the claim \
+             store owns the harness stamp. Re-acquire with \
+             `fno agents claim acquire node:<id> --holder <id>`, which captures it.",
+            3,
+        ));
     }
     if let Some(v) = &args.has_brief {
         let obj = rows[idx].as_object_mut().expect("row is an object");
