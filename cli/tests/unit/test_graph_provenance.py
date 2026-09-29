@@ -157,44 +157,37 @@ def test_ac4_edge_provenance_survives_save_reload(tmp_path, monkeypatch):
     assert reloaded[0]["source_kind"] == "from_inbox"
 
 
-@pytest.mark.skip(
-    reason="known defect: --locked-by null re-derives the stale claim "
-    "identity instead of clearing; the write path must release the "
-    "claim-mirror row in the same transaction as the field write"
-)
-def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
-    """US6: `update --locked-by X --locked-by-harness ...` stamps the holder's
-    provider + harness UUID over a stale owner; --locked-by null clears all three."""
-    from typer.testing import CliRunner
-    import fno.graph.cli as C
+def test_successor_reacquire_projects_the_new_lockfile_holder(tmp_path, monkeypatch):
+    """AC13-EDGE: successor acquire replaces the released holder in the read
+    projection without a graph stamp."""
+    import os
+
+    from fno.claims.core import acquire_claim, release_claim
     from fno.graph.store import read_graph_strict
 
-    g = _make_graph(tmp_path, [{
-        "id": "ab-harnes01", "title": "t", "plan_path": "p.md",
-        "session_id": "stale-owner", "claimed_at": "2020-01-01T00:00:00Z",
-    }])
+    g = _make_graph(tmp_path, [{"id": "x-reacq001", "title": "t", "plan_path": "p.md"}])
     _patch_graph(monkeypatch, g)
-    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(root))
+    old = acquire_claim(
+        "node:x-reacq001", "target-session:old-session", pid=os.getpid(), root=root
+    )
+    assert release_claim(old.key, old.holder, root=root) is not None
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "new-session")
+    new = acquire_claim(
+        "node:x-reacq001",
+        "target-session:new-session",
+        pid=os.getpid(),
+        root=root,
+        reason="target start successor re-acquire",
+    )
 
-    r = CliRunner().invoke(C.cli, [
-        "update", "ab-harnes01", "--locked-by", "new-owner",
-        "--locked-by-harness", "claude", "--locked-by-harness-session", "uuid-9",
-    ])
-    assert r.exit_code == 0, r.output
-    node = read_graph_strict(g)[0]
-    assert node["locked_by"] == "new-owner"          # stale owner overwritten
-    assert node["session_id"] == "new-owner"          # mirror synced
-    assert node["locked_by_harness"] == "claude"
-    assert node["locked_by_harness_session"] == "uuid-9"
-    assert node["status"] == "in_progress"
-
-    r2 = CliRunner().invoke(C.cli, ["update", "ab-harnes01", "--locked-by", "null"])
-    assert r2.exit_code == 0, r2.output
-    cleared = read_graph_strict(g)[0]
-    assert cleared["locked_by"] is None
-    assert cleared["locked_by_harness"] is None
-    assert cleared["locked_by_harness_session"] is None
-    assert cleared["status"] == "ready"
+    row = read_graph_strict(g)[0]
+    assert row["locked_by"] == "new-session"
+    assert row["locked_by_harness_session"] == "new-session"
+    assert row["locked_at"] is not None
+    assert new.holder == "target-session:new-session"
+    assert new.reason == "target start successor re-acquire"
 
 
 # ---------------------------------------------------------------------------

@@ -141,7 +141,9 @@ def test_unclaim_stale_release_is_holder_verified_toctou(tmp_graph, claims_root,
     assert result.exit_code == 0, result.output
     # The fresh live holder's lock survives (holder mismatch -> release no-ops).
     assert _lock_exists("node:ab-1234abcd", claims_root)
-    assert _read(tmp_graph)[0]["session_id"] is None  # graph still cleared
+    # locked_by is a projection of the claim store: the surviving claim is
+    # the truth the row shows, never a stale mirror of the cleared one.
+    assert _read(tmp_graph)[0]["session_id"] == "target-session:fresh-live"
 
 
 def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypatch, native_backlog_door):
@@ -154,9 +156,9 @@ def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypat
     )
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
     assert result.exit_code == 0, result.output
-    # Graph claim still cleared...
-    assert _read(tmp_graph)[0]["session_id"] is None
-    # ...but the live foreign lockfile is left intact, with an override hint.
+    # The row projects the surviving holder: one answer, from the lockfile.
+    assert _read(tmp_graph)[0]["session_id"] == "target-session:someone-else"
+    # The live foreign lockfile is left intact, with an override hint.
     assert _lock_exists("node:ab-1234abcd", claims_root)
     out = result.output + (result.stderr or "")
     assert "release" in out and "--force" in out

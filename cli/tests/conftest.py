@@ -1305,18 +1305,37 @@ def _door_binary_from_this_checkout(monkeypatch):
     on a dev checkout the installed one lags the worktree source: a store
     verb then refuses against rows only the worktree build can see. Pin the
     door to this checkout's build when one exists; an operator override
-    through $FNO_AGENTS_BIN always wins."""
+    through $FNO_AGENTS_BIN always wins. The store WORKER pins the same way:
+    the projection reads live through whichever worker binary serves the
+    read, and a newer installed build without this branch's projection
+    serves pre-projection rows that fail claims tests intermittently."""
     import os
 
-    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
-    if pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK):
-        return
     root = Path(__file__).resolve().parents[2]
+    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
+    if not (pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK)):
+        for profile in ("debug", "release"):
+            candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+                break
+    pinned_worker = (os.environ.get("FNO_AGENTS_WORKER") or "").strip()
+    if pinned_worker and Path(pinned_worker).is_file():
+        return
     for profile in ("debug", "release"):
-        candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        candidate = (
+            root / "crates" / "fno-agents" / "target" / profile / "fno-agents-worker"
+        )
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+            monkeypatch.setenv("FNO_AGENTS_WORKER", str(candidate))
             return
+    # The worker lag warning rides the same decision: no local build means
+    # every store read resolves the installed binary.
+    if not (Path(os.environ.get("FNO_AGENTS_BIN") or "")).is_file():
+        _warn_no_local_door_binary()
+
+
+def _warn_no_local_door_binary() -> None:
     # No local build: the door silently resolved the installed binary and
     # store-door tests fail with refusals that look like product bugs.
     # Measured 2026-09-18: a swept target dir cost a store suite an hour of

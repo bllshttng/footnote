@@ -173,8 +173,11 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
     assert _graph_entry("n-000002")["type"] == "feature"
     assert _graph_entry("n-000001")["project"] == "graph-proj"
     assert _slug_for_node("n-000001") == "graph-slug-1"
-    assert _default_node_resolver("n-000001") == "sess-graph"
-    assert _default_node_resolver("graph-slug-1") == "sess-graph"
+    # The store projects the claim store over every read: an open row with
+    # no claim serves session_id None, so the graph file's pin cannot
+    # resurrect a holder. Routing resolves the live holder or nothing.
+    assert _default_node_resolver("n-000001") is None
+    assert _default_node_resolver("graph-slug-1") is None
 
 
 def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):
