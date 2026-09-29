@@ -1133,6 +1133,14 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 3;
     }
 
+    // (5c) The shrink-only test cap, the same `--max-net 0` gate the guards
+    // workflow runs in CI. Refusing here moves the fix one round earlier: a
+    // breach used to surface as a red main only after both runs had spent.
+    if let Err(msg) = crate::test_delta::shrink_only_gate(&cwd, "origin/main") {
+        eprintln!("pr-push: refusing: {msg}");
+        return 3;
+    }
+
     // (6) The fetched remote head of the SAME-NAME branch, read BEFORE
     // preflight: a doomed push must not first spend a rehearsal of up to an
     // hour. This is the head both the lease and the in-flight read pin to;
@@ -1621,5 +1629,92 @@ exit 1
         assert!(commit_citation_failures(log).is_empty());
         assert!(commit_citation_failures("").is_empty());
         assert!(commit_citation_failures("abc1234\u{1f}no separator").is_empty());
+    }
+
+    /// A work repo off a pushed bare origin: base commit on main carrying
+    /// one test, then the feature branch. `base_body`/`feat_body` write
+    /// lib.rs at each commit so one fixture serves refuse and allow.
+    fn push_repo(dir: &std::path::Path, base_body: &str, feat_body: &str) -> (String, String) {
+        let origin = dir.join("origin.git");
+        let work = dir.join("work");
+        std::fs::create_dir(&origin).unwrap();
+        let o = Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        std::fs::create_dir(&work).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        std::fs::write(work.join("lib.rs"), base_body).unwrap();
+        git(&["add", "lib.rs"]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["checkout", "-q", "-b", "feature/cap"]);
+        std::fs::write(work.join("lib.rs"), feat_body).unwrap();
+        git(&["add", "lib.rs"]);
+        git(&["commit", "-q", "-m", "feat: exercise the cap"]);
+        (
+            origin.to_str().unwrap().to_string(),
+            work.to_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn pr_push_refuses_a_net_new_test_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_origin, work) = push_repo(
+            dir.path(),
+            "#[test]\nfn kept_case() {}\n",
+            "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+        );
+        let argv = [
+            "--cwd",
+            work.as_str(),
+            "--no-preflight",
+            "--stamps-dir",
+            dir.path().join("stamps").to_str().unwrap(),
+        ]
+        .map(str::to_string);
+
+        assert_eq!(run_push(&argv), 3);
+    }
+
+    // The allow case is a genuinely flat delta: the base test kept and a
+    // non-test edit on top. A kept-but-unmodified test would not prove the
+    // push path past the gate.
+    #[test]
+    fn pr_push_allows_a_flat_test_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_origin, work) = push_repo(
+            dir.path(),
+            "#[test]\nfn kept_case() {}\n",
+            "#[test]\nfn kept_case() {}\n\nfn helper() {}\n",
+        );
+        let argv = [
+            "--cwd",
+            work.as_str(),
+            "--no-preflight",
+            "--stamps-dir",
+            dir.path().join("stamps").to_str().unwrap(),
+        ]
+        .map(str::to_string);
+
+        assert_eq!(run_push(&argv), 0);
     }
 }
