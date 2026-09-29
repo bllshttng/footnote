@@ -792,7 +792,7 @@ pub struct Arm {
 /// The production runner: the page render, cwd-bound (config, the graph and
 /// the default out path all resolve per cwd).
 fn run_ledger() -> Result<(), String> {
-    let output = std::process::Command::new(crate::scrape::fno_py())
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["agents", "org", "rundown"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -1714,9 +1714,30 @@ mod tests {
     }
 
     #[test]
-    fn crown_ledger_success_writes_one_acted_row() {
+    #[cfg(unix)]
+    fn crown_ledger_success_writes_one_acted_row_through_the_rust_front() {
+        // The real runner, not a synthetic Ok: FNO_BIN pins an exit-0 stub
+        // and FNO_PY a sentinel, so a regression to fno-py - which has no
+        // `org` command - fails this row instead of a daemon beat.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_bin = std::env::var_os("FNO_BIN");
+        let prior_py = std::env::var_os("FNO_PY");
+        let dir = tempfile::tempdir().unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "fno", "#!/bin/sh\nexit 0\n");
+        std::env::set_var("FNO_BIN", &stub);
+        std::env::set_var("FNO_PY", "/nonexistent/fno-py-sentinel");
         let h = home();
-        let o = emit_one(&h, || Ok(()));
+        let o = emit_one(&h, run_ledger);
+        match prior_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        match prior_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
         let log = crate::events::committed_journal_text(&h.events_jsonl());
