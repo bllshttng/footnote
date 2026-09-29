@@ -769,7 +769,7 @@ def test_phase_caps_fit_ceiling():
         f"{total}s against the {ceiling}s ceiling; shrink a cap in "
         f"_EVERY_TICK_CAP_S/_FLEET_CAP_S or re-measure"
     )
-    assert set(_PHASE_CAP_S) == set(_EVERY_TICK_CAP_S) | set(_FLEET_CAP_S)
+    assert set(_PHASE_CAP_S) == set(_EVERY_TICK_CAP_S) | set(_FLEET_CAP_S) | {"merge"}
     # Merge runs before the sweep (x-e69d), so its guaranteed room is the
     # fresh wall minus the caps of the two phases ahead of it. The room must
     # cover the read bound plus one attempt at the drain's floor.
@@ -777,7 +777,7 @@ def test_phase_caps_fit_ceiling():
 
     merge_room = ceiling - sum(
         _EVERY_TICK_CAP_S[k] for k in ("settings", "king_wake"))
-    assert "merge" not in _PHASE_CAP_S and merge_room >= (
+    assert 0 < _PHASE_CAP_S["merge"] <= 300 and merge_room >= (
         _MERGE_FLOOR_S + _GRANT_QUEUE_READ_TIMEOUT_S), (
         f"merge room does not fit: {ceiling}s - settings and king_wake caps "
         f"= {merge_room}s, needs read {_GRANT_QUEUE_READ_TIMEOUT_S}s + floor "
@@ -839,10 +839,10 @@ def _run_merge_tick_with_counts(monkeypatch, counts):
 
 
 def test_merge_phase_runs_before_the_sweep_on_the_fresh_wall(monkeypatch):
-    """x-e69d: the drain sees the fresh wall, not the sweep's leftovers."""
+    """The merge drain gets first access to the wall within its phase cap."""
     counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
     rows, left, drained = _run_merge_tick_with_counts(monkeypatch, counts)
-    assert len(drained) == 1 and left[0] > 400
+    assert len(drained) == 1 and 0 < left[0] <= 300
     merge_at = rows.index(next(r for r in rows if r[0] == "pr_watch_merge"))
     sweep_at = rows.index(next(r for r in rows if r[0] == "pr_watch_sweep"))
     assert merge_at < sweep_at

@@ -2824,7 +2824,7 @@ class TestTickRecordsAndDeadline:
             assert d._ritual_timeout() <= 110
         finally:
             d.set_phase_deadline(None)
-        assert d._ritual_timeout() == 300.0
+        assert d._ritual_timeout() == 120.0
 
     def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
         """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
