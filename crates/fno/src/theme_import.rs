@@ -48,9 +48,9 @@ pub(crate) fn parse_source(input: &str, cwd: &Path) -> Result<Source, String> {
     if input.is_empty() {
         return Err("Enter a theme file path, folder path, or public GitHub file URL.".into());
     }
-    if input.starts_with("http://")
-        || input.starts_with("https://")
-        || input.starts_with("github.com/")
+    if has_url_scheme(input)
+        || starts_with_ascii_case(input, "github.com/")
+        || starts_with_ascii_case(input, "raw.githubusercontent.com/")
     {
         return canonical_github_url(input).map(Source::Url);
     }
@@ -71,6 +71,23 @@ pub(crate) fn parse_source(input: &str, cwd: &Path) -> Result<Source, String> {
     Ok(Source::File(path))
 }
 
+fn has_url_scheme(input: &str) -> bool {
+    let Some((scheme, _)) = input.split_once("://") else {
+        return false;
+    };
+    let mut bytes = scheme.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-'))
+}
+
+fn starts_with_ascii_case(input: &str, prefix: &str) -> bool {
+    input
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+}
+
 fn expand_path(input: &str, cwd: &Path) -> Result<PathBuf, String> {
     let expanded = if input == "~" || input.starts_with("~/") {
         let home = std::env::var_os("HOME").ok_or("HOME is not set; use an absolute path.")?;
@@ -86,7 +103,21 @@ fn expand_path(input: &str, cwd: &Path) -> Result<PathBuf, String> {
 }
 
 fn canonical_github_url(input: &str) -> Result<String, String> {
-    let with_scheme = if input.starts_with("github.com/") {
+    let input = input.trim();
+    let with_scheme = if input
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        format!("https://{}", &input[8..])
+    } else if input
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    {
+        format!("http://{}", &input[7..])
+    } else if input
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("github.com/"))
+    {
         format!("https://{input}")
     } else {
         input.to_string()
@@ -743,6 +774,22 @@ mod tests {
             (
                 "http://github.com/octo/themes/blob/main/mocha.conf",
                 "HTTPS",
+            ),
+            (
+                "HTTP://github.com/octo/themes/blob/main/mocha.conf",
+                "HTTPS",
+            ),
+            (
+                "HTTPS://github.com/octo/themes/blob/main/mocha.conf?token=secret",
+                "query",
+            ),
+            (
+                "ftp://github.com/octo/themes/blob/main/mocha.conf?token=secret",
+                "query",
+            ),
+            (
+                "raw.githubusercontent.com/octo/themes/main/mocha.conf?token=secret",
+                "query",
             ),
             (
                 "https://evil.test/octo/themes/blob/main/mocha.conf",
