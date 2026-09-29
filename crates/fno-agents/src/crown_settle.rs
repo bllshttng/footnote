@@ -260,7 +260,7 @@ fn plan_with_projects(
             "scope {scope:?} overlaps territory held by live row(s) {listed}. Two live \
              crowns would rule the same members, so this spawn refuses before launch. \
              --succeed hands down only an identical crown, never part of a wider or \
-             overlapping one. Re-scope the holder (fno agents crown {first} --scope \
+             overlapping one. Re-scope the holder (fno agents org promote {first} --scope \
              <other territory>), run fno agents reconcile if it looks dead, or fno \
              agents stop {first}, then retry."
         );
@@ -315,8 +315,8 @@ fn plan_with_projects(
         ),
         Caller::Agent(_) => format!(
             "scope {scope:?} is held by live row(s) {holders:?}, not by this session, so \
-             this session cannot hand it down. Only the holder (spawn --crown --succeed \
-             from its own session) or an attended shell (spawn --crown --succeed) can \
+             this session cannot hand it down. Only the holder (spawn --promote --succeed \
+             from its own session) or an attended shell (spawn --promote --succeed) can \
              transfer it."
         ),
     };

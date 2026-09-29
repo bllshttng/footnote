@@ -192,7 +192,7 @@ fn append_verdict(closing: &mut String, verdict: &str, scope: Option<&str>, read
             .unwrap_or_else(|| "<scope>".to_owned());
         closing.push_str(&format!(
             " Verdict {verdict}. To hand this crown to a fresh-context \
-             successor, run fno agents spawn --crown {handoff} --succeed."
+             successor, run fno agents spawn --promote {handoff} --succeed."
         ));
     } else if name == "unreadable" {
         let detail = verdict
@@ -561,7 +561,7 @@ mod tests {
         ));
         assert!(text.starts_with(&format!("[{MARKER}:{KEY}]")));
         assert!(text.contains("Verdict stalled 16, 13, 10: undelivered is not falling."));
-        assert!(text.contains("run fno agents spawn --crown x-bbbb --succeed"));
+        assert!(text.contains("run fno agents spawn --promote x-bbbb --succeed"));
     }
 
     #[test]
