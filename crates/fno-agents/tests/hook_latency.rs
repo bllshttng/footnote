@@ -1014,7 +1014,7 @@ fn hook_budget_bash_pretooluse_dispatch() {
             extra_env: &[],
             budget_p90_ms: 100.0,
             ceiling_ms: 200.0,
-            allowed_execs: &["bash", "fno-agents", "git"],
+            allowed_execs: &["bash", "cat", "fno-agents", "git", "mktemp", "rm"],
             max_git: None,
         },
         |code, stdout, stderr| {
