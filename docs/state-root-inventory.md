@@ -22,10 +22,6 @@ One file per install. These belong at the root.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog find`, or the tracker snapshot door (`fno-agents backlog get` stdin door) | written only when exported |
-| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate); reached from the `paths.graph_json()` anchor via its `.db` sibling | durable row store; WAL sidecars are SQLite-managed |
-| `graph.json.lock` | `crates/fno-agents/src/graph_store.rs::BoundedLock` | the publish cycle's bounded lock beside the store; the keeper holds it for the duration of one mutation |
-| `relatedness.json` | `paths.relatedness_json()` | regenerated |
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
@@ -77,12 +73,8 @@ The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. T
 |---|---|---|
 | `decisions.db`, `decisions.db-wal`, `decisions.db-shm` | `crates/fno-agents/src/decision_index.rs`: the decision store the inbox `decide` path commits to; the journals index into it | durable |
 | `questions.db`, `questions.db-wal`, `questions.db-shm` | `crates/fno-agents/src/question_intake.rs`: the question store beside the questions journal | durable; a question does not expire |
-| `graph-archive.db`, `graph-archive.db-wal`, `graph-archive.db-shm` | the archive store (the same backlog schema as `graph.db`), populated by the operator's archive import; `read_archive` in `crates/fno-agents/src/graph_store.rs` reads the archive projection | durable; imported nodes live here under fresh ids |
-| `graph-archive.json.lock` | the store's bounded lock beside the archive anchor, the `graph.json.lock` shape | lives only for one mutation |
-| `graph.json.store.sock.lock`, `graph-archive.json.store.sock.lock` | the store keeper's bounded lock beside each `*.store.sock` IPC socket | server-managed, unlinked with the socket |
 | `config.toml.bak*` (5 files, 2026-09-08 through 2026-09-22) | the operator, by hand, during config and model-routing edits | permanent: no `.db` holds their data, so deletion waits on the operator's yes |
 | `ruleset-21074865-before-smoke-hold.json` | the operator, by hand, before a smoke-hold change | permanent, same rule as the `config.toml.bak*` row |
-| `.plan-sync-watermark-v2` | `cli/src/fno/plan/cli.py` | single file, overwritten |
 | `pr-watch-bounce.json` | `cli/src/fno/pr_watch/_install.py` | transient bounce record, overwritten per deferred bounce |
 | `ntfy/` | an operator-run ntfy server (its `cache.db`) plus `ntfy.out.log` / `ntfy.err.log` | server-managed; not written by this repo |
 | `intel/` | the intel fold behind `fno intel` | regenerated per run; safe to delete |
@@ -130,8 +122,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `events.jsonl.ephemeral` | retired. Ephemeral-class rows commit to the store with `retention_class = 'ephemeral'` and expire at the schema floor | no new writes |
 | `events.jsonl.shell-writers.d/` | retired. The shell writer makes one native store commit; no writer-liveness markers exist | no new writes |
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
-| `graph.db.history/notes.jsonl` | `crates/fno-agents/src/backlog/note_history.rs::history_path` | PERMANENT node-prose history keyed to the graph store (the bounded-state change): every replaced or cleared `current_state` pre-image and every evacuated note; append-only, hash-verified on write, deduped by (node, reason, prior revision, hash). Never rotates, never prunes; the only copy of evacuated prose. Safe to copy with the graph, fatal to delete. |
-| `graph.db.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
+| `db/` | the graph and archive stores and their kin: `crates/fno-agents/src/backlog/` (`graph.db`, schema in `mod.rs`, one owning module per aggregate; reached from the `paths.graph_json()` anchor through `docs/state-root-layout.tsv`'s `place` resolver, the legacy root spelling still readable), the archive store (`graph-archive.db`, populated by the operator's import; `read_archive` in `graph_store.rs` reads the projection), `graph_store.rs::BoundedLock` (`graph.json.lock`, the publish cycle's bounded lock), `graph_keeper.rs::store_socket_for` (each store's `*.store.sock` IPC socket and its bounded `.lock`, server-managed, unlinked by the keeper on exit and the daemon's `store_socket_sweep`), `backlog/note_history.rs::history_path` (`graph.db.history/notes.jsonl`: PERMANENT node-prose history, every replaced or cleared `current_state` pre-image and every evacuated note, append-only, hash-verified, never rotates; the only copy of evacuated prose, safe to copy with the graph, fatal to delete), `fno doctor graph export --now` (`graph.json`, the on-demand JSON snapshot), `paths.relatedness_json()` (`relatedness.json`, regenerated), `cli/src/fno/plan/cli.py` (`.plan-sync-watermark-v2`, the sweep's shared gate) | durable row store; WAL sidecars are SQLite-managed |
 | `heal/pr-heal.pid` | `crates/fno-agents/src/heal_pid.rs::pid_file` (the pr-heal drive loop, beside the global events journal) | server-managed pid file; unlinked by the loop on a clean exit and by the pid scan when the pid is dead |
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
 | `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`), every reader resolving through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |

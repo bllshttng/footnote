@@ -493,11 +493,12 @@ fn render(payload: &Value) -> String {
 }
 
 fn graph_path(home: &crate::paths::AgentsHome) -> PathBuf {
-    home.root()
+    let root = home
+        .root()
         .parent()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".fno"))
-        .join("graph.json")
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    crate::state_layout::place(&root, "graph.json")
 }
 
 pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {

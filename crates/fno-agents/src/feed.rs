@@ -527,15 +527,17 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
 
 /// The store path, resolved as the fno crate's `backlog_view::graph_path`
 /// does: `FNO_GRAPH_JSON` > `$HOME/.fno/graph.json` (the agents home's parent,
-/// so a test home redirects it too).
+/// so a test home redirects it too), through the layout table.
 pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_GRAPH_JSON") {
         return PathBuf::from(v);
     }
-    home.root()
+    let root = home
+        .root()
         .parent()
-        .map(|d| d.join("graph.json"))
-        .unwrap_or_else(|| PathBuf::from("graph.json"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    crate::state_layout::place(&root, "graph.json")
 }
 
 /// Read every reap receipt under `<agents home>/reap-receipts/`. An absent or

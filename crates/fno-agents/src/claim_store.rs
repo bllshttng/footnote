@@ -42,11 +42,18 @@ fn root_path(root: Option<&Path>) -> Result<PathBuf, String> {
 }
 
 fn database_path(root: Option<&Path>) -> Result<PathBuf, String> {
-    Ok(root_path(root)?.join("graph.db"))
+    Ok(crate::state_layout::place(&root_path(root)?, "graph.json").with_extension("db"))
 }
 
 pub fn open(root: Option<&Path>) -> Result<Connection, String> {
-    open_paths(database_path(root)?, claims_dir(root)?)
+    let root_path = root_path(root)?;
+    // Shares graph.db with the graph store, so the same migration fence
+    // orders this open after any publish under the root.
+    crate::state_layout_sqlite::wait_for_fence(&root_path);
+    open_paths(
+        crate::state_layout::place(&root_path, "graph.json").with_extension("db"),
+        claims_dir(root)?,
+    )
 }
 
 fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
@@ -55,7 +62,11 @@ fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let space = crate::paths::space_dir(&cwd);
-    open_paths(space.join("graph.db"), space.join("claims"))
+    crate::state_layout_sqlite::wait_for_fence(&space);
+    open_paths(
+        crate::state_layout::place(&space, "graph.json").with_extension("db"),
+        space.join("claims"),
+    )
 }
 
 fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {

@@ -180,10 +180,10 @@ fn stamped_annotated(hit: &Value, archived: bool) -> Value {
     out.remove(0)
 }
 
-/// The store file the served read came from: the sqlite mirror when one
-/// exists beside the json path, else the json path itself.
+/// The store file the served read came from: the sqlite mirror the layout
+/// resolver names for this anchor, else the anchor itself.
 fn served_store_path(graph_path: &std::path::Path) -> std::path::PathBuf {
-    let db = graph_path.with_extension("db");
+    let db = super::database_path(graph_path);
     if db.exists() {
         db
     } else {

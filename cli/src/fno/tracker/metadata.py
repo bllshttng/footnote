@@ -52,7 +52,7 @@ def _graph_store_path() -> Path:
     except Exception:  # noqa: BLE001 - mirror _constants' fail-open default
         from fno.graph._constants import _state_dir
 
-        return _state_dir() / "graph.json"
+        return _state_dir() / "db" / "graph.json"
 
 
 def read_entries(reader: str, *, strict: bool = False) -> list[dict]:

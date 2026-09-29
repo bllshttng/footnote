@@ -267,6 +267,14 @@ impl Receipt {
 pub fn migrate(root: &Path, apply: bool) -> Receipt {
     let stamp = utc_stamp();
     let mut receipt = Receipt::default();
+    // The sqlite family's deferred verify: stamps parked on earlier passes
+    // get their parked copies compared against their recorded counts here.
+    for (name, status) in crate::state_layout_sqlite::verify_sweep(root, &stamp) {
+        receipt.entries.push(Entry {
+            legacy: format!("{name} (verify)"),
+            status,
+        });
+    }
     for row in rows() {
         match row.kind {
             // Glob rows: every root entry the pattern matches parks.
@@ -341,13 +349,12 @@ fn migrate_entry(root: &Path, row: &Row, apply: bool, stamp: &str) -> Status {
     }
     // Skipped families. Their legacy file EXISTS here, so the work is real
     // and reads pending: the mux server moves its own rows at its start
-    // (change 3.1); the sqlite kind moves through the backup-API protocol
-    // (change 4.1, a later wave).
+    // (change 3.1).
     if row.owner == Owner::Mux {
         return Status::Pending("owner mux (the mux server moves it at its start)".to_string());
     }
     if row.kind == Kind::Sqlite {
-        return Status::Pending("sqlite (moves with the backup-API protocol)".to_string());
+        return crate::state_layout_sqlite::migrate_sqlite_row(root, row, apply, stamp);
     }
     if !apply {
         return Status::Pending(match row.kind {

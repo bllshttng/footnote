@@ -774,8 +774,8 @@ def locks_dir() -> Path:
 
 
 def graph_json() -> Path:
-    """Return the path to graph.json."""
-    return state_dir() / "graph.json"
+    """Return the path to graph.json (the anchor; its store is the db sibling)."""
+    return state_dir() / "db" / "graph.json"
 
 
 def graph_archive_json() -> Path:
