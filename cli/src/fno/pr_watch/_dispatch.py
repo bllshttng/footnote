@@ -1,8 +1,4 @@
-"""PR-state watcher: headless dispatch + impure tick orchestrator.
-
-``fire_skill`` routes one PR through ``fno agents spawn --substrate headless``; ``tick``
-is the impure orchestrator that ties together discovery, state, decisions,
-and dispatch for one poll interval.
+"""PR-state watcher: headless dispatch + the impure tick orchestrator.
 
 All I/O dependencies are injectable (runner, emit, store, claim,
 reviewers_for, post_merge_readiness_fn) so the entire tick is unit-testable
@@ -1270,6 +1266,22 @@ _MERGE_FLOOR_S = 150.0
 _RITUAL_TIMEOUT_CAP_S = 135.0
 
 
+def merge_freeze_refusal(pr: int) -> Optional[str]:
+    """One freeze-check receipt answers; an unreadable one refuses fail closed."""
+    from fno.rust_binary import call_binary_json
+
+    error, receipt = call_binary_json(
+        "authorized-merge", [json.dumps({"op": "freeze-check", "pr": pr})], timeout=15
+    )
+    if error is not None or not isinstance(receipt, dict):
+        return f"merge-freeze check unavailable ({error or receipt!r}); the arm fails closed"
+    if receipt.get("outcome") == "clear":
+        return None
+    if receipt.get("outcome") == "frozen":
+        return f"a merge freeze holds ({receipt.get('detail') or 'unnamed'}); PR {pr} is not on its allow-list"
+    return f"merge-freeze record unreadable ({receipt.get('detail')}); the arm fails closed"
+
+
 def run_execute_queue(
     queue: list,
     *,
@@ -1295,6 +1307,13 @@ def run_execute_queue(
     slowest = 0.0
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
+        # An off-list PR skips; the merge owner's gate refuses the merge too.
+        freeze_why = merge_freeze_refusal(pr)
+        if freeze_why:
+            _grant("held", pr, cand, grant_fields, reason=freeze_why)
+            emit("pr_watch_skipped", {"pr": pr, "reason": "merge-freeze"})
+            counts["held"] += 1
+            continue
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
         set_tick_phase("merge:prepare")
         try:

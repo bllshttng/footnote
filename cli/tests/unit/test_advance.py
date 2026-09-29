@@ -26,6 +26,51 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+# --- the hold verdict: these tests build in-memory graphs -----------------
+#
+# The verdict answers from the graph on disk (one fno-agents receipt). An
+# autouse adapter persists each call's map to a temp graph first, so the
+# composition tests keep their in-memory row shapes and still exercise the
+# real reader. Tests that stub the verdict themselves override this.
+
+import json as _json
+
+import pytest
+
+from tests.fixtures.graph_seed import seed_graph
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_hold_verdict(tmp_path, monkeypatch):
+    from fno.graph import ladder
+
+    real = ladder.dispatch_hold_verdict
+
+    def patched(entry, by_id):
+        rows = list(by_id.values())
+        if isinstance(entry, dict) and entry not in rows:
+            rows = rows + [entry]
+        complete = {}
+        for e in rows:
+            if not isinstance(e, dict) or not e.get("id"):
+                continue
+            row = {"type": "feature", "priority": "p2", "status": "ready", **e}
+            row.setdefault("title", str(row.get("id")))
+            row.setdefault("slug", str(row.get("id")))
+            complete[str(row["id"])] = row
+        complete = list(complete.values())
+        graph = tmp_path / "graph.json"
+        for stale in (graph, graph.with_suffix(".db")):
+            stale.unlink(missing_ok=True)
+        seed_graph(graph, _json.dumps({"entries": complete}))
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        if not isinstance(entry, dict) or not entry.get("id"):
+            # A row the graph cannot carry: the pre-adapter read was absent.
+            return None
+        return real(entry, by_id)
+
+    monkeypatch.setattr(ladder, "dispatch_hold_verdict", patched)
+
 
 
 requires_rust = pytest.mark.dev_build
