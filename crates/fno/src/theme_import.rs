@@ -194,6 +194,7 @@ fn path_error(path: &Path, error: &std::io::Error) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn preview(source: &Source, cwd: &Path) -> Result<Preview, String> {
     preview_with_theme_dir(source, cwd, crate::digest_overlay::themes_dir()).await
 }
