@@ -410,7 +410,9 @@ row_cargo() {
     miss "cargo-install" "rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
     return 0
   fi
-  shared_smoke "$CARGO_HOME/bin"
+  # cargo install lands the front door here; its first-run bootstrap
+  # provisions fno-agents into the uv tool bin instead.
+  shared_smoke "$CARGO_HOME/bin" "$HOME/.local/bin"
 }
 
 row_skills_sh() {
