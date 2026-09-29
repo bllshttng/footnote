@@ -620,8 +620,23 @@ fn comma_span(text: &str, s: usize, e: usize) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    /// The opencode-config contract, one declaration: the scan finds the
+    /// plugin array through comments and classifies entries (omo, stranger,
+    /// file: paths, the 2.x object form); disable cuts the flagged entries,
+    /// keeps comments, backs up the original, and leaves bystanders.
     #[test]
-    fn scanner_finds_plugin_array_with_comments() {
+    fn scan_classify_disable_one_contract() {
+        let text = r#"{
+  // opencode config
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    // a bare fno spec is a stranger's npm package, not footnote
+    "oh-my-openagent@latest",
+    "opencode-antigravity-auth",
+    "fno"
+  ],
+  "theme": "decoy"
+}"#;
         let text = r#"{
   // opencode config
   "$schema": "https://opencode.ai/config.json",
@@ -675,10 +690,17 @@ mod tests {
         assert_eq!(spec, "oh-my-openagent");
         assert!(is_object);
         assert_eq!(classify_spec(&spec), Some(FindingKind::Omo));
-    }
 
-    #[test]
-    fn disable_cuts_entries_keeps_comments_and_backs_up() {
+        // disable(): cuts the flagged entries from the same fixture shape,
+        // keeps comments, backs up the original, leaves bystanders.
+        let dir = std::env::temp_dir().join(format!("fno-ocfg-disable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("opencode.jsonc");
+        let text = "{\n  // opencode config\n  \"plugin\": [\n    \"oh-my-openagent@latest\",\n    \"opencode-antigravity-auth\",\n    \"fno\"\n  ],\n  \"theme\": \"decoy\"\n}\n";
+        std::fs::write(&file, text).unwrap();
+        let (_s, _e, elements) = scan_plugin_array(text).unwrap();
+        let finding = |i: usize, spec: &str| Finding {
         let dir = std::env::temp_dir().join(format!("fno-ocfg-disable-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
