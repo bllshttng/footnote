@@ -18,7 +18,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 const EXIT_USAGE: i32 = 2;
-const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] [--planned <json>] [--qualification <manifest.json>] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
+const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] [--planned <json>] [--qualification <manifest.json>] [--by-cohort [--prices <json>]] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
 
 /// One history row: the fields the folds read. Absent keys read as the
 /// Python fold read them (missing `variant` is baseline, missing `ts` is
@@ -501,6 +501,188 @@ fn compare_variants(rows: &[Row], variant: &str) -> Value {
     })
 }
 
+/// The per-cohort fold behind `--mode report --by-cohort`: one row list per
+/// `experiment_id`, each folded into the harness-fit comparison projection.
+/// Scored rows are natively `graded` rows that the lane evidence does not
+/// exclude (not `substituted`, no `excluded_reason`); everything else is
+/// counted by reason and never scored. Cost is priced only when every scored
+/// row carries usage and a price line: `unmeasured` otherwise, never a
+/// partial sum (AC3-EDGE).
+fn cohort_fold(rows: &[Row], prices: Option<&Value>) -> Value {
+    let mut cohorts: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
+    for r in rows {
+        let id = r
+            .raw
+            .get("experiment_id")
+            .and_then(Value::as_str)
+            .unwrap_or("(no cohort)")
+            .to_string();
+        cohorts.entry(id).or_default().push(r);
+    }
+    let mut out = Map::new();
+    for (id, cohort_rows) in &cohorts {
+        out.insert(id.clone(), cohort_score(cohort_rows, prices));
+    }
+    json!({ "cohorts": Value::Object(out) })
+}
+
+fn cohort_score(rows: &[&Row], prices: Option<&Value>) -> Value {
+    let mut statuses: BTreeMap<String, usize> = BTreeMap::new();
+    let mut lane_statuses: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
+    let mut scored: Vec<&Row> = Vec::new();
+    let mut excluded = 0usize;
+    let mut usage_missing = 0usize;
+    for r in rows {
+        let status = r
+            .raw
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("legacy");
+        *statuses.entry(status.to_string()).or_default() += 1;
+        let lane_status = r
+            .raw
+            .get("lane_status")
+            .and_then(Value::as_str)
+            .unwrap_or("unverified");
+        *lane_statuses.entry(lane_status.to_string()).or_default() += 1;
+        let reason = r.raw.get("excluded_reason").and_then(Value::as_str);
+        if let Some(reason) = reason {
+            *by_reason.entry(reason.to_string()).or_default() += 1;
+        }
+        if status == "graded" && lane_status != "substituted" && reason.is_none() {
+            scored.push(r);
+        } else {
+            excluded += 1;
+        }
+    }
+    let accepted = scored.iter().filter(|r| r.pass).count();
+    let (rate, lo, hi) = bootstrap_rate(scored.len(), accepted);
+    let mut durations: Vec<f64> = scored
+        .iter()
+        .filter_map(|r| r.raw.get("duration_s").and_then(Value::as_f64))
+        .collect();
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_wall_s = match durations.len() {
+        0 => 0.0,
+        odd if odd % 2 == 1 => durations[odd / 2],
+        even => (durations[even / 2 - 1] + durations[even / 2]) / 2.0,
+    };
+    let mut tokens = (0u64, 0u64, 0u64, 0u64);
+    let mut cost_total = 0.0f64;
+    let mut measured = !scored.is_empty();
+    if scored.is_empty() {
+        measured = false;
+    }
+    for r in &scored {
+        let usage = r.raw.get("usage");
+        let Some(u) = usage.and_then(Value::as_object) else {
+            usage_missing += 1;
+            continue;
+        };
+        let num = |k: &str| u.get(k).and_then(Value::as_u64);
+        let (Some(input), Some(output)) = (num("input"), num("output")) else {
+            usage_missing += 1;
+            continue;
+        };
+        let cache_read = num("cache_read").unwrap_or(0);
+        let cache_write = num("cache_write").unwrap_or(0);
+        tokens = (
+            tokens.0 + input,
+            tokens.1 + output,
+            tokens.2 + cache_read,
+            tokens.3 + cache_write,
+        );
+        let model_key = r
+            .raw
+            .get("observed_model")
+            .and_then(Value::as_str)
+            .or_else(|| r.raw.get("requested_model").and_then(Value::as_str))
+            .unwrap_or("");
+        let price = prices
+            .and_then(|p| p.get(model_key))
+            .and_then(Value::as_object);
+        let Some(price) = price else {
+            measured = false;
+            continue;
+        };
+        let per_m = |k: &str| price.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        cost_total += (input as f64 * per_m("input_per_m")
+            + output as f64 * per_m("output_per_m")
+            + cache_read as f64 * per_m("cache_read_per_m")
+            + cache_write as f64 * per_m("cache_write_per_m"))
+            / 1_000_000.0;
+    }
+    if usage_missing > 0 {
+        measured = false;
+        tokens = (0, 0, 0, 0);
+        cost_total = 0.0;
+    }
+    let dollars_per_accepted = if measured && accepted > 0 {
+        Value::from(round4(cost_total / accepted as f64))
+    } else {
+        Value::Null
+    };
+    json!({
+        "attempts": rows.len(),
+        "graded": statuses.get("graded").copied().unwrap_or(0),
+        "accepted": accepted,
+        "pass_rate": round4(rate),
+        "pass_rate_ci95": [round4(lo), round4(hi)],
+        "median_wall_s": round4(median_wall_s),
+        "lane_status_counts": lane_statuses,
+        "status_counts": statuses,
+        "excluded": {
+            "total": excluded,
+            "by_reason": by_reason,
+            "usage_missing": usage_missing,
+        },
+        "tokens": {"input": tokens.0, "output": tokens.1,
+                    "cache_read": tokens.2, "cache_write": tokens.3},
+        "cost": {
+            "measured": measured,
+            "dollars_total": if measured { json!(round4(cost_total)) } else { Value::Null },
+            "dollars_per_accepted": dollars_per_accepted,
+        },
+    })
+}
+
+/// Deterministic bootstrap over the pass indicator (B = 2000, xorshift64*
+/// seeded once, percentile CI). Same numbers on every run of the same rows:
+/// a report is reproducible evidence, not a die roll.
+fn bootstrap_rate(n: usize, passes: usize) -> (f64, f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let rate = passes as f64 / n as f64;
+    let mut state: u64 = 0x5EED_D00D;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    const B: usize = 2000;
+    let mut below = 0usize;
+    let mut above = 0usize;
+    for _ in 0..B {
+        let mut hits = 0usize;
+        for _ in 0..n {
+            // Resample the pass indicator: the first `passes` draws read true.
+            let idx = (next() % n as u64) as usize;
+            if idx < passes {
+                hits += 1;
+            }
+        }
+        let share = hits as f64 / n as f64;
+        below += (share < rate).then_some(1).unwrap_or(0);
+        above += (share > rate).then_some(1).unwrap_or(0);
+    }
+    let lo_q = (below as f64 / B as f64) * 0.025;
+    let hi_q = 1.0 - (above as f64 / B as f64) * 0.025;
+    (rate, lo_q, hi_q)
+}
+
 /// The summary document `evals_health_summary` reads: alarm, regressed set,
 /// tier pass rate, flake count, and the staleness fold (newest
 /// regression-tier timestamp vs the window). Staleness lives here so Python
@@ -647,6 +829,8 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let mut compare: Option<String> = None;
     let mut planned: Option<BTreeMap<String, usize>> = None;
     let mut qualification: Option<String> = None;
+    let mut by_cohort = false;
+    let mut prices: Option<Value> = None;
     let mut now: Option<DateTime<Utc>> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -738,6 +922,18 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                 Ok(v) => qualification = Some(v),
                 Err(()) => return EXIT_USAGE,
             },
+            "--by-cohort" => by_cohort = true,
+            "--prices" => {
+                match value("--prices")
+                    .and_then(|v| serde_json::from_str::<Value>(&v).map_err(|_| ()))
+                {
+                    Ok(v) => prices = Some(v),
+                    Err(()) => {
+                        eprintln!("evals-trend: --prices must be a JSON object of model -> per-million rates");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
             "--now" => match value("--now").map(|v| DateTime::parse_from_rfc3339(&v)) {
                 Ok(Ok(dt)) => now = Some(dt.with_timezone(&Utc)),
                 _ => {
@@ -825,6 +1021,51 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     // --mode report
     if let Some(qpath) = &qualification {
         return qualification_report(&history, qpath, json_out, since);
+    }
+    if by_cohort {
+        let rows = read_rows(&history, None, since);
+        let fold = cohort_fold(&rows, prices.as_ref());
+        if json_out {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fold).unwrap_or_default()
+            );
+        } else {
+            if let Some(cohorts) = fold["cohorts"].as_object() {
+                for (id, c) in cohorts {
+                    let rate = c["pass_rate"].as_f64().unwrap_or(0.0);
+                    let ci = c["pass_rate_ci95"].as_array();
+                    let (lo, hi) = match ci.map(|a| {
+                        (
+                            a.first().and_then(Value::as_f64),
+                            a.get(1).and_then(Value::as_f64),
+                        )
+                    }) {
+                        Some((Some(lo), Some(hi))) => (lo, hi),
+                        _ => (0.0, 0.0),
+                    };
+                    let cost = if c["cost"]["measured"].as_bool().unwrap_or(false) {
+                        format!(
+                            "${:.4}/accepted",
+                            c["cost"]["dollars_per_accepted"].as_f64().unwrap_or(0.0)
+                        )
+                    } else {
+                        "cost unmeasured".to_string()
+                    };
+                    println!(
+                        "  {id}: attempts={} graded={} accepted={} rate={:.1}% [{:.1},{:.1}] median={}s {cost}",
+                        c["attempts"],
+                        c["graded"],
+                        c["accepted"],
+                        rate * 100.0,
+                        lo * 100.0,
+                        hi * 100.0,
+                        c["median_wall_s"],
+                    );
+                }
+            }
+        }
+        return 0;
     }
     if let Some(v) = &compare {
         let ok = v == "baseline"
@@ -966,3 +1207,6 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_cohort;
