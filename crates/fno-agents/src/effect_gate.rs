@@ -2,11 +2,11 @@
 //! request, and read the verdict.
 //!
 //! Ported from `cli/src/fno/approvals` (models.py `classify_effect` +
-//! `canonical_digest`, store.py `EffectStore.submit`) per d-e11b2b3e and
-//! d-19004329: one Rust owner of the effect table, the Python legs deleted in
-//! the same change. Unknown classes require approval, so a new effect class is
-//! safe by default; every unreadable store or config reads not-approved, so
-//! the gate fails closed.
+//! `canonical_digest`, store.py `EffectStore.submit`): one Rust owner of the
+//! effect table, the Python legs deleted in the same change and their callers
+//! routed through the authorized-merge door. Unknown classes require
+//! approval, so a new effect class is safe by default; every unreadable
+//! store or config reads not-approved, so the gate fails closed.
 
 use rusqlite::Connection;
 use serde_json::{json, Value};

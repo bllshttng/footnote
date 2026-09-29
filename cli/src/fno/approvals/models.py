@@ -17,7 +17,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Any, NoReturn, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -115,17 +115,25 @@ INERT_EFFECT_CLASSES: frozenset[str] = frozenset(
 )
 
 
+def _unavailable_refusal(detail: str) -> NoReturn:
+    """The fail-closed refusal every effect door shares: an unavailable or
+    unreadable classifier never allows the effect."""
+    raise RefusedError(
+        Refusal(
+            reason=RefusalReason.STORE_UNAVAILABLE,
+            detail=detail,
+            fields=("effect_class",),
+            recovery="Check the fno-agents binary (`fno doctor`), then retry the effect.",
+        )
+    )
+
+
 def classify_effect(effect_class: str) -> EffectDisposition:
-    """Classify an effect class. Function-agnostic: only the class is read.
-
-    The table is Rust state (d-19004329): one owner in
-    ``crates/fno-agents/src/effect_gate.rs``, read through the
-    ``authorized-merge`` door, and the Python table is deleted rather than
-    kept as a twin. Unrecognised classes require approval rather than sliding
-    through, so a new effect class is safe by default.
-
-    A door that cannot answer refuses (fail closed): an unavailable or
-    unreadable classifier never allows the effect.
+    """Classify an effect class. The table is Rust state
+    (crates/fno-agents/src/effect_gate.rs), read through the authorized-merge
+    door. Function-agnostic: only the class is read. Unrecognised classes
+    require approval rather than sliding through, so a new effect class is
+    safe by default instead of silently exempt.
     """
     from fno.rust_binary import VerbUnavailable, verb_call
 
@@ -134,23 +142,10 @@ def classify_effect(effect_class: str) -> EffectDisposition:
             "authorized-merge", {"op": "effect-classify", "effect_class": effect_class}
         )
     except VerbUnavailable as exc:
-        raise RefusedError(
-            Refusal(
-                reason=RefusalReason.STORE_UNAVAILABLE,
-                detail=f"the effect classifier is unavailable ({exc}); the effect is refused",
-                fields=("effect_class",),
-                recovery="Check the fno-agents binary (`fno doctor`), then retry the effect.",
-            )
-        ) from exc
+        _unavailable_refusal(f"the effect classifier is unavailable ({exc})")
     disposition = out.get("disposition")
     if disposition not in ("allow", "require_approval", "deny"):
-        raise RefusedError(
-            Refusal(
-                reason=RefusalReason.STORE_UNAVAILABLE,
-                detail=f"unreadable classifier receipt: {out!r}",
-                fields=("effect_class",),
-            )
-        )
+        _unavailable_refusal(f"unreadable classifier receipt: {out!r}")
     return EffectDisposition(disposition)
 
 

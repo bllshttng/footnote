@@ -215,26 +215,19 @@ class EffectStore:
     # -- approval lifecycle ----------------------------------------------
 
     def submit(self, request: ApprovalRequest) -> ApprovalRequest:
-        """Record one exact request. A denied effect class never becomes pending.
-
-        The write is Rust state (d-e11b2b3e, d-19004329): the door's
-        ``effect-submit`` op owns the insert, the outbox row, and the DENY
-        refusal, and the Python table this method used to carry is deleted.
-        The db path rides the payload so a test's tmp store stays tmp.
+        """Record one exact request through the Rust effect gate. The door's
+        effect-submit op owns the insert, the outbox row, and the DENY
+        refusal: a denied effect class never becomes pending. The db path
+        rides the payload so a test's tmp store stays tmp.
         """
         from fno.rust_binary import VerbUnavailable, verb_call
 
-        payload = {
+        payload: dict[str, Any] = {
             "op": "effect-submit",
+            # isoformat, not model_dump's `Z` suffix: the Rust digest binds
+            # the expires_at string, so both sides must serialize it alike.
             "request": {
-                "request_id": request.request_id,
-                "principal_id": request.principal_id,
-                "work_order_id": request.work_order_id,
-                "attempt_id": request.attempt_id,
-                "effect_id": request.effect_id,
-                "effect_class": request.effect_class,
-                "destination": request.destination,
-                "action_digest": request.action_digest,
+                **request.model_dump(mode="json"),
                 "created_at": request.created_at.isoformat(),
                 "expires_at": request.expires_at.isoformat(),
             },
