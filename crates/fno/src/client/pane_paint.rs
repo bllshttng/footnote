@@ -38,7 +38,12 @@ impl View {
                         break;
                     }
                     covered[r * cols + c] = true;
-                    if *pid == self.layout.focus {
+                    // The seam outline is a keyboard-focus mark: it reads the
+                    // shared owner, so a pane loses it while the feed or the
+                    // backlog owns typing.
+                    if *pid == self.layout.focus
+                        && self.input_owner() == super::region_focus::RegionOwner::Pane
+                    {
                         focused[r * cols + c] = true;
                     }
                     if is_framed {
@@ -355,7 +360,11 @@ impl View {
         if !crate::pane_border::framed(rect) {
             return;
         }
-        let focused_pane = pid == self.layout.focus;
+        // The frame accent is the pane's keyboard-focus mark: the server
+        // focus alone is not enough while the feed or the backlog owns
+        // typing - an inactive pane must lose its accent (AC3-HP).
+        let focused_pane = pid == self.layout.focus
+            && self.input_owner() == super::region_focus::RegionOwner::Pane;
         // The grip rides the top edge of multi-pane tabs (None on a lone
         // pane or one too narrow to spare the cells), exactly as drawn.
         let has_grip = self.layout.panes.len() >= 2 && self.grip_span(rect).is_some();

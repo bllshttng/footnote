@@ -172,7 +172,7 @@ impl View {
                         rows,
                         cols,
                         (0, 0, rows - chrome_rows, text_w),
-                        b.detail.is_some(),
+                        self.input_owner() == super::region_focus::RegionOwner::Board,
                         &self.theme,
                     );
                 }
