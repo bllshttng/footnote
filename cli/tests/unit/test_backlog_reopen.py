@@ -491,3 +491,74 @@ def test_the_event_schema_requires_a_reason():
 
     with pytest.raises(Exception):
         _build("backlog_reopened", "backlog", {"node_id": "ab-11111111"})
+
+
+# -- update projects difficulty (restored from the x-dd1f branch; main moved
+# its own difficulty coverage to test_graph_status.py) --
+
+
+@pytest.mark.real_plan_projection
+def test_update_difficulty_reaches_the_plan_doc(tmp_path):
+    """`--difficulty` is a mirrored key, so the edit must trigger the projection
+    like `--priority` does; before this it changed the graph and left the doc."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\n---\n\n# a plan\n")
+    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
+
+    code, out = _native_update(root, "ab-11111111", "--difficulty", "high")
+    assert code == 0, out
+    assert "difficulty: high" in plan.read_text()
+
+
+@pytest.mark.real_plan_projection
+def test_update_difficulty_null_clears_the_plan_doc(tmp_path):
+    """The explicit clear reaches the doc even on a row that never held the key."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: high\n---\n\n# a plan\n")
+    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
+
+    code, out = _native_update(root, "ab-11111111", "--difficulty", "null")
+    assert code == 0, out
+    assert "difficulty" not in plan.read_text()
+
+
+@pytest.mark.real_plan_projection
+def test_update_priority_keeps_a_persisted_null_band_off_the_doc(tmp_path):
+    """Rows minted before the intake fix still store difficulty: null; a
+    mirrored edit on them must not delete the band the doc authored since."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: medium\n---\n\n# a plan\n")
+    root = sandbox(tmp_path, _node("ab-11111111", status="ready", completed_at=None, difficulty=None, plan_path=str(plan)))
+
+    code, out = _native_update(root, "ab-11111111", "--priority", "p1")
+    assert code == 0, out
+    assert "difficulty: medium" in plan.read_text()
+
+
+def _native_update(root: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the sandbox
+    the fixture seeded (in-process monkeypatches cannot reach a subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(root),
+            "FNO_CONFIG": str(root / "config.toml"),
+            "FNO_GLOBAL_SETTINGS_PATH": "/dev/null",
+            "FNO_TRACKER_BACKEND": "graph",
+            "FNO_CLAIMS_ROOT": str(root / "claims"),
+        },
+        cwd=str(root),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
