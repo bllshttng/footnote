@@ -194,7 +194,7 @@ fn keep_question(item: &QuestionItem) -> bool {
 pub struct FoldOutcome {
     pub needs: Option<Vec<FoldItem>>,
     pub mine: Option<Vec<MineItem>>,
-    pub questions: Option<QuestionsFold>,
+    pub questions: Result<QuestionsFold, String>,
 }
 
 /// Fold the needs-me events leg over the `since_epoch` window. `None` on any
@@ -241,10 +241,11 @@ pub async fn mine_now() -> Option<Vec<MineItem>> {
     parse_mine(&output.stdout)
 }
 
-/// Fold open questions through the Rust projection verb - 0.13 s against the
-/// 800 ms cap (the Python verb measured 1.77 s and degraded the lane). Same
-/// bounded/fail-open shape as the other legs.
-pub async fn questions_now() -> Option<QuestionsFold> {
+/// Fold open questions through the Rust projection verb - under the cap with
+/// the store's cursor fast path (a store-sized read measured 4.99 s before
+/// it). Same bounded shape as the other legs, but a failure carries a reason:
+/// the toggle toast names it instead of toasting "shown" over an empty fold.
+pub async fn questions_now() -> Result<QuestionsFold, String> {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
@@ -253,14 +254,48 @@ pub async fn questions_now() -> Option<QuestionsFold> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
-        .await
-        .ok()?
-        .ok()?;
+    let output = match tokio::time::timeout(SHELLOUT_TIMEOUT, fut).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}ms",
+                SHELLOUT_TIMEOUT.as_millis()
+            ))
+        }
+    };
     if !output.status.success() {
-        return None;
+        return Err(questions_reason(&output.stdout).unwrap_or_else(|| {
+            match output.status.code() {
+                Some(code) => format!("needs --items exited {code}"),
+                None => "needs --items was killed by a signal".to_string(),
+            }
+        }));
     }
-    parse_questions(&output.stdout)
+    parse_questions(&output.stdout).ok_or_else(|| "unreadable output".to_string())
+}
+
+/// The first unreadable source the payload names. A failed projection still
+/// prints its payload with exit 1, so the reason rides in `sources`.
+fn questions_reason(stdout: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let sources = v.get("sources")?.as_array()?;
+    let bad = sources
+        .iter()
+        .find(|s| s.get("readable") == Some(&serde_json::Value::Bool(false)))?;
+    let store = bad
+        .get("store")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("source");
+    let error = bad
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if error.is_empty() {
+        Some(store.to_string())
+    } else {
+        Some(format!("{store}: {error}"))
+    }
 }
 
 /// Run all three bounded reads concurrently under the client's one

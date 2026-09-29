@@ -49,6 +49,24 @@ impl TerminalGuard {
         Ok(TerminalGuard { ground_set: false })
     }
 
+    /// Latch the color restore for a ground taken AFTER launch (a live theme
+    /// switch): the exit Drop and the SIGTERM handler then restore too.
+    pub(super) fn latch_ground(&mut self) {
+        self.ground_set = true;
+    }
+
+    /// Tests cannot construct the guard (the field is private to this
+    /// module) and must not enable raw mode to get one.
+    #[cfg(test)]
+    pub(super) fn test_guard() -> Self {
+        TerminalGuard { ground_set: false }
+    }
+
+    #[cfg(test)]
+    pub(super) fn ground_latched(&self) -> bool {
+        self.ground_set
+    }
+
     /// The alternate screen + mouse capture, after the inline splash.
     fn enter_screen(&mut self) -> Result<(), String> {
         let mut out = std::io::stdout();

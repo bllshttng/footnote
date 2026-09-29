@@ -548,7 +548,7 @@ if jq -e '.type == "project"' <<<"$CANDIDATE" >/dev/null 2>&1; then
     bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/append-lesson-candidate.sh" \
         --session-id "$SESSION_ID" \
         --candidate "$CANDIDATE"
-    # Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
+    # Appends one line to ~/.fno/history/lesson-candidates.jsonl (home-keyed, worktree-
     # independent). Promotion into AGENTS.md is a reviewed PR, never automatic.
 fi
 ```

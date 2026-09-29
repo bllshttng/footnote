@@ -280,6 +280,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
 pub mod pr_push;

@@ -4,7 +4,7 @@
 #
 # Designed to be called by verifier scripts in production repos (your project,
 # fno, etc.) when they block a commit. Appends exactly one structured
-# line to ~/.fno/corrections.log with locking.
+# line to ~/.fno/logs/corrections.log with locking.
 #
 # Usage:
 #   corrections-verifier-log.sh \

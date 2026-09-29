@@ -668,11 +668,12 @@ pub(crate) fn turn_policy(
 }
 
 /// The roots the thread lane carries onto every `turn/start`: the caller's
-/// state dirs plus the repo's git common dir, resolved by the same resolver
-/// the exec lane grants with. Both postures carry them. A `yolo` thread asks
-/// for `danger-full-access` on `thread/start`, but the server keeps its
-/// workspaceWrite default, and withholding the policy does not lift a sandbox -
-/// it keeps whatever the server already had, `.git` read-only included.
+/// state dirs, the repo's git common dir, and the uv cache, resolved by the
+/// same resolvers the exec lane grants with. Both postures carry them. A
+/// `yolo` thread asks for `danger-full-access` on `thread/start`, but the
+/// server keeps its workspaceWrite default, and withholding the policy does
+/// not lift a sandbox - it keeps whatever the server already had, `.git`
+/// read-only included.
 ///
 /// Fail-open like the exec lane's grant: an unresolvable root is skipped, so
 /// resolution can never break the spawn.
@@ -681,6 +682,11 @@ fn granted_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
     if let Some(git_dir) = crate::provider::git_common_dir(cwd) {
         if !roots.iter().any(|root| root == &git_dir) {
             roots.push(git_dir);
+        }
+    }
+    for root in crate::provider::codex_cache_roots() {
+        if !roots.iter().any(|existing| existing == &root) {
+            roots.push(root);
         }
     }
     roots
@@ -3144,6 +3150,36 @@ mod tests {
         assert!(!wired
             .iter()
             .any(|root| root.as_str() == Some(linked_git.as_str())));
+    }
+
+    /// AC4-HP/AC4-ERR (thread lane): every `turn/start` carries the uv cache
+    /// alongside the state dirs and the git common dir, and a missing cache
+    /// path grants nothing. UV_CACHE_DIR is authoritative, so pointing it at
+    /// a nonexistent path isolates the verdict from the host's real cache.
+    #[test]
+    fn granted_roots_carry_the_uv_cache_only_when_it_exists() {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cache = tempfile::tempdir().unwrap();
+        let want = std::fs::canonicalize(cache.path()).unwrap();
+        let prev = std::env::var_os("UV_CACHE_DIR");
+
+        unsafe { std::env::set_var("UV_CACHE_DIR", cache.path()) };
+        let roots = granted_roots(Path::new("/nonexistent-fno-cwd-probe"), &[]);
+        assert!(roots
+            .iter()
+            .any(|root| *root == want.to_string_lossy().into_owned()));
+
+        unsafe { std::env::set_var("UV_CACHE_DIR", "/nonexistent-fno-uv-cache-probe") };
+        let roots = granted_roots(Path::new("/nonexistent-fno-cwd-probe"), &[]);
+        assert!(roots.is_empty());
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("UV_CACHE_DIR", v) },
+            None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
+        }
+        drop(guard);
     }
 
     /// An ungranted spawn must build TODAY's frame, byte for byte. A new
