@@ -695,6 +695,13 @@ def test_a_stale_var_survives_its_launcher_exiting(iso):
             time.sleep(0.1)
         child_pid = int(pidfile.read_text())
         _wait_for_flight_held(key, iso)
+        # the watchdog writes its stack file before it reads getppid, so past
+        # this point the launcher's death can no longer turn the named pid
+        # into "orphaned at arm" (holder would exit 129 without a donefile)
+        stack = iso / ".fno" / "flight" / f"stack-{child_pid}.txt"
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not stack.exists():
+            time.sleep(0.05)
         os.kill(intermediate.pid, signal.SIGKILL)
         intermediate.wait(timeout=5)
         deadline = time.monotonic() + 12
