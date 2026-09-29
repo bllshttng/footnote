@@ -116,7 +116,6 @@ INERT_EFFECT_CLASSES: frozenset[str] = frozenset(
 
 
 def _unavailable_refusal(detail: str) -> NoReturn:
-    """The fail-closed refusal every effect door shares."""
     raise RefusedError(
         Refusal(
             reason=RefusalReason.STORE_UNAVAILABLE,
@@ -129,9 +128,8 @@ def _unavailable_refusal(detail: str) -> NoReturn:
 
 def classify_effect(effect_class: str) -> EffectDisposition:
     """Classify an effect class: only the class is read. The table is Rust
-    state (crates/fno-agents/src/effect_gate.rs) read through the
-    authorized-merge door; unknown classes require approval, so a new effect
-    class is safe by default instead of silently exempt.
+    state (crates/fno-agents/src/effect_gate.rs); unknown classes require
+    approval, so a new effect class is safe by default.
     """
     from fno.rust_binary import VerbUnavailable, verb_call
 
