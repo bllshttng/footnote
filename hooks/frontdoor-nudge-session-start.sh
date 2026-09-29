@@ -40,9 +40,11 @@ fi
 
 PLUGIN_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
 INSTALLER="$PLUGIN_ROOT/.claude-plugin/postinstall.sh"
-DATA="${CLAUDE_PLUGIN_DATA:-}"
+# A Codex session carries no CLAUDE_PLUGIN_DATA, so the data dir falls back to
+# the XDG state dir: the same log, stamp and lock as a Claude session's.
+DATA="${CLAUDE_PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/fno/plugin-install}"
 STAMPED_LOG=""
-if [[ -n "$DATA" && -f "$INSTALLER" ]] && mkdir -p "$DATA" 2>/dev/null; then
+if [[ -f "$INSTALLER" ]] && mkdir -p "$DATA" 2>/dev/null; then
   LOG="$DATA/postinstall.log"
   STAMP="$DATA/postinstall.version"
   LOCK="$DATA/postinstall.lock"
@@ -90,7 +92,7 @@ fi
 cat <<'EOF'
 ## Install the `fno` front door
 
-`fno` (the Rust mux front door) is not active on your PATH - you likely have `fno-py` (the Python CLI) only. Install the front door so bare `fno` works and bootstraps the rest: `cargo install fno` (needs a Rust toolchain), or `fno doctor update --rust` from a clone - see docs/getting-started.md for other methods. Until then, reach the CLI as `fno-py`.
+`fno` (the Rust mux front door) is not active on your PATH - you likely have `fno-py` (the Python CLI) only. Install the complete set with the one-liner: `curl -fsSL fno.sh | sh` (it provisions uv, then the published wheel with front door, agent binaries and CLI). From a Rust toolchain, `cargo install fno` is the source route - see docs/getting-started.md for other methods. Until then, reach the CLI as `fno-py`.
 EOF
 if [[ -n "$STAMPED_LOG" ]]; then
   echo
