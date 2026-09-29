@@ -3455,8 +3455,7 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
 // its own module: same-module helpers resolve directly.
 
 /// A home whose graph path (`home.root().parent()/graph.json`) lands INSIDE
-/// the test's tmpdir: the root is a subdir of it. `tmp_home` makes the root
-/// the tmpdir itself, so its graph path would be the shared temp dir.
+/// the test's tmpdir; `tmp_home` would make it the shared temp dir instead.
 pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     let dir = tempfile::tempdir().unwrap();
     let home = AgentsHome::at(dir.path().join("agents"));
@@ -3913,9 +3912,8 @@ fn an_unidentified_do_row_is_not_open() {
 #[test]
 fn a_settle_that_cannot_read_is_named_and_changes_nothing() {
     let (dir, home) = staged_graph_home();
-    // An unimported malformed anchor makes the read refuse, never write.
-    // The anchor probe resolves through the layout ladder, so the legacy
-    // db twin must exist for the root spelling to be the one it reads.
+    // An unimported malformed anchor makes the read refuse, never write; the
+    // legacy db twin makes the ladder read this root spelling.
     std::fs::write(dir.path().join("graph.db"), b"SQLite format 3\0").unwrap();
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
 
@@ -4077,8 +4075,8 @@ fn an_unreadable_staging_graph_holds_the_row_in_both_modes_without_effects() {
 
     let (dir, home) = staged_graph_home();
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    // The corrupt graph: the staging re-read returns None on it. The ladder
-    // needs the legacy db twin for the root spelling to be the one read.
+    // The corrupt graph: the staging re-read returns None on it; the legacy
+    // db twin makes the ladder read this root spelling.
     std::fs::write(dir.path().join("graph.db"), b"SQLite format 3\0").unwrap();
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
     crate::state::update_registry(&home.registry_json(), |r| {
