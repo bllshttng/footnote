@@ -529,6 +529,7 @@ fn run_request(
                         id: entry.name.clone(),
                         released: false,
                         via_release: false,
+                        pr_settled_live: false,
                         basis: format!(
                             "merge-cleanup:{} all nodes done+merged",
                             request.request_id

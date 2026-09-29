@@ -147,8 +147,43 @@ pub fn content_version(entries: &[Value]) -> String {
     format!("sqlite:{:x}", hash.finalize())
 }
 
+/// The store behind a graph anchor. The state-root spellings (the anchor at
+/// the root, or its `db/` twin) resolve through the layout table, so the
+/// legacy and new spellings reach one physical file; every other parent
+/// (a space, a test fixture) keeps the sibling store.
 pub fn database_path(graph: &Path) -> PathBuf {
-    graph.with_extension("db")
+    let name = match graph.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return graph.with_extension("db"),
+    };
+    if name != "graph.json" && name != "graph-archive.json" {
+        return graph.with_extension("db");
+    }
+    let parent = match graph.parent() {
+        Some(p) => p,
+        None => return graph.with_extension("db"),
+    };
+    let root = if parent.file_name().is_some_and(|n| n == "db") {
+        match parent.parent() {
+            Some(r) => r,
+            None => return graph.with_extension("db"),
+        }
+    } else {
+        parent
+    };
+    crate::state_layout::place(root, name).with_extension("db")
+}
+
+/// The state root an anchor belongs to: the same walk `database_path` does
+/// behind its db/ parent check, so the migration fence resolves from the
+/// same place the move wrote it.
+fn state_root_of(graph: &Path) -> &Path {
+    let parent = graph.parent().unwrap_or(graph);
+    if parent.file_name().is_some_and(|n| n == "db") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    }
 }
 
 /// The sole graph store.
@@ -206,6 +241,9 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
 }
 
 fn open_connection(graph: &Path) -> Result<Connection, String> {
+    // A migration publishing under this root parks the legacy inode we
+    // would otherwise open; the bounded fence wait orders us after it.
+    crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let path = database_path(graph);
     let size = match path.metadata() {
         Ok(metadata) => metadata.len(),
@@ -1345,6 +1383,25 @@ mod tests {
     /// deleted the write.
     #[test]
     fn an_opener_never_restamps_the_empty_version_over_a_first_write() {
+        // The AC14 resolution ladder rides the same boundary: an unmigrated
+        // root answers a db-spelled anchor with the legacy store, a migrated
+        // root answers an old-spelled anchor with the moved store. The
+        // anchor kind probes the .db twin, so each arm seeds its own.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("graph.db"), b"SQLite format 3\0").unwrap();
+        let db = database_path(&root.join("db").join("graph.json"));
+        assert_eq!(db, root.join("graph.db"), "unmigrated: legacy store");
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        std::fs::write(root.join("db").join("graph.json"), "{}").unwrap();
+        std::fs::write(root.join("db").join("graph.db"), b"SQLite format 3\0").unwrap();
+        let db = database_path(&root.join("graph.json"));
+        assert_eq!(
+            db,
+            root.join("db").join("graph.db"),
+            "migrated: moved store"
+        );
         let (_dir, graph) = fixture("graph.json");
         drop(open(&graph).unwrap());
         let mut writer = open(&graph).unwrap();

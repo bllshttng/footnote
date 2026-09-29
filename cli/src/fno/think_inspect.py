@@ -508,11 +508,11 @@ def build_receipt(
 ) -> dict[str, Any]:
     """Collect a deterministic, read-only design-discovery receipt."""
     from fno.config import load_settings_for_repo
-    from fno.paths import resolve_configured_path
+    from fno.paths import place_anchor, resolve_configured_path
 
     repo = Path(repo).resolve()
     settings = load_settings_for_repo(repo)
-    graph_path = resolve_configured_path(settings.state_dir, project_root=repo, settings=settings) / "graph.json"
+    graph_path = place_anchor(resolve_configured_path(settings.state_dir, project_root=repo, settings=settings))
     archive_path = graph_path.parent / "graph-archive.json"
     configured_plans_path = resolve_configured_path(
         settings.plans_dir,

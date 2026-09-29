@@ -42,7 +42,7 @@ pub(crate) fn reset_derive_queue_calls() {
 const CARD_CAP: usize = 40;
 
 /// The graph path, resolved as `fno.paths` does: `FNO_GRAPH_JSON` >
-/// `$HOME/.fno/graph.json` > `./.fno/graph.json`.
+/// `$HOME/.fno/graph.json` > `./.fno/graph.json`, through the layout table.
 pub fn graph_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_GRAPH_JSON") {
         return PathBuf::from(v);
@@ -50,7 +50,7 @@ pub fn graph_path() -> PathBuf {
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".fno").join("graph.json")
+    crate::state_layout::place(&base.join(".fno"), "graph.json")
 }
 
 /// The `(harness, harness_session_id)` pairs whose work the graph says is
