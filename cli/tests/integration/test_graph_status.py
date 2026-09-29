@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from tests.conftest import run_native_create
+from tests.goldens._door import door_graph
 
 runner = CliRunner()
 
@@ -221,11 +222,11 @@ def test_linked_idea_stub_excluded_from_next_by_default(tmp_graph, tmp_path):
     ready.write_text("---\ncreated: 2026-05-05\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     assert _invoke("backlog", "intake", str(ready)).exit_code == 0
 
-    r = _invoke("backlog", "next", "--all")
-    assert r.exit_code == 0, r.output
-    if r.stdout.strip() == "null":
+    code, out, err = door_graph(tmp_graph, "next", "--all")
+    assert code == 0, err
+    if out.strip() == "null":
         pytest.fail("expected the ready node, got null")
-    payload = json.loads(r.stdout)
+    payload = json.loads(out)
     assert payload is not None
     assert payload.get("id") != stub_id, (
         "a linked idea stub should stay excluded from `next` by default"
@@ -238,9 +239,9 @@ def test_plan_less_idea_surfaces_in_next_by_default(tmp_graph):
     add = run_native_create(tmp_graph, "add", "Pure idea")
     idea_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "next", "--all")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.stdout)
+    code, out, err = door_graph(tmp_graph, "next", "--all")
+    assert code == 0, err
+    payload = json.loads(out)
     assert payload is not None, "plan-less idea should surface in `next` by default"
     assert payload.get("id") == idea_id
 
@@ -257,9 +258,9 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
     assert high.exit_code == 0
     idea_id = json.loads(high.stdout)["id"]
 
-    r = _invoke("backlog", "next", "--all", "--include-ideas")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.stdout)
+    code, out, err = door_graph(tmp_graph, "next", "--all", "--include-ideas")
+    assert code == 0, err
+    payload = json.loads(out)
     assert payload is not None
     assert payload.get("id") == idea_id, (
         f"high-prio idea should win when --include-ideas is set, got {payload}"
@@ -598,9 +599,9 @@ def test_dash_a_is_shorthand_for_all_in_next(tmp_graph, tmp_path):
     plan = tmp_path / "p.md"
     plan.write_text("---\ncreated: 2026-05-05\ntitle: Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan))
-    r = _invoke("backlog", "next", "-A")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.stdout)
+    code, out, err = door_graph(tmp_graph, "next", "-A")
+    assert code == 0, err
+    payload = json.loads(out)
     assert payload is not None
 
 
@@ -626,9 +627,9 @@ def test_dash_i_is_shorthand_for_ideas_in_next(tmp_graph, tmp_path):
         "--priority", "p1",
     )
     high_id = json.loads(high.stdout)["id"]
-    r = _invoke("backlog", "next", "--all", "-I")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.stdout)
+    code, out, err = door_graph(tmp_graph, "next", "--all", "-I")
+    assert code == 0, err
+    payload = json.loads(out)
     assert payload is not None
     assert payload["id"] == high_id
 

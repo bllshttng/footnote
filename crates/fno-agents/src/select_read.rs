@@ -353,7 +353,9 @@ pub fn run(args: &[String]) -> i32 {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let bound_s = crate::agents_config::auto_continue_select_timeout_s(&cwd);
-    let fno_py: OsString = crate::scrape::fno_py();
+    // The next/undispatched doors are native: the wrapper drives the
+    // rust binary's backlog namespace, never a python cold start.
+    let fno_py: OsString = crate::scrape::fno_bin();
     let receipt = select_read(kind, &forwarded, &fno_py, bound_s);
     match serde_json::to_string(&receipt) {
         Ok(json) => {
