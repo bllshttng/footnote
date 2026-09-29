@@ -66,7 +66,7 @@ if grep -q '| skill-commit | skills/target/SKILL.md |' "$LOG" 2>/dev/null; then
 else
     fail "skill-commit row missing"
 fi
-ROWS=$(grep -c 'skill-commit | skills/target/SKILL.md' "$LOG" 2>/dev/null || echo 0)
+ROWS=$(grep -c 'skill-commit | skills/target/SKILL.md' "$LOG" 2>/dev/null || true)
 if [[ "$ROWS" -eq 1 ]]; then
     pass "exactly one row"
 else

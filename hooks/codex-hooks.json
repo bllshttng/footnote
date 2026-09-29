@@ -47,33 +47,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${PLUGIN_ROOT}/hooks/git-protection.py",
-            "statusMessage": "checking git guardrails"
-          },
-          {
-            "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/bin-install-guard.sh",
-            "statusMessage": "checking for a copy onto the deployed fno-agents"
-          },
-          {
-            "type": "command",
-            "command": "python3 ${PLUGIN_ROOT}/hooks/bg-process-guard.py",
-            "statusMessage": "checking for unbounded background processes"
-          },
-          {
-            "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/pipe-guard.sh",
-            "statusMessage": "checking for a pipe that hides the exit or the rows"
-          },
-          {
-            "type": "command",
-            "command": "python3 ${PLUGIN_ROOT}/hooks/recursive-grep-guard.py",
-            "statusMessage": "checking recursive grep cache traversal"
-          },
-          {
-            "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/test-run-guard.sh",
-            "statusMessage": "checking for an unadmitted raw test run"
+            "command": "bash ${PLUGIN_ROOT}/hooks/pretooluse-bash-dispatch.sh",
+            "statusMessage": "checking Bash tool guards"
           }
         ]
       },
