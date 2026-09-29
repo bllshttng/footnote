@@ -354,6 +354,12 @@ pub struct Inputs {
     pub scope: BoardScope,
     pub scope_reason: String,
     pub errors: Vec<String>,
+    /// The derived total order, built once per read. The rows are frozen at
+    /// gather time, so one map serves every consumer; before the cache,
+    /// `order_of` rebuilt a map over every row on each `node()` call, and
+    /// the detail pane calls `node()` per paint (the frame-cost sample
+    /// named this rebuild as the open board's hot function).
+    pub(crate) order_map: std::sync::OnceLock<HashMap<String, usize>>,
 }
 
 #[cfg(test)]
@@ -371,8 +377,13 @@ pub(crate) fn fixture(rows: Vec<Value>) -> Inputs {
 }
 
 /// The card's index in the model's total order: the keeper's `ids` first,
-/// then ids the keeper did not name, by `created_at`.
-pub(crate) fn order_of(inp: &Inputs) -> HashMap<String, usize> {
+/// then ids the keeper did not name, by `created_at`. Computed once per
+/// read; every caller shares the one map.
+pub(crate) fn order_of(inp: &Inputs) -> &HashMap<String, usize> {
+    inp.order_map.get_or_init(|| build_order_map(inp))
+}
+
+fn build_order_map(inp: &Inputs) -> HashMap<String, usize> {
     let mut map: HashMap<String, usize> = HashMap::new();
     for (i, id) in inp.order.iter().enumerate() {
         map.insert(id.clone(), i);
@@ -624,7 +635,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
     let mut cards: Vec<Card> = Vec::new();
     for e in &inp.rows {
         let blocked = has_open_dependency(e, &by_ref);
-        if let Some(card) = card_of(inp, e, &order, blocked) {
+        if let Some(card) = card_of(inp, e, order, blocked) {
             cards.push(card);
         }
     }
@@ -682,7 +693,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
             .collect(),
         flow: inp.flow.clone(),
     };
-    let lanes = build_lanes(filtered, &order, inp, &q.lanes, q.view == View::List);
+    let lanes = build_lanes(filtered, order, inp, &q.lanes, q.view == View::List);
     Board {
         schema: 1,
         version: inp.version,
@@ -993,7 +1004,7 @@ fn links(inp: &Inputs, e: &Value, field: &str) -> Vec<Link> {
             let (column, status) = match resolve_row(inp, id) {
                 Some(r) => {
                     let blocked = false;
-                    let card = card_of(inp, r, &order, blocked);
+                    let card = card_of(inp, r, order, blocked);
                     (card.as_ref().map(|c| c.column), node_status_text(r))
                 }
                 None => (None, None),
@@ -1025,7 +1036,7 @@ fn reverse_links(inp: &Inputs, id: &str, field: &str) -> Vec<Link> {
         .filter_map(|r| {
             let rid = r.get("id").and_then(Value::as_str)?;
             let title = r.get("title").and_then(Value::as_str).map(str::to_string);
-            let card = card_of(inp, r, &order, false);
+            let card = card_of(inp, r, order, false);
             Some(Link {
                 id: rid.to_string(),
                 title,
@@ -1049,7 +1060,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             .collect();
         has_open_dependency(e, &by_ref)
     };
-    let card = card_of(inp, e, &order, blocked)?;
+    let card = card_of(inp, e, order, blocked)?;
     let str_field =
         |k: &str| -> Option<String> { e.get(k).and_then(Value::as_str).map(str::to_string) };
     // Sessions joined to the roster: the model carries the answer.
@@ -1335,6 +1346,7 @@ fn gather_blocking(
         scope,
         scope_reason,
         errors,
+        order_map: Default::default(),
     }
 }
 
