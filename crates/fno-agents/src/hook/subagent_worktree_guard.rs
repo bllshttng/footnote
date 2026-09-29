@@ -71,9 +71,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const SID: &str = "11111111-1111-1111-1111-111111111111";
-    const TOP_TRANSCRIPT: &str =
-        "/home/u/.claude/projects/-repo/11111111-1111-1111-1111-111111111111.jsonl";
+    const SID: &str = "7a3f9c1e-5b2d-4e8f-9a0c-1d2e3f4a5b6c";
+    const TOP_TRANSCRIPT: &str = "/fixtures/proj/7a3f9c1e-5b2d-4e8f-9a0c-1d2e3f4a5b6c.jsonl";
 
     #[test]
     fn top_level_payload_allows() {
@@ -105,7 +104,7 @@ mod tests {
     fn subagents_transcript_payload_blocks() {
         let payload = json!({
             "session_id": SID,
-            "transcript_path": format!("/home/u/.claude/projects/-repo/{SID}/subagents/agent-x.jsonl"),
+            "transcript_path": format!("/fixtures/proj/{SID}/subagents/agent-x.jsonl"),
             "tool_name": "EnterWorktree",
             "tool_input": {"name": "wt-name"}
         });
