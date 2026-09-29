@@ -27,9 +27,9 @@ def env(tmp_path, monkeypatch):
 
 
 def _flag_path(form):
-    from fno.bus.cursor import control_pending_dir
+    from fno import paths
 
-    return control_pending_dir() / f"{form}.flag"
+    return paths.bus_dir() / "control-pending" / f"{form}.flag"
 
 
 def _seed_thread(recipient):

@@ -191,34 +191,3 @@ def scan_unread(
         # Cursor id rotated out or otherwise unresolvable: rescan retained.
         return [m for m in msgs if _mine(m)]
     return after
-
-
-# --- control lane pending flags ---------------------------------------------
-#
-# A control body that demoted durable must land at the recipient's next TOOL
-# boundary, not wait for a prompt boundary a busy worker never reaches. The
-# sender stamps a per-recipient flag file; the PreToolUse hook stats three
-# flag files (shell-only) before paying a CLI start, and the drain clears
-# them. Any flag failure degrades to prompt-boundary delivery, never a loss.
-
-
-def control_pending_dir() -> Path:
-    """Directory of per-recipient ``control`` pending flags."""
-    from fno import paths
-
-    return paths.bus_dir() / "control-pending"
-
-
-def control_pending_flag(name: str) -> Path:
-    """Flag file for one recipient address form."""
-    return control_pending_dir() / f"{_safe_name(name)}.flag"
-
-
-def mark_control_pending(name: str) -> None:
-    """Flag ``name`` as holding an undrained CONTROL body (best-effort)."""
-    try:
-        p = control_pending_flag(name)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.touch()
-    except OSError:
-        pass

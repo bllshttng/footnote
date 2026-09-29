@@ -810,6 +810,19 @@ def post_inbox_message(
     )
 
 
+def _mark_control_pending(recipient: str) -> None:
+    """Stamp the tool-boundary pending flag (best-effort: a missed stamp
+    degrades to prompt-boundary delivery, never a loss)."""
+    try:
+        from fno import paths
+
+        flag = paths.bus_dir() / "control-pending" / f"{recipient}.flag"
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch()
+    except OSError:
+        pass
+
+
 def write_new_thread(
     recipient: str,
     sender: str,
@@ -942,15 +955,11 @@ def write_new_thread(
     # Best-effort: the derived markdown render. A failure is logged, not fatal.
     _write_render_best_effort(target, _format_thread(handle))
 
-    # A control body must reach the recipient at its next TOOL boundary,
-    # so flag it for the PreToolUse drain. Best-effort: a missed
-    # flag degrades to prompt-boundary delivery, never a loss.
+    # A control body must reach the recipient at its next TOOL boundary.
     from fno.mail.budget import is_control
 
     if is_control(body):
-        from fno.bus.cursor import mark_control_pending
-
-        mark_control_pending(recipient)
+        _mark_control_pending(recipient)
 
     return handle
 
@@ -1041,9 +1050,7 @@ def append_to_thread(
     from fno.mail.budget import is_control
 
     if is_control(body):
-        from fno.bus.cursor import mark_control_pending
-
-        mark_control_pending(existing.to_project)
+        _mark_control_pending(existing.to_project)
 
     return msg_id
 
