@@ -18,7 +18,7 @@ from typing import Optional
 
 import typer
 
-from fno._subprocess_util import propagate_returncode
+from fno._subprocess_util import fno_py_cmd, propagate_returncode
 from fno.paths import resolve_plugin_script, resolve_repo_root
 
 app = typer.Typer(
@@ -293,22 +293,41 @@ def _fetch_failure(fetch: Optional[subprocess.CompletedProcess[str]]) -> str:
     return ""
 
 
+def _node_branch(name: str) -> str:
+    """The node's branch, minted by the one Rust resolver:
+    `fno backlog get <name> --field _branch`. A deployed binary that
+    predates `_branch` prints null and a non-node name exits 1; both
+    degrade to today's feature/<name>."""
+    try:
+        p = subprocess.run(
+            [*fno_py_cmd(), "backlog", "get", name, "--field", "_branch"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return f"feature/{name}"
+    if p.returncode == 0:
+        out = (p.stdout or "").strip()
+        if out and out != "null":
+            return out
+    return f"feature/{name}"
+
+
 def _continuation_base(
-    repo: Path, name: str, base: str
+    repo: Path, name: str, base: str, br: str
 ) -> Optional[tuple]:
-    """What a re-dispatch should continue : origin/feature/<name>
+    """What a re-dispatch should continue : origin/<br>
     ahead of base wins, then a salvage ref ahead of base (remote, then the
     local one a dead worker's hook wrote). Ahead-of-base by rev-list count,
     never name existence. Returns (kind, receipt_ref, count, create_target)."""
     remote_branch = base.split("/", 1)[1]
     salvage = f"refs/fno/salvage/{name}"
-    feat = f"origin/feature/{name}"
-    feat_ref = f"refs/remotes/origin/feature/{name}"
+    feat = f"origin/{br}"
+    feat_ref = f"refs/remotes/origin/{br}"
     fetch: Optional[subprocess.CompletedProcess[str]]
     try:
         fetch = subprocess.run(
             ["git", "-C", str(repo), "fetch", "--quiet", "origin",
-             remote_branch, f"feature/{name}:{feat_ref}"],
+             remote_branch, f"{br}:{feat_ref}"],
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
@@ -483,7 +502,7 @@ def _worktree_ensure(
         )
         return 1
 
-    br = branch or f"feature/{name}"
+    br = branch or _node_branch(name)
     # base= stays ONE whitespace-free token: the orientation line is a
     # key=value contract.
     base_note = ""
@@ -522,7 +541,7 @@ def _worktree_ensure(
         base = _base_ref(top)
         # Continue the node's own work when it reached origin. An explicit
         # --branch (batch lane) is the caller's choice; default path only.
-        cont = _continuation_base(top, name, base) if base and branch is None else None
+        cont = _continuation_base(top, name, base, br) if base and branch is None else None
         if cont is not None:
             kind, source, count, target = cont
             if kind == "continued":
@@ -607,7 +626,7 @@ def ensure(
     repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout to spawn a worktree from."),
     name: str = typer.Option(..., "--name", help="Worktree name (dir + default branch suffix)."),
     branch: Optional[str] = typer.Option(
-        None, "--branch", help="Branch to create/checkout (default: feature/<name>)."
+        None, "--branch", help="Branch to create/checkout (default: the node's branch, else feature/<name>)."
     ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Resolved harness (claude/codex/...); drives the policy gate."

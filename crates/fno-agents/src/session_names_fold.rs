@@ -12,12 +12,13 @@ use crate::state;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// `$HOME/.fno/session-names.json`, the overlay's default global path.
+/// `$HOME/.fno/session-names.json` (under `mux/` after the server migrates
+/// it), the overlay's default global path.
 fn default_name_map_path() -> PathBuf {
     let base = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join(".fno").join("session-names.json")
+    crate::state_layout::place(&base.join(".fno"), "session-names.json")
 }
 
 /// Fold the overlay into the registry, once per sweep. Best-effort: an

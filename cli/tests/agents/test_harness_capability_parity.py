@@ -69,6 +69,7 @@ def bundled_state():
     harness_map.OVERRIDE_WARNINGS[:] = warnings
 
 
+@pytest.mark.timeout(144)
 def test_resolved_rows_match_between_readers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bundled_state
 ) -> None:

@@ -1,4 +1,4 @@
-//! Persisted named squads (`~/.fno/squads.json`): the durable half of the
+//! Persisted named squads (`~/.fno/mux/squads.json`): the durable half of the
 //! session-scoped [`crate::squad::Squad`] model.
 //!
 //! Every squad persists (operator decision: any squad created remains across a
@@ -409,7 +409,7 @@ pub fn squads_path() -> PathBuf {
         return PathBuf::from(v).join("squads.json");
     }
     #[cfg(not(test))]
-    return crate::proto::mux_sidecar_root().join("squads.json");
+    return crate::proto::mux_sidecar_path("squads.json");
 }
 
 /// A jobId is exactly 8 ascii-hex digits (the `claude attach` gate). File

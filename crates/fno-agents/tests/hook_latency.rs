@@ -1088,6 +1088,7 @@ fn assert_bash_pretooluse_dispatch_order() {
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_REPO_ROOT", &repo)
         .env("FNO_EVENTS_PATH", &events)
+        .env("FNO_GUARD_PRESET", "strict")
         .env("HOME", &home)
         .env("CARGO_HOME", home.join(".cargo"))
         .stdin(Stdio::piped())

@@ -279,6 +279,18 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
     // daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
+        // The control drain rides this action as a mode flag (law d-fe66560a
+        // allows no new client action): the PreToolUse hook calls it
+        // binary-direct at every tool boundary, and a frozen worker's freeze
+        // mail must land even when the daemon is the thing wedged.
+        if args.iter().skip(1).any(|a| a == "--control-drain") {
+            let rest: Vec<String> = args[1..]
+                .iter()
+                .filter(|a| a.as_str() != "--control-drain")
+                .cloned()
+                .collect();
+            return fno_agents::mail_control_drain::run(&rest);
+        }
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 

@@ -810,6 +810,18 @@ def post_inbox_message(
     )
 
 
+def _mark_control_pending(recipient: str) -> None:
+    """Stamp the tool-boundary pending flag (best-effort)."""
+    try:
+        from fno import paths
+
+        flag = paths.bus_dir() / "control-pending" / f"{recipient}.flag"
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch()
+    except OSError:
+        pass
+
+
 def write_new_thread(
     recipient: str,
     sender: str,
@@ -942,6 +954,11 @@ def write_new_thread(
     # Best-effort: the derived markdown render. A failure is logged, not fatal.
     _write_render_best_effort(target, _format_thread(handle))
 
+    from fno.mail.budget import is_control
+
+    if is_control(body):
+        _mark_control_pending(recipient)
+
     return handle
 
 
@@ -1026,6 +1043,11 @@ def append_to_thread(
                 )
     finally:
         _release_lock(lock)
+
+    from fno.mail.budget import is_control
+
+    if is_control(body):
+        _mark_control_pending(existing.to_project)
 
     return msg_id
 

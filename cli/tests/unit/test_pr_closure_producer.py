@@ -1359,11 +1359,38 @@ def test_unknown_manifest_id_falls_back_to_the_branch():
     assert result.bound_ids == ["x-1a2b"]
 
 
+def _native_supersede(graph, *args: str):
+    """The supersede leaf answers natively; drive the dev binary over the
+    conftest-sandboxed store (the graph path is frozen at import time)."""
+    import os as _os
+    import subprocess as _sp
+
+    import pytest as _pytest
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        _pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "supersede", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(graph.parent),
+            "FNO_STATE_DIR": str(graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(graph.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
     """--reason is accepted and documented, so it must land somewhere."""
     import json
-    from typer.testing import CliRunner
-    from fno.graph.cli import cli
 
     # The graph path is frozen at import time (see conftest), so point at the
     # already-sandboxed location rather than a fresh env var.
@@ -1375,26 +1402,25 @@ def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
         {"id": "x-9f0c", "title": "old"},
     ]}))
 
-    result = CliRunner().invoke(cli, [
-        "supersede", "x-1a2b", "--replaces", "x-9f0c",
+    code, out = _native_supersede(graph,
+        "x-1a2b", "--replaces", "x-9f0c",
         "--cause", "owned the parser", "--surface", "cli/p.py",
         "--reason", "folded into the rewrite",
-    ])
-    assert result.exit_code == 0, result.output
+    )
+    assert code == 0, out
     rows = {e["id"]: e for e in read_graph_strict(graph)}
     assert rows["x-9f0c"]["supersession"]["reason"] == "folded into the rewrite"
 
 
 def test_supersede_without_surface_names_a_runnable_example():
-    from typer.testing import CliRunner
-    from fno.graph.cli import cli
+    from fno.graph._constants import GRAPH_JSON as graph
 
-    result = CliRunner().invoke(cli, [
-        "supersede", "x-1a2b", "--replaces", "x-9f0c", "--cause", "c",
-    ])
-    assert result.exit_code == 1
-    assert "--surface" in result.output
-    assert "fno backlog supersede" in result.output
+    code, out = _native_supersede(graph,
+        "x-1a2b", "--replaces", "x-9f0c", "--cause", "c",
+    )
+    assert code == 1
+    assert "--surface" in out
+    assert "fno backlog supersede" in out
 
 
 def test_a_closed_successor_still_owes_its_predecessor_a_verdict():

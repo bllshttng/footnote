@@ -135,7 +135,6 @@ def _invoke_init(args: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
                 "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
                 "FNO_BG", "FNO_AGENT_SELF"):
         monkeypatch.delenv(var, raising=False)
-    from fno.config import load_settings
     from fno.cli import app
 
     return CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature", *args])
@@ -161,7 +160,14 @@ def test_deliverables_flag_reaches_the_manifest_writer_env(
     class _Proc:
         returncode = 0
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     def _fake_run(cmd, **kwargs):
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
         if "env" in kwargs:
             captured["env"] = kwargs["env"]
         return _Proc()
@@ -176,7 +182,6 @@ def test_deliverables_flag_reaches_the_manifest_writer_env(
     monkeypatch.setattr("fno.target_cli._maybe_dispatch_work_start", lambda *a, **k: None)
     monkeypatch.setattr("fno.target_cli._maybe_reconcile_lane_slot", lambda *a, **k: None)
     monkeypatch.setattr("fno.target_cli._maybe_check_resume_receipt", lambda *a, **k: None)
-    from fno.config import load_settings
     from fno.cli import app
 
     r = CliRunner().invoke(
@@ -197,7 +202,14 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
     class _Proc:
         returncode = 0
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     def _fake_run(cmd, **kwargs):
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
         if "env" in kwargs:
             captured["env"] = kwargs["env"]
         return _Proc()
@@ -211,7 +223,6 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
     monkeypatch.setattr("fno.target_cli._maybe_dispatch_work_start", lambda *a, **k: None)
     monkeypatch.setattr("fno.target_cli._maybe_reconcile_lane_slot", lambda *a, **k: None)
     monkeypatch.setattr("fno.target_cli._maybe_check_resume_receipt", lambda *a, **k: None)
-    from fno.config import load_settings
     from fno.cli import app
 
     r = CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature"])
@@ -240,7 +251,14 @@ def _invoke_init_node(
     runs, and the writer env is captured when `captured` is given."""
     monkeypatch.setattr("fno.target_cli._resolve_dispatch_node", lambda *a, **k: node)
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # captured before the stub replaces it
+
     def _fake_run(cmd, *a, **kwargs):
+        if any(str(part).endswith("fno-agents") for part in cmd[:1]):
+            # The hold verdict's receipt call is real infrastructure.
+            return real_run(cmd, capture_output=True, text=True, check=False)
         if captured is not None and "env" in kwargs:
             captured["env"] = kwargs["env"]
         return type("_P", (), {"returncode": 0})()
@@ -256,7 +274,6 @@ def _invoke_init_node(
                 "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
                 "FNO_BG", "FNO_AGENT_SELF"):
         monkeypatch.delenv(var, raising=False)
-    from fno.config import load_settings
     from fno.cli import app
 
     args = ["do", "target", "init", "--input", "x-test"]
@@ -334,7 +351,6 @@ def test_init_never_refuses_a_node_with_a_bound_plan(
                 "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
                 "FNO_BG", "FNO_AGENT_SELF"):
         monkeypatch.delenv(var, raising=False)
-    from fno.config import load_settings
     from fno.cli import app
 
     plan = tmp_path / "plan.md"

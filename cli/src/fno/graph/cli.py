@@ -133,7 +133,7 @@ cli.add_typer(_retro_app, name="retro", hidden=True)
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
 # under the original module-global name that existing tests monkeypatch.
-from fno.graph.statuses import derived_status, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
+from fno.graph.statuses import derived_status, live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
 
 
 def _require_live_claimed_node_ids(operation: str) -> set[str]:
@@ -388,9 +388,8 @@ _RECEIPT_TYPES = {
 def _live_worker(node_id: str) -> Optional[str]:
     """The holder of a live/suspect ``node:<id>`` claim, else None.
 
-    A suspect claim (TTL-unexpired, pid dead) still belongs to its session, so
-    it counts as a worker here (). Routes through the global claims root
-    that node ids key on, so it reads the same lockfile the dispatcher wrote.
+    Retained for the decompose surface's adopt guard; the contain verb's
+    probe moved to the native leg, which reads the same lockfiles.
     """
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
@@ -2233,18 +2232,20 @@ def cmd_unclaim(
         ..., help="Node id to free (reverts claimed -> ready, releases the lockfile)"
     ),
 ) -> None:
-    """Free a claimed node in one call (graph claim + safe lockfile release)."""
     from fno.backlog.requeue import _unclaim_node
 
     _unclaim_node(task_id)
 
 
-@cli.command("requeue", hidden=True, epilog="Paired verbs: fno agents claim acquire node:<node> takes the lockfile; fno backlog update <node> --locked-by <worker> stamps the graph field.")
+@cli.command("requeue", hidden=True)
 def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Return a node wedged in_progress by a dead worker to the queue."""
+    """Return a node wedged in_progress by a dead worker to the queue.
+
+    The re-lock door retired with the graph claim mirror; re-acquisition is a claim store acquire, not a backlog verb.
+    """
     from fno.backlog.requeue import cmd_requeue as _impl
 
     _impl(node, json_out=json_out)
@@ -2383,7 +2384,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import commit_rows_via_store, read_graph_strict
+    from fno.graph.store import read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -2416,7 +2417,7 @@ def cmd_next(
             pre_entries = _joined_open_candidates()
         else:
             pre_entries = None
-            if (not project_filter and not all_) or parent:
+            if (not project_filter and not all_) or parent or claim:
                 pre_entries = _read_entries()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
@@ -2424,7 +2425,6 @@ def cmd_next(
     if not project_filter and not all_:
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
-
     # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4424
     parent_target_id: Optional[str] = None
     if parent:
@@ -2438,15 +2438,6 @@ def cmd_next(
             typer.echo(f"no children under {parent_target_id}", err=True)
 
     def _select(entries, occupancy):
-        """One call into the native leg: survivors, in selection order.
-
-        The admission set, the narrowing cascade, and the ranking are the
-        keeper verb's (backlog_ready::select); `next` takes rows[0] of the
-        same answer its sibling verb serves, so the two surfaces cannot
-        drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock; `occupancy` rides IN so the
-        keeper never re-reads claims this command already has.
-        """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
             ClaimsUnavailableError,
@@ -2576,24 +2567,17 @@ def cmd_next(
         return merged
 
     if claim:
-        if _external:
-            # External claims use the claims subsystem only: no graph
-            # mutation, and no claim pointer written into tracker or sidecar
-            # (the live holder lives in the claims dir). Contention falls
-            # through to the next ranked candidate rather than failing the
-            # whole selection.
+        if pre_entries is not None:
             from fno.claims.cli import _parse_ttl
             from fno.claims.core import ClaimHeldByOther, acquire_claim
             from fno.claims.io import claims_root_for
 
-            assert pre_entries is not None
             occupied, observer = _prepare(pre_entries)
             candidates = _with_observer(
                 _select(pre_entries, occupied), pre_entries, occupied, observer
             )
             for winner in candidates:
                 key = f"node:{winner['id']}"
-    # Rationale (14 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4593
                 try:
                     acquire_claim(
                         key,
@@ -2605,33 +2589,6 @@ def cmd_next(
                     continue
                 result[0] = _dispatch_node_summary(winner)
                 break
-        else:
-
-            def mutator(entries):
-                occupied, observer = _prepare(entries)
-                candidates = _with_observer(
-                    _select(entries, occupied), entries, occupied, observer
-                )
-                if candidates:
-                    winner = candidates[0]
-                    # Rows are serialized summaries, not graph references:
-                    # the lock must land on the graph entry itself or the
-                    # commit publishes nothing (the pre-port leg returned
-                    # graph references from _pick_ready, so this was
-                    # implicit).
-                    target = next(
-                        (e for e in entries if e.get("id") == winner["id"]), None
-                    )
-                    if target is None:
-                        raise RuntimeError(
-                            f"selected node vanished under the lock: {winner['id']}"
-                        )
-                    target["locked_by"] = claim
-                    target["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _dispatch_node_summary(target)
-                return entries
-
-            commit_rows_via_store(_graph_path(), mutator)
     else:
         if _external:
             assert pre_entries is not None
@@ -4061,17 +4018,6 @@ def cmd_task_update(
 
     if status == "in_progress":
         pid = resolve_session_pid()
-        if pid is None:
-            # An unprovable pid would anchor the claim to this short-lived CLI
-            # process: it dies on exit, the claim reads stale, and a peer
-            # steals the task mid-flight - the exact double-dispatch the
-            # transition exists to prevent. Refuse instead of degrading.
-            typer.echo(
-                "cannot prove a session pid for the claim; "
-                "set FNO_SESSION_PID or run inside a harness session",
-                err=True,
-            )
-            raise typer.Exit(code=4)
         harness = resolve_session_harness()
         # acquire_task succeeds idempotently for a caller that ALREADY holds
         # the key, so releasing on a later refusal would drop a claim this
@@ -4080,14 +4026,7 @@ def cmd_task_update(
 
         try:
             _before = _claim_status(key)
-            # `holder` is reported for a STALE claim too, so name-only would
-            # read a resumed session's dead claim as one this call holds. The
-            # acquire then mints a genuinely new live claim that no refusal
-            # path releases. Task claims carry ttl_ms=None, so live/stale is
-            # the whole vocabulary here.
-            held_before = (
-                _before.get("holder") == holder and _before.get("state") == "live"
-            )
+            held_before = _before.get("holder") == holder and _before.get("state") in ("live", "suspect")
         except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
             held_before = False
 
@@ -4688,38 +4627,15 @@ def cmd_queued(
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
 ) -> None:
     """List nodes the user has queued for action. JSON output, sorted by priority."""
-    from fno.graph._intake import filter_by_project, _graph_sort_key_fn
-    from fno.tracker import active_backend_name
-
-    # Queue state is footnote-minted (the queue verb is tracker-owned), so no
-    # external item can be queued: answer the empty list rather than consult
-    # local rows behind an external selection.
-    if active_backend_name() != "graph":
-        typer.echo("[]")
-        return
-
-    entries = wire_rows(path=_graph_path())
-    queued = [
-        e
-        for e in entries
-        if e.get("queued_at") and not e.get("completed_at") and not e.get("deferred_at")
-    ]
-    queued = filter_by_project(queued, project, all_)
-    queued.sort(key=_graph_sort_key_fn)
-
-    output = [
-        {
-            "id": e["id"],
-            "title": e.get("title"),
-            "priority": e.get("priority"),
-            "project": e.get("project"),
-            "queued_at": e.get("queued_at"),
-            "queued_reason": e.get("queued_reason"),
-            "status": e.get("status"),
-        }
-        for e in queued
-    ]
-    typer.echo(json.dumps(output, indent=2))
+    # The queue read is native: the door (fno backlog queued) serves the
+    # read, the project filter, and the sort. A direct wheel spelling has no
+    # leg left to run, so it names the door instead of carrying a second
+    # implementation.
+    typer.echo(
+        "Error: the queue read is served by the native door; run `fno backlog queued`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 @cli.command(
@@ -4744,26 +4660,16 @@ def cmd_queue(
     Atomic across the batch: if any ID is unknown, none of the nodes
     are queued. Same reason applies to every ID in the batch.
     """
-    from fno.graph.store import commit_rows_via_store
-    from fno.graph._intake import _find_node
-
-    ids = _expand_valid_ids(task_ids)
-
-    cleaned_reason = (reason or "").strip() or None
-
-    def mutator(entries):
-        _require_nodes(entries, ids)
-        now = datetime.now(timezone.utc).isoformat()
-        for tid in ids:
-            node = _find_node(entries, tid)
-            node["queued_at"] = now
-            node["queued_reason"] = cleaned_reason
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-    suffix = f': "{cleaned_reason}"' if cleaned_reason else ""
-    for tid in ids:
-        typer.echo(f"Queued {tid}{suffix}")
+    # The queue write is native: the door (fno backlog queue) owns the
+    # batch stamp and its atomicity. A direct wheel spelling has no leg left
+    # to run, so it names the door instead of carrying a second
+    # implementation.
+    typer.echo(
+        "Error: the queue write is served by the native door; "
+        "run `fno backlog queue <ids>`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 @cli.command("unqueue", hidden=True)
@@ -4779,28 +4685,16 @@ def cmd_unqueue(
     Reports each ID's prior state; warns (non-fatally) for IDs that
     were not actually queued.
     """
-    from fno.graph.store import commit_rows_via_store
-    from fno.graph._intake import _find_node
-
-    ids = _expand_valid_ids(task_ids)
-
-    not_queued: list[str] = []
-
-    def mutator(entries):
-        _require_nodes(entries, ids)
-        for tid in ids:
-            node = _find_node(entries, tid)
-            if not node.get("queued_at"):
-                not_queued.append(tid)
-            node["queued_at"] = None
-            node["queued_reason"] = None
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-    for tid in not_queued:
-        typer.echo(f"warning: {tid} was not queued", err=True)
-    for tid in ids:
-        typer.echo(f"Unqueued {tid}")
+    # The unqueue write is native: the door (fno backlog unqueue) owns the
+    # batch clear and its atomicity. A direct wheel spelling has no leg left
+    # to run, so it names the door instead of carrying a second
+    # implementation.
+    typer.echo(
+        "Error: the unqueue write is served by the native door; "
+        "run `fno backlog unqueue <ids>`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 def _tsv_safe(s: str | None) -> str:
@@ -5174,96 +5068,16 @@ def cmd_contain(
     first, undefer second, so the node is never armed in between). Containment
     is released by the owner's merge cascade or by moving the node away.
     """
-    import json as _json
-
-    from fno.graph.store import commit_rows_via_store
-    from fno.graph._intake import _find_node
-    from fno.graph._contain import contain_into, refuse_dead_owner
-    from fno.graph._decompose import DecomposeError
-    from fno.handoff.output import json_mode
-
-    ids = _expand_id_args(task_ids)
-    if not ids:
-        typer.echo("Error: at least one task_id is required", err=True)
-        raise typer.Exit(code=1)
-
-    contained: list[str] = []
-    warnings: list[str] = []
-    owner_id = ""
-
-    def mutator(entries):
-        nonlocal contained, warnings, owner_id
-        owner_node = _find_node(entries, owner)
-        if owner_node is None:
-            typer.echo(f"Error: owner not found: {owner}", err=True)
-            raise typer.Exit(code=3)
-        owner_id = owner_node["id"]
-        if owner_node.get("completed_at"):
-            typer.echo(
-                f"Error: owner {owner_id} is done; its PR already merged, so "
-                "nothing will ever close a node folded into it now",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        refuse_dead_owner(owner_node, context=owner)
-        seen: dict[str, str] = {}
-        for tid in ids:
-            target = _find_node(entries, tid)
-            if target is None:
-                typer.echo(f"Error: feature(s) not found: {tid}", err=True)
-                raise typer.Exit(code=3)
-            prior = seen.get(target["id"])
-            if prior is not None:
-                typer.echo(
-                    f"Error: node {target['id']} is named twice ({prior} and "
-                    f"{tid}); two spellings of one id resolve to the same node",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-            seen[target["id"]] = tid
-        if owner_id in seen:
-            typer.echo(
-                f"Error: contain names the owner {owner_id} itself",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        for tid in ids:
-            target = _find_node(entries, tid)
-            outcome = contain_into(
-                entries,
-                owner_node,
-                target,
-                live_worker=_live_worker,
-                context=owner_id,
-            )
-            if outcome.warning:
-                warnings.append(
-                    f"warning: contained {target['id']} into {owner_id} but did "
-                    f"NOT mark it contained: it {outcome.warning}, so it is "
-                    "its own delivery unit and is not closed by the owner's merge"
-                )
-            if outcome.adopted or target.get("parent") == owner_id:
-                if target["id"] not in contained:
-                    contained.append(target["id"])
-        return entries
-
-    try:
-        commit_rows_via_store(_graph_path(), mutator)
-    except DecomposeError as e:
-        from fno.handoff.output import emit_error
-
-        emit_error(ctx, str(e))
-        raise typer.Exit(code=e.exit_code)
-
-    for line in warnings:
-        typer.echo(line, err=True)
-    if json_mode(ctx):
-        typer.echo(
-            _json.dumps({"owner": owner_id, "contained": contained, "warnings": warnings})
-        )
-        return
-    for tid in contained:
-        typer.echo(f"contained {tid} into {owner_id}; it ships inside {owner_id}'s PR")
+    # The containment write is native: the door (fno backlog contain) owns the
+    # guard ladder, the stamps, and the receipts. A direct wheel spelling has
+    # no leg left to run, so it names the door instead of carrying a second
+    # implementation.
+    typer.echo(
+        "Error: the containment write is served by the native door; "
+        "run `fno backlog contain <owner> <ids>`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 # -- backfill-deferred-kind --
@@ -5476,8 +5290,6 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
     so the field keeps meaning "GitHub confirmed this". A ``--force`` close and
     a PR-less epic cascade leave it unset rather than assert a merge.
     """
-    node["locked_by"] = None
-    node["locked_at"] = None
     # Done dominates deferred per the cascade. Clear any deferred/queued state
     # so the row presents as cleanly done with no ghost fields.
     node["deferred_at"] = None
@@ -5564,9 +5376,7 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 # In graph/strand.py: the terminal-parent strand family (moved with the
 # close guards, release twins, and self-heal that share its liveness predicate).
 from fno.graph.strand import (  # noqa: E402
-    _live_child_ids,
     _release_contained_children,
-    _release_parented_children,
     _reparent_live_children,
     _reparent_receipt,
     _strandable_orphan_ids,
@@ -8552,11 +8362,6 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # Promote idea -> ready by clearing a stale idea lock; a node with a
-        # live work lock (locked_by set) keeps it.
-        # status is recomputed by recompute_statuses on the next read.
-        if entry.get("locked_by") is None:
-            entry["locked_at"] = None
         break
     return es
 
@@ -8996,171 +8801,16 @@ def cmd_supersede(
     children's ``parent`` is cleared so they stay dispatchable instead of
     stranding under a dead unit. Reverse with ``unsupersede``.
     """
-    from fno.graph._constants import has_node_id_prefix
-    from fno.graph.store import commit_rows_via_store
-    from fno.graph._intake import _find_node
-
-    if not has_node_id_prefix(new_id):
-        typer.echo(f"Error: new_id must be a <prefix>-<4..8 hex> node id, got '{new_id}'", err=True)
-        raise typer.Exit(code=1)
-    if not has_node_id_prefix(replaces):
-        typer.echo(
-            f"Error: --replaces must be a <prefix>-<4..8 hex> node id, got '{replaces}'", err=True
-        )
-        raise typer.Exit(code=1)
-    if new_id == replaces:
-        typer.echo("Error: cannot supersede self", err=True)
-        raise typer.Exit(code=1)
-
-    cleaned_cause = (cause or "").strip()
-    if not cleaned_cause:
-        typer.echo(
-            "Error: --cause is required and cannot be blank.\n"
-            "A supersede carries the evidence trail: what the old\n"
-            "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node's status reads superseded from the edge\n"
-            "alone; a merged PR covering every declared surface later stamps the\n"
-            "evidence verified_at.\n"
-            f"  {_SUPERSEDE_EXAMPLE}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    if not surface:
-        typer.echo(
-            "Error: at least one --surface is required.\n"
-            "Name the repo-relative paths the old node owned; a merged PR\n"
-            "touching all of them is what verifies this supersede.\n"
-            f"  {_SUPERSEDE_EXAMPLE}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    normalized_surfaces: list[str] = []
-    for raw_surface in surface:
-        candidate = str(raw_surface).strip().replace("\\", "/")
-        parts = candidate.split("/")
-        if (
-            not candidate
-            or candidate.startswith("/")
-            or any(part in ("", ".", "..") for part in parts)
-        ):
-            typer.echo(
-                f"Error: --surface must be a non-empty repo-relative path: {raw_surface!r}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        if candidate not in normalized_surfaces:
-            normalized_surfaces.append(candidate)
-    _freed_box: list[list] = [[]]
-    _parent_freed_box: list[list] = [[]]
-    _proj_kids_box: list[list] = [[]]
-
-    def mutator(entries):
-        new_node = _find_node(entries, new_id)
-        old_node = _find_node(entries, replaces)
-        if new_node is None:
-            typer.echo(f"Error: new node {new_id} not found", err=True)
-            raise typer.Exit(code=1)
-        if old_node is None:
-            typer.echo(f"Error: old node {replaces} not found", err=True)
-            raise typer.Exit(code=1)
-
-        # Refuse to supersede a shipped or already-superseded node. Without
-        # this guard, the mutation would silently clear the old node's
-        # completed_at to let the precedence cascade flip to superseded -
-        # erasing the ship timestamp on a shipped plan and destroying
-        # forensic history. Use a follow-up node instead.
-        if node_is_done(old_node):
-            typer.echo(
-                f"Error: cannot supersede {replaces}: it is already shipped "
-                f"(status=done). Open a follow-up node instead.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        if old_node.get("superseded_by"):
-            typer.echo(
-                f"Error: cannot supersede {replaces}: it is already superseded "
-                f"by {old_node['superseded_by']}. Resolve the existing supersede chain first.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-
-    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-supersede-12402
-        live_kids = _live_child_ids(entries, old_node.get("id"))
-        if live_kids and not force:
-            typer.echo(
-                f"Error: cannot supersede {replaces}: it still has "
-                f"{len(live_kids)} live child(ren): {', '.join(live_kids)}. "
-                f"Superseding would strand them under a dead unit. Re-run with "
-                f"--force to supersede anyway (their parent is cleared so they "
-                f"stay dispatchable).",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-
-        # Store the canonical id, not the raw (possibly abbreviated) --replaces:
-        # unsupersede removes the backref by canonical id, so a stored
-        # abbreviation would survive the reverse as a stale forward edge.
-        canonical_old = old_node["id"]
-        supersedes = list(new_node.get("supersedes") or [])
-        if canonical_old not in supersedes:
-            supersedes.append(canonical_old)
-        new_node["supersedes"] = supersedes
-        # Canonical replacement id, not the raw (possibly abbreviated) new_id:
-        # an abbreviation stored here can later turn ambiguous and make the
-        # replacer unresolvable on unsupersede, leaving a stale edge.
-        canonical_new = new_node["id"]
-        old_node["superseded_by"] = canonical_new
-        old_node["locked_by"] = None
-        old_node["locked_at"] = None
-        old_node["supersession"] = {
-            "successor": canonical_new,
-            "cause": cleaned_cause,
-            # Kept, not dropped. --reason is accepted and documented as the
-            # human rationale, so discarding it silently lost the one field the
-            # operator wrote by hand.
-            "reason": (reason or "").strip() or None,
-            "surfaces": normalized_surfaces,
-            "verified_at": None,
-            "evidence_pr": None,
-            "matched_surfaces": [],
-        }
-    # Rationale (11 lines): docs/architecture/graph-cli-rationale.md#cmd-supersede-12450
-        _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
-        # Release the membership axis too. contained_in covers nodes shipping
-        # inside this unit's PR; epic children carry `parent`, a different field.
-        # Without this they stay parented to a unit that will never ship, and any
-        # one later revived strands under the dead-ancestor selection guard - the
-        # same unbuildable, uncloseable, invisible shape the contained release
-        # exists to end. Non-done children only: done keeps the link as history.
-        parent_freed = _release_parented_children(entries, old_node.get("id"))
-        _parent_freed_box[0] = parent_freed
-        # Projection targets: freed children that have their OWN plan doc. A
-        # child sharing the owner's plan_path (an adopted delivery child) is
-        # excluded: the owner is already a target, and re-projecting the one
-        # shared doc per child would let the last child's mirrored metadata
-        # overwrite the owner's.
-        owner_plan = old_node.get("plan_path")
-        by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
-        _proj_kids_box[0] = [
-            k for k in parent_freed if (by_id.get(k, {}).get("plan_path") != owner_plan)
-        ]
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-    typer.echo(f"superseded {replaces} with {new_id}")
-    _echo_freed(_freed_box[0], replaces)
-    if _parent_freed_box[0]:
-        typer.echo(
-            f"Cleared parent on {len(_parent_freed_box[0])} child(ren) of {replaces} "
-            f"(revive-safe; a later undefer/unsupersede cannot strand them): "
-            f"{', '.join(_parent_freed_box[0])}"
-        )
-    # Repaint the orphaned children's OWN plan docs (the converger expands
-    # ancestors, not descendants, so naming only old + replacement would leave a
-    # member child's parent/parent_slug/wave stale). _proj_kids already excluded
-    # any child sharing the owner's plan_path, so this cannot rewrite the
-    # owner's doc per child.
-    _project_plans_from_graph([replaces, new_id] + _proj_kids_box[0])
+    # The supersede write is native: the door (fno backlog supersede) owns the
+    # guard ladder, the edge + record, both child releases, and the plan
+    # projection. A direct wheel spelling has no leg left to run, so it names
+    # the door instead of carrying a second implementation.
+    typer.echo(
+        "Error: the supersede write is served by the native door; "
+        "run `fno backlog supersede <new> --replaces <old> ...`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 # ---------------------------------------------------------------------------

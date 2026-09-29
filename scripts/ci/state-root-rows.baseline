@@ -94,8 +94,6 @@ logs
 mail-escalations
 mail-hold
 mux
-mux-view.json
-mux-view.json.lock
 my-priorities.md
 my-priorities.md.lock
 notes
@@ -133,15 +131,11 @@ retro-pending
 review-invocations
 route-settings
 ruleset-21074865-before-smoke-hold.json
-session-names.json
-session-names.json.lock
 sessions
 settings.yaml
 settings.yaml.lock
 sidecar
 spaces
-squads.json
-squads.json.lock
 squads.json.tmp.*
 stable-bin
 state

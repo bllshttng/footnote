@@ -133,7 +133,6 @@ def test_metadata_class_guards_external(external_store, contradictory_graph):
 
     from fno.agents.crown import _graph_entry
     from fno.relay.router import _default_node_resolver
-    from fno.worktree import _slug_for_node
 
     def _active_missions():
         # The fail-safe shape every mission reader keeps: a guarded read that
@@ -151,7 +150,6 @@ def test_metadata_class_guards_external(external_store, contradictory_graph):
     assert _active_missions() == []
     assert _graph_entry("n-000001") is None
     assert _default_node_resolver("n-000001") is None
-    assert _slug_for_node("n-000001") == ""
 
 
 def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
@@ -162,7 +160,6 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
 
     from fno.agents.crown import _graph_entry
     from fno.relay.router import _default_node_resolver
-    from fno.worktree import _slug_for_node
 
     rows = metadata.read_entries("active_backlog")
     assert [
@@ -172,9 +169,11 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
     ] == ["n-000001"]
     assert _graph_entry("n-000002")["type"] == "feature"
     assert _graph_entry("n-000001")["project"] == "graph-proj"
-    assert _slug_for_node("n-000001") == "graph-slug-1"
-    assert _default_node_resolver("n-000001") == "sess-graph"
-    assert _default_node_resolver("graph-slug-1") == "sess-graph"
+    # The store projects the claim store over every read: an open row with
+    # no claim serves session_id None, so the graph file's pin cannot
+    # resurrect a holder. Routing resolves the live holder or nothing.
+    assert _default_node_resolver("n-000001") is None
+    assert _default_node_resolver("graph-slug-1") is None
 
 
 def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):

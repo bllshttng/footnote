@@ -738,6 +738,7 @@ pub(crate) struct HoldVerdict {
 }
 
 /// One plan's hold state (`ladder.dispatch_hold`).
+#[derive(Debug, Clone)]
 pub(crate) enum HoldState {
     /// No declaration: no plan, no anchor, no file under an absent root, or
     /// no `dispatch_hold` key in readable frontmatter.
@@ -750,61 +751,171 @@ pub(crate) enum HoldState {
     Invalid,
 }
 
-/// Read one plan's hold declaration (`ladder.dispatch_hold`).
+/// Read one node's hold (`ladder.dispatch_hold`): the plan declaration first,
+/// then the node row's own `dispatch_hold` field (a hold works without a
+/// plan file).
 pub(crate) fn dispatch_hold(entry: &Value) -> HoldState {
-    let Some(probe) = resolve_plan_probe(entry) else {
-        return HoldState::Absent;
-    };
-    if !probe.exists() {
-        // A missing file under an EXISTING root is INVALID (stale path, typo,
-        // mid-fetch checkout); only a root that is itself absent stays ABSENT.
-        if probe.parent().map(|d| d.is_dir()).unwrap_or(false) {
-            return HoldState::Invalid;
-        }
-        return HoldState::Absent;
+    let plan = dispatch_hold_plan(entry);
+    if !matches!(plan, HoldState::Absent) {
+        return plan;
     }
-    let Some(fm) = read_frontmatter(&probe) else {
-        return HoldState::Invalid;
-    };
-    let Some(block) = fm.get("dispatch_hold") else {
-        return HoldState::Absent;
-    };
+    node_field_hold(entry)
+}
+
+/// Read one plan's hold declaration (`ladder.dispatch_hold`).
+fn dispatch_hold_plan(entry: &Value) -> HoldState {
+    plan_hold_read(entry).state
+}
+
+/// Read the node row's own `dispatch_hold` field (the plan-less hold home).
+/// Absent or null is ABSENT; a present non-object fails closed.
+pub(crate) fn node_field_hold(entry: &Value) -> HoldState {
+    node_field_read(entry).state
+}
+
+/// One hold read: the state plus the fields a receipt renders, and the
+/// INVALID reason or the passed-review note.
+#[derive(Debug, Clone)]
+pub(crate) struct HoldRead {
+    pub state: HoldState,
+    pub reason: String,
+    pub release_when: String,
+    pub review_on: String,
+    pub set_by: String,
+    pub detail: String,
+}
+
+impl HoldRead {
+    fn absent() -> HoldRead {
+        HoldRead {
+            state: HoldState::Absent,
+            reason: String::new(),
+            release_when: String::new(),
+            review_on: String::new(),
+            set_by: String::new(),
+            detail: String::new(),
+        }
+    }
+
+    fn invalid(detail: impl Into<String>) -> HoldRead {
+        HoldRead {
+            state: HoldState::Invalid,
+            reason: String::new(),
+            release_when: String::new(),
+            review_on: String::new(),
+            set_by: String::new(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Read one block: four required non-blank strings and a parsable
+/// `review_on` date; a past review date keeps the hold active with a note.
+pub(crate) fn hold_block_read(block: &Value) -> HoldRead {
     let Some(obj) = block.as_object() else {
         // A non-mapping dispatch_hold is invalid, not absent.
-        return HoldState::Invalid;
+        return HoldRead::invalid("dispatch_hold is invalid: not a mapping");
     };
-    // DispatchHoldBlock shape: four required fields; missing, blank, or
-    // unparseable is INVALID (refuse, never raise).
     let str_field = |k: &str| -> Option<String> {
         match obj.get(k) {
             Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
             _ => None,
         }
     };
-    if str_field("reason").is_none()
-        || str_field("release_when").is_none()
-        || str_field("set_by").is_none()
-    {
-        return HoldState::Invalid;
+    let (Some(reason), Some(release_when), Some(set_by)) = (
+        str_field("reason"),
+        str_field("release_when"),
+        str_field("set_by"),
+    ) else {
+        return HoldRead::invalid("dispatch_hold is invalid: a required field is missing or blank");
+    };
+    let Some(Value::String(raw)) = obj.get("review_on") else {
+        return HoldRead::invalid("dispatch_hold is invalid: review_on is missing");
+    };
+    let review_on = raw.trim().to_string();
+    let Ok(review_date) = chrono::NaiveDate::parse_from_str(&review_on, "%Y-%m-%d") else {
+        return HoldRead::invalid("dispatch_hold is invalid: review_on is not a date");
+    };
+    let mut detail = String::new();
+    if review_date < chrono::Utc::now().date_naive() {
+        detail = format!("review date {review_on} has passed; hold remains active");
     }
-    match obj.get("review_on") {
-        Some(Value::String(s)) => {
-            if chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").is_err() {
-                return HoldState::Invalid;
-            }
+    HoldRead {
+        state: HoldState::Held,
+        reason,
+        release_when,
+        review_on,
+        set_by,
+        detail,
+    }
+}
+
+/// One plan's hold read with its fields, failing closed with the reason a
+/// receipt renders.
+fn plan_hold_read(entry: &Value) -> HoldRead {
+    let Some(probe) = resolve_plan_probe(entry) else {
+        return HoldRead::absent();
+    };
+    if !probe.exists() {
+        // A missing file under an EXISTING root is INVALID (stale path, typo,
+        // mid-fetch checkout); only a root that is itself absent stays ABSENT.
+        if probe.parent().map(|d| d.is_dir()).unwrap_or(false) {
+            return HoldRead::invalid(format!(
+                "plan file is missing under its existing plan root: {}",
+                probe.display()
+            ));
         }
-        _ => return HoldState::Invalid,
+        return HoldRead::absent();
     }
-    HoldState::Held
+    let Some(fm) = read_frontmatter(&probe) else {
+        return HoldRead::invalid(format!(
+            "plan frontmatter is unreadable: {}",
+            probe.display()
+        ));
+    };
+    match fm.get("dispatch_hold") {
+        None => HoldRead::absent(),
+        Some(block) => hold_block_read(block),
+    }
+}
+
+fn node_field_read(entry: &Value) -> HoldRead {
+    match entry.get("dispatch_hold") {
+        None | Some(Value::Null) => HoldRead::absent(),
+        Some(block) => hold_block_read(block),
+    }
+}
+
+/// One node's hold read with its fields: the plan declaration first, then
+/// the node row's own `dispatch_hold` field.
+pub(crate) fn hold_read(entry: &Value) -> HoldRead {
+    let plan = plan_hold_read(entry);
+    if !matches!(plan.state, HoldState::Absent) {
+        return plan;
+    }
+    node_field_read(entry)
+}
+
+/// A verdict with the fields a receipt renders (`merge_hold_reason`).
+#[derive(Debug, Clone)]
+pub(crate) struct HoldVerdictReceipt {
+    pub owner: String,
+    pub held: bool,
+    pub guard_reason: String,
+    pub reason: String,
+    pub release_when: String,
+    pub review_on: String,
+    pub set_by: String,
+    pub detail: String,
 }
 
 /// Find a hold on a node, its parents, or its contained delivery owner
 /// (`ladder.dispatch_hold_verdict`): bounded BFS, enqueue-time dedup, first
 /// non-ABSENT verdict wins.
-pub(crate) fn dispatch_hold_verdict(
+pub(crate) fn hold_verdict_receipt(
     entry: &Value,
     by_id: &BTreeMap<String, Value>,
-) -> Option<HoldVerdict> {
+) -> Option<HoldVerdictReceipt> {
     if !is_dict(entry) {
         return None;
     }
@@ -820,17 +931,23 @@ pub(crate) fn dispatch_hold_verdict(
             continue;
         }
         seen.insert(node_id.clone());
-        let state = dispatch_hold(&current);
-        if !matches!(state, HoldState::Absent) {
-            let held = matches!(state, HoldState::Held);
+        let read = hold_read(&current);
+        if !matches!(read.state, HoldState::Absent) {
+            let held = matches!(read.state, HoldState::Held);
             let prefix = if held {
                 "dispatch-hold"
             } else {
                 "dispatch-hold-invalid"
             };
-            return Some(HoldVerdict {
+            return Some(HoldVerdictReceipt {
                 guard_reason: format!("{prefix}:{node_id}"),
+                owner: node_id,
                 held,
+                reason: read.reason,
+                release_when: read.release_when,
+                review_on: read.review_on,
+                set_by: read.set_by,
+                detail: read.detail,
             });
         }
         for relation in ["contained_in", "parent"] {
@@ -845,6 +962,17 @@ pub(crate) fn dispatch_hold_verdict(
         }
     }
     None
+}
+
+/// The native selection guard's verdict: the same walk, the prefix only.
+pub(crate) fn dispatch_hold_verdict(
+    entry: &Value,
+    by_id: &BTreeMap<String, Value>,
+) -> Option<HoldVerdict> {
+    hold_verdict_receipt(entry, by_id).map(|v| HoldVerdict {
+        guard_reason: v.guard_reason,
+        held: v.held,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1904,6 +2032,153 @@ fn dependents_fanout(entries: &[Value]) -> BTreeMap<String, i64> {
 
 #[cfg(test)]
 mod tests {
+    // --- the hold reader (the contracts the Python ladder tests carried) ---
+
+    fn hold_dir(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new_in(std::env::temp_dir()).unwrap();
+        let root = dir.path().join(tag);
+        std::fs::create_dir_all(&root).unwrap();
+        (dir, root)
+    }
+
+    fn held_plan(dir: &std::path::Path, name: &str, review_on: &str) -> std::path::PathBuf {
+        let plan = dir.join(name);
+        std::fs::write(
+            &plan,
+            format!(
+                "---\nstatus: ready\ndispatch_hold:\n  reason: Blocking finding\n  release_when: Finding fixed\n  review_on: {review_on}\n  set_by: king:119e3c52\n---\n"
+            ),
+        )
+        .unwrap();
+        plan
+    }
+
+    #[test]
+    fn a_held_plan_is_attributable_and_active_on_its_review_date() {
+        let (_d, root) = hold_dir("hold-plan-held");
+        let plan = held_plan(&root, "held.md", "2099-08-20");
+        let read = hold_read(
+            &serde_json::json!({"id": "x-held", "plan_path": plan.display().to_string()}),
+        );
+        assert!(matches!(read.state, HoldState::Held));
+        assert_eq!(read.reason, "Blocking finding");
+        assert_eq!(read.release_when, "Finding fixed");
+        assert_eq!(read.review_on, "2099-08-20");
+        assert_eq!(read.set_by, "king:119e3c52");
+        past_review_note_contract();
+        malformed_blocks_contract();
+        unreadable_plan_contract();
+        missing_vs_absent_root_contract();
+        node_field_contract();
+    }
+
+    fn past_review_note_contract() {
+        let (_d, root) = hold_dir("hold-plan-past");
+        let plan = held_plan(&root, "held.md", "2020-01-01");
+        let read = hold_read(
+            &serde_json::json!({"id": "x-held", "plan_path": plan.display().to_string()}),
+        );
+        assert!(matches!(read.state, HoldState::Held));
+        assert!(read.detail.contains("has passed"), "{}", read.detail);
+        assert!(read.detail.contains("remains active"), "{}", read.detail);
+    }
+
+    fn malformed_blocks_contract() {
+        let shapes = [
+            serde_json::json!("blocked"),
+            serde_json::json!({"reason": "why"}),
+            serde_json::json!({"reason": "why", "release_when": "fixed", "review_on": "soon", "set_by": "king"}),
+            serde_json::json!({"reason": "   ", "release_when": "fixed", "review_on": "2026-08-20", "set_by": "king"}),
+            serde_json::json!({"reason": "why", "release_when": "fixed", "review_on": "2026-08-20", "set_by": "   "}),
+        ];
+        for shape in shapes {
+            assert!(
+                matches!(hold_block_read(&shape).state, HoldState::Invalid),
+                "{shape}"
+            );
+        }
+    }
+
+    fn unreadable_plan_contract() {
+        let (_d, root) = hold_dir("hold-plan-unreadable");
+        let plan = root.join("malformed.md");
+        std::fs::write(&plan, "---\nstatus: ready\ndispatch_hold: [\n").unwrap();
+        let read = hold_read(
+            &serde_json::json!({"id": "x-held", "plan_path": plan.display().to_string()}),
+        );
+        assert!(matches!(read.state, HoldState::Invalid));
+    }
+
+    fn missing_vs_absent_root_contract() {
+        let (_d, root) = hold_dir("hold-plan-missing");
+        let stale = root.join("gone.md"); // root exists, file does not
+        let read = hold_read(
+            &serde_json::json!({"id": "x-stale", "plan_path": stale.display().to_string()}),
+        );
+        assert!(matches!(read.state, HoldState::Invalid));
+        assert!(read.detail.contains("missing under its existing plan root"));
+
+        // An absent ROOT is a no-signal case, and the node field answers next.
+        let unmounted = std::path::Path::new("/nonexistent-root").join("gone.md");
+        let read = hold_read(&serde_json::json!({
+            "id": "x-mid",
+            "plan_path": unmounted.display().to_string(),
+            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "king"},
+        }));
+        assert!(matches!(read.state, HoldState::Held), "{:?}", read);
+    }
+
+    fn node_field_contract() {
+        let read = hold_read(&serde_json::json!({
+            "id": "x-n",
+            "dispatch_hold": {"reason": "rc freeze", "release_when": "lift", "review_on": "2099-01-01", "set_by": "king"},
+        }));
+        assert!(matches!(read.state, HoldState::Held));
+        assert_eq!(read.reason, "rc freeze");
+        let absent = hold_read(&serde_json::json!({"id": "x-n2"}));
+        assert!(matches!(absent.state, HoldState::Absent));
+    }
+
+    #[test]
+    fn the_verdict_walks_parent_and_contained_owner_and_names_the_owner() {
+        let owner = serde_json::json!({
+            "id": "x-owner",
+            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "king"},
+        });
+        let parent = serde_json::json!({"id": "x-parent", "parent": "x-owner"});
+        let child = serde_json::json!({"id": "x-child", "contained_in": "x-parent"});
+        let by_id: BTreeMap<String, Value> = [owner, parent.clone(), child.clone()]
+            .into_iter()
+            .filter_map(|e| get_str(&e, "id").map(|id| (id.to_string(), e.clone())))
+            .collect();
+        let v = hold_verdict_receipt(&child, &by_id).expect("hold reachable");
+        assert_eq!(v.owner, "x-owner");
+        assert_eq!(v.guard_reason, "dispatch-hold:x-owner");
+        assert!(v.held);
+        assert_eq!(v.reason, "r");
+        assert!(dispatch_hold_verdict(&child, &by_id).is_some());
+        fan_in_cap_contract();
+    }
+
+    fn fan_in_cap_contract() {
+        // 200 middle nodes fanning into one shared root: reconverging
+        // duplicates must burn the cap, never skip a held root past dequeue
+        // 64, and no id may be evaluated twice.
+        let mut rows: Vec<Value> = vec![serde_json::json!({"id": "x-root"})];
+        for i in 0..200 {
+            rows.push(serde_json::json!({
+                "id": format!("x-mid{i:03}"),
+                "parent": "x-root",
+                "contained_in": "x-root",
+            }));
+        }
+        let by_id: BTreeMap<String, Value> = rows
+            .iter()
+            .filter_map(|e| get_str(e, "id").map(|id| (id.to_string(), e.clone())))
+            .collect();
+        assert!(hold_verdict_receipt(&rows[100], &by_id).is_none());
+    }
+
     use super::*;
     use serde_json::json;
 
