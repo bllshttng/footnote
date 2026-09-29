@@ -347,6 +347,28 @@ fn hook_and_door_flows_refuse_recover_and_allow() {
     assert!(judge(&payload, &root).is_none());
     std::env::remove_var("FNO_SPACES_DIR");
 
+    // A second session making the same call files its own request: request_id
+    // derives from the request digest, so the rows never clash on UNIQUE.
+    let other = tmp_root("hook-other");
+    std::fs::copy(&db, other.join("approvals.db")).unwrap();
+    let other_payload = json!({
+        "tool_name": "mcp__claude_ai_Gmail__send_message",
+        "tool_input": {"to": "a@example.com", "body": "hi"},
+        "session_id": "sess-2",
+        "cwd": other.display().to_string(),
+        "db": other.join("approvals.db").display().to_string(),
+    });
+    // The env lock taken for the first judge call still guards this scope;
+    // taking it twice on one thread would deadlock.
+    std::env::set_var("FNO_SPACES_DIR", other.join("spaces"));
+    assert!(judge(&other_payload, &other).is_some());
+    std::env::remove_var("FNO_SPACES_DIR");
+    let other_conn = open_db(&other.join("approvals.db")).unwrap();
+    let rows: i64 = other_conn
+        .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2, "the second session files its own row");
+
     // A denied class refuses without filing anything.
     let deny_root = tmp_root("hook-deny");
     let denial = judge(

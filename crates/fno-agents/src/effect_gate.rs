@@ -539,12 +539,12 @@ pub fn verdict(
 /// `config.approvals.authorized_principals` (the `*` wildcard class
 /// included). Unconfigured means unauthorized: policy.py's fail-closed rule.
 pub fn authorized(cwd: &Path, principal: &str, effect_class: &str) -> bool {
-    let Some(table) =
-        crate::agents_config::config_lookup(cwd, &["approvals", "authorized_principals"])
+    // Merged across config tiers, the way Python's ConfigAuthority reads
+    // them: a principal list split between the project and global config is
+    // one policy, not two candidates where only the first counts.
+    let Some(entries) =
+        crate::agents_config::config_table_merged(cwd, &["approvals", "authorized_principals"])
     else {
-        return false;
-    };
-    let Some(entries) = table.as_table() else {
         return false;
     };
     let named = |class: &str| {
@@ -625,7 +625,12 @@ pub fn judge(payload: &Value, cwd: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("tool-{}", &mapped.action_digest[..16]));
-    let request = hook_request(session, &effect_id, &mapped, now);
+    let mut request = hook_request(session, &effect_id, &mapped, now);
+    // request_id is not a bound field, so it may derive from the request
+    // digest: two sessions making the same call file different digests, and
+    // each needs its own request row rather than a UNIQUE clash on a shared
+    // action-derived id.
+    request.request_id = format!("hook-{}", &request.request_digest()[..16]);
     let db_path = match payload.get("db").and_then(Value::as_str) {
         Some(db) => PathBuf::from(db),
         None => default_db_path(cwd).ok()?,
