@@ -2687,14 +2687,6 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn write_registry(home: &crate::paths::AgentsHome, agents: serde_json::Value) {
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": agents,
-        });
-        std::fs::write(home.registry_json(), doc.to_string()).unwrap();
-    }
-
     #[test]
     fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
         let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";

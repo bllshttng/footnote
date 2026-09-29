@@ -254,7 +254,7 @@ def test_reign_finding_starts_a_new_epic():
     assert "### A finding starts a new epic" in text
     assert "--type epic" in text
     assert "--parent null" in text
-    assert "fno agents crown <handle> --scope" in text
+    assert "fno agents org promote <handle> --scope" in text
     assert "inside an active mission scope" not in text
     once = _skill("skills/lead/references/once.md")
     assert "../SKILL.md#a-finding-starts-a-new-epic" in once
@@ -303,7 +303,7 @@ def test_king_rule_and_exit_name_the_king_channel_not_decide():
     once = _skill("skills/lead/references/once.md")
     exit_section = once[once.index("Before you abdicate") :]
     assert "../SKILL.md#recording-a-ruling" in exit_section
-    assert "fno agents king done" in exit_section
+    assert "fno agents org done" in exit_section
 
 
 def test_king_mailbox_addresses_full_session_ids():

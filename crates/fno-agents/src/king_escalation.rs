@@ -572,7 +572,7 @@ mod tests {
             Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict degraded 2 bounds breached."));
-        assert!(text.contains("--crown x-bbbb --succeed"));
+        assert!(text.contains("--promote x-bbbb --succeed"));
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
             Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict unknown."));
-        assert!(text.contains("--crown x-bbbb --succeed"));
+        assert!(text.contains("--promote x-bbbb --succeed"));
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
             "stalled undelivered 9",
             None,
         ));
-        assert!(text.contains("--crown x-bbbb,x-1111 --succeed"));
+        assert!(text.contains("--promote x-bbbb,x-1111 --succeed"));
     }
 
     #[test]
@@ -603,7 +603,7 @@ mod tests {
             "stalled undelivered 9",
             None,
         ));
-        assert!(text.contains("--crown <scope> --succeed"));
+        assert!(text.contains("--promote <scope> --succeed"));
     }
 
     #[test]
