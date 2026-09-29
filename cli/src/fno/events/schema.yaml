@@ -3011,6 +3011,23 @@ event_types:
         pr:
           type: [integer, "null"]
 
+  - name: worker_reap_refused
+    description: "The retirement sweep's commit refused to reap a driver row whose node still carries an open PR while the session never recorded a dispatch termination: the row is kept, a reap-keep fleet task files the resume order, and this event is the mechanical trail. Emitted only when the task filing is NEW, so one event per row per PR, not one per sweep pass. session_id is the row's harness session the resume command targets; caller names the sweep door that refused."
+    sources: [daemon]
+    data:
+      required: [name, node, pr, session_id, caller]
+      properties:
+        name:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+        session_id:
+          type: string
+        caller:
+          type: string
+
   - name: burn_watch_wake
     description: "The burn arm waked a worker whose spend or node age grew while its branch and node touched_at stayed flat. attempt counts from 1; delivered is receipt-confirmed landing; via names the leg that carried it (mail, resume, or a durable receipt held over a busy turn)."
     sources: [daemon]
