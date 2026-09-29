@@ -106,8 +106,8 @@ jobs:
             readme: ['cargo install fno']
           - id: skills-sh
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-d166
+            expect: pass
+            node: ''
             readme: ['npx skills add bllshttng/footnote --skill tdd']
           - id: clone-setup
             runs-on: ubuntu-latest
@@ -116,8 +116,8 @@ jobs:
             readme: ['bash scripts/setup.sh']
           - id: readme-commands
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-d166
+            expect: pass
+            node: ''
             readme: []
     steps:
       - uses: actions/checkout@v4
