@@ -590,7 +590,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         });
         // The worked read answers in-process now: the authority is native
         // (backlog::worked), and the Python leg it used to shell out to is a
-        // refusing tombstone (x-4d8d). It still rides the concurrent section:
+        // refusing tombstone. It still rides the concurrent section:
         // the roster fold is real work, and only the ready thread (its one
         // consumer) waits for the result.
         let t_worked = s_worked.map(|dl| {

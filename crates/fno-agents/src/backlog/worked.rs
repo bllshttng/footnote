@@ -961,7 +961,7 @@ fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>,
 
 /// The `--json` rows, in-process: the same payload `run --json` prints,
 /// without a process. The king board reads this directly because the Python
-/// worked leg is a refusing tombstone (x-4d8d).
+/// worked leg is a refusing tombstone.
 pub(crate) fn json_rows() -> Result<Vec<Value>, String> {
     let graph = super::settings::graph_path();
     // Strict, like the python twin's read_graph_strict: a corrupt graph is
