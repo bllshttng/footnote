@@ -3468,4 +3468,31 @@ fn title_claim_rows() {
         "the second tick is silent"
     );
     core.reap_pane(seat);
+
+    // A row coincidentally named into the marked form never answers the
+    // marked key: the mark deepens until nothing answers it, so the
+    // uninvolved row wears no marker.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("vellum", "/tmp/seen", Some("deadbee1")),
+        bg_row("vellum", "/tmp/seen", Some("deadbee3")),
+        bg_row("vellum?", "/tmp/seen", None),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐ vellum");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(
+        core.portals[&0].row_key, "vellum??",
+        "the mark deepens past the row named vellum?"
+    );
+    assert!(
+        !core.agent_rows().iter().any(|r| r.portal == Some(0)),
+        "no row carries the marker, the row named vellum? least of all"
+    );
+    core.reap_pane(seat);
 }

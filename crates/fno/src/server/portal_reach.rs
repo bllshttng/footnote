@@ -1416,9 +1416,9 @@ impl Core {
     /// the title when exactly one live row answers it by name and no other
     /// portal holds its attach claim - the sideline marks what the viewer
     /// shows. Any other title (ambiguous, unknown, claimed elsewhere) is
-    /// stored marked, which no row answers, so no row wears this seat and a
-    /// claimant elsewhere stays unpoisoned. A portal is a TV and every row
-    /// is a channel: the label never keeps a stale row.
+    /// stored marked, deepened until no live row answers it, so no row wears
+    /// this seat and a claimant elsewhere stays unpoisoned. A portal is a TV
+    /// and every row is a channel: the label never keeps a stale row.
     fn follow_unclaimed_title(&mut self, idx: u8, seat: u64, title: &str) -> bool {
         let live_named: Vec<&RegistryAgent> = self
             .agents
@@ -1439,7 +1439,18 @@ impl Core {
         let key = if live_named.len() == 1 && !claimed_elsewhere {
             title.to_string()
         } else {
-            marked.clone()
+            // The marked key must answer no row: the mark exists so nothing
+            // wears the seat. A row coincidentally named into the marked
+            // form pushes the mark one character deeper.
+            let mut key = marked.clone();
+            while self
+                .agents
+                .iter()
+                .any(|a| !a.exited && row_answers_key(a, &key))
+            {
+                key.push('?');
+            }
+            key
         };
         let mut changed = false;
         let portal = self.portals.get_mut(&idx).expect("candidate idx");
