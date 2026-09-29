@@ -4044,7 +4044,6 @@ class TestDurableGrantExecution:
     ):
         """An unavailable REST head does not turn a head-bound hold into a retry."""
         from fno.pr_watch.cli import TickDeadlineExceeded
-
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
         self._fake_merge(monkeypatch, 2, reason="held: worktree_dirty: /w carries uncommitted changes")
