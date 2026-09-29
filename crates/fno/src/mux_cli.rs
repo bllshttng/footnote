@@ -5877,7 +5877,7 @@ mod tests {
     }
 
     #[test]
-    fn mux_pick_fold_keys_arrows_and_bare_esc_split_across_reads() {
+    fn mux_pick_key_decoding() {
         let mut esc = Vec::new();
         // A plain Down arrow arriving one byte per read.
         let mut got = Vec::new();
@@ -5897,10 +5897,7 @@ mod tests {
             fold_pick_keys(&mut esc, b"a\r\x7f"),
             vec![PickKey::Char(b'a'), PickKey::Enter, PickKey::Backspace]
         );
-    }
 
-    #[test]
-    fn mux_pick_keys_from_read_flushes_a_lone_esc_as_quit() {
         // codex P2: a bare Esc press (single 0x1b byte in a read) must surface
         // as PickKey::Esc so Esc-to-quit works without a second keystroke.
         let mut esc = Vec::new();
@@ -5920,7 +5917,6 @@ mod tests {
             vec![PickKey::Esc, PickKey::Char(b'x')]
         );
     }
-
     #[test]
     fn mux_picker_anchors_cursor_on_first_live_row() {
         // AC5-ERR: a leading stale row must not be where the cursor opens.
@@ -6006,7 +6002,7 @@ mod tests {
     }
 
     #[test]
-    fn mux_kill_server_missing_socket_is_no_server_exit_1() {
+    fn kill_server_refusal_rows() {
         // No env manipulation (unit tests share the process): a name no real
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
@@ -6017,10 +6013,7 @@ mod tests {
             false,
         );
         assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
-    }
 
-    #[test]
-    fn mux_kill_server_invalid_name_is_usage_exit_2() {
         assert_eq!(
             kill_server("../evil", false, false),
             EXIT_USAGE,
@@ -6076,7 +6069,6 @@ mod tests {
     fn alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
-
     #[test]
     fn kill_server_escalates_to_sigkill_when_sigterm_is_ignored() {
         let session = "w9";
@@ -6119,7 +6111,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_server_refuses_without_a_pid_sidecar() {
+    fn kill_server_sidecar_refusal_rows() {
         let session = "w1";
         let sock = wedged_listener(session);
 
@@ -6138,10 +6130,7 @@ mod tests {
             "refusal names the recovery chain: {}",
             out.note
         );
-    }
 
-    #[test]
-    fn kill_server_refuses_a_stale_sidecar_whose_pid_was_reused() {
         let session = "w5";
         let sock = wedged_listener(session);
         let mut holder = holder(false);
@@ -6168,9 +6157,8 @@ mod tests {
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
-
     #[test]
-    fn mux_pane_parse_ls_read_kill() {
+    fn pane_parse_arg_rows() {
         assert_eq!(
             parse_pane_args(&op_of("ls"), &os(&[])).unwrap(),
             ParsedPane {
@@ -6224,10 +6212,7 @@ mod tests {
                 }
             }
         );
-    }
 
-    #[test]
-    fn mux_pane_parse_split_break_and_ls_fno_id() {
         // split needs a direction; --focus opts into focus.
         assert_eq!(
             parse_pane_args(&op_of("split"), &os(&["5", "--direction", "right"]))
@@ -6279,10 +6264,7 @@ mod tests {
                 fno_id: Some("abc123".into()),
             }
         );
-    }
 
-    #[test]
-    fn mux_pane_parse_run_tab_and_anchor() {
         // AC2-HP: `run --tab id:10 --at 2 --split down -- <argv>`.
         let p = parse_pane_args(
             &op_of("run"),
@@ -6318,7 +6300,6 @@ mod tests {
             .unwrap()
             .contains(r#""max_panes":4"#));
     }
-
     #[test]
     fn parse_tab_sel_grammar() {
         assert_eq!(parse_tab_sel("active").unwrap(), TabSel::Active);
@@ -6333,7 +6314,7 @@ mod tests {
     }
 
     #[test]
-    fn mux_pane_parse_run_takes_argv_verbatim_after_flags() {
+    fn pane_parse_run_argv_rows() {
         // Leading flags are ours; the command argv (incl. ITS flags) is not.
         let p = parse_pane_args(
             &op_of("run"),
@@ -6361,10 +6342,7 @@ mod tests {
         );
         // An empty command is a usage error.
         assert!(parse_pane_args(&op_of("run"), &os(&["--cwd", "/x"])).is_err());
-    }
 
-    #[test]
-    fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
         let p = parse_pane_args(
             &op_of("run"),
             &os(&["squad", "review", "split", "left", "claude", "--print"]),
@@ -6465,7 +6443,6 @@ mod tests {
             } if argv == &["codex"]
         ));
     }
-
     #[test]
     fn mux_pane_parse_wait_defaults_and_units() {
         // --timeout is seconds -> ms; the default is bounded, never infinite.
@@ -6842,7 +6819,7 @@ mod tests {
     }
 
     #[test]
-    fn mux_shell_init_snippets_are_marker_emitting_and_hygienic() {
+    fn mux_shell_init_contract() {
         for snippet in [ZSH_SHELL_INIT, BASH_SHELL_INIT] {
             // Emits all four FinalTerm markers.
             for m in ["133;A", "133;B", "133;C", "133;D"] {
@@ -6867,10 +6844,7 @@ mod tests {
                 "snippet must carry no absolute paths"
             );
         }
-    }
 
-    #[test]
-    fn mux_shell_init_unsupported_shell_is_a_usage_error() {
         // AC4-ERR: an unsupported / missing shell exits non-zero.
         assert_eq!(shell_init(Some("zsh"), false), EXIT_OK);
         assert_eq!(shell_init(Some("bash"), false), EXIT_OK);
@@ -6889,25 +6863,20 @@ mod tests {
             remedy: None,
         }
     }
-
     #[test]
-    fn doctor_exit_ok_when_no_check_fails() {
+    fn doctor_exit_table_rows() {
         // AC6-FR/HP: ok/warn/na only -> exit 0 (the exit table's OK row).
         let checks = [check(Verdict::Ok), check(Verdict::Warn), check(Verdict::Na)];
         assert_eq!(render_doctor(&checks, &[], false), EXIT_OK);
         assert_eq!(render_doctor(&checks, &[], true), EXIT_OK);
-    }
 
-    #[test]
-    fn doctor_exit_error_when_any_check_fails() {
         // AC6-ERR: a single Fail (version skew) flips the exit non-zero.
         let checks = [check(Verdict::Ok), check(Verdict::Fail)];
         assert_eq!(render_doctor(&checks, &[], false), EXIT_ERROR);
         assert_eq!(render_doctor(&checks, &[], true), EXIT_ERROR);
     }
-
     #[test]
-    fn doctor_version_skew_is_a_failing_check_naming_both_versions() {
+    fn session_check_verdict_rows() {
         // AC6-ERR: the skew verdict carries the server's message (which names
         // both versions + the restart remedy) and renders as a Fail.
         let msg = "protocol version mismatch: client 0.3.0 speaks v7, \
@@ -6915,25 +6884,24 @@ mod tests {
         let c = session_check("main", VersionVerdict::Skew(msg.into()));
         assert_eq!(c.verdict, Verdict::Fail);
         assert!(c.detail.contains("v7") && c.detail.contains("v6"));
-    }
 
+        // A leftover socket is worth cleaning but not a run failure; doctor
+        // never unlinks it (read-only) - the remedy points at kill-server.
+        let c = session_check("old", VersionVerdict::Stale);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(c.remedy.as_deref().unwrap().contains("kill-server old"));
+    }
     #[test]
-    fn squad_store_verdict_empty_is_na() {
+    fn squad_store_verdict_rows() {
         let c = squad_store_verdict(0, 0);
         assert_eq!(c.verdict, Verdict::Na);
         assert_eq!(c.name, "workspace store (squads.json)");
         assert!(c.remedy.is_none());
-    }
 
-    #[test]
-    fn squad_store_verdict_clean_is_ok() {
         let c = squad_store_verdict(7, 0);
         assert_eq!(c.verdict, Verdict::Ok);
         assert!(c.detail.contains("7 workspace(s), none orphaned"));
-    }
 
-    #[test]
-    fn squad_store_verdict_orphans_warn_with_prune_remedy() {
         // AC3-UI: N>0 prunable -> warn naming the count + the prune remedy; a
         // Warn never flips doctor's exit non-zero (only Fail does).
         let c = squad_store_verdict(137, 124);
@@ -6941,18 +6909,14 @@ mod tests {
         assert!(c.detail.contains("124 orphaned"));
         assert_eq!(c.remedy.as_deref(), Some("fno mux workspace prune"));
     }
-
     #[test]
-    fn doctor_no_sessions_is_na_not_a_finding() {
+    fn doctor_session_aggregation_rows() {
         // AC6-FR: nothing to check reports cleanly and never fails the run.
         let checks = session_checks(&[], |_| VersionVerdict::Ok);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].verdict, Verdict::Na);
         assert_eq!(render_doctor(&checks, &[], false), EXIT_OK);
-    }
 
-    #[test]
-    fn doctor_sessions_aggregate_each_verdict() {
         // A live session is Ok; a skewed one Fails the run.
         let names = vec!["good".to_string(), "bad".to_string()];
         let checks = session_checks(&names, |n| match n {
@@ -6962,16 +6926,6 @@ mod tests {
         assert_eq!(checks.len(), 2);
         assert_eq!(render_doctor(&checks, &[], false), EXIT_ERROR);
     }
-
-    #[test]
-    fn doctor_stale_socket_is_advisory_not_a_failure() {
-        // A leftover socket is worth cleaning but not a run failure; doctor
-        // never unlinks it (read-only) - the remedy points at kill-server.
-        let c = session_check("old", VersionVerdict::Stale);
-        assert_eq!(c.verdict, Verdict::Warn);
-        assert!(c.remedy.as_deref().unwrap().contains("kill-server old"));
-    }
-
     #[test]
     fn doctor_copy_degraded_without_a_clipboard_tool() {
         // AC6-EDGE: no local tool -> copy flagged degraded (Warn), before the
