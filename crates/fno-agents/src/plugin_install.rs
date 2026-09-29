@@ -1510,7 +1510,7 @@ fn run_opencode_arm(
                     ));
                 }
             }
-            let (_action, undo, refusals) = decide_plugin_array(&findings, yes);
+            let (_action, undo, refusals) = decide_plugin_array(&findings, yes, json);
             if json {
                 let mut value = serde_json::to_value(&receipt).unwrap_or_else(|_| json!({}));
                 value["plugin_array"] = json!({
@@ -1579,10 +1579,12 @@ fn run_opencode_arm(
 /// TTY), and disable the approved findings. Returns (action, undo lines,
 /// refusal lines). A finding inside a project config is reported, never
 /// edited; with no TTY and no --yes nothing is edited and stdout names
-/// --yes.
+/// --yes. Under `json` stdout carries the receipt alone: findings and the
+/// kept-line move to stderr, and the prompt never fires.
 fn decide_plugin_array(
     findings: &[crate::opencode_config::Finding],
     yes: bool,
+    json: bool,
 ) -> (String, Vec<String>, Vec<String>) {
     use std::io::IsTerminal as _;
     use std::io::Write as _;
@@ -1590,16 +1592,24 @@ fn decide_plugin_array(
         return ("none".into(), vec![], vec![]);
     }
     for f in findings {
-        println!("{}", f.summary());
+        if json {
+            eprintln!("{}", f.summary());
+        } else {
+            println!("{}", f.summary());
+        }
     }
     let editable: Vec<crate::opencode_config::Finding> =
         findings.iter().filter(|f| !f.project).cloned().collect();
     if editable.is_empty() {
-        println!("project config entries are reported, never edited");
+        if json {
+            eprintln!("project config entries are reported, never edited");
+        } else {
+            println!("project config entries are reported, never edited");
+        }
         return ("reported".into(), vec![], vec![]);
     }
-    let approved = if yes {
-        true
+    let approved = if yes || json {
+        yes
     } else if std::io::stdin().is_terminal() {
         print!("\nDisable these plugin entries? [Y/n] ");
         let _ = std::io::stdout().flush();
@@ -1614,7 +1624,11 @@ fn decide_plugin_array(
         let (undo, refusals) = crate::opencode_config::disable(&refs);
         return ("disabled".into(), undo, refusals);
     }
-    println!("kept: re-run `fno config plugin install opencode --yes` to disable them");
+    if json {
+        eprintln!("kept: re-run `fno config plugin install opencode --yes` to disable them");
+    } else {
+        println!("kept: re-run `fno config plugin install opencode --yes` to disable them");
+    }
     ("kept".into(), vec![], vec![])
 }
 

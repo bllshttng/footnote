@@ -346,7 +346,7 @@ fn agent_restrictions_render_as_permission_records() {
     );
     write_file(
         &s.root.join("agents/allowlisted.md"),
-        "---\ndescription: allowlist only\ntools: [\"Read\", \"Grep\", \"Bash\", \"Skill\", \"Edit\"]\n---\nAllowlisted body\n",
+        "---\ndescription: allowlist only\ntools: [\"Read\", \"Grep\", \"Bash\", \"Skill\", \"Write\", \"Edit\"]\n---\nAllowlisted body\n",
     );
     write_file(
         &s.root.join("agents/unmappable.md"),
@@ -361,8 +361,15 @@ fn agent_restrictions_render_as_permission_records() {
     assert!(reviewer.contains("bash: deny"));
 
     // The allowlist installs restricted: deny-all first, allows after.
+    // Write and Edit both map to the edit key: the render must carry it
+    // once, not as a duplicate YAML mapping key.
     let allowlisted = read(&s.conf.join("agents/fno:allowlisted.md"));
     assert!(allowlisted.contains("permission:\n  \"*\": deny\n  read: allow\n  grep: allow\n  bash: allow\n  skill: allow\n  edit: allow\n"));
+    assert_eq!(
+        allowlisted.matches("edit: allow").count(),
+        1,
+        "Write and Edit collapse to one edit key"
+    );
 
     // An allowlist that maps to nothing skips the agent.
     assert!(

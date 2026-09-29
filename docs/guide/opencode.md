@@ -92,7 +92,7 @@ An opencode upgrade crossing 2.0.0 after an install reads `stale` in `fno doctor
 ## What you get: agents and models
 
 - One `fno` primary agent (the orchestrator), Tab-selectable in every project.
-- Seventeen `fno:<name>` subagents: archer, scout, architect, verifier, code-reviewer, and the rest. Restrictions render as opencode permissions. A tool allowlist becomes a deny-all record with the named allows, so an allowlisted agent never installs unrestricted.
+- Eighteen `fno:<name>` subagents: archer, scout, architect, verifier, code-reviewer, and the rest. Restrictions render as opencode permissions. A tool allowlist becomes a deny-all record with the named allows, so an allowlisted agent never installs unrestricted.
 
 Models are opencode's own mechanism: assign one per agent in `opencode.json`, and it decides.
 

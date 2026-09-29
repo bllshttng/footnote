@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingKind {
-    /// oh-my-openagent / oh-my-opencode: footnote replaces it (user ruling
-    /// d-ae070595); the installer still asks before flipping the entry.
+    /// oh-my-openagent / oh-my-opencode: footnote replaces it; the installer
+    /// still asks before flipping the entry.
     Omo,
     /// A bare `fno` or `footnote` spec: an unrelated npm package (fno@0.5.0,
     /// footnote@1.1.0) a stranger owns; footnote loads as a local file, so
@@ -626,17 +626,6 @@ mod tests {
     /// keeps comments, backs up the original, and leaves bystanders.
     #[test]
     fn scan_classify_disable_one_contract() {
-        let text = r#"{
-  // opencode config
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    // a bare fno spec is a stranger's npm package, not footnote
-    "oh-my-openagent@latest",
-    "opencode-antigravity-auth",
-    "fno"
-  ],
-  "theme": "decoy"
-}"#;
         let text = r#"{
   // opencode config
   "$schema": "https://opencode.ai/config.json",
