@@ -8001,7 +8001,6 @@ fn band_rows() {
     // x-6851 US2 (AC11-EDGE): pairs drop atomically from the least-severe
     // (✗) end when the panel is too narrow; a glyph never renders without its
     // count; the name truncates only after every pair is gone.
-    use LatticeState::*;
     let rollup = [(Blocked, 2), (Working, 3), (Exited, 1)];
     // Wide enough for everything: label left, counts right, exact width.
     let wide = header_band_text("sq", &rollup, 20);
