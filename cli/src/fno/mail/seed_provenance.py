@@ -65,6 +65,14 @@ SEED_PROVENANCE_KEYS: tuple[str, ...] = (
 MAX_SEED_BYTES = 16 * 1024
 
 
+def scrub_seed_provenance(environ: dict) -> None:
+    """Pop the whole seed group from a child-env dict. The floor every
+    adapter's child env crosses already runs this; these callers build a
+    child env without crossing it (a child that inherits it misattributes)."""
+    for key in SEED_PROVENANCE_KEYS:
+        environ.pop(key, None)
+
+
 def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     """The child-environment fields carrying this seed's provenance.
 

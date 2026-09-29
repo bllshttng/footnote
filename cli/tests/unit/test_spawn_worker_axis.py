@@ -198,11 +198,19 @@ def _resolve(monkeypatch, source):
 
 def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
     """A merge-triggered dispatch is asked for by no session: the spawn env
-    carries the dispatcher trigger and no ambient identity marker."""
+    carries the dispatcher trigger, no ambient identity marker, and none of
+    the dispatcher's own seed provenance block - a worker that inherits that
+    block attributes its first message to whoever seeded its parent."""
+    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
+
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
-    args = _resolve(monkeypatch, source="ac")
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        monkeypatch.setenv(_seed_key, "stale-dispatcher-value")
+    args = _resolve(monkeypatch, source="ab")
     assert "CLAUDE_CODE_SESSION_ID" not in args.env
-    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ac"
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ab"
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        assert _seed_key not in args.env, f"{_seed_key} rode the dispatch wrapper env"
 
 
 def test_reconcile_source_names_rd_in_the_trigger(monkeypatch):

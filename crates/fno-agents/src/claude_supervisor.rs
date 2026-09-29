@@ -307,6 +307,40 @@ pub fn guard_birth_for_plan(env: &std::collections::BTreeMap<String, String>) {
     guard_birth(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 }
 
+/// The seed provenance group, by name. The Rust side never imports the Python
+/// tuple; the names are the wire contract (cli/src/fno/mail/seed_provenance.py).
+const SEED_PROVENANCE_KEYS: [&str; 6] = [
+    "FNO_SEED_PROV_SEED_B64",
+    "FNO_SEED_PROV_FROM",
+    "FNO_SEED_PROV_FROM_SESSION",
+    "FNO_SEED_PROV_HARNESS",
+    "FNO_SEED_PROV_NODE",
+    "FNO_SEED_PROV_MSG_ID",
+];
+
+/// The per-spawn identity pair. A child that inherits them reports its
+/// parent's name and harness as its own, which is how one daemon fossil
+/// broke whoami, mail attribution, and target start for later workers.
+const PER_SPAWN_IDENTITY_KEYS: [&str; 2] = ["FNO_AGENT_SELF", "FNO_AGENT_HARNESS"];
+
+/// The client Command for `claude-birth-exec`, holding the seed provenance
+/// group and the per-spawn identity pair out of the child env. A claude
+/// client that finds no daemon auto-starts one from its own env, and that env
+/// is fossilized for every session the daemon forks later; the supervisor
+/// birth already holds all `FNO_*` back (`is_poison`), so the client exec is
+/// the remaining door.
+fn client_command(argv: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    for key in SEED_PROVENANCE_KEYS
+        .into_iter()
+        .chain(PER_SPAWN_IDENTITY_KEYS)
+    {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
 /// Run a Claude client command after guarding any supervisor it may birth.
 /// `--` is a strict fence; the client argv, environment, cwd, and streams pass
 /// through unchanged when the process is replaced.
@@ -318,7 +352,7 @@ pub fn run_birth_exec(args: &[String]) -> i32 {
     guard_birth(std::iter::empty::<(&str, &str)>());
     use std::os::unix::process::CommandExt;
     let argv = &args[1..];
-    let error = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let error = client_command(argv).exec();
     eprintln!("claude CLI not found: {error}");
     127
 }
@@ -421,6 +455,20 @@ mod tests {
             }
         }
         let envs = env_of(&cmd);
+        // The same birth via the CLIENT door: a claude client that
+        // auto-starts the daemon fossils its env for every later session, so
+        // the door holds the seed group and the identity pair beside the
+        // poison set the supervisor birth already covers.
+        let client_held: Vec<String> =
+            env_of(&client_command(&["claude".to_string(), "--bg".to_string()]))
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_") || k.starts_with("FNO_AGENT_"))
+                .map(|(k, _)| k)
+                .collect();
+        assert_eq!(
+            client_held.len(),
+            SEED_PROVENANCE_KEYS.len() + PER_SPAWN_IDENTITY_KEYS.len()
+        );
         for k in poison {
             assert!(
                 envs.iter().any(|(n, v)| n == k && v.is_none()),
