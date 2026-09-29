@@ -313,7 +313,7 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
     sibling = "019cc082-1111-7283-97cc-751c46742a08"
     row = {
-        "name": "w-x1a5a",
+        "name": "w-redispatch",
         "status": "live",
         "substrate": "thread",
         "harness": "claude",
@@ -352,5 +352,5 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     fields = _fields(result)
     assert fields["DISPOSITION"] == "ambiguous"
-    assert fields["COLLISION"] == "w-x1a5a"
+    assert fields["COLLISION"] == "w-redispatch"
     assert fields["COLLISION_ID"] == mine
