@@ -175,13 +175,18 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
+    node_id="${3:-unknown}"
+    if [ "$node_id" = "--strict" ]; then
+      node_id="${4:-unknown}"
+    fi
     case " $* " in
       *" --field _archived"*) printf 'null\n'; exit 0 ;;
-      *" --field id"*)        printf '%s\n' "${3:-unknown}"; exit 0 ;;
+      *" --field id"*)        printf '%s\n' "$node_id"; exit 0 ;;
       *" --field status"*)    printf 'ready\n'; exit 0 ;;
-      *" --field pr_number"*) printf '4242\n'; exit 0 ;;
+      *" --field pr_number"*) printf 'null\n'; exit 0 ;;
     esac
-    exit 1
+    printf '{"status":"ready","id":"%s"}\n' "$node_id"
+    exit 0
     ;;
   *)
     exit 0

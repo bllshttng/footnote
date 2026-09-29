@@ -172,8 +172,24 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
         (
-            "tests/agents/test_spawn_pane.py::"
+            "tests/agents/test_pane_journeys.py::"
             "test_late_codex_identity_composes_across_every_peer_surface"
+        ),
+        (
+            "tests/agents/test_pane_journeys.py::"
+            "test_codex_autonomous_pane_journey_completes_without_operator_input"
+        ),
+        (
+            "tests/agents/test_harness_capability_parity.py::"
+            "test_resolved_rows_match_between_readers"
+        ),
+        (
+            "tests/agents/test_send.py::"
+            "test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery"
+        ),
+        (
+            "tests/unit/test_graph_read_race.py::"
+            "test_ac3fr_no_false_negative_under_concurrent_writes"
         ),
     }
 )
@@ -283,6 +299,14 @@ def _dev_build_absent() -> bool:
 
         _dev_build_absent_cache = find_dev_binary() is None
     return _dev_build_absent_cache
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Show slow tests on smoke shards to measure the per-test ceiling."""
+    if os.environ.get("FNO_PYTEST_SHARD") and config.option.durations is None:
+        config.option.durations = 15
+        config.option.durations_min = 30.0
 
 
 @pytest.hookimpl(tryfirst=True)

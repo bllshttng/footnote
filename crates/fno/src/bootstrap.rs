@@ -116,6 +116,14 @@ pub fn forward(args: &[OsString]) -> ! {
     }
 }
 
+/// The remedy a cargo-only install needs: `reinstall fno` re-runs the same
+/// Rust-only crate, and `fno doctor update --rust` needs the wheel this
+/// machine does not have yet. Any forwarded verb self-provisions uv and the
+/// wheel, and the wheel bundles fno-agents.
+const BACKLOG_NO_SIBLING_REMEDY: &str = "run any other fno verb once (for \
+     example `fno config get`): the forward provisions uv and the wheel that \
+     bundles fno-agents. Or set FNO_AGENTS_BIN.";
+
 /// Forward the `fno backlog ...` argv to the sibling Rust binary's grouped
 /// dispatcher. One exec, stdio inherited, signals and exit codes pass
 /// through unchanged. A missing or non-executable sibling refuses with the
@@ -129,8 +137,7 @@ pub fn forward_backlog(args: &[OsString]) -> ! {
     {
         let err = crate::process_admission::bootstrap_exec(&mut command);
         eprintln!(
-            "fno backlog: the sibling Rust binary could not be exec'd: {err}\n       \
-             reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+            "fno backlog: the sibling Rust binary could not be exec'd: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
         );
         std::process::exit(2);
     }
@@ -139,8 +146,7 @@ pub fn forward_backlog(args: &[OsString]) -> ! {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(err) => {
             eprintln!(
-                "fno backlog: the sibling Rust binary could not be run: {err}\n       \
-                 reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+                "fno backlog: the sibling Rust binary could not be run: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
             );
             std::process::exit(2);
         }
@@ -1797,6 +1803,21 @@ mod tests {
         assert!(
             m.contains("uv tool install --force --compile-bytecode --from <repo>/cli fno"),
             "{m}"
+        );
+        // The cargo-channel no-sibling refusal names the warm-up that can
+        // actually provision the sibling: a reinstall re-runs the same
+        // Rust-only crate, and doctor update needs the wheel.
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("`fno config get`"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
+        );
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("bundles fno-agents"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
+        );
+        assert!(
+            BACKLOG_NO_SIBLING_REMEDY.contains("FNO_AGENTS_BIN"),
+            "{BACKLOG_NO_SIBLING_REMEDY}"
         );
     }
 

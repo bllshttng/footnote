@@ -107,7 +107,8 @@ def test_ac2_hp_emit_concurrency_safe(tmp_path: Path) -> None:
         for i in range(n_workers)
     ]
 
-    with multiprocessing.Pool(n_workers) as pool:
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(n_workers) as pool:
         pool.map(_worker_emit, args_list)
 
     from fno.events.log import read_events
