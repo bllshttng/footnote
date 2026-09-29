@@ -355,8 +355,14 @@ fn colorfgbg_is_light(v: Option<&str>) -> bool {
 
 /// Parse one theme-role override value: the sideline palette's color
 /// vocabulary (`#rrggbb`, an ANSI-16 name, or `indexed(<n>)`), so an
-/// operator writes the same forms the sideline already accepts.
+/// operator writes the same forms the sideline already accepts, plus
+/// `default`: the terminal's own text color, so a border follows the
+/// emulator palette (white on a dark ground, black on paper) under any
+/// theme.
 fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
+    if s.trim().eq_ignore_ascii_case("default") {
+        return Some(crate::proto::Color::Default);
+    }
     crate::sideline_color::parse_color(s)
 }
 
@@ -365,11 +371,13 @@ fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
 /// theme - brand recolors selection, the active tab and the interaction
 /// accents; needs_you recolors the waiting-on-you accent; border recolors
 /// every border at once (the pane frame and the modal/popover borders,
-/// which default to the theme's brand). The tab-bar mark's stamp takes NO
-/// override - the mark keeps its theme's own label. In TOML the keys are
-/// quoted dotted keys inside `[mux]` (`"theme.border" = "#ff3434"`), which
-/// coexists with the scalar `theme` name. An unparseable value is reported,
-/// never silently ignored (the keymap-notice channel).
+/// which default to the theme's brand). Every role also takes `default`:
+/// that role pins to the terminal's own text color. The tab-bar mark's
+/// stamp takes NO override - the mark keeps its theme's own label. In TOML
+/// the keys are quoted dotted keys inside `[mux]` (`"theme.border" =
+/// "#ff3434"`), which coexists with the scalar `theme` name. An
+/// unparseable value is reported, never silently ignored (the keymap
+/// notice channel).
 /// Injectable so tests never touch process env.
 fn apply_overrides_to(
     t: &mut crate::theme::Theme,
@@ -389,7 +397,7 @@ fn apply_overrides_to(
             Some(c) if role == "border" => t.border = c,
             Some(c) => t.needs_you = c,
             None => bad.push(format!(
-                "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
+                "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), an ANSI-16 name, or default; ignored"
             )),
         }
     }
@@ -451,6 +459,9 @@ mod theme_role_override_tests {
         // The sideline names resolve, trimmed and case-insensitive.
         assert_eq!(parse_override_color(" RED "), Some(Color::Indexed(1)));
         assert_eq!(parse_override_color("indexed(8)"), Some(Color::Indexed(8)));
+        // `default` names the terminal's own text color: Color::Default.
+        assert_eq!(parse_override_color("default"), Some(Color::Default));
+        assert_eq!(parse_override_color(" DEFAULT "), Some(Color::Default));
         assert_eq!(parse_override_color("#f34"), None);
         assert_eq!(parse_override_color("#zzzzzz"), None);
         assert_eq!(parse_override_color("ff3434"), None, "hex needs its #");
@@ -487,12 +498,21 @@ mod theme_role_override_tests {
     #[test]
     fn border_override_recolors_every_border_under_any_theme() {
         // AC4-OVERRIDE: the border key recolors modal borders AND the focused
-        // pane frame at once, because both read t.border.
-        for name in crate::theme::THEME_NAMES {
-            let (mut t, _) = Theme::from_name(name);
-            apply_overrides_to(&mut t, None, None, Some("#112233"));
-            assert_eq!(t.border, Color::Rgb(0x11, 0x22, 0x33), "{name}");
-            assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
+        // pane frame at once, because both read t.border. `default` resolves
+        // to Color::Default, the terminal's own text color, so the border
+        // follows the emulator palette (white on a dark ground, black on
+        // paper) under EVERY theme.
+        for value in ["#112233", "default"] {
+            for name in crate::theme::THEME_NAMES {
+                let (mut t, _) = Theme::from_name(name);
+                apply_overrides_to(&mut t, None, None, Some(value));
+                assert_eq!(
+                    t.border,
+                    parse_override_color(value).unwrap(),
+                    "{name} {value}"
+                );
+                assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
+            }
         }
     }
 }
