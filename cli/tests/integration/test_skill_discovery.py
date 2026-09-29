@@ -82,6 +82,11 @@ def env(tmp_path: Path, store: Path) -> dict[str, str]:
     codex_stub = bin_dir / "codex"
     codex_stub.write_text("#!/bin/sh\nexit 0\n")
     codex_stub.chmod(codex_stub.stat().st_mode | stat.S_IEXEC)
+    # setup.sh probes `fno mux ls`; without a stub the probe fails and the
+    # fixture repo (no scripts/install/) tries a live install.
+    fno_stub = bin_dir / "fno"
+    fno_stub.write_text("#!/bin/sh\nexit 0\n")
+    fno_stub.chmod(fno_stub.stat().st_mode | stat.S_IEXEC)
     return {
         **os.environ,
         "HOME": str(tmp_path),
