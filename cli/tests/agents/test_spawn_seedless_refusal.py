@@ -75,6 +75,11 @@ def test_cmd_spawn_refuses_a_defaulted_thread_before_dispatch(tmp_path, monkeypa
     monkeypatch.setattr(spawn_gate, "run_gate", lambda name, substrate, **kw: FakeGuard())
     dispatched: list[dict] = []
     monkeypatch.setattr(dispatch_mod, "dispatch_spawn", lambda **kw: dispatched.append(kw))
+    refused: list[dict] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit_spawn_refused",
+        lambda **kw: refused.append(kw),
+    )
 
     res = CliRunner().invoke(
         agents_cli.agents_app, ["spawn", "--name", "w", "--node", "x-1", "--harness", "claude"]
@@ -82,3 +87,9 @@ def test_cmd_spawn_refuses_a_defaulted_thread_before_dispatch(tmp_path, monkeypa
     assert res.exit_code == 2, res.output
     assert "--node x-1 names no readable backlog row" in res.output, res.output
     assert dispatched == []
+    # Every pre-birth refusal leaves a feed-visible row (x-db50): argv,
+    # exit code, and the door's fatal line.
+    assert len(refused) == 1, refused
+    assert refused[0]["exit_code"] == 2
+    assert "names no readable backlog row" in refused[0]["reason"]
+    assert refused[0]["argv"][:2] == ["spawn", "--name"]

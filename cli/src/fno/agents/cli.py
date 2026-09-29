@@ -1033,7 +1033,55 @@ def _parse_wait_seconds(raw: str) -> float:
 
 
 
+def _refusal_watch(func):
+    """Emit `agent_spawn_refused` for any pre-birth fatal exit of cmd_spawn.
+
+    A refused launch used to leave NO event row, so the feed showed nothing
+    for a launch the operator watched refuse. The door prints preamble notes
+    first and its fatal line last, so the captured stderr's last non-empty
+    line is the reason. Best-effort: the event write can never change the
+    refusal or its exit code, and success paths never pay for the tee beyond
+    one list append per write.
+    """
+
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        captured: list[str] = []
+        real_stderr = sys.stderr
+
+        class _Tee:
+            def write(self, text: str) -> int:
+                captured.append(text)
+                return real_stderr.write(text)
+
+            def flush(self) -> None:
+                real_stderr.flush()
+
+        try:
+            sys.stderr = _Tee()  # type: ignore[assignment]
+            return func(*args, **kwargs)
+        except (typer.Exit, SystemExit) as exc:
+            code = getattr(exc, "exit_code", None)
+            if code is None:
+                code = getattr(exc, "code", None)
+            if code not in (0, None, False):
+                reason = "".join(captured).strip().rsplit("\n", 1)[-1].strip()
+                from fno.agents.events import emit_spawn_refused
+
+                emit_spawn_refused(
+                    argv=list(sys.argv[1:]), exit_code=int(code), reason=reason
+                )
+            raise
+        finally:
+            sys.stderr = real_stderr
+
+    return wrapper
+
+
 @agents_app.command("spawn")
+@_refusal_watch
 def cmd_spawn(
     ctx: typer.Context,
     message: str = typer.Argument("", help="The prompt to seed the worker with."),

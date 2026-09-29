@@ -458,6 +458,25 @@ pub fn project(
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
+        if v.get("type").and_then(Value::as_str) == Some("agent_spawn_refused") {
+            // A pre-birth refusal: the feed shows the launch the operator
+            // watched refuse, carrying the door's own fatal line.
+            let Some(data) = v.get("data") else { continue };
+            let Some(ts) = s_field(&v, "ts") else {
+                continue;
+            };
+            rows.push(FeedRow {
+                ts,
+                kind: "session_spawn_refused".into(),
+                harness: s_field(data, "harness"),
+                title: format!(
+                    "spawn refused: {}",
+                    s_field(data, "reason").unwrap_or_else(|| "unknown reason".into())
+                ),
+                ..FeedRow::default()
+            });
+            continue;
+        }
         if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
             continue;
         }
@@ -906,7 +925,11 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     for note in &removal_notes {
         eprintln!("fno-agents feed: {note}");
     }
-    let spawns_raw = agents_journal(home, &["agent_spawned"], args.since_epoch);
+    let spawns_raw = agents_journal(
+        home,
+        &["agent_spawned", "agent_spawn_refused"],
+        args.since_epoch,
+    );
     let crown_raw = crown_journals(home);
 
     let Projection {
@@ -1403,6 +1426,18 @@ mod tests {
             row.parent.as_deref(),
             Some("49a80492-388e-44a3-bd91-017be26bcaa0")
         );
+        // x-db50: a pre-birth refusal used to write nothing, so the feed
+        // showed nothing for a launch the operator watched refuse.
+        let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"python","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
+        let p = project("", &[], &[], refused, "");
+        let row = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "session_spawn_refused")
+            .expect("one refused row");
+        assert!(row
+            .title
+            .starts_with("spawn refused: --mux-session is pane-only"));
     }
 
     #[test]
