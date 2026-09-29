@@ -1073,12 +1073,14 @@ if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
                 printf '%s\n' '{"decisions":[{"decision_id":"d-0dd0beef","decision":"approve the repair for x-a1b2c","subject":"x-ffff","lifecycle":"live"}]}' ;;
             d-0b5c0b5c)
                 printf '%s\n' '{"decisions":[{"decision_id":"d-0b5c0b5c","decision":"approve the +2 repair","subject":"x-a1b2","lifecycle":"unknown"}]}' ;;
+            d-f1cebabe)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-f1cebabe","decision":"the org-title rename ships as two PRs; the second carries the file-budget-exception label for its mechanical move, node x-beef00","subject":"x-beef00","lifecycle":"live"}]}' ;;
             *) printf '%s\n' '{"decisions":[]}' ;;
         esac
         exit 0
     fi
     case "$decision_id" in
-        d-1234abcd|d-b6cc1a2a|d-a9cddc93|d-7e57a11a|d-0dd0beef)
+        d-1234abcd|d-b6cc1a2a|d-a9cddc93|d-7e57a11a|d-0dd0beef|d-f1cebabe)
             printf 'LIVE  LAW  %s  2026-09-12T00:00:00Z  stub  stub\n' "$decision_id" ;;
         d-5ca1ab1e) echo "EXPIRED  COORD  $decision_id  2026-09-12T00:00:00Z  x-a1b2  stub" ;;
         d-0b5c0b5c) echo "UNKNOWN  COORD  $decision_id  2026-09-12T00:00:00Z  x-a1b2  stub" ;;
@@ -1115,6 +1117,100 @@ if [[ -z "$NNPY_OUT" ]]; then
     pass "AC11e: Grant with a LIVE ruling prints nothing"
 else
     fail "AC11e: expected a clean section: $NNPY_OUT"
+fi
+
+# AC13-HP: Grant rows over the ceiling citing a LIVE ruling that names the
+# plan's node AND file-budget-exception -> passes, printing the ruling.
+PLAN_NNPY_W="$TMPDIR_BASE/nnpy_waiver.md"
+cat > "$PLAN_NNPY_W" <<'HEREDOC'
+---
+status: ready
+created: 2026-09-29
+difficulty: medium
+project: fno
+node: x-beef00
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+  decisions_acknowledged: []
+surface:
+  question: "Does the granted file-budget-exception waiver lift the ceiling?"
+  sweep: "bash tests/test-validate-plan.sh"
+  control: skills/blueprint/scripts/validate-plan.sh
+  answerers:
+    - at: skills/blueprint/scripts/validate-plan.sh
+      disposition: dual-logic
+      reads: "the waiver branch prints the ruling that lifted the ceiling"
+      feed: "the cited live decision text"
+      emits: "exit 0 with the grant budget line naming the ruling"
+  count: 1
+  count_after: 1
+code_index:
+  main_sha: 9817805bf5e
+  providers: []
+---
+
+# Waiver plan
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| the waiver branch exists | code | exists at skills/blueprint/scripts/validate-plan.sh | `waiver_ruling` |
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/king/cli.py` | Grant d-f1cebabe +400 |
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    difficulty: medium
+    tasks: ["1.1"]
+tasks:
+  - id: "1.1"
+    title: Waiver
+    surface: [skills/blueprint/scripts/validate-plan.sh]
+    verify: bash tests/test-validate-plan.sh
+    acceptance: [AC13]
+```
+HEREDOC
+# A keyed plan activates the stage-law gate; the fixture stubs the stage read
+# to zero laws so the suite's own live laws cannot reach the fixture.
+LAWBIN="$TMPDIR_BASE/lawbin"
+mkdir -p "$LAWBIN"
+cat > "$LAWBIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${3:-}" == "stage" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n"}}}'
+    exit 0
+fi
+exec "__LAWBIN_FALLBACK__/fno" "$@"
+STUB
+sed "s|__LAWBIN_FALLBACK__|$STUBBIN|g" "$LAWBIN/fno" > "$LAWBIN/fno.tmp" && mv "$LAWBIN/fno.tmp" "$LAWBIN/fno"
+chmod +x "$LAWBIN/fno"
+OUTPUT=$(PATH="$LAWBIN:$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_W" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ "$EXIT_CODE" -eq 0 && "$OUTPUT" == *"d-f1cebabe"* && "$OUTPUT" == *"file-budget-exception"* ]]; then
+    pass "AC13-HP: a granted file-budget-exception lifts the Grant sum ceiling"
+else
+    fail "AC13-HP: expected pass with the lifting line naming d-f1cebabe (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC13-EDGE: the ruling names the node but not file-budget-exception -> the
+# over-budget finding stands.
+PLAN_NNPY_NW="$TMPDIR_BASE/nnpy_nowaiver.md"
+sed 's/Grant d-f1cebabe +400/Grant d-7e57a11a +400/; s/node: x-beef00/node: x-a1b2/' "$PLAN_NNPY_W" > "$PLAN_NNPY_NW"
+OUTPUT=$(PATH="$LAWBIN:$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_NW" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ "$EXIT_CODE" -eq 1 && "$OUTPUT" == *"against a budget of 30"* ]]; then
+    pass "AC13-EDGE: a ruling without file-budget-exception leaves the ceiling standing"
+else
+    fail "AC13-EDGE: expected the over-budget refusal (exit $EXIT_CODE): $OUTPUT"
 fi
 
 # AC11f (AC5-ERR): Grant whose id reads no LIVE line -> ERROR naming the id

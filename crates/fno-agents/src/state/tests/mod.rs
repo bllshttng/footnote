@@ -7,7 +7,8 @@ use super::*;
 
 /// Tests that mutate process-wide env vars hold this so parallel test
 /// threads never interleave mid-arm snapshots of the same keys.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(crate::claims::test_env_lock);
 
 #[test]
 fn enters_fires_once_per_episode() {

@@ -1,55 +1,29 @@
-"""Selection-time node-claim enforcement for `fno graph next` / `ready`.
+"""Selection-time node-claim enforcement for the native `fno backlog next`.
 
-A node with a LIVE `node:<id>` claim at the global claims root must be
-excluded from selection so a second session never picks up a node another
-session is actively driving. Stale/expired/released claims must NOT exclude.
+A node with a LIVE `node:<id>` claim at the claims root must be excluded
+from selection so a second session never picks up a node another session
+is actively driving. Stale/expired/released claims must NOT exclude.
 
-The global claims root resolves via Path.home() (i.e. ~/.fno/claims,
-mirroring the global ~/.fno/graph.json). Tests isolate by overriding
-HOME so Path.home() and the acquire root point at the same tmp dir.
+The doors run through the binary against a sandbox state root; the claims
+root rides FNO_CLAIMS_ROOT. A malformed roster refuses selection; an
+unreachable one degrades to the registry-only view and proceeds.
 
 Refs: ab-fcf9cec5 (double-claim of ab-1e86b88e observed across PR #397/#398).
 """
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from fno.cli import app
 from fno.claims.core import acquire_claim, release_claim
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
+from fno.graph.store import read_graph_strict
 
-runner = CliRunner()
-
-
-@pytest.fixture
-def tmp_graph(tmp_path, monkeypatch) -> Path:
-    """Fresh graph.json routed to a temp file; HOME pinned to tmp_path so the
-    global claims root (Path.home()/.fno/claims) is isolated too."""
-    g = tmp_path / "graph.json"
-    seed_graph(g, '{"entries": []}\n')
-    import fno.graph._constants as gc
-    import fno.graph.store as gs
-    monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
-    monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    # Seam readers resolve fno.paths.graph_json at call time; pin the
-    # resolver to the same hermetic file (module-attr pins do not reach it).
-    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    # Pin the global claims root to tmp: clear any inherited override so
-    # global_claims_root() falls through to $HOME (which we pin here), and the
-    # acquire root (tmp_path) and the selection filter resolve to the same dir.
-    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    return g
+from tests.goldens._door import door, make_sandbox, roster_stub
 
 
 # Recent so the G1 stale-ready guard never quarantines these fixtures.
@@ -65,137 +39,65 @@ def _two_ready_entries():
     ]
 
 
-def _invoke(*args):
-    return runner.invoke(app, list(args), catch_exceptions=False)
+def _open(phase, sid):
+    return {
+        "phase": phase,
+        "harness": "claude",
+        "session_id": sid,
+        "started_at": "2026-09-09T00:00:00Z",
+    }
 
 
-def _store_entries(g):
+def _claim(node_id, root, holder="target-session:other"):
+    # `root` is the claims BASE: wheel and door both append .fno/claims
+    # under it (FNO_CLAIMS_ROOT carries the same base semantics).
+    acquire_claim(key=f"node:{node_id}", holder=holder, ttl_ms=3_600_000,
+                  root=root / "claims")
+
+
+def _store_entries(root):
     # The store owns state; graph.json is a frozen export, so read-backs
     # come from store rows.
-    from fno.graph.store import read_graph_strict
-
-    return read_graph_strict(g)
+    return read_graph_strict(root / "graph.json")
 
 
-def test_next_skips_live_claimed_node(tmp_graph, tmp_path):
-    """A live TTL claim on ab-aaaaaaaa makes `graph next` pick ab-bbbbbbbb."""
-    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
-    # TTL claim is live regardless of the acquiring process's liveness.
-    acquire_claim(
-        key="node:ab-aaaaaaaa",
-        holder="target-session:other",
-        ttl_ms=3_600_000,
-        root=tmp_path,
-    )
-    r = _invoke("backlog", "next", "--all")
-    out = json.loads(r.stdout)
-    assert out is not None, r.stdout
-    assert out["id"] == "ab-bbbbbbbb"
+
+# `backlog rank` retired from the Python surface: its lane pin answers
+# natively in the binary now, and the two integration tests that pinned the
+# python leg went with it.
 
 
-def test_next_reads_each_liveness_source_once(tmp_graph, tmp_path, monkeypatch):
-    """One selection, one claim verdict scan, one roster read.
+def test_next_skips_live_claimed_node(tmp_path):
+    """A live TTL claim on ab-aaaaaaaa makes `backlog next` pick ab-bbbbbbbb."""
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    _claim("ab-aaaaaaaa", root)
+    code, out, err = door(root, ["next", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    assert json.loads(out)["id"] == "ab-bbbbbbbb"
 
-    Three layers used to rescan live occupancy inside a single `backlog next`
-    and got the same answer each time; the scans are what the command costs.
+
+def test_next_skips_worked_node(tmp_path):
+    """Occupancy has two live sources: a claim on A and a working roster
+    session on C both exclude, so the pick falls to B.
+
+    (The python leg's scan-counting pin retired with that leg; the door
+    pins the occupancy contract the scans served.)
     """
     entries = _two_ready_entries() + [
-        {"id": "ab-cccccccc", "title": "C", "status": "ready", "priority": "p2",
-         "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "c.md"},
+        {"id": "ab-cccccccc", "title": "C", "status": "ready", "priority": "p1",
+         "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "c.md",
+         "sessions": [_open("execute", "session-9")]},
     ]
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    acquire_claim(
-        key="node:ab-aaaaaaaa",
-        holder="target-session:other",
-        ttl_ms=3_600_000,
-        root=tmp_path,
-    )
-
-    import fno.graph.statuses as statuses
-
-    calls = {"claimed": 0, "worked": 0}
-    real_claimed = statuses.live_claimed_node_ids
-
-    def counting_claimed(**kwargs):
-        calls["claimed"] += 1
-        return real_claimed(**kwargs)
-
-    def counting_worked(**_kwargs):
-        calls["worked"] += 1
-        return {"ab-cccccccc": ["bp-worker"]}
-
-    monkeypatch.setattr(statuses, "live_claimed_node_ids", counting_claimed)
-    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", counting_claimed)
-    monkeypatch.setattr(statuses, "live_worked_node_ids", counting_worked)
-
-    result = _invoke("backlog", "next", "--all")
-
-    assert result.exit_code == 0, result.output
-    # The claimed node and the worked node are both occupied; only C is free.
-    assert json.loads(result.stdout)["id"] == "ab-bbbbbbbb"
-    assert calls == {"claimed": 1, "worked": 1}, result.output
+    root = make_sandbox(tmp_path, entries)
+    stub = roster_stub(root, [{"sessionId": "session-9", "name": "c-worker",
+                                "state": "working", "cwd": "/tmp"}])
+    _claim("ab-aaaaaaaa", root)
+    code, out, err = door(root, ["next", "--all"], path_prepend=stub)
+    assert code == 0, err
+    assert json.loads(out)["id"] == "ab-bbbbbbbb"
 
 
-def test_next_refuses_when_worked_evidence_is_unreadable(tmp_graph, monkeypatch):
-    """An unreadable roster refuses selection; it never reads as unoccupied."""
-    entries = _two_ready_entries()
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    def unavailable(**_kwargs):
-        raise RuntimeError("roster timeout")
-
-    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", unavailable)
-
-    result = _invoke("backlog", "next", "--all")
-
-    assert result.exit_code == 1, result.output
-    assert "roster timeout" in result.output
-    assert "selection refused" in result.output
-    assert '"id"' not in result.output
-    # same ids and statuses: the refused selection must not have written
-    assert [(e['id'], e.get('status')) for e in _store_entries(tmp_graph)] == [
-        (e['id'], e.get('status')) for e in entries
-    ]
-
-
-def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
-    """A corrupt graph refuses selection; it never selects over zero rows.
-
-    `read_graph` swallows corruption and answers no rows, and a selection over
-    no rows prints `null`, which `advance` reads as the benign `no-work` skip.
-    """
-    entries = _two_ready_entries()
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    def unreadable(*_args, **_kwargs):
-        raise RuntimeError("graph.json is corrupt")
-
-    monkeypatch.setattr("fno.graph.store.read_graph_strict", unreadable)
-
-    result = _invoke("backlog", "next", "--all")
-
-    assert result.exit_code == 1, result.output
-    assert "graph unreadable" in result.output
-    assert "graph.json is corrupt" in result.output
-    assert '"id"' not in result.output
-
-
-def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
-    """`graph ready` omits a live-claimed node from the listing."""
-    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
-    acquire_claim(
-        key="node:ab-aaaaaaaa",
-        holder="target-session:other",
-        ttl_ms=3_600_000,
-        root=tmp_path,
-    )
-    r = _invoke("backlog", "ready", "--all")
-    ids = [e["id"] for e in json.loads(r.stdout)]
-    assert "ab-aaaaaaaa" not in ids
-    assert "ab-bbbbbbbb" in ids
-
-
-def test_next_prefers_sibling_of_live_claimed_epic(tmp_graph, tmp_path):
+def test_next_prefers_sibling_of_live_claimed_epic(tmp_path):
     entries = [
         {"id": "ab-epic001", "title": "Active epic", "type": "epic",
          "status": "ready", "priority": "p2", "created_at": "2026-02-01",
@@ -213,21 +115,14 @@ def test_next_prefers_sibling_of_live_claimed_epic(tmp_graph, tmp_path):
          "parent": "ab-epic002", "priority": "p2", "created_at": _RECENT_CREATED,
          "project": "p", "blocked_by": [], "plan_path": "idle.md"},
     ]
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    acquire_claim(
-        key="node:ab-claimed1",
-        holder="target-session:other",
-        ttl_ms=3_600_000,
-        root=tmp_path,
-    )
-
-    result = _invoke("backlog", "next", "--all")
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["id"] == "ab-sibling1"
+    root = make_sandbox(tmp_path, entries)
+    _claim("ab-claimed1", root)
+    code, out, err = door(root, ["next", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    assert json.loads(out)["id"] == "ab-sibling1"
 
 
-def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
+def test_parallel_next_draw_holds_unique_nodes(tmp_path):
     """Each serialized lane claims its pick before the next lane selects."""
     max_lanes = 3
     entries = [
@@ -238,84 +133,115 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
         }
         for i in range(1, max_lanes + 2)
     ]
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
+    root = make_sandbox(tmp_path, entries)
+    stub = roster_stub(root, [])
     selected: list[str] = []
 
     for lane in range(max_lanes):
-        out = json.loads(_invoke("backlog", "next", "--all").stdout)
-        assert out["id"] not in selected
-        selected.append(out["id"])
-        acquire_claim(
-            key=f"node:{out['id']}",
-            holder=f"target-session:lane-{lane}",
-            ttl_ms=3_600_000,
-            root=tmp_path,
-        )
+        code, out, err = door(root, ["next", "--all"], path_prepend=stub)
+        assert code == 0, err
+        picked = json.loads(out)["id"]
+        assert picked not in selected
+        selected.append(picked)
+        _claim(picked, root, holder=f"target-session:lane-{lane}")
 
     assert len(set(selected)) == max_lanes
 
 
-# `backlog rank` retired from the Python surface: its lane pin answers
-# natively in the binary now, and the two integration tests that pinned the
-# python leg went with it.
+def test_no_claims_directory_is_graceful(tmp_path):
+    """Absent claims dir: selection behaves exactly as before (no crash)."""
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    (root / "claims").rmdir()
+    code, out, err = door(root, ["next", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    assert json.loads(out)["id"] in {"ab-aaaaaaaa", "ab-bbbbbbbb"}
 
 
-def test_released_claim_does_not_block(tmp_graph, tmp_path):
-    """After release the node is selectable again (only LIVE claims filter)."""
-    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
-    acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000, root=tmp_path)
-    release_claim(key="node:ab-aaaaaaaa", holder="h", root=tmp_path)
-    r = _invoke("backlog", "ready", "--all")
-    ids = [e["id"] for e in json.loads(r.stdout)]
-    assert "ab-aaaaaaaa" in ids
+
+def test_next_refuses_malformed_roster_and_degrades_an_unreachable_one(tmp_path):
+    """The roster verdict ladder: a malformed listing refuses selection (it
+    never reads as unoccupied); an unreachable one degrades to the
+    registry-only view and selection proceeds on the claims verdict."""
+    entries = _two_ready_entries()
+    root = make_sandbox(tmp_path, entries)
+    code, out, err = door(root, ["next", "--all"], path_prepend=roster_stub(root, [42]))
+    assert code == 1, out
+    assert "selection refused" in err
+    assert '"id"' not in out
+    # same ids and statuses: the refused selection must not have written
+    assert [(e["id"], e.get("status")) for e in _store_entries(root)] == [
+        (e["id"], e.get("status")) for e in entries
+    ]
+
+    stub = root / "stubbin"
+    (stub / "claude").write_text("#!/bin/sh\necho 'roster timeout' >&2\nexit 1\n")
+    code, out, err = door(root, ["next", "--all"], path_prepend=str(stub))
+    assert code == 0, err
+    assert json.loads(out)["id"] in {"ab-aaaaaaaa", "ab-bbbbbbbb"}
+
+
+def test_next_refuses_when_the_graph_is_unreadable(tmp_path):
+    """A corrupt store refuses selection; it never selects over zero rows.
+
+    A selection over no rows prints `null`, which `advance` reads as the
+    benign `no-work` skip; corruption must never collapse to that.
+    """
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    (root / "graph.db").write_bytes(b"not a database")
+    code, out, err = door(root, ["next", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 1
+    assert "graph unreadable" in err
+    assert '"id"' not in out
 
 
 @pytest.mark.parametrize("command", [("next", "--all"), ("ready", "--all")])
 def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
-    tmp_graph, tmp_path, monkeypatch, command
+    tmp_path, command
 ):
+    """A claims root that exists but cannot be read is UNKNOWN state, which
+    must refuse, never read as "nothing is claimed"."""
     entries = _two_ready_entries()
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    locked = None
-    if command[0] == "ready":
-        # The ready leg enforces claim liveness inside the keeper, so the
-        # refusal is driven through the env the spawned keeper inherits:
-        # a claims root that exists but cannot be read is UNKNOWN state,
-        # which must refuse, never read as "nothing is claimed".
-        locked = tmp_path / "claims-locked"
-        locked.mkdir()
-        locked.chmod(0o000)
-        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(locked))
-    else:
-
-        def unavailable(*args, **kwargs):
-            raise OSError("claims unavailable")
-
-        monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
-
+    root = make_sandbox(tmp_path, entries)
+    (root / "claims").chmod(0o000)
     try:
-        result = _invoke("backlog", *command)
-
-        assert result.exit_code == 1
-        assert "live claim state is unavailable" in result.output
+        code, out, err = door(root, list(command), path_prepend=roster_stub(root, []))
+        assert code == 1
+        assert "live claim state is unavailable" in err
         # same ids and statuses: the refused selection must not have written
-        assert [(e["id"], e.get("status")) for e in _store_entries(tmp_graph)] == [
+        assert [(e["id"], e.get("status")) for e in _store_entries(root)] == [
             (e["id"], e.get("status")) for e in entries
         ]
     finally:
         # A mode-000 dir left behind makes the next run's rm_rf of this tree
         # fail with Errno 66 ("Directory not empty") - no process needed.
-        if locked is not None:
-            locked.chmod(0o700)
+        (root / "claims").chmod(0o700)
 
 
-def test_expired_claim_does_not_block(tmp_graph, tmp_path):
-    """A stale (expired TTL) claim must not exclude its node from selection."""
-    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
-    # Write an already-expired claim file directly (acquire validates ttl bounds).
-    cdir = claims_dir(tmp_path)
-    cdir.mkdir(parents=True, exist_ok=True)
+def test_ready_excludes_live_claimed_node(tmp_path):
+    """`backlog ready` omits a live-claimed node from the listing."""
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    _claim("ab-aaaaaaaa", root)
+    code, out, err = door(root, ["ready", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    ids = [e["id"] for e in json.loads(out)]
+    assert "ab-aaaaaaaa" not in ids
+    assert "ab-bbbbbbbb" in ids
+
+
+def test_non_live_claim_does_not_block(tmp_path):
+    """Only LIVE claims filter: a released claim and an expired-TTL one both
+    leave their node selectable."""
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000,
+                  root=root / "claims")
+    release_claim(key="node:ab-aaaaaaaa", holder="h", root=root / "claims")
+    code, out, err = door(root, ["ready", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    ids = [e["id"] for e in json.loads(out)]
+    assert "ab-aaaaaaaa" in ids
+
+    cbase = root / "claims"
+    claims_dir(cbase).mkdir(parents=True, exist_ok=True)
     past = now_ms() - 1000
     expired = Claim(
         key="node:ab-aaaaaaaa",
@@ -327,16 +253,8 @@ def test_expired_claim_does_not_block(tmp_graph, tmp_path):
         reason=None,
         metadata={},
     )
-    claim_path("node:ab-aaaaaaaa", root=tmp_path).write_text(serialize_claim(expired))
-    r = _invoke("backlog", "ready", "--all")
-    ids = [e["id"] for e in json.loads(r.stdout)]
+    claim_path("node:ab-aaaaaaaa", root=cbase).write_text(serialize_claim(expired))
+    code, out, err = door(root, ["ready", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    ids = [e["id"] for e in json.loads(out)]
     assert "ab-aaaaaaaa" in ids, "expired claim should not block selection"
-
-
-def test_no_claims_directory_is_graceful(tmp_graph, tmp_path):
-    """Absent claims dir: selection behaves exactly as before (no crash)."""
-    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
-    r = _invoke("backlog", "next", "--all")
-    out = json.loads(r.stdout)
-    assert out is not None
-    assert out["id"] in {"ab-aaaaaaaa", "ab-bbbbbbbb"}

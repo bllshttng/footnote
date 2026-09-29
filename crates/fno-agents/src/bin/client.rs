@@ -2788,8 +2788,8 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
              `fno agents spawn --name <n> --substrate pane`.",
         ),
         "promote" => Some(
-            "fno agents promote was retired at G4: the mux hosts agent panes; spawn one with \
-             `fno agents spawn --name <n> --substrate pane`.",
+            "fno agents promote is now fno agents org promote <session> --scope <scope>; \
+             the old pane verb was retired at G4 (spawn with `fno agents spawn --name <n> --substrate pane`).",
         ),
         _ => None,
     }

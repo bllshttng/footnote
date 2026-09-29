@@ -773,7 +773,7 @@ fn is_build_output(t: &str, cwd: &Path) -> bool {
 
 // ── Limb signatures ──────────────────────────────────────────────────────────
 
-fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
+pub(crate) fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
     let Some(parent) = Path::new(transcript).parent() else {
         return false;
     };

@@ -21,10 +21,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT" || exit 1
 
 KING_SURFACES=(
-    skills/reign/SKILL.md
-    skills/reign/references/once.md
-    skills/reign/references/court-operations.md
-    skills/reign/references/minion-clause.md
+    skills/lead/SKILL.md
+    skills/lead/references/once.md
+    skills/lead/references/court-operations.md
+    skills/lead/references/minion-clause.md
 )
 SPAWN_GUIDE=docs/guides/fno-agents-spawn.md
 ALL_SURFACES=("${KING_SURFACES[@]}" "$SPAWN_GUIDE")
@@ -66,9 +66,9 @@ else
 fi
 
 # --- 3. Canonical spelling is actually taught --------------------------------
-for f in skills/reign/references/once.md \
-         skills/reign/references/court-operations.md \
-         skills/reign/references/minion-clause.md \
+for f in skills/lead/references/once.md \
+         skills/lead/references/court-operations.md \
+         skills/lead/references/minion-clause.md \
          "$SPAWN_GUIDE"; do
     grep -q -- '--workspace' "$f" ||
         note "$f teaches no --workspace placement example"
@@ -124,8 +124,8 @@ done
 # corrected in SKILL.md while court-operations.md kept teaching the old one.
 # The split is deliberate (contract vs hands) and nothing mechanically ties the
 # two, so pin the load-bearing wait invariants in both.
-COURT_OPS=skills/reign/references/court-operations.md
-for f in skills/reign/references/once.md "$COURT_OPS"; do
+COURT_OPS=skills/lead/references/court-operations.md
+for f in skills/lead/references/once.md "$COURT_OPS"; do
     grep -q 'fno-agents wait' "$f" ||
         note "$f does not name the lifecycle wait primitive"
     # `idle` is wait.rs's DEFAULT verdict (lapsed hook / unknown / absent

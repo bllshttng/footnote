@@ -748,6 +748,11 @@ pub fn court_fold(
                 fold["name"] = names.get(scope).map(|n| json!(n)).unwrap_or(Value::Null);
             }
         }
+        if let Ok(titles) = crate::crown_names::live_titles(&store, registry_path) {
+            for (scope, fold) in folds.iter_mut() {
+                fold["title"] = titles.get(scope).map(|t| json!(t)).unwrap_or(Value::Null);
+            }
+        }
     }
     // The whole owner read, node id -> canonical owning scope, exposed once
     // so a dispatch reader (the blueprint starts list) drops another crown's
@@ -1720,7 +1725,8 @@ mod tests {
     fn the_short_json_spelling_selects_the_json_format() {
         // The run path resolves the state root; point it at a tempdir for the
         // run and restore it after, under the process-wide env lock.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(crate::claims::test_env_lock);
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();
