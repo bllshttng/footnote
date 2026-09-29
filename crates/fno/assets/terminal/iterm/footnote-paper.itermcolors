@@ -1,5 +1,5 @@
 {
-  "Ansi 0 Color" : { "Red Component" : 0.749020, "Green Component" : 0.749020, "Blue Component" : 0.749020 },
+  "Ansi 0 Color" : { "Red Component" : 0.376471, "Green Component" : 0.376471, "Blue Component" : 0.376471 },
   "Ansi 1 Color" : { "Red Component" : 0.588235, "Green Component" : 0.325490, "Blue Component" : 0.317647 },
   "Ansi 2 Color" : { "Red Component" : 0.274510, "Green Component" : 0.466667, "Blue Component" : 0.282353 },
   "Ansi 3 Color" : { "Red Component" : 0.474510, "Green Component" : 0.407843, "Blue Component" : 0.137255 },
@@ -7,7 +7,7 @@
   "Ansi 5 Color" : { "Red Component" : 0.545098, "Green Component" : 0.325490, "Blue Component" : 0.474510 },
   "Ansi 6 Color" : { "Red Component" : 0.031373, "Green Component" : 0.474510, "Blue Component" : 0.439216 },
   "Ansi 7 Color" : { "Red Component" : 0.235294, "Green Component" : 0.235294, "Blue Component" : 0.235294 },
-  "Ansi 8 Color" : { "Red Component" : 0.658824, "Green Component" : 0.658824, "Blue Component" : 0.658824 },
+  "Ansi 8 Color" : { "Red Component" : 0.431373, "Green Component" : 0.431373, "Blue Component" : 0.431373 },
   "Ansi 9 Color" : { "Red Component" : 0.682353, "Green Component" : 0.352941, "Blue Component" : 0.337255 },
   "Ansi 10 Color" : { "Red Component" : 0.274510, "Green Component" : 0.533333, "Blue Component" : 0.309804 },
   "Ansi 11 Color" : { "Red Component" : 0.537255, "Green Component" : 0.462745, "Blue Component" : 0.082353 },
