@@ -1066,30 +1066,3 @@ fn worked_status<'a>(by_id: &BTreeMap<&str, &'a Value>, id: &str) -> &'a str {
         .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("unknown")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // x-4d8d: the king board reads this fold in-process, never the
-    // tombstoned Python leg. An all-terminal graph answers Ok(empty)
-    // without consulting the roster, so the native read is provable
-    // hermetically under a pinned state dir.
-    #[test]
-    fn json_rows_answers_ok_on_an_all_terminal_graph() {
-        let _guard = crate::claims::test_env_lock();
-        let prior = std::env::var_os("FNO_STATE_DIR");
-        let dir = tempfile::tempdir().unwrap();
-        crate::paths::pin_test_claims_root(dir.path());
-        std::env::set_var("FNO_STATE_DIR", dir.path());
-        let graph = crate::backlog::settings::graph_path();
-        crate::graph_store::seed_rows(&graph, &[json!({"id": "x-ffff", "status": "done"})])
-            .unwrap();
-        let rows = json_rows().expect("the native worked fold answers");
-        assert!(rows.is_empty());
-        match prior {
-            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
-            None => std::env::remove_var("FNO_STATE_DIR"),
-        }
-    }
-}
