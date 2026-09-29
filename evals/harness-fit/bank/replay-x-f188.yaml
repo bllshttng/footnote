@@ -41,6 +41,6 @@ prompt: |
   RELATED: x-f1f4 is the same operator complaint at the modal (an update surface that reports state and offers no action). x-4f44 shipped this exact staleness fix for the DAEMON and left every keeper uncovered. x-ebd6 is a wedged keeper hanging mux startup, the adjacent lifecycle gap.
 grade:
   - kind: exit
-    command: "git checkout 9f01454cea12e7f9c151a145196bc8ba0afd3c88 -- crates/fno-agents/tests/census.rs && cargo test -p fno-agents --test census"
+    command: "git checkout 9f01454cea12e7f9c151a145196bc8ba0afd3c88 -- crates/fno-agents/tests/census.rs && cd crates/fno-agents && cargo test --test census"
 timeout_minutes: 45
 tags: [harness-fit]

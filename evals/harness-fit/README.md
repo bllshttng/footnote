@@ -57,6 +57,15 @@ The smokes are not results: they check that each arm reaches z.ai. They exposed 
 - Reasoning tokens. z.ai bills reasoning tokens as output. Harbor's opencode adapter counts only visible output: one smoke step reported 14 output tokens beside 31,986 reasoning tokens. Where an arm's log reports reasoning apart from output, the report adds it to output.
 - Token source. Run 0 tokens come from Harbor's per-trial agent context. A trial whose arm reported no usage reads `unmeasured`, never zero.
 
+## Amendment 3 (2026-09-29, the bank, before any Run 1 result)
+
+A grade-only dry run checked every replay task before Run 1. The hidden tests must pass at the merge sha and fail at the first parent, with no worker. The dry run found five bad tasks and one bad grade shape. `nodes.md` lists each change.
+
+- The repo has no Cargo workspace manifest. Each Rust grade now runs `cargo test` inside its own crate.
+- x-632f kept no list of the eligible population, and the list cannot be rebuilt to match its picks. So the population for replacements is rebuilt from local git. It holds the first-parent PR merges on `origin/main` dated 2026-09-01 through 2026-09-28 (UTC) that add at least one test file. Each must name a node the graph resolves, because the prompt is that node's title and details. That gives 242 entries.
+- The replacement rule: a bad task gives way to the next entry after it in merge order that is not already sampled. That entry's grade must pass the dry run, and its hidden tests must run, not skip.
+- A task whose node the graph cannot resolve is bad, because its prompt cannot come from the node. Three of x-632f's tasks carried a one-sentence prompt written by hand, and all three are replaced.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.

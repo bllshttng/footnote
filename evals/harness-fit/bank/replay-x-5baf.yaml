@@ -1,0 +1,28 @@
+id: replay-x-5baf
+tier: capability
+repo_fixture: 0eba748b36cb57f4cda693764918aad2f8ff15a5
+prompt: |
+  A restored shell tab comes back where it was
+
+  MEASURED 2026-09-04 on the operator's machine, from the store and the source, after the operator asked why 7 tabs did not come back from a server restart.
+
+  THE SITE, and it is a type. crates/fno/src/proto.rs:1042 defines SlotBinding with exactly two variants. Fno(String) carries an fno session id and its doc says it resolves to a live pane through the registry join. Shell is a UNIT variant whose whole doc is "An intentional empty shell slot". It carries no cwd, no command, no title, no scrollback handle. Nothing.
+
+  WHAT THAT MEANS AT CAPTURE. squad_store.rs:259 states the capture rule outright: "Slot names are decided at CAPTURE (an fno pane names its slot its attach id and binds Fno; anything else is p<ordinal> binding Shell)". So a pane fno launched is captured with a resolvable identity, and a shell the OPERATOR opened is captured as the fact that a pane occupied that position. The store is insuring the fleet's panes and treating the operator's own terminals as disposable.
+
+  THE MEASUREMENT. ~/.fno/squads.json, squad key d7108fab, origin /Users/bb16/code/footnote/footnote, holds 28 tab_trees. 16 carry a real binding, worker:claude:<uuid> or worker:codex:<uuid>, and are in principle restorable. 11 are the byte-identical placeholder {"tab_name": null, "tree": {"slot": "p1"}, "slots": [{"name": "p1", "binding": "shell"}], "focus": "p1"}. 1 carries tab_name "claude" and still binds shell. Across all 28, tab_name is non-null exactly ONCE.
+
+  THE SECOND HALF, which closes the door the first left open. StoredTabSpec's doc at squad_store.rs:241 says it is "Keyed by tab_name, the durable tab identity (x-0f9d) - an unnamed tab has no stable key and is never persisted." An operator's tabs read ·1 through ·7 in fno mux pane ls. The dot-N form is a positional display, not a name. So they are unnamed, they have no stable key, and by this rule they are never persisted. tab_specs is [] on all four squads in the live store, which is that rule showing its work.
+
+  SO THE ANSWER TO "WHY DIDN'T IT SAVE 7 TABS". It did save that seven panes existed and where they sat in the tree. That is the most the Shell variant can express. It saved nothing about what any of them WAS, because the type has no field to put it in. Restore then re-creates seven empty shells in a default cwd, which is faithful to the record and useless to the operator.
+
+  WHAT TO BUILD, for the plan to decide. Give the Shell variant a payload: at minimum the cwd, and the running command where one is recoverable from the pty's foreground process group. That is a serde change on a persisted enum, so it needs the same no-bump treatment tab_specs and tab_trees already got (#[serde(default)], an absent field loading to None, no squad quarantined). Whether an unnamed tab should also mint a durable key the way an unnamed SQUAD already does via mint_key is the second question, and mint_key is the prior art to read: the squad model already solved exactly this identity problem one level up.
+
+  VERIFY BY A POSITIVE MARKER, never by an absence. Assert BY NAME that a squad captured with a shell pane whose cwd is a named directory persists a tab_trees slot carrying THAT directory, and that restore re-creates the pane with that cwd. Read the cwd back from the restored pane, not from the store. A test that only checks tab count survives passes today: the count already survives, and the count is the part that was never broken.
+
+  WHAT THIS IS NOT. Not a save-on-exit bug. squads.json is written continuously, mtime 12:54:01 against a 12:23 server kill. The store ran correctly and wrote exactly what its types can hold.
+grade:
+  - kind: exit
+    command: "git checkout f02c3f760f2042dfca9bc6e1582e64d844e8065c -- crates/fno/tests/mux_restore_shell_cwd_e2e.rs && (cd crates/fno && cargo test --test mux_restore_shell_cwd_e2e)"
+timeout_minutes: 45
+tags: [harness-fit]
