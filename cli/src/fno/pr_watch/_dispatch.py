@@ -1362,16 +1362,14 @@ def run_execute_queue(
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
-                if (park := "checks-red" if bare.startswith("checks are red") else next(
-                    (word for word in (WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)
-                     if bare.startswith(word)), None
-                )):
-                    # A red hold never clears by retrying: the healer or the
-                    # worker owns the next push; worktree holds wait for their
-                    # worker. Park with the reason and the held PR head so the
-                    # sweep resumes the row when that head moves.
-                    entry["parked"] = park
-                    entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
+                if bare.startswith(("checks are red", WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)):
+                    entry["parked"] = park = "checks-red" if bare.startswith("checks are red") else bare.split(":", 1)[0]
+                    # Park these head-bound holds until a sweep sees a later PR head.
+                    try:
+                        entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
+                    except Exception as exc:  # noqa: BLE001 - a failed read still parks
+                        log.warning("pr-watch: PR #%d head read failed while parking: %s", pr, exc)
+                        entry["parked_head"] = None
                     store.set(key, entry)
                     emit("pr_watch_parked", {"pr": pr, "reason": park})
                     _notify_parked_pr(

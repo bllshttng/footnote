@@ -4038,7 +4038,10 @@ class TestDurableGrantExecution:
             for event in next_deps["events"]
         )
 
-    def test_head_bound_hold_parks_when_pr_head_cannot_be_read(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("raise_error", [False, True])
+    def test_head_bound_hold_parks_when_pr_head_cannot_be_read(
+        self, tmp_path, monkeypatch, raise_error
+    ):
         """An unavailable REST head does not turn a head-bound hold into a retry."""
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
@@ -4046,7 +4049,11 @@ class TestDurableGrantExecution:
             monkeypatch, 2,
             reason="held: worktree_dirty: /w carries uncommitted changes",
         )
-        monkeypatch.setattr("fno.pr._merge._pr_head_oid", lambda _pr, _repo: None)
+        def _read_head(_pr, _repo):
+            if raise_error:
+                raise OSError("gh unavailable")
+
+        monkeypatch.setattr("fno.pr._merge._pr_head_oid", _read_head)
         self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
         from fno.pr_watch._state import WatermarkStore
