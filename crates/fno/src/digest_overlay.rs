@@ -25,6 +25,9 @@ use crate::proto;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const DEFAULT_THRESHOLD_MIN: u64 = 10;
 /// Fail-open budget for the fold shell-out; a slow `fno-agents` yields no
 /// overlay rather than stalling the attach (AC-error: >800ms => no overlay).
@@ -1346,9 +1349,6 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dev_profile_dir_recognizes_both_cargo_binary_shapes() {
@@ -1426,7 +1426,9 @@ mod tests {
 
     #[test]
     fn the_top_ladder_reads_the_project_tier_the_explicit_reader_ignores() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = super::ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("fno-top-ladder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let proj_state = base.join("proj-state");
@@ -1802,11 +1804,8 @@ mod user_theme_tests {
     use crate::proto::Color;
     use crate::theme::{ground_set, Theme};
     use std::path::Path;
-    use std::sync::Mutex;
 
-    // Serializes the two env-pinned tests below (the outer tests module
-    // keeps its own lock; siblings never share one).
-    static FOLDER_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::ENVIRONMENT_LOCK;
 
     fn spec(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -1815,8 +1814,7 @@ mod user_theme_tests {
             .collect()
     }
 
-    #[test]
-    fn a_user_theme_loads_inherits_and_overrides() {
+    fn assert_user_theme_loads_inherits_and_overrides() {
         let (t, w) = materialize_user_theme(
             "midnight",
             &spec(&[
@@ -1834,8 +1832,7 @@ mod user_theme_tests {
         assert_eq!(t.sel, Theme::from_name("tokyo-night").0.sel);
     }
 
-    #[test]
-    fn the_default_inherit_is_the_brand_default_and_unknown_inherit_warns() {
+    fn assert_default_inherit_and_unknown_inherit_warn() {
         let (t, w) = materialize_user_theme("bare", &spec(&[]));
         assert!(w.is_empty());
         assert_eq!(t.inherit_from, "footnote-superscript");
@@ -1845,8 +1842,7 @@ mod user_theme_tests {
         assert_eq!(t.inherit_from, "footnote-superscript");
     }
 
-    #[test]
-    fn a_bad_hex_and_an_unknown_role_warn_and_are_ignored() {
+    fn assert_bad_hex_and_unknown_role_warn_and_are_ignored() {
         let (t, w) =
             materialize_user_theme("sloppy", &spec(&[("base", "#zzzzzz"), ("wat", "#112233")]));
         assert_eq!(w.len(), 2, "{w:?}");
@@ -1859,8 +1855,7 @@ mod user_theme_tests {
         );
     }
 
-    #[test]
-    fn a_user_theme_paints_its_ground_through_its_parents_palette() {
+    fn assert_user_theme_paints_its_ground_through_its_parents_palette() {
         let (t, w) = materialize_user_theme(
             "midnight",
             &spec(&[("inherit", "footnote-superscript"), ("base", "#0f0f14")]),
@@ -1874,6 +1869,14 @@ mod user_theme_tests {
         );
         // The parent's 16-slot table rides (OSC 4 slots emitted).
         assert!(s.contains("\x1b]4;0;"), "parent palette slots ride: {s:?}");
+    }
+
+    #[test]
+    fn user_theme_materialization_keeps_role_fallbacks_warnings_and_ground() {
+        assert_user_theme_loads_inherits_and_overrides();
+        assert_default_inherit_and_unknown_inherit_warn();
+        assert_bad_hex_and_unknown_role_warn_and_are_ignored();
+        assert_user_theme_paints_its_ground_through_its_parents_palette();
     }
 
     #[test]
@@ -1910,7 +1913,7 @@ mod user_theme_tests {
 
     #[test]
     fn the_theme_folder_is_the_lowest_layer_and_a_config_table_wins_per_role() {
-        let _env = FOLDER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENVIRONMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("fno-themes-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("themes");
@@ -1941,25 +1944,6 @@ mod user_theme_tests {
             Color::Rgb(0xff, 0x00, 0x00),
             "the config table wins the role"
         );
-        match ambient {
-            Some(v) => std::env::set_var("FNO_CONFIG", v),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-        set_themes_dir_for_test(None);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn a_folder_file_cannot_shadow_a_built_in() {
-        let _env = FOLDER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let base = std::env::temp_dir().join(format!("fno-themes-dir2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("themes");
-        std::fs::create_dir_all(&dir).unwrap();
-        set_themes_dir_for_test(Some(dir.clone()));
-        let ambient = std::env::var_os("FNO_CONFIG");
-        std::env::set_var("FNO_CONFIG", base.join("config.toml"));
-        std::fs::write(base.join("config.toml"), "").unwrap();
         std::fs::write(
             dir.join("gruvbox.toml"),
             "[mux.themes.gruvbox]\nbase = \"#010203\"\n",
@@ -1967,16 +1951,12 @@ mod user_theme_tests {
         .unwrap();
         let (themes, _) = user_themes(Path::new("/"));
         assert!(
-            themes.iter().any(|(n, _)| n == "gruvbox"),
+            themes.iter().any(|(name, _)| name == "gruvbox"),
             "the reader lists the folder name"
         );
-        let (t, w) = Theme::from_name_in("gruvbox", &themes);
-        assert_eq!(
-            t.base,
-            Theme::from_name("gruvbox").0.base,
-            "the built-in wins"
-        );
-        assert!(w.is_none());
+        let (theme, warning) = Theme::from_name_in("gruvbox", &themes);
+        assert_eq!(theme.base, Theme::from_name("gruvbox").0.base);
+        assert!(warning.is_none());
         match ambient {
             Some(v) => std::env::set_var("FNO_CONFIG", v),
             None => std::env::remove_var("FNO_CONFIG"),

@@ -25,7 +25,6 @@ pub(crate) enum Source {
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub(crate) name: String,
-    pub(crate) original_name: String,
     pub(crate) rename_reason: Option<String>,
     pub(crate) theme: Theme,
     pub(crate) spec: Vec<(String, String)>,
@@ -164,6 +163,14 @@ fn path_error(path: &Path, error: &std::io::Error) -> String {
 }
 
 pub(crate) async fn preview(source: &Source, cwd: &Path) -> Result<Preview, String> {
+    preview_with_theme_dir(source, cwd, crate::digest_overlay::themes_dir()).await
+}
+
+pub(crate) async fn preview_with_theme_dir(
+    source: &Source,
+    cwd: &Path,
+    theme_dir: Option<PathBuf>,
+) -> Result<Preview, String> {
     let input = match source {
         Source::File(path) => InputFile::One(path.clone()),
         Source::Folder(path) => InputFile::Many(folder_files(path)?),
@@ -196,7 +203,7 @@ pub(crate) async fn preview(source: &Source, cwd: &Path) -> Result<Preview, Stri
         }
     };
 
-    let mut names = taken_names(cwd);
+    let mut names = taken_names(cwd, theme_dir.as_deref());
     let mut candidates = Vec::new();
     for (source_name, text) in files {
         let stem = if source_name.starts_with("https://") {
@@ -283,7 +290,7 @@ fn read_theme_file(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{} is not valid UTF-8.", path.display()))
 }
 
-fn taken_names(cwd: &Path) -> HashSet<String> {
+fn taken_names(cwd: &Path, theme_dir: Option<&Path>) -> HashSet<String> {
     let mut names = crate::theme::THEME_NAMES
         .iter()
         .map(|name| name.to_string())
@@ -294,7 +301,7 @@ fn taken_names(cwd: &Path) -> HashSet<String> {
             .into_iter()
             .map(|(name, _)| name.to_ascii_lowercase()),
     );
-    if let Some(dir) = crate::digest_overlay::themes_dir() {
+    if let Some(dir) = theme_dir {
         if let Ok(entries) = fs::read_dir(dir) {
             names.extend(entries.flatten().filter_map(|entry| {
                 entry
@@ -329,21 +336,20 @@ pub(crate) fn parse_theme_text(
             "dim",
             "chip",
         ];
-        let spec = roles
-            .iter()
-            .filter_map(|key| {
-                table.get(*key).map(|value| {
+        if roles.iter().any(|key| table.contains_key(*key)) {
+            let spec = table
+                .iter()
+                .filter(|(_, value)| !value.is_table() && !value.is_array())
+                .map(|(key, value)| {
                     (
-                        (*key).to_string(),
+                        key.clone(),
                         value
                             .as_str()
                             .map(str::to_string)
                             .unwrap_or_else(|| value.to_string()),
                     )
                 })
-            })
-            .collect::<Vec<_>>();
-        if !spec.is_empty() {
+                .collect::<Vec<_>>();
             return Ok(vec![(stem.to_string(), spec)]);
         }
     }
@@ -495,10 +501,15 @@ pub(crate) fn candidate(
     taken: &HashSet<String>,
 ) -> Result<Candidate, String> {
     let name = final_name(raw_name, taken)?;
+    let builtin = crate::theme::THEME_NAMES
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(raw_name));
     let collided = taken.iter().any(|held| held.eq_ignore_ascii_case(raw_name));
     let rename_reason = (name != raw_name).then(|| {
-        if collided {
-            format!("{raw_name} is already a built-in or user theme")
+        if builtin {
+            format!("{raw_name} is a shipped theme")
+        } else if collided {
+            format!("{raw_name} is already your theme")
         } else {
             format!("{raw_name} was normalized for a file name")
         }
@@ -506,7 +517,6 @@ pub(crate) fn candidate(
     let (theme, warnings) = crate::digest_overlay::materialize_user_theme(&name, &spec);
     Ok(Candidate {
         name,
-        original_name: raw_name.to_string(),
         rename_reason,
         theme,
         spec,
@@ -695,8 +705,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[tokio::test]
-    async fn local_and_github_sources_are_bounded_and_canonical() {
+    async fn assert_local_and_github_sources_are_bounded_and_canonical() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("theme.toml"), "base = \"#112233\"").unwrap();
         assert_eq!(
@@ -753,7 +762,7 @@ mod tests {
         ] {
             assert!(
                 parse_source(url, root.path()).unwrap_err().contains(reason),
-                "{url}"
+                "refusal should name {reason}"
             );
         }
         let too_large = root.path().join("large.toml");
@@ -808,24 +817,20 @@ mod tests {
             .1
             .iter()
             .any(|(key, value)| key == "inherit" && value == "footnote-paper"));
-        let invalid = candidate(
-            "bad",
-            vec![
-                ("base".into(), "#zzzzzz".into()),
-                ("unknown".into(), "red".into()),
-                ("inherit".into(), "not-a-built-in".into()),
-            ],
-            &HashSet::new(),
+        let invalid_spec = parse_theme_text(
+            "[mux.themes.bad]\nbase = \"#zzzzzz\"\nunknown = \"red\"\ninherit = \"not-a-built-in\"",
+            "ignored",
         )
-        .unwrap();
+        .unwrap()
+        .remove(0);
+        let invalid = candidate(&invalid_spec.0, invalid_spec.1, &HashSet::new()).unwrap();
         assert_eq!(invalid.warnings.len(), 3);
         let refused_dir = tempfile::tempdir().unwrap();
         assert!(save_all(refused_dir.path(), &[invalid], "local", "2026-09-29").is_err());
         assert_eq!(fs::read_dir(refused_dir.path()).unwrap().count(), 0);
     }
 
-    #[tokio::test]
-    async fn fetch_and_save_refuse_oversize_and_never_replace_a_theme() {
+    async fn assert_fetch_and_save_refuse_oversize_and_never_replace_a_theme() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let program = root.path().join("curl-stub.sh");
@@ -862,7 +867,6 @@ mod tests {
         }
         let item = Candidate {
             name: "midnight".into(),
-            original_name: "midnight".into(),
             rename_reason: None,
             theme: Theme::default_theme(),
             spec: vec![("base".into(), "#112233".into())],
@@ -898,5 +902,11 @@ mod tests {
         let batch = preview(&Source::Folder(folder), root.path()).await.unwrap();
         assert_eq!(batch.candidates.len(), 1);
         assert_eq!(batch.skipped.len(), 31);
+    }
+
+    #[tokio::test]
+    async fn import_sources_and_persistence_stay_bounded() {
+        assert_local_and_github_sources_are_bounded_and_canonical().await;
+        assert_fetch_and_save_refuse_oversize_and_never_replace_a_theme().await;
     }
 }
