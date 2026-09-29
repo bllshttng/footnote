@@ -212,6 +212,11 @@ jobs:
           python-version: "3.12"
       - name: Install PyYAML
         run: python3 -m pip install --quiet "pyyaml>=6"
+      # The generator fail-closes when it cannot verify pack manifests through
+      # the in-tree fno-py (`uv run --project cli`); without uv the job dies
+      # refusing every pack, never green.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
       - name: Run the bundle freshness check
         run: bash scripts/lint/check-skill-bundles-fresh.sh
 
