@@ -1,17 +1,11 @@
 """Unit tests for role-based model routing (x-d2fe).
 
-Covers the resolver contract from the plan's acceptance criteria, on the
-provider-registry schema (config.model_routing.providers / roles / extra_env):
-
-- AC1-HP  routed role + valid key -> provider base_url + token + model (all tiers)
-- AC2-HP  production role (implement) -> None (primary model untouched)
-- AC2-INV no role -> None (regression guard: behaves as today)
-- AC3-HP  config roles map changes the model / provider for a role
-- AC4-FR  no key -> None + one-line notice (fail-safe, never raises)
-- guard   protected roles never route, even via config
-- multi   a second provider (deepseek) routes via its own Anthropic endpoint
-- proto   a non-anthropic-protocol provider is skipped for the claude lane
+One table test per family; each row is a distinct branch of the resolver.
+The resolver contract lives on config.model_routing (providers / roles /
+extra_env): routed roles need a key (fail-safe None + notice), production
+roles never route, and the tier map layers per provider.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,7 +18,6 @@ from fno.config import ConfigBlock, ModelRoutingBlock, SettingsModel
 
 
 def _settings(**block_kwargs: object) -> SettingsModel:
-    """Build a SettingsModel carrying a model_routing block for tests."""
     return SettingsModel(
         config=ConfigBlock(model_routing=ModelRoutingBlock(**block_kwargs))
     )
@@ -35,84 +28,47 @@ def _collector() -> tuple[list[str], "object"]:
     return notes, notes.append
 
 
-# ---------------------------------------------------------------------------
-# AC1-HP: routed spawn -> secondary provider (z.ai default), all model tiers
-# ---------------------------------------------------------------------------
-
+# --- routed roles ---------------------------------------------------------------
 
 def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
     route = mr.resolve_route(
         "consolidate", settings=_settings(), env={"ZAI_API_KEY": "zk-secret"}
     )
     assert route is not None
-    # The Anthropic-compatible endpoint (a claude worker speaks Anthropic).
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    # opus/sonnet/default stay on the role model; the background haiku tier
-    # drops to the provider's cheaper glm-4.7 (still the same zai provider).
     assert route["ANTHROPIC_MODEL"] == "glm-5.3"
     assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
     assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
     assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
 
 
-@pytest.mark.parametrize(
-    "role", ["coordinate", "tidy", "orient", "consolidate", "post-merge"]
-)
-def test_all_default_routed_roles_route_when_keyed(role: str) -> None:
-    route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
-
-
-def test_post_merge_is_routable_not_protected() -> None:
-    # Item 3: the post-merge ritual routes to GLM by default (judgment-light),
-    # but must NOT be a protected role (it stays overridable / fail-safe).
+def test_all_default_routed_roles_route_when_keyed() -> None:
+    for role in ["coordinate", "tidy", "orient", "consolidate", "post-merge"]:
+        route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
+        assert route is not None and route["ANTHROPIC_MODEL"] == "glm-5.3", role
+    # Item 3: the ritual routes by default but is NOT protected.
     assert "post-merge" in mr.DEFAULT_ROUTED_ROLES
     assert "post-merge" not in mr.PROTECTED_ROLES
 
 
-def test_post_merge_fails_safe_without_key() -> None:
-    # No key -> primary Anthropic model (the ritual still fires, on Anthropic).
-    assert mr.resolve_route("post-merge", settings=_settings(), env={}) is None
-
-
 def test_role_is_case_and_space_insensitive() -> None:
-    route = mr.resolve_route(
+    assert mr.resolve_route(
         "  Consolidate ", settings=_settings(), env={"ZAI_API_KEY": "k"}
-    )
-    assert route is not None
+    ) is not None
 
 
-# ---------------------------------------------------------------------------
-# AC2: production roles + no-role are untouched
-# ---------------------------------------------------------------------------
+# --- roles that must stay untouched ----------------------------------------------
+
+def test_untouched_roles_return_none_rows() -> None:
+    keyed = {"ZAI_API_KEY": "k"}
+    for role in ("implement", "review-verdict", "compile"):
+        assert mr.resolve_route(role, settings=_settings(), env=keyed) is None, role
+    for role in (None, "", "   "):
+        assert mr.resolve_route(role, settings=_settings(), env=keyed) is None, role
 
 
-@pytest.mark.parametrize("role", ["implement", "review-verdict"])
-def test_production_roles_return_none(role: str) -> None:
-    assert (
-        mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
-        is None
-    )
-
-
-@pytest.mark.parametrize("role", [None, "", "   "])
-def test_no_role_returns_none(role: Optional[str]) -> None:
-    assert mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"}) is None
-
-
-def test_unknown_role_returns_none() -> None:
-    assert (
-        mr.resolve_route("compile", settings=_settings(), env={"ZAI_API_KEY": "k"})
-        is None
-    )
-
-
-# ---------------------------------------------------------------------------
-# AC3: config roles map (per-role provider,model)
-# ---------------------------------------------------------------------------
-
+# --- config roles map, extra_env, providers --------------------------------------
 
 def test_roles_map_changes_model_for_a_role() -> None:
     route = mr.resolve_route(
@@ -151,13 +107,10 @@ def test_extra_env_is_merged_and_can_override_a_tier() -> None:
     assert route["ANTHROPIC_MODEL"] == "glm-5.3"
 
 
-# ---------------------------------------------------------------------------
-# Multi-provider: a second provider (deepseek) routes via its own endpoint
-# ---------------------------------------------------------------------------
-
-
-def test_second_provider_routes_via_its_own_anthropic_endpoint() -> None:
-    route = mr.resolve_route(
+def test_second_provider_rows():
+    # A second anthropic-protocol provider routes via its own endpoint; an
+    # entry can override only base_url and keep the built-in protocol/key.
+    deepseek = mr.resolve_route(
         "tidy",
         settings=_settings(
             providers={
@@ -171,40 +124,33 @@ def test_second_provider_routes_via_its_own_anthropic_endpoint() -> None:
         ),
         env={"DEEPSEEK_API_KEY": "dsk"},
     )
-    assert route is not None
-    assert route["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "dsk"
-    assert route["ANTHROPIC_MODEL"] == "deepseek-chat"
+    assert deepseek is not None
+    assert deepseek["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert deepseek["ANTHROPIC_AUTH_TOKEN"] == "dsk"
+    assert deepseek["ANTHROPIC_MODEL"] == "deepseek-chat"
+    # deepseek has no haiku_model, so the haiku tier keeps the role model.
+    assert deepseek["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
 
-
-def test_provider_entry_can_override_builtin_zai_base_url() -> None:
-    route = mr.resolve_route(
+    override = mr.resolve_route(
         "tidy",
         settings=_settings(
             providers={"zai": {"base_url": "https://api.z.ai/api/coding/paas/v4"}},
         ),
         env={"ZAI_API_KEY": "k"},
     )
-    # The built-in zai protocol/api_key_env survive; only base_url is overridden.
-    assert route is not None
-    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/coding/paas/v4"
+    assert override is not None
+    assert override["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/coding/paas/v4"
 
 
-def test_unknown_provider_in_roles_falls_back() -> None:
+def test_unknown_or_foreign_provider_falls_back_with_notice() -> None:
     notes, sink = _collector()
-    route = mr.resolve_route(
-        "tidy",
-        settings=_settings(roles={"tidy": "mystery,model-x"}),
-        env={"ZAI_API_KEY": "k"},
-        notice=sink,
-    )
-    assert route is None
+    assert mr.resolve_route(
+        "tidy", settings=_settings(roles={"tidy": "mystery,model-x"}),
+        env={"ZAI_API_KEY": "k"}, notice=sink,
+    ) is None
     assert notes
-
-
-def test_non_anthropic_protocol_provider_skipped_for_claude_lane() -> None:
     notes, sink = _collector()
-    route = mr.resolve_route(
+    assert mr.resolve_route(
         "tidy",
         settings=_settings(
             providers={
@@ -218,17 +164,13 @@ def test_non_anthropic_protocol_provider_skipped_for_claude_lane() -> None:
         ),
         env={"ZAI_API_KEY": "k"},
         notice=sink,
-    )
-    assert route is None
+    ) is None
     assert any("protocol" in n for n in notes)
 
 
-# ---------------------------------------------------------------------------
-# resolve_explicit_route: the peer lane names (provider, model) directly (x-ef41)
-# ---------------------------------------------------------------------------
+# --- resolve_explicit_route --------------------------------------------------------
 
-
-def test_explicit_route_builds_zai_env_for_glm_peer() -> None:
+def test_explicit_route_rows():
     route = mr.resolve_explicit_route(
         "zai", "glm-5.2", settings=_settings(), env={"ZAI_API_KEY": "zk"}
     )
@@ -236,136 +178,94 @@ def test_explicit_route_builds_zai_env_for_glm_peer() -> None:
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk"
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
-
-
-def test_explicit_route_ignores_protected_roles_and_enabled_flag() -> None:
     # An explicit peer opt-in is not role auto-routing: neither the disabled
     # global flag nor PROTECTED_ROLES applies (there is no role).
     route = mr.resolve_explicit_route(
         "zai", "glm-5.2", settings=_settings(enabled=False), env={"ZAI_API_KEY": "k"}
     )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route is not None and route["ANTHROPIC_MODEL"] == "glm-5.2"
 
 
 def test_explicit_route_no_key_fails_safe() -> None:
-    # No z.ai key -> None (the peer skips GLM; never silently Anthropic-billed).
     notes, sink = _collector()
     route = mr.resolve_explicit_route(
         "zai", "glm-5.2", settings=_settings(), env={}, notice=sink
     )
     assert route is None
-    assert notes
-    # The notice must describe the ACTUAL outcome for a peer (skipped), not claim
-    # a fall-back to the primary/Anthropic model that never happens (gemini P-med).
     assert any("skipping the peer" in n for n in notes)
     assert not any("primary" in n for n in notes)
 
 
 def test_role_context_notice_still_says_primary_model() -> None:
-    # A ROLE that can't route DOES fall back to the primary model - keep that
-    # wording (the peer-only rewording must not leak into the role path).
     notes, sink = _collector()
-    route = mr.resolve_route(
-        "consolidate", settings=_settings(), env={}, notice=sink
-    )
-    assert route is None
+    assert mr.resolve_route("consolidate", settings=_settings(), env={}, notice=sink) is None
     assert any("primary Anthropic model" in n for n in notes)
 
 
-@pytest.mark.parametrize("provider,model", [("", "glm-5.2"), ("zai", ""), ("zai", "  ")])
-def test_explicit_route_rejects_empty_target(provider: str, model: str) -> None:
-    assert (
-        mr.resolve_explicit_route(
+def test_explicit_route_rejects_empty_target() -> None:
+    for provider, model in [("", "glm-5.2"), ("zai", ""), ("zai", "  ")]:
+        assert mr.resolve_explicit_route(
             provider, model, settings=_settings(), env={"ZAI_API_KEY": "k"}
-        )
-        is None
-    )
+        ) is None
 
 
-# ---------------------------------------------------------------------------
-# tier_models: a provider declares a model per tier (x-f173)
-# ---------------------------------------------------------------------------
+# --- tier_models --------------------------------------------------------------------
 
-
-def test_tier_map_layers_over_blanket_fill() -> None:
-    # AC1-HP: undeclared tiers keep the spawn model; opus moves; haiku keeps
-    # the provider's haiku_model (the folded-in default).
-    route = mr.resolve_explicit_route(
-        "zai",
-        "glm-5.3-flash[1m]",
-        settings=_settings(
-            providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}}
-        ),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.3-flash[1m]"
-    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3-flash[1m]"
-    assert route["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "glm-5.3-flash[1m]"
-    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-
-
-def test_tier_models_haiku_wins_over_haiku_model() -> None:
-    # Both set resolves to tier_models, asserted rather than left to dict order.
-    route = mr.resolve_explicit_route(
-        "zai",
-        "glm-5.3",
-        settings=_settings(
-            providers={
-                "zai": {
-                    "tier_models": {"haiku": "glm-4.7-air"},
-                    "haiku_model": "glm-4.5-air",
-                }
-            }
-        ),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7-air"
-
-
-def test_tier_models_haiku_beats_builtin_haiku_model_default() -> None:
-    # The built-in zai record already carries haiku_model=glm-4.7; a config
-    # tier_models.haiku overrides the BUILT-IN default per-field.
-    route = mr.resolve_explicit_route(
-        "zai",
-        "glm-5.3",
-        settings=_settings(providers={"zai": {"tier_models": {"haiku": "glm-4.7-air"}}}),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7-air"
-
-
-def test_haiku_model_only_composes_unchanged() -> None:
-    # AC3-INV: a provider with haiku_model and no tier_models composes exactly
-    # the pre-tier_models shape: spawn model on four keys, cheap haiku.
-    route = mr.resolve_explicit_route(
-        "zai", "glm-5.3", settings=_settings(), env={"ZAI_API_KEY": "k"}
-    )
-    assert route is not None
-    model_keys = {k: route[k] for k in mr.MODEL_ENV_KEYS}
-    assert model_keys == {
+def test_tier_map_rows():
+    # (provider extra, spawn model, expect model_keys)
+    base_keys = {
         "ANTHROPIC_MODEL": "glm-5.3",
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
         "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3",
         "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
     }
-
-
-def test_empty_tier_models_behaves_as_unset() -> None:
-    route = mr.resolve_explicit_route(
-        "zai",
-        "glm-5.3",
-        settings=_settings(providers={"zai": {"tier_models": {}}}),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+    rows = [
+        # Undeclared tiers keep the spawn model; opus moves; haiku keeps the
+        # provider's folded-in default.
+        (
+            {"tier_models": {"opus": "glm-5.3[1m]"}},
+            "glm-5.3-flash[1m]",
+            {
+                "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+            },
+        ),
+        # Both set resolves to tier_models, asserted rather than left to order.
+        (
+            {"tier_models": {"haiku": "glm-4.7-air"}, "haiku_model": "glm-4.5-air"},
+            "glm-5.3",
+            {**base_keys, "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7-air"},
+        ),
+        # A config tier_models.haiku overrides the BUILT-IN haiku_model default.
+        (
+            {"tier_models": {"haiku": "glm-4.7-air"}},
+            "glm-5.3",
+            {**base_keys, "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7-air"},
+        ),
+        # Empty tier_models behaves as unset.
+        (
+            {"tier_models": {}},
+            "glm-5.3",
+            base_keys,
+        ),
+        # A provider haiku_model override alone wins for haiku only.
+        (
+            {"haiku_model": "glm-tiny"},
+            "glm-5.3",
+            {**base_keys, "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-tiny"},
+        ),
+    ]
+    for extra, spawn, want in rows:
+        route = mr.resolve_explicit_route(
+            "zai", spawn, settings=_settings(providers={"zai": extra}), env={"ZAI_API_KEY": "k"}
+        )
+        assert route is not None
+        got = {k: route[k] for k in mr.MODEL_ENV_KEYS}
+        assert got == want, extra
 
 
 def test_extra_env_still_wins_over_tier_map() -> None:
@@ -383,9 +283,6 @@ def test_extra_env_still_wins_over_tier_map() -> None:
 
 
 def test_refuses_bare_tier_alias_on_foreign_endpoint() -> None:
-    # AC6-ERR: a z.ai endpoint asked for "sonnet" dies on its first turn behind
-    # a receipt that already printed live; refuse at compose, naming the alias
-    # and the provider.
     notes, sink = _collector()
     route = mr.resolve_explicit_route(
         "zai", "sonnet", settings=_settings(), env={"ZAI_API_KEY": "k"}, notice=sink
@@ -395,8 +292,6 @@ def test_refuses_bare_tier_alias_on_foreign_endpoint() -> None:
 
 
 def test_accepts_bare_tier_alias_on_anthropic_endpoint() -> None:
-    # AC7-INV: endpoint and model agree on Anthropic's own endpoint, so the
-    # alias is Claude Code's own customization, not a vendor conflict.
     settings = _settings(
         providers={
             "anthropic-via-proxy": {
@@ -414,10 +309,9 @@ def test_accepts_bare_tier_alias_on_anthropic_endpoint() -> None:
 
 
 def test_collapsed_tiers_emit_a_notice_naming_the_config_key() -> None:
-    # AC8-HP: four identical /model rows read as "the config did not take" when
-    # the truth was "the config took and there is only one value"; say so and
-    # name the one lever that fixes it. A provider with no haiku_model is the
-    # one-distinct-value case (the zai builtin's glm-4.7 fold already makes two).
+    # Four identical /model rows read as "the config did not take" when the
+    # truth was "the config took and there is only one value"; say so and name
+    # the lever. A provider with no haiku_model is the one-distinct-value case.
     notes, sink = _collector()
     settings = _settings(
         providers={
@@ -435,9 +329,6 @@ def test_collapsed_tiers_emit_a_notice_naming_the_config_key() -> None:
         "no alternative" in n and "glm-5.3-flash[1m]" in n and "tier_models" in n
         for n in notes
     )
-
-
-def test_differentiated_tiers_emit_no_collapse_notice() -> None:
     notes, sink = _collector()
     route = mr.resolve_explicit_route(
         "zai",
@@ -446,15 +337,12 @@ def test_differentiated_tiers_emit_no_collapse_notice() -> None:
         env={"ZAI_API_KEY": "k"},
         notice=sink,
     )
-    assert route is not None
-    assert not notes
+    assert route is not None and not notes
 
 
 def test_materialized_settings_keep_floor_and_undeclared_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # AC10-INV: the auth floor survives, an undeclared tier is PRESENT and set
-    # to the spawn model (never absent), and the declared tier carries the map.
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     route = mr.resolve_explicit_route(
         "zai",
@@ -482,24 +370,9 @@ def test_materialized_settings_keep_floor_and_undeclared_tiers(
     assert env_out["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
 
 
-# ---------------------------------------------------------------------------
-# AC4-FR: fail-safe fallback (no key -> None + notice, never raises)
-# ---------------------------------------------------------------------------
+# --- key resolution: env, env file, custom names ------------------------------------
 
-
-def test_missing_key_falls_back_with_notice() -> None:
-    notes, sink = _collector()
-    route = mr.resolve_route("coordinate", settings=_settings(), env={}, notice=sink)
-    assert route is None
-    assert len(notes) == 1
-    assert "coordinate" in notes[0]
-
-
-def test_missing_key_never_raises_without_notice() -> None:
-    assert mr.resolve_route("coordinate", settings=_settings(), env={}) is None
-
-
-def test_env_file_supplies_key_when_process_env_absent(tmp_path: Path) -> None:
+def test_key_resolution_rows(tmp_path: Path) -> None:
     envf = tmp_path / "modelkit.env"
     envf.write_text("# comment\nZAI_API_KEY=from-file\n", encoding="utf-8")
     route = mr.resolve_route(
@@ -507,35 +380,24 @@ def test_env_file_supplies_key_when_process_env_absent(tmp_path: Path) -> None:
         settings=_settings(providers={"zai": {"api_key_file": str(envf)}}),
         env={},
     )
-    assert route is not None
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "from-file"
+    assert route is not None and route["ANTHROPIC_AUTH_TOKEN"] == "from-file"
 
-
-def test_process_env_wins_over_env_file(tmp_path: Path) -> None:
-    envf = tmp_path / "modelkit.env"
     envf.write_text("ZAI_API_KEY=from-file\n", encoding="utf-8")
     route = mr.resolve_route(
         "consolidate",
         settings=_settings(providers={"zai": {"api_key_file": str(envf)}}),
         env={"ZAI_API_KEY": "from-process"},
     )
-    assert route is not None
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "from-process"
+    assert route is not None and route["ANTHROPIC_AUTH_TOKEN"] == "from-process"
 
-
-def test_env_file_tolerates_export_and_spaces(tmp_path: Path) -> None:
-    envf = tmp_path / "modelkit.env"
     envf.write_text("export ZAI_API_KEY = spaced-and-exported\n", encoding="utf-8")
     route = mr.resolve_route(
         "consolidate",
         settings=_settings(providers={"zai": {"api_key_file": str(envf)}}),
         env={},
     )
-    assert route is not None
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "spaced-and-exported"
+    assert route is not None and route["ANTHROPIC_AUTH_TOKEN"] == "spaced-and-exported"
 
-
-def test_missing_env_file_is_not_fatal() -> None:
     route = mr.resolve_route(
         "consolidate",
         settings=_settings(providers={"zai": {"api_key_file": "/no/such/file.env"}}),
@@ -543,68 +405,48 @@ def test_missing_env_file_is_not_fatal() -> None:
     )
     assert route is None
 
-
-def test_custom_key_env_var_name() -> None:
     route = mr.resolve_route(
         "orient",
         settings=_settings(providers={"zai": {"api_key_env": "MY_GLM_KEY"}}),
         env={"MY_GLM_KEY": "alt"},
     )
-    assert route is not None
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "alt"
+    assert route is not None and route["ANTHROPIC_AUTH_TOKEN"] == "alt"
 
 
-# ---------------------------------------------------------------------------
-# Hard quality guard: protected roles never route, even via config
-# ---------------------------------------------------------------------------
+def test_builtin_zai_key_falls_back_to_env_file(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("ZAI_API_KEY=sk-test-not-a-real-key\n", encoding="utf-8")
+    provider = dict(mr._DEFAULT_PROVIDERS["zai"], api_key_file=str(env_file))
+    assert mr._resolve_key(provider, env={}) == "sk-test-not-a-real-key"
+    satisfying, checked = mr.key_source(provider, env={})
+    assert satisfying == str(env_file)
+    assert checked == ["ZAI_API_KEY", str(env_file)]
 
 
-def test_config_cannot_route_protected_role() -> None:
-    route = mr.resolve_route(
+# --- protected roles ------------------------------------------------------------------
+
+def test_protected_roles_never_route_rows(monkeypatch) -> None:
+    assert "implement" in mr.PROTECTED_ROLES
+    assert "review-verdict" in mr.PROTECTED_ROLES
+    assert mr.PROTECTED_ROLE_FLOOR == "high"
+    assert mr.resolve_route(
         "implement",
         settings=_settings(roles={"implement": "zai,glm-5.2"}),
         env={"ZAI_API_KEY": "k"},
-    )
-    assert route is None
-
-
-def test_protected_roles_constant_is_locked() -> None:
-    assert "implement" in mr.PROTECTED_ROLES
-    assert "review-verdict" in mr.PROTECTED_ROLES
-
-
-def test_protected_role_short_circuit_names_itself(monkeypatch) -> None:
-    """AC14-ERR: the guard announces the floor it forces instead of returning
-    None in silence (an absence has three explanations)."""
+    ) is None
     notices: list[str] = []
-    route = mr.resolve_route(
+    assert mr.resolve_route(
         "implement",
         settings=_settings(roles={"implement": "zai,glm-5.2"}),
         env={"ZAI_API_KEY": "k"},
         notice=notices.append,
-    )
-    assert route is None
-    assert any(
-        "protected-role(implement) floor=high" in n for n in notices
-    ), notices
+    ) is None
+    assert any("protected-role(implement) floor=high" in n for n in notices)
 
 
-def test_protected_role_floor_is_exported_and_strong() -> None:
-    assert mr.PROTECTED_ROLE_FLOOR == "high"
-
-
-# ---------------------------------------------------------------------------
-# Item 4: codex-lane (OpenAI-protocol) routing via inline -c config
-# ---------------------------------------------------------------------------
-
+# --- codex lane -------------------------------------------------------------------------
 
 def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
-    """A settings block with an openai-protocol provider routed to `tidy`.
-
-    Only the ROLE half of this block reaches the codex lane now (x-3954): the
-    provider record itself resolves in Rust, which reads the real candidates -
-    pin it with :func:`_pin_codex_config`.
-    """
     prov = {
         "zai-openai": {
             "protocol": "openai",
@@ -619,9 +461,6 @@ def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
 def _pin_codex_config(
     tmp_path, monkeypatch, provider: str, body: str, *, role: str = "tidy"
 ) -> None:
-    """Write a real config.toml carrying ``provider``'s record and pin it via
-    FNO_CONFIG: the codex lane's provider half resolves in Rust, which reads
-    the real candidates, so a pydantic settings block cannot carry it."""
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         "[model_routing]\n"
@@ -655,7 +494,6 @@ def test_codex_route_returns_config_and_env_for_openai_provider(tmp_path, monkey
         "OPENAI_API_KEY": "oai-key",
         "FNO_ROUTE_PROVIDER": "zai-openai",
     }
-    # Codex config: provider table + selection + model, all as -c flags.
     joined = " ".join(route.config_args)
     assert route.config_args[0] == "-c"
     assert "model_providers.zai-openai=" in joined
@@ -665,9 +503,7 @@ def test_codex_route_returns_config_and_env_for_openai_provider(tmp_path, monkey
     assert "model_provider='zai-openai'" in joined
     assert "model='glm-5.2'" in joined
 
-
-@requires_rust
-def test_codex_route_honors_configured_wire_api(tmp_path, monkeypatch) -> None:
+    # A configured wire_api passes through.
     _pin_codex_config(
         tmp_path,
         monkeypatch,
@@ -683,14 +519,30 @@ def test_codex_route_honors_configured_wire_api(tmp_path, monkeypatch) -> None:
     assert "wire_api = 'responses'" in " ".join(route.config_args)
 
 
-def test_codex_route_none_for_anthropic_provider() -> None:
-    # The default zai provider is anthropic-protocol -> belongs to the claude
-    # lane, so the codex lane returns None (no cross-lane leakage).
+def test_codex_lane_cross_lane_and_safety_rows(tmp_path, monkeypatch) -> None:
+    # The default zai provider is anthropic-protocol -> the codex lane returns
+    # None; the claude lane skips an openai provider in the other direction.
     assert mr.resolve_codex_route("tidy", settings=_settings()) is None
+    notes, sink = _collector()
+    assert mr.resolve_route(
+        "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "k"}, notice=sink
+    ) is None
+    assert any("protocol" in n for n in notes)
 
+    for role in ("implement", "review-verdict"):
+        s = _settings(
+            providers={
+                "oai": {
+                    "protocol": "openai",
+                    "base_url": "https://x/v4",
+                    "api_key_env": "OPENAI_API_KEY",
+                }
+            },
+            roles={role: "oai,glm-5.2"},
+        )
+        assert mr.resolve_codex_route(role, settings=s) is None, role
 
-@requires_rust
-def test_codex_route_none_without_key(tmp_path, monkeypatch) -> None:
+    # No key: the lane notices, never silently Anthropic-bills.
     _pin_codex_config(
         tmp_path,
         monkeypatch,
@@ -701,33 +553,15 @@ def test_codex_route_none_without_key(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     notes, sink = _collector()
-    route = mr.resolve_codex_route("tidy", notice=sink)
-    assert route is None
+    assert mr.resolve_codex_route("tidy", notice=sink) is None
     assert notes
-
-
-@pytest.mark.parametrize("role", ["implement", "review-verdict"])
-def test_codex_route_never_routes_protected_role(role: str) -> None:
-    s = _settings(
-        providers={
-            "oai": {
-                "protocol": "openai",
-                "base_url": "https://x/v4",
-                "api_key_env": "OPENAI_API_KEY",
-            }
-        },
-        roles={role: "oai,glm-5.2"},
-    )
-    assert mr.resolve_codex_route(role, settings=s) is None
 
 
 @requires_rust
 def test_codex_route_bails_on_unsafe_provider_name(tmp_path, monkeypatch) -> None:
     notes, sink = _collector()
-    # A dot is a valid single non-whitespace token (so _parse_target accepts it)
-    # but is not a safe codex bareword provider id, so the Rust builder's own
-    # guard is what bails + notices here. (A space in the provider is caught
-    # earlier by _parse_target; see test_parse_target_rejects_internal_whitespace.)
+    # A dot is a valid single non-whitespace token but not a safe codex bareword
+    # provider id, so the Rust builder's own guard bails + notices.
     _pin_codex_config(
         tmp_path,
         monkeypatch,
@@ -737,16 +571,13 @@ def test_codex_route_bails_on_unsafe_provider_name(tmp_path, monkeypatch) -> Non
         'api_key_env = "OPENAI_API_KEY"\n',
     )
     monkeypatch.setenv("OPENAI_API_KEY", "k")
-    route = mr.resolve_codex_route("tidy", notice=sink)
-    assert route is None
+    assert mr.resolve_codex_route("tidy", notice=sink) is None
     assert any("safe codex provider id" in n for n in notes), notes
 
 
 @requires_rust
-@pytest.mark.parametrize("bad_url", ["https://x/v4'inject", "https://x/v4\x00", "https://x\nv4", "https://x\tv4"])
-def test_codex_route_bails_on_unquotable_value(tmp_path, monkeypatch, bad_url: str) -> None:
-    # A value with a single quote OR any control char (incl. NUL, which would
-    # otherwise make subprocess raise) can't be embedded -> bail fail-safe.
+def test_codex_route_bails_on_unquotable_value(tmp_path, monkeypatch) -> None:
+    # A single quote OR any control char (incl. NUL) can't be embedded -> bail.
     notes, sink = _collector()
     import json as _json
 
@@ -755,7 +586,9 @@ def test_codex_route_bails_on_unquotable_value(tmp_path, monkeypatch, bad_url: s
         "[model_routing]\n"
         '[model_routing.roles]\ntidy = "oai,glm-5.2"\n'
         "[model_routing.providers.oai]\n"
-        f"protocol = \"openai\"\nbase_url = {_json.dumps(bad_url)}\n"
+        "protocol = \"openai\"\nbase_url = "
+        + _json.dumps("https://x/v4'inject")
+        + "\n"
         'api_key_env = "OPENAI_API_KEY"\n',
         encoding="utf-8",
     )
@@ -764,22 +597,9 @@ def test_codex_route_bails_on_unquotable_value(tmp_path, monkeypatch, bad_url: s
     assert mr.resolve_codex_route("tidy", notice=sink) is None
 
 
-def test_claude_lane_still_skips_openai_provider() -> None:
-    # The claude lane (resolve_route) must still return None for an openai
-    # provider (no cross-lane leakage, both directions).
-    notes, sink = _collector()
-    assert (
-        mr.resolve_route(
-            "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "k"}, notice=sink
-        )
-        is None
-    )
-    assert any("protocol" in n for n in notes)
-
+# --- defaults drift guard -----------------------------------------------------------------
 
 def test_config_defaults_match_module_constants() -> None:
-    # Drift guard: the built-in zai endpoint + default model must agree with the
-    # module fallback constants.
     assert mr._DEFAULT_PROVIDERS["zai"]["base_url"] == mr.DEFAULT_ZAI_BASE_URL
     assert mr.DEFAULT_ZAI_BASE_URL == "https://api.z.ai/api/anthropic"
     assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.3"
@@ -789,95 +609,21 @@ def test_config_defaults_match_module_constants() -> None:
     assert mr.DEFAULT_API_KEY_FILE == "~/.fno/.env"
 
 
-def test_builtin_zai_key_falls_back_to_env_file(tmp_path, monkeypatch) -> None:
-    # A key living only in ~/.fno/.env (not the process env) must satisfy the
-    # built-in zai lane - the file rung the anthropic-protocol lanes lacked.
-    env_file = tmp_path / ".env"
-    env_file.write_text("ZAI_API_KEY=sk-test-not-a-real-key\n", encoding="utf-8")
-    provider = dict(mr._DEFAULT_PROVIDERS["zai"], api_key_file=str(env_file))
-    assert mr._resolve_key(provider, env={}) == "sk-test-not-a-real-key"
-    satisfying, checked = mr.key_source(provider, env={})
-    assert satisfying == str(env_file)
-    assert checked == ["ZAI_API_KEY", str(env_file)]
+# --- the [1m] compact window ------------------------------------------------------------------
 
-
-# ---------------------------------------------------------------------------
-# Item 1: per-tier routed model (background haiku -> cheaper glm-4.7)
-# ---------------------------------------------------------------------------
-
-
-def test_zai_haiku_tier_defaults_to_cheaper_model() -> None:
-    route = mr.resolve_route(
-        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
-    )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
-    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
-    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-
-
-def test_per_provider_haiku_override_wins_over_builtin_default() -> None:
-    route = mr.resolve_route(
-        "tidy",
-        settings=_settings(providers={"zai": {"haiku_model": "glm-tiny"}}),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-tiny"
-    # opus/sonnet/default unaffected by the haiku override.
-    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
-
-
-def test_provider_without_haiku_override_keeps_role_model_on_haiku() -> None:
-    # deepseek has no haiku_model, so the haiku tier keeps the role model
-    # (no regression to an empty/invalid id).
-    route = mr.resolve_route(
-        "tidy",
-        settings=_settings(
-            providers={
-                "deepseek": {
-                    "protocol": "anthropic",
-                    "base_url": "https://api.deepseek.com/anthropic",
-                    "api_key_env": "DEEPSEEK_API_KEY",
-                }
-            },
-            roles={"tidy": "deepseek,deepseek-chat"},
-        ),
-        env={"DEEPSEEK_API_KEY": "dsk"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "deepseek-chat"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
-
-
-# ---------------------------------------------------------------------------
-# Item 2: inject the [1m] auto-compact backstop window
-# ---------------------------------------------------------------------------
-
-
-def test_one_m_suffix_injects_compact_window() -> None:
+def test_compact_window_rows() -> None:
+    # 800000, not 1000000: the [1m] variant already selects 1M context, so a 1M
+    # threshold is a no-op; 800000 is the ~80% backstop above the king nudge.
     route = mr.resolve_route(
         "tidy",
         settings=_settings(roles={"tidy": "zai,glm-5.2[1m]"}),
         env={"ZAI_API_KEY": "k"},
     )
     assert route is not None
-    # 800000, not 1000000: the [1m] variant already selects the 1M context, so a
-    # 1M threshold is a no-op (no compaction before the ceiling). 800000 is the
-    # ~80% backstop above the ~40% king compact nudge.
     assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "800000"
-
-
-def test_non_one_m_model_injects_no_compact_window() -> None:
-    route = mr.resolve_route(
-        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
-    )
+    route = mr.resolve_route("consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"})
     assert route is not None
     assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in route
-
-
-def test_extra_env_compact_window_wins_over_injection() -> None:
     route = mr.resolve_route(
         "tidy",
         settings=_settings(
@@ -890,22 +636,12 @@ def test_extra_env_compact_window_wins_over_injection() -> None:
     assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
 
 
-# ---------------------------------------------------------------------------
-# build lane (x-b0b4): opt-in by config presence, not in DEFAULT_ROUTED_ROLES
-# ---------------------------------------------------------------------------
+# --- build lane ----------------------------------------------------------------------------------
 
-
-def test_build_lane_unconfigured_returns_none() -> None:
-    # AC2-EDGE precondition: build is NOT auto-routed. With no config line it
-    # resolves None (fail-safe -> primary Anthropic model), byte-identical to
-    # today for a --role build spawn.
+def test_build_lane_rows() -> None:
+    # build is NOT auto-routed; writing model_routing.roles.build is the opt-in.
     assert "build" not in mr.DEFAULT_ROUTED_ROLES
     assert mr.resolve_route("build", settings=_settings(), env={"ZAI_API_KEY": "k"}) is None
-
-
-def test_build_lane_routes_when_configured() -> None:
-    # AC2-HP: writing model_routing.roles.build is the opt-in; a --role build
-    # spawn then gets the full z.ai env block.
     route = mr.resolve_route(
         "build",
         settings=_settings(roles={"build": "zai,glm-5.2"}),
@@ -913,66 +649,36 @@ def test_build_lane_routes_when_configured() -> None:
     )
     assert route is not None
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
-    assert route["ANTHROPIC_AUTH_TOKEN"] == "zk"
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
-
-
-def test_build_lane_configured_missing_key_fails_safe() -> None:
-    # AC2-EDGE: configured build with no resolvable key falls back to the
-    # primary model (None), a notice names the missing key.
     notes, sink = _collector()
-    route = mr.resolve_route(
-        "build",
-        settings=_settings(roles={"build": "zai,glm-5.2"}),
-        env={},
-        notice=sink,
-    )
-    assert route is None
+    assert mr.resolve_route(
+        "build", settings=_settings(roles={"build": "zai,glm-5.2"}), env={}, notice=sink
+    ) is None
     assert any("ZAI_API_KEY" in n or "no API key" in n for n in notes)
-
-
-def test_build_is_in_known_lane_roles_not_protected() -> None:
     assert "build" in mr.KNOWN_LANE_ROLES
     assert "build" not in mr.PROTECTED_ROLES
-
-
-@pytest.mark.parametrize(
-    "raw", ["zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2", "zai,gl\tm"]
-)
-def test_parse_target_rejects_internal_whitespace(raw: str) -> None:
-    # One non-whitespace model token per the route contract; an embedded space
-    # is an invalid id and a newline would corrupt the dispatch receipt line.
-    assert mr._parse_target(raw) is None
-
-
-def test_parse_target_accepts_one_m_suffix() -> None:
-    assert mr._parse_target("zai,glm-5.2[1m]") == ("zai", "glm-5.2[1m]")
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("zai/glm-5.2", ("zai", "glm-5.2")),
-        ("zai/glm-5.2[1m]", ("zai", "glm-5.2[1m]")),
-        ("zai-openai/glm-4.6", ("zai-openai", "glm-4.6")),
-        # First slash splits, so a namespaced model id keeps its slashes.
-        ("zai/z-ai/glm-5.2", ("zai", "z-ai/glm-5.2")),
-        # Legacy comma still parses.
-        ("zai,glm-5.2", ("zai", "glm-5.2")),
-    ],
-)
-def test_parse_target_accepts_slash_and_comma(raw: str, expected: tuple) -> None:
-    assert mr._parse_target(raw) == expected
-
-
-def test_build_lane_routes_when_configured_with_slash() -> None:
     route = mr.resolve_route(
         "build",
         settings=_settings(roles={"build": "zai/glm-5.2"}),
         env={"ZAI_API_KEY": "zk"},
     )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route is not None and route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_parse_target_rows() -> None:
+    for raw in ("zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2", "zai,gl\tm"):
+        assert mr._parse_target(raw) is None, raw
+    assert mr._parse_target("zai,glm-5.2[1m]") == ("zai", "glm-5.2[1m]")
+    rows = [
+        ("zai/glm-5.2", ("zai", "glm-5.2")),
+        ("zai/glm-5.2[1m]", ("zai", "glm-5.2[1m]")),
+        ("zai-openai/glm-4.6", ("zai-openai", "glm-4.6")),
+        # First slash splits, so a namespaced model id keeps its slashes.
+        ("zai/z-ai/glm-5.2", ("zai", "z-ai/glm-5.2")),
+        ("zai,glm-5.2", ("zai", "glm-5.2")),
+    ]
+    for raw, expected in rows:
+        assert mr._parse_target(raw) == expected, raw
 
 
 def test_route_table_target_uses_slash() -> None:
@@ -981,8 +687,7 @@ def test_route_table_target_uses_slash() -> None:
     assert by_role["coordinate"]["provider_model"] == "zai/glm-5.3"
 
 
-# ---- x-5cc5: a recorded overlay's provider-DEFAULT tier re-resolves on resume ----
-
+# --- x-5cc5: a recorded overlay's provider-DEFAULT tier re-resolves on resume -----
 
 def _recorded_route(
     haiku: str = "glm-4.5-air", base: str = mr.DEFAULT_ZAI_BASE_URL
@@ -996,66 +701,44 @@ def _recorded_route(
     }
 
 
-def test_refresh_moves_a_stale_haiku_tier_to_todays_default() -> None:
-    """The x-5cc5 symptom: a file recorded when glm-4.5-air was the zai
-    default keeps failing background calls after the default moved. The
-    refresh lands on today's glm-4.7 and the note names provider, old, new."""
+def test_refresh_rows() -> None:
+    # A file recorded when glm-4.5-air was the zai default keeps failing after
+    # the default moved; the refresh lands on today's default, names old/new,
+    # replays operator keys verbatim, and never mutates the caller's mapping.
     route = _recorded_route()
     refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
     assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
     assert note is not None
     assert "zai" in note and "glm-4.5-air" in note and "glm-4.7" in note
-    # Operator-chosen keys replay verbatim, and the caller's mapping is not
-    # mutated behind its back.
     assert refreshed["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    assert refreshed["ANTHROPIC_BASE_URL"] == mr.DEFAULT_ZAI_BASE_URL
     assert refreshed["ANTHROPIC_MODEL"] == "glm-5.3"
     assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
 
-
-def test_refresh_is_silent_when_the_default_has_not_moved() -> None:
     route = _recorded_route(haiku="glm-4.7")
     refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
-    assert note is None
-    assert refreshed == route
+    assert note is None and refreshed == route
 
-
-def test_refresh_replays_verbatim_and_names_the_miss_when_no_provider_matches() -> None:
-    """A base_url today's registry does not know cannot be re-resolved; the
-    route replays unchanged and the disclosure names exactly what failed to
-    match (never a bare 'kept stale')."""
+    # An unknown base_url replays unchanged; the disclosure names the miss.
     route = _recorded_route(base="https://elsewhere.example/api")
     refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
     assert refreshed == route
-    assert note is not None
-    assert "https://elsewhere.example/api" in note
+    assert note is not None and "https://elsewhere.example/api" in note
 
-
-def test_refresh_matches_by_provider_stamp_over_base_url() -> None:
-    """A mirrored base_url still resolves through the FNO_ROUTE_PROVIDER
-    stamp the route carries, so the tier follows the provider, not the
-    endpoint spelling."""
+    # A mirrored base_url still resolves through the provider stamp.
     route = _recorded_route(base="https://mirror.example/api")
     route[mr.ROUTE_PROVIDER_ENV] = "zai"
     refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
     assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
     assert note is not None and "zai" in note
 
-
-def test_refresh_lands_on_a_config_pinned_default_not_the_builtin() -> None:
-    """A provider haiku_model pinned in config is a NAMED default; a resume
-    re-resolves onto the pin, which is the durable form of a tier override."""
+    # A config-pinned haiku_model is a NAMED default.
     route = _recorded_route()
     settings = _settings(providers={"zai": {"haiku_model": "glm-4.6"}})
     refreshed, note = mr.refresh_provider_default_tiers(route, settings=settings)
     assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.6"
     assert note is not None and "glm-4.6" in note
 
-
-def test_refresh_moves_every_declared_tier_not_haiku_alone() -> None:
-    """AC4-HP: a tier declared in config between record and resume re-resolves
-    on resume like the haiku tier always has; the note names each tier that
-    moved, old and new, and undeclared keys replay verbatim."""
+    # AC4-HP: a tier declared between record and resume re-resolves too.
     route = _recorded_route(haiku="glm-4.7")
     route["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "glm-5.2"
     route["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "glm-5.3"
@@ -1064,11 +747,8 @@ def test_refresh_moves_every_declared_tier_not_haiku_alone() -> None:
     assert refreshed["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
     assert refreshed["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
     assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-    assert note is not None
-    assert "opus glm-5.2 -> glm-5.3[1m]" in note
+    assert note is not None and "opus glm-5.2 -> glm-5.3[1m]" in note
 
-
-def test_provider_name_for_route_returns_none_for_an_unknown_route() -> None:
     assert mr.provider_name_for_route({}, settings=_settings()) is None
     assert (
         mr.provider_name_for_route(

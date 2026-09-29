@@ -75,7 +75,9 @@ def test_node_query_returns_typed_models(tmp_path):
     assert n is not None
     assert isinstance(n, Node)
     assert isinstance(n.claim, NodeClaim)
-    assert n.claim.locked_by == "holder-1"
+    # locked_by projects from the claim store: a stored mirror with no live
+    # claim behind it answers unheld, not the stale holder string.
+    assert n.claim.locked_by is None
     assert isinstance(n.dispatch, Dispatch)
     assert all(isinstance(pr, PullRequest) for pr in n.pull_requests)
     assert all(isinstance(row, SessionRecord) for row in n.sessions)

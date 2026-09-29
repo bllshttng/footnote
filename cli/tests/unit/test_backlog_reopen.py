@@ -491,3 +491,78 @@ def test_the_event_schema_requires_a_reason():
 
     with pytest.raises(Exception):
         _build("backlog_reopened", "backlog", {"node_id": "ab-11111111"})
+
+
+# -- update projects difficulty (restored from the x-dd1f branch; main moved
+# its own difficulty coverage to test_graph_status.py) --
+
+@pytest.mark.real_plan_projection
+@pytest.mark.parametrize(
+    ("doc_seed", "node_over", "args", "expect_present", "expect_value"),
+    [
+        pytest.param(
+            None, {}, ("--difficulty", "high"), True, "high",
+            id="set-writes-the-doc",
+        ),
+        pytest.param(
+            "difficulty: high", {}, ("--difficulty", "null"), False, None,
+            id="null-clears-the-doc",
+        ),
+        pytest.param(
+            "difficulty: medium", {"difficulty": None}, ("--priority", "p1"), True, "medium",
+            id="persisted-null-band-survives-a-priority-edit",
+        ),
+    ],
+)
+def test_update_mirrored_keys_project_to_the_plan_doc(
+    tmp_path, doc_seed, node_over, args, expect_present, expect_value
+):
+    """`--difficulty` is a mirrored key, so an edit must trigger the projection
+    like `--priority` does; a persisted difficulty: null must not delete a band
+    the doc authored since; an explicit null clears the doc."""
+    front = "---\nstatus: ready\ncreated: 2026-05-05\n"
+    if doc_seed:
+        front += f"{doc_seed}\n"
+    plan = tmp_path / "plan.md"
+    plan.write_text(front + "---\n\n# a plan\n")
+    root = sandbox(
+        tmp_path,
+        _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan), **node_over),
+    )
+
+    code, out = _native_update(root, "ab-11111111", *args)
+    assert code == 0, out
+    text = plan.read_text()
+    if expect_present:
+        assert f"difficulty: {expect_value}" in text
+    else:
+        assert "difficulty" not in text
+
+
+def _native_update(root: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the sandbox
+    the fixture seeded (in-process monkeypatches cannot reach a subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(root),
+            "FNO_CONFIG": str(root / "config.toml"),
+            "FNO_GLOBAL_SETTINGS_PATH": "/dev/null",
+            "FNO_TRACKER_BACKEND": "graph",
+            "FNO_CLAIMS_ROOT": str(root / "claims"),
+        },
+        cwd=str(root),
+    )
+    return proc.returncode, proc.stdout + proc.stderr

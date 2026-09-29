@@ -456,6 +456,8 @@ fn run_server(socket: PathBuf) {
     if let Some((warning, _)) = proto::pending_config_warning() {
         eprintln!("{warning}");
     }
+    // The owner=mux sidecars move at their long-lived writer's start.
+    proto::migrate_mux_sidecars();
     std::process::exit(fno::server::run(socket));
 }
 

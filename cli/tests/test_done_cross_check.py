@@ -631,22 +631,34 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
     """A merged-PR close stamps a never-shipped plan shipped->done using the
     evidencing PR url, rather than calling graduate (a no-op) on its own
     (ab-bd9f476c)."""
+    import os
+    import time
+
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
+
     plan = tmp_path / "p.md"
     plan.write_text("---\ntitle: t\nstatus: ready\n---\n\nbody\n")
-    code, out, err, g = _door_done(
-        tmp_path,
-        {
-            "id": "ab-done0001",
-            "title": "t",
-            "status": "ready",
-            "domain": "code",
-            "pr_number": 900,
-            "pr_url": "https://github.com/org/repo/pull/900",
-            "plan_path": str(plan),
-            "session_id": "sess-9",
-        },
-        pr_states={900: "MERGED"},
+    holder = tmp_path / "door-ab-done0001"
+    holder.mkdir(exist_ok=True)
+    root = make_sandbox(holder, [seed_node("ab-done0001", "ready", domain="code", pr_number=900,
+                                           pr_url="https://github.com/org/repo/pull/900",
+                                           plan_path=str(plan),
+                                           session_id="sess-row")])
+    warm(root, "ab-done0001")
+    # The holder projects over every read, so the stamp's session id is the
+    # live claim holder, not the graph row's retired mirror field: the row
+    # carries a distinct stale id on purpose. FNO_CLAIMS_ROOT is a root; the
+    # scan reads its .fno/claims directory.
+    now_ms = int(time.time() * 1000)
+    claims_dir = root / "claims" / ".fno" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "node%3Aab-done0001.lock").write_text(
+        f'schema_version: 1\nkey: "node:ab-done0001"\nholder: "sess-9"\n'
+        f"acquired_at: {now_ms}\npid: {os.getpid()}\nhost: test-host\n"
+        f'expires_at: {now_ms + 900_000}\nreason: "done stamp fixture"\n'
     )
+    stub = write_pr_stub(root, {900: "MERGED"})
+    code, out, err = door(root, ["done", "ab-done0001"], path_prepend=str(stub))
     assert code == 0, out + err
 
     text = plan.read_text()

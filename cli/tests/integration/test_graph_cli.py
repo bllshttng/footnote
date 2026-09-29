@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -1856,6 +1857,31 @@ def test_next_selects_healthy_ready_node(tmp_graph):
     }])
     r = _invoke("backlog", "next", "--project", "fno")
     assert '"id": "ab-live"' in r.output
+
+
+def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkeypatch):
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    recent = _recent_iso(1)
+    plan = _write_plan(tmp_graph.parent, "claimed-next.md", "Claimed next")
+    node_id = "ab-next0001"
+    _seed_graph_text(tmp_graph, json.dumps({"entries": [{
+        "id": node_id, "title": "Claimed next", "project": "fno",
+        "plan_path": str(plan), "created_at": recent, "priority": "p2",
+    }]}) + "\n")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "next-session")
+
+    result = _invoke("backlog", "next", "--project", "fno", "--claim", "next-session")
+
+    assert result.exit_code == 0, result.output
+    assert f'"id": "{node_id}"' in result.output
+    assert claim_status(f"node:{node_id}")["state"] == "live"
+    # The served holder is the claim projection: the lockfile is the holder
+    # of record and no graph owner is ever written.
+    served = read_graph(tmp_graph)[0]
+    assert served["locked_by"] == "next-session"
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

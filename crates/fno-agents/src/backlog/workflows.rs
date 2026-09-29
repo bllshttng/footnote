@@ -826,8 +826,15 @@ fn close_node(tail: &[String], args: &DoneArgs, task_id: &str) -> i32 {
             .get("session_id")
             .and_then(Value::as_str)
             .map(String::from);
-        let sid = existing
-            .clone()
+        // The holder projects over every read, so the stamp records the live
+        // work-claim holder first; the row's stored mirror loses to it (the
+        // python twin stamped a projected read's session_id).
+        let holder = crate::backlog::nodes::claim_for_node(&task)
+            .ok()
+            .filter(|claim| claim.work)
+            .and_then(|claim| claim.locked_by);
+        let sid = holder
+            .or(existing.clone())
             .or_else(|| env_session.clone())
             .or_else(|| rollup.session_id.clone());
         if let Some(sid) = sid {
@@ -2477,8 +2484,6 @@ fn supersede_write(graph: &Path, args: &SupersedeArgs) -> i32 {
             {
                 let obj = working[idx_old].as_object_mut().expect("row");
                 obj.insert("superseded_by".into(), Value::String(new_canon.clone()));
-                obj.insert("locked_by".into(), Value::Null);
-                obj.insert("locked_at".into(), Value::Null);
                 obj.insert(
                     "supersession".into(),
                     json!({
