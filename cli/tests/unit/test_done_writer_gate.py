@@ -212,34 +212,22 @@ def test_ac3_err_gh_failure_fails_closed(done_graph, monkeypatch):
     assert entry.get("merge_status") is None
 
 
-def test_compat_done_routing_refusal_is_not_retryable(done_graph, monkeypatch):
-    from typer.testing import CliRunner
-    from fno.cli import app
-    import fno.done.cli as done_cli
-    from fno.graph._reconcile import ReconcileError
+def test_compat_done_routing_refusal_is_not_retryable(tmp_path):
+    """The close's routing refusal names its remedy and is not retryable."""
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
 
-    _seed(done_graph, {
-        "id": "ab-routec01",
-        "title": "Routed refusal",
-        "domain": "code",
-        "pr_number": 1140,
-        "pr_url": "https://github.com/o/r/pull/1140",
-    })
-    def _throw(n, **kw):
-        raise ReconcileError(
-            "[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal"
-        )
-    monkeypatch.setattr(done_cli, "_gh_query", _throw)
-    import fno.graph.cli as graph_cli
-
-    monkeypatch.setattr(graph_cli, "_done_gh_query", _throw)
-
-    result = CliRunner().invoke(app, ["done", "ab-routec01"])
-
-    assert result.exit_code == 3
-    combined = result.output + (result.stderr or "")
-    assert "fno do pr info 1140 --repo o/r" in combined
-    assert "retryable once gh is available again" not in combined
+    root = make_sandbox(tmp_path, [seed_node("ab-routec01", pr_number=1140, pr_url="https://github.com/o/r/pull/1140")])
+    warm(root, "ab-routec01")
+    stubbin = write_pr_stub(
+        root,
+        fail_stderr="[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal",
+    )
+    code, out, err = door(root, ["done", "ab-routec01"], path_prepend=str(stubbin))
+    assert code == 3, out + err
+    assert "fno do pr info 1140 --repo o/r" in err
+    assert "retryable once gh is available again" not in err
+    entry = _node(root / "graph.json", "ab-routec01")
+    assert entry.get("completed_at") is None
 
 
 def test_merged_pr_closes_and_records_resolved_merge_status(done_graph, monkeypatch):
@@ -281,18 +269,20 @@ def test_ac5_edge_non_pr_close_is_ungated(done_graph, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
+def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, tmp_path, monkeypatch):
     """Every close path refuses an OPEN PR, so none can regress alone.
 
     The inventory that produced this fix listed six writers; W1/W2 were already
     merge-gated, W5 is deleted, and W3/W4 are fixed here. Sweeping them against
     one fixture is what keeps a future seventh writer from quietly rejoining the
-    list - the node must read in_review afterward no matter who tried.
+    list - the node must read in_review afterward no matter who tried. The bare
+    close is native now, so W1 drives the door over its own sandbox.
     """
     from typer.testing import CliRunner
     from fno.cli import app
     from fno.graph._reconcile import PrMergeState
     import fno.graph.cli as graph_cli
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
 
     _seed(done_graph, {
         "id": "ab-sweep01",
@@ -310,9 +300,14 @@ def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
     )
 
     runner = CliRunner()
-    # W4 `fno done`, W1 `backlog done`: both must report awaiting merge.
+    # W4 `fno done` reports awaiting merge on the rich surface.
     assert runner.invoke(app, ["done", "ab-sweep01", "--pr", "42"]).exit_code == 5
-    assert runner.invoke(app, ["backlog", "done", "ab-sweep01"]).exit_code == 5
+    # W1 `backlog done` is the native close: the same refusal through the door.
+    root = make_sandbox(tmp_path, [seed_node("ab-sweep01", "in_review", pr_number=42, pr_url="https://github.com/o/r/pull/42")])
+    warm(root, "ab-sweep01")
+    stubbin = write_pr_stub(root, {42: "OPEN"})
+    code, out, err = door(root, ["done", "ab-sweep01"], path_prepend=str(stubbin))
+    assert code == 5, out + err
     # W3 `backlog update --completed`: the flag is gone, so it cannot be reached.
     assert runner.invoke(
         app, ["backlog", "update", "ab-sweep01", "--completed"]
@@ -413,29 +408,22 @@ def _stub_no_git(monkeypatch):
     monkeypatch.setattr(done_cli.subprocess, "run", fake_run)
 
 
-def test_bare_done_gates_on_the_nodes_pr_when_autodetect_fails(done_graph, monkeypatch):
-    """`fno done <id>` must gate on the node's stored PR, not the --pr argument.
+def test_bare_done_gates_on_the_nodes_pr_when_autodetect_fails(tmp_path):
+    """The bare close gates on the node's stored PR.
 
-    Auto-detect returns None when gh is unreachable, so a gate keyed on the
-    argument would skip entirely and close a node whose PR is open - the
-    original incident, on the default invocation.
+    Auto-detect is a rich-surface concern; the canonical close has no argument
+    to hide behind, so the gate reading the STORED refs is the invariant the
+    original incident turned on. The close is native, so this drives the door.
     """
-    from typer.testing import CliRunner
-    from fno.cli import app
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
 
-    _seed(done_graph, {
-        "id": "ab-bare001", "title": "Bare close", "domain": "code",
-        "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42",
-    })
-    _stub_no_git(monkeypatch)
-    calls: list = []
-    _stub_gh(monkeypatch, "OPEN", calls=calls)
-
-    r = CliRunner().invoke(app, ["done", "ab-bare001"])
-
-    assert r.exit_code == 5
-    assert calls == [42], "the node's own PR must be consulted"
-    assert _node(done_graph, "ab-bare001").get("completed_at") is None
+    root = make_sandbox(tmp_path, [seed_node("ab-bare001", pr_number=42, pr_url="https://github.com/o/r/pull/42")])
+    warm(root, "ab-bare001")
+    stubbin = write_pr_stub(root, {42: "OPEN"})
+    code, out, err = door(root, ["done", "ab-bare001"], path_prepend=str(stubbin))
+    assert code == 5, out + err
+    assert "42" in err, "the node's own PR must be the one consulted"
+    assert _node(root / "graph.json", "ab-bare001").get("completed_at") is None
 
 
 def test_note_close_cannot_bypass_the_gate_on_a_node_with_an_open_pr(
@@ -600,21 +588,22 @@ def test_orient_renders_merged_for_an_evidenced_close(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_store_refuses_a_bare_evidence_less_close(done_graph, monkeypatch):
+def test_store_refuses_a_bare_evidence_less_close(tmp_path):
     """A bare close of a node with no PR ref, note or link exits non-zero,
     names the repair flags, and leaves completed_at null.
+
+    The receipt is pinned byte-for-byte by the lifecycle golden
+    (test_done_without_evidence_refuses_and_writes_nothing); this pins the
+    same refusal through one more seed shape.
     """
-    from typer.testing import CliRunner
-    from fno.cli import app
+    from tests.goldens._door import door, make_sandbox, seed_node, warm
 
-    _seed(done_graph, {"id": "ab-bare001", "title": "Bare node", "domain": "code"})
-
-    r = CliRunner().invoke(app, ["done", "ab-bare001"])
-
-    assert r.exit_code != 0
-    combined = r.output + str(r.exception)
-    assert "--note" in combined
-    entry = _node(done_graph, "ab-bare001")
+    root = make_sandbox(tmp_path, [seed_node("ab-bare001", "ready")])
+    warm(root, "ab-bare001")
+    code, out, err = door(root, ["done", "ab-bare001"])
+    assert code != 0, out + err
+    assert "--note" in err
+    entry = _node(root / "graph.json", "ab-bare001")
     assert entry.get("completed_at") is None
     assert entry.get("status") != "done"
 

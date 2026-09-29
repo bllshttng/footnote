@@ -54,6 +54,10 @@ pub fn run(_args: &[String]) -> i32 {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    // The guardrail preset owns whether this guard runs at all.
+    if !crate::agents_config::guard_enabled(&cwd, "bin-install") {
+        return super::emit_allow();
+    }
     let refusal = judge(&payload);
     super::emit_guard_decision(&cwd, "bin-install-guard", "Bash", refusal.is_some());
     match refusal {
@@ -64,7 +68,7 @@ pub fn run(_args: &[String]) -> i32 {
 
 /// The whole verdict for one payload: a refusal, or None to allow. A null
 /// payload, a non-Bash tool and a blank command allow.
-fn judge(payload: &Value) -> Option<String> {
+pub(super) fn judge(payload: &Value) -> Option<String> {
     if payload.is_null() {
         return None;
     }

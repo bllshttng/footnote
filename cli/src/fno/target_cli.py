@@ -101,7 +101,7 @@ def _resolve_init_script() -> Path:
       4. ``resolve_repo_root()`` - last resort (running inside fno repo).
     """
     # Delegates to the shared resolver (env hint -> package-relative ->
-    # persisted ~/.fno/plugin-root pointer -> repo) so `fno do target init`
+    # persisted ~/.fno/install/plugin-root pointer -> repo) so `fno do target init`
     # finds the script from any project without a hand-set FNO_REPO_ROOT.
     return resolve_plugin_script(_INIT_RELPATH)
 
@@ -1297,9 +1297,9 @@ def resolve_owned_identity_cmd() -> None:
         return row_owning_session_id(sid, self_binding=own_pair)
 
     # Same injection seam self_stamp uses.
-    from fno.agents.codex_rollout import codex_rollout_witness
+    from fno.agents.self_stamp import runtime_identity_witness
 
-    owned = resolve_self_identity(env, collide=_collide, witness=codex_rollout_witness)
+    owned = resolve_self_identity(env, collide=_collide, witness=runtime_identity_witness)
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so
@@ -2830,8 +2830,10 @@ def _under_codex_worktrees(cwd: Path) -> bool:
 
 
 def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
-    """Attach an app-created detached worktree to this target's feature branch."""
-    branch = f"feature/{_wt_name(node)}"
+    """Attach an app-created detached worktree to this target's node branch."""
+    from fno.worktree_cli.cli import _node_branch
+
+    branch = _node_branch(_wt_name(node))
     base = _remote_base_ref(cwd, fetch=True)
     current = _git_out(cwd, "branch", "--show-current") or ""
     if current == branch:

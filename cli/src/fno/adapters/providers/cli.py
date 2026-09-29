@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time as time_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, cast
@@ -1694,6 +1695,13 @@ def use_provider(
         except managed.SwitchDeferred as exc:
             typer.echo(f"switch deferred: {exc}", err=True)
             raise typer.Exit(2)
+        except managed.NeedsLogin as exc:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                typer.echo(f"{exc} Run in a terminal: fno config accounts use {provider_id}", err=True)
+                raise typer.Exit(1)
+            if managed.run_vault_login(provider_id) != 0:
+                raise typer.Exit(1)
+            result = managed.SwitchResult(active=provider_id)
         except managed.ManagedStoreError as exc:
             typer.echo(f"switch failed: {exc}", err=True)
             raise typer.Exit(1)

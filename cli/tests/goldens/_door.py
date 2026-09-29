@@ -30,6 +30,9 @@ def seed_node(id: str, status: str = "in_progress", **kw) -> dict:
         "id": id,
         "title": kw.pop("title", f"node {id}"),
         "status": status,
+        # Every store mutator parses rows through the typed Node, which
+        # requires `type`; a seed without one refuses its own mutation.
+        "type": kw.pop("type", "feature"),
         "project": "fno",
         "slug": kw.pop("slug", f"slug-{id.split('-', 1)[1]}"),
         "priority": "p2",
@@ -87,6 +90,46 @@ def write_gh_stub(tmp_path: Path, body: str = "[]\n") -> str:
     gh.write_text(f"#!/bin/sh\ncat /dev/null\nprintf '{body}'\nexit 0\n")
     gh.chmod(0o755)
     return str(stub_bin)
+
+
+def write_pr_stub(root: Path, states: dict[int, str] | None = None, *, fail_stderr: str = "") -> Path:
+    """A PATH dir whose `gh` answers per-PR JSON (or fails), so the gate reads
+    stay hermetic. states: {41: "OPEN"} -> {"state": ..., "html_url": ...}.
+    Returns the dir to prepend to PATH (door's path_prepend)."""
+    stubbin = root / "stubbin"
+    stubbin.mkdir(exist_ok=True)
+    if fail_stderr:
+        # A failing gh answers nothing: every call fails, which is the shape
+        # both the outage and the routing refusal tests need.
+        escaped = fail_stderr.replace("'", "'\\''")
+        script = "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s' '{escaped}' >&2",
+                "exit 1",
+            ]
+        )
+    else:
+        arms = []
+        for n, s in sorted((states or {}).items()):
+            # REST reality: a merged PR is state "closed" with merged true,
+            # never a MERGED state. The stub speaks production so the reader's
+            # mapping is what the tests prove.
+            if str(s).upper() == "MERGED":
+                payload = {"state": "closed", "merged": True,
+                           "merged_at": "2026-06-01T10:00:00Z",
+                           "html_url": f"https://github.com/o/r/pull/{n}"}
+            else:
+                payload = {"state": str(s).lower(),
+                           "html_url": f"https://github.com/o/r/pull/{n}"}
+            body = json.dumps(payload)
+            arm = '  case "$a" in */pulls/{n}) printf \'{b}\'; exit 0;; esac'
+            arms.append(arm.replace("{n}", str(n)).replace("{b}", body))
+        script = "\n".join(["#!/bin/sh", 'for a in "$@"; do'] + arms + ["done", "printf '{}'", "exit 0"])
+    stub = stubbin / "gh"
+    stub.write_text(script)
+    stub.chmod(0o755)
+    return stubbin
 
 
 def graph_rows(root: Path) -> list[dict]:

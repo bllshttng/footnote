@@ -572,7 +572,6 @@ def bind_pr_rows(
     pr_number: int,
     pr_url: Optional[str],
     repo: Optional[str] = None,
-    owner: Optional[str] = None,
     rebind: bool = False,
 ) -> PrRowBindResult:
     """Validate and bind every PR claim as one graph-owned mutation.
@@ -630,7 +629,6 @@ def bind_pr_rows(
         nodes[nid] = node
 
     bindings: list[PrRowBinding] = []
-    clean_owner = owner.strip() if isinstance(owner, str) else ""
     for nid in claimed_ids:
         node = nodes[nid]
         # The claim line predates the release: skip it, bind the rest.
@@ -656,9 +654,6 @@ def bind_pr_rows(
             additional.append({"number": pr_number, "url": pr_url})
             node["additional_prs"] = additional
             action = "appended_additional"
-        if clean_owner and node_is_open(node):
-            node["locked_by"] = clean_owner
-            node["session_id"] = clean_owner
         bindings.append(PrRowBinding(nid, action))
 
     return PrRowBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
@@ -1503,7 +1498,7 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
 def stamp_reopen_warning(parent: dict, child: object, node_id: str) -> None:
     """Stamp which child reopened this done-on-its-own-evidence parent, and when.
 
-    ``_cascade_reopen_parents``'s stderr warning is gone the moment that
+    The reopen stderr warning is gone the moment that
     terminal closes; this survives on the graph node instead. ``child`` is
     ``cur`` at the call site (falls back to ``node_id`` when not a dict, same
     as before this was extracted). Cleared by

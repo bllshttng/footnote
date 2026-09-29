@@ -323,10 +323,20 @@ fn open_pr_total(pages: &[Value]) -> i64 {
         .sum()
 }
 
+/// The check-in board's own budget, above the 30s hand-run default. A
+/// fleet-sized board prices its truth batch alone at `20s + 750ms` a holder
+/// (a 24-handle page self-bounds at 38s), and the beat has no interactive
+/// caller waiting on it: measured 2026-09-28, three beats in a row starved
+/// the probe on the hand default and lost undriven_pr, unplanned and
+/// blocked_child to "batch of 33-34 handles timed out". A blind beat cannot
+/// seat work; 45s buys the full feed at fleet size.
+const BOARD_BUDGET_MS: u64 = 45_000;
+
 fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
     let opts = BoardOpts {
         state_path: ctx.board_state.clone(),
         cwd: Some(ctx.cwd.clone()),
+        budget_ms: BOARD_BUDGET_MS,
         ..Default::default()
     };
     Ok(read_board(&opts))
@@ -2740,7 +2750,7 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa").unwrap();
+        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa", None).unwrap();
         write_registry(
             &home,
             serde_json::json!([{

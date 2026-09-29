@@ -231,13 +231,53 @@ install_source_via_uv() {
   return 1
 }
 
-if command -v uv >/dev/null 2>&1; then
-  SRC_VERSION="$(src_version)"
-  CHANNEL="stable"
-  # Not a bare `[[ ]] &&` list: an empty SRC_VERSION would trip set -e there.
-  if [[ -n "$SRC_VERSION" ]]; then
-    CHANNEL="$(plugin_channel "$SRC_VERSION")"
+SRC_VERSION="$(src_version)"
+CHANNEL="stable"
+# Not a bare `[[ ]] &&` list: an empty SRC_VERSION would trip set -e there.
+if [[ -n "$SRC_VERSION" ]]; then
+  CHANNEL="$(plugin_channel "$SRC_VERSION")"
+fi
+
+# Register the global ~/.fno state dir on every success exit, so a plugin-only
+# install gets the same additionalDirectories entry a clone user's setup.sh
+# writes (scripts/ensure-global-dir.sh).
+finish_success() {
+  bash "$(dirname "$SCRIPT_DIR")/scripts/ensure-global-dir.sh" || true
+}
+
+# No uv: delegate to the one installer that provisions it (scripts/install/fno.sh
+# chains Astral's standalone uv), pinned to this plugin's channel so the wheel
+# matches what the plugin declares. The pip fallback below stays as the offline
+# last resort. A nightly with no matching wheel skips the delegation: a nightly
+# install never silently downgrades to the stable PyPI wheel.
+if ! command -v uv >/dev/null 2>&1; then
+  FNO_SH="$(dirname "$SCRIPT_DIR")/scripts/install/fno.sh"
+  if [[ -f "$FNO_SH" ]]; then
+    fno_sh_spec=""
+    case "$CHANNEL" in
+      nightly)
+        NIGHTLY_WHEEL="$(nightly_wheel_url || true)"
+        [[ -n "$NIGHTLY_WHEEL" ]] && fno_sh_spec="FNO_INSTALL_WHEEL=$NIGHTLY_WHEEL"
+        ;;
+      rc|stable)
+        [[ -n "$SRC_VERSION" ]] && fno_sh_spec="FNO_VERSION=$SRC_VERSION"
+        ;;
+    esac
+    if [[ -n "$fno_sh_spec" ]]; then
+      log "uv not found; delegating to scripts/install/fno.sh (it provisions uv)..."
+      fno_sh_rc=0
+      env "$fno_sh_spec" sh "$FNO_SH" || fno_sh_rc=$?
+      if [[ "$fno_sh_rc" -eq 0 ]]; then
+        finish_success
+        next_steps
+        exit 0
+      fi
+      err "fno.sh could not install uv or fno (exit $fno_sh_rc); falling back to a Python-only install."
+    fi
   fi
+fi
+
+if command -v uv >/dev/null 2>&1; then
 
   # Idempotent: already binary-complete at our version -> nothing to do. Require
   # the front door and ALL THREE agent binaries, not just the client: a
@@ -252,6 +292,7 @@ if command -v uv >/dev/null 2>&1; then
      && command -v fno-agents-worker >/dev/null 2>&1; then
     log "fno $SRC_VERSION already installed (binary-complete); skipping."
     shim_sweep || exit 1
+    finish_success
     exit 0
   fi
 
@@ -270,6 +311,7 @@ if command -v uv >/dev/null 2>&1; then
         verify_frontdoor || true
         shim_sweep || exit 1
         log "restart your shell (or source your env) to pick up PATH."
+        finish_success
         next_steps
         exit 0
       fi
@@ -304,6 +346,7 @@ if command -v uv >/dev/null 2>&1; then
   esac
 
   if install_source_via_uv; then
+    finish_success
     exit 0
   fi
   err "uv tool install failed; falling through to pip fallback."
@@ -315,6 +358,7 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
   if "$PIP" install --user "$CLI_DIR"; then
     log "installed Python-only fno via pip --user. INCOMPLETE install: no 'fno' front door - run 'fno doctor update --rust' for the Rust binaries, or install a published PyPI wheel for the advertised command."
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
+    finish_success
     next_steps
     exit 0
   else

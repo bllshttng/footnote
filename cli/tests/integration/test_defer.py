@@ -89,6 +89,22 @@ def _read_entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
+def _mark_done(g: Path, node_id: str) -> None:
+    """Arrange a done node straight through the store. The close itself is
+    native, and this file's subject is what a done node does downstream, not
+    the close, so the arrangement seeds the same row state a close leaves."""
+    from fno.graph.store import commit_rows_via_store
+
+    def stamp(rows):
+        for e in rows:
+            if e["id"] == node_id:
+                e["status"] = "done"
+                e["completed_at"] = "2026-04-01T00:00:00+00:00"
+        return rows
+
+    commit_rows_via_store(g, stamp)
+
+
 def _seed_with_plan(tmp_path, title: str = "Plan") -> str:
     plan = tmp_path / f"{title.lower().replace(' ', '-')}.md"
     plan.write_text(f"---\ncreated: 2026-05-05\ntitle: {title}\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
@@ -146,7 +162,7 @@ def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     """Done wins over deferred. A completed node stays done."""
     node_id = _seed_with_plan(tmp_path, "Plan Done")
     _native_update(tmp_graph, node_id, "--completion-note", "done-beats-deferred fixture")
-    _invoke("backlog", "done", node_id, "--skip-stamp")
+    _mark_done(tmp_graph, node_id)
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
@@ -242,7 +258,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
     """
     node_id = _seed_with_plan(tmp_path, "Plan Done Then Defer")
     _native_update(tmp_graph, node_id, "--completion-note", "done-door fixture")
-    _invoke("backlog", "done", node_id, "--skip-stamp")
+    _mark_done(tmp_graph, node_id)
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
@@ -591,7 +607,7 @@ def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path)
     (first) refuses before the other ids are written."""
     done_node = _seed_with_plan(tmp_path, "Batch Done")
     _native_update(tmp_graph, done_node, "--completion-note", "batch defer fixture")
-    _invoke("backlog", "done", done_node, "--skip-stamp")
+    _mark_done(tmp_graph, done_node)
     idea_node = _seed_idea(tmp_graph, "Batch Idea")
 
     r = _invoke("backlog", "defer", done_node, idea_node, "--reason", "park")

@@ -158,8 +158,8 @@ def _recency_seconds() -> float:
 
 
 def default_name_map_path() -> Path:
-    """Persisted hex->legible alias overlay (``~/.fno/session-names.json``)."""
-    return paths.state_dir() / NAME_MAP_FILENAME
+    """Persisted hex->legible alias overlay (``~/.fno/mux/session-names.json``)."""
+    return paths.state_dir() / "mux" / NAME_MAP_FILENAME
 
 
 # Codex's transcript store is a structural mirror of claude's projects store,
@@ -1669,7 +1669,7 @@ def resolve_project_for_cwd(cwd: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
-# Friendly-name overlay (~/.fno/session-names.json)
+# Friendly-name overlay (~/.fno/mux/session-names.json)
 # --------------------------------------------------------------------------
 
 

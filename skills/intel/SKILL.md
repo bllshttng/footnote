@@ -29,7 +29,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
    The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
 
-2. Judge the sampled sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only rows with `sampled: true`. They are idle and substantive by construction. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache. A matching facet that lacks the current question key gains only that one summary line:
+2. Judge the sampled sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only rows with `sampled: true`. They are idle and substantive by construction. Witnessed-turn sessions sample first, so the judged set reaches the conversations the user typed into. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The fold's `sample.held_out_live` names live sessions with witnessed user turns the idle rule held out. The report carries that list as one line under the Sample heading. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache. A matching facet that lacks the current question key gains only that one summary line:
 
    ```json
    {
@@ -68,7 +68,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
 6. Corrections section: quote user corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
 
-7. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
+7. Feed the S2 writer so the rows land in `~/.fno/logs/corrections.log`:
 
    ```bash
    bash scripts/corrections-insights-tag.sh --insights-file <report>

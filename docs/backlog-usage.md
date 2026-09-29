@@ -85,7 +85,7 @@ fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
 `<id>` resolves by canonical id (`ab-1a2b3c4d`), title-derived slug
 (`dashless-spawn`), or bare hex (`1a2b3c4d`).
 
-When a PR opens outside the Footnote PR path, repair its node with `fno backlog update <id> --locked-by <worker> --pr-number <n>`. This command binds the owner and primary PR together. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. A bare `--pr-number` removes the node from ready but leaves its owner unknown. The update receipt rereads the stored row and reports its owner, PR, and status.
+When a PR opens outside the Footnote PR path, acquire the owner claim with `fno agents claim acquire node:<id> --holder <worker>`, then record the primary PR with `fno backlog update <id> --pr-number <n>`. The claim lockfile is the owner source, and the update receipt reports its owner, PR, and status. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. Without a claim lockfile, the owner reads as `unknown`.
 
 ## Demand signal: what the agents keep hitting
 
@@ -110,7 +110,7 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
-The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write the graph store. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
+The local `~/.fno/pages/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write the graph store. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
 `demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
 

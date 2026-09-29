@@ -464,6 +464,11 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The test pins the NO-ROOTS frame. The uv cache is a root now, so pin
+    // UV_CACHE_DIR to a missing path (authoritative, so nothing resolves):
+    // a runner with a real cache would grow a sandboxPolicy and fail here.
+    let uv_prev = std::env::var_os("UV_CACHE_DIR");
+    unsafe { std::env::set_var("UV_CACHE_DIR", "/nonexistent-fno-uv-cache-probe") };
     let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-plain"));
     let worktree = tempfile::tempdir().unwrap();
     let mut thread = CodexThread::start_with_state_dirs(
@@ -477,6 +482,11 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
     .await
     .expect("thread starts");
     thread.drive_turn("go").await.expect("turn");
+
+    match uv_prev {
+        Some(v) => unsafe { std::env::set_var("UV_CACHE_DIR", v) },
+        None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
+    }
 
     let start = daemon.first_params("thread/start").expect("a thread/start");
     assert_eq!(start["sandbox"], "workspace-write");

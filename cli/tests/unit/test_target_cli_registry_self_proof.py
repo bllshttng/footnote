@@ -236,3 +236,64 @@ def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch
 # into the native resolver; they are pinned Rust-side by
 # fno-agents' session_identity_ambient stamp tests. The Python module is a
 # shim over that verb and carries no stamp logic to test here.
+
+
+def _silent_walk_claude_proof(monkeypatch, attested_id: str):
+    """The claude spawned worker's shape: the tree proves the claude family,
+    but the attester stays env_only - supervisor births poison the session id
+    out of the child env and darwin no longer reads harness env through ps,
+    so ancestry can never witness the id value."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: "claude"
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (attested_id, "env_only"),
+    )
+
+
+def test_name_only_claude_spawn_row_witness(tmp_path, monkeypatch):
+    """A claude spawned worker's own spawn row - bound by its spawn-minted
+    name - witnesses the id the spawn flow wrote: the identity resolves
+    canonically when the named row holds the marker id, a stale name export
+    (the row under that name holds a different live id) fails closed and
+    names the true holder, and the reader keys on FNO_AGENT_SELF with a
+    FNO_WORKER_NAME fallback, empty on any harness mismatch."""
+    from fno.agents.registry import register_existing_session, spawn_row_session_ids
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    stale_row_id = "019cc082-1111-7283-97cc-751c46742a08"
+    _silent_walk_claude_proof(monkeypatch, mine)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
+
+    row = register_existing_session(harness="claude", session_id=mine, cwd="/x")
+    monkeypatch.setenv("FNO_AGENT_SELF", row.name)
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
+    assert fields["COLLISION"] == ""
+
+    # The reader seam behind the witness, keyed by the spawn-minted name.
+    assert spawn_row_session_ids("claude") == frozenset({mine})
+    monkeypatch.delenv("FNO_AGENT_SELF")
+    monkeypatch.setenv("FNO_WORKER_NAME", row.name)
+    assert spawn_row_session_ids("claude") == frozenset({mine})
+    assert spawn_row_session_ids("codex") == frozenset()
+
+    # A stale name export cannot witness: the row under that name holds a
+    # different live id, so the marker stays refused and names the holder.
+    stale = register_existing_session(harness="claude", session_id=stale_row_id, cwd="/x")
+    monkeypatch.delenv("FNO_WORKER_NAME")
+    monkeypatch.setenv("FNO_AGENT_SELF", stale.name)
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == row.name
+    assert fields["COLLISION_ID"] == mine

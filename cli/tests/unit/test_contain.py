@@ -80,6 +80,52 @@ def _read_entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
+def _native_contain(g: Path, *args: str):
+    """The contain leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess). Returns (code, combined output)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    env = {
+        "PATH": _os.environ["PATH"],
+        "HOME": str(g.parent),
+        "FNO_STATE_DIR": str(g.parent),
+        "FNO_TRACKER_BACKEND": "graph",
+    }
+    if _os.environ.get("FNO_CLAIMS_ROOT"):
+        env["FNO_CLAIMS_ROOT"] = _os.environ["FNO_CLAIMS_ROOT"]
+    proc = _sp.run(
+        [str(binary), "backlog", "contain", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _mark_done(g: Path, node_id: str) -> None:
+    """Arrange a done node straight through the store. The close itself is
+    native; this file's subject is what contain does with a done node."""
+    from fno.graph.store import commit_rows_via_store
+
+    def stamp(rows):
+        for e in rows:
+            if e["id"] == node_id:
+                e["status"] = "done"
+                e["completed_at"] = "2026-04-01T00:00:00+00:00"
+        return rows
+
+    commit_rows_via_store(g, stamp)
+
+
 def _by_id(g: Path) -> dict:
     return {e["id"]: e for e in _read_entries(g)}
 
@@ -119,33 +165,11 @@ def _seed_owner_with_children(g: Path, n: int = 3) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_contain_stamps_containment_and_parent_on_every_child(tmp_graph):
-    owner, kids = _seed_owner_with_children(tmp_graph, 3)
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 0, r.output
-    rows = _by_id(tmp_graph)
-    for kid in kids:
-        assert rows[kid]["contained_in"] == owner
-        assert rows[kid]["parent"] == owner
-        assert f"contained {kid} into {owner}" in r.output
-        assert "it ships inside" in r.output
-
-
-def test_contain_json_receipt(tmp_graph):
-    owner, kids = _seed_owner_with_children(tmp_graph, 2)
-    r = _invoke("--json", "backlog", "contain", owner, *kids)
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.output.strip().splitlines()[-1])
-    assert payload["owner"] == owner
-    assert sorted(payload["contained"]) == sorted(kids)
-    assert payload["warnings"] == []
-
-
 def test_contain_is_idempotent_on_rerun(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 0, r.output
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
+    code, out = _native_contain(tmp_graph, owner, *kids)
+    assert code == 0, out
     row = _by_id(tmp_graph)[kids[0]]
     assert row["contained_in"] == owner
 
@@ -162,10 +186,10 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     # done either way and contain must still refuse. The completion note
     # satisfies the close-evidence rule; the force keeps the child gate.
     _native_update(tmp_graph, owner, "--completion-note", "setup: done owner")
-    _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 2, r.output
-    assert "is done" in r.output
+    _mark_done(tmp_graph, owner)
+    code, out = _native_contain(tmp_graph, owner, *kids)
+    assert code == 2, out
+    assert "is done" in out
     rows = _by_id(tmp_graph)
     assert all(rows[k].get("contained_in") is None for k in kids)
 
@@ -173,33 +197,33 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
 def test_contain_refuses_a_deferred_owner_and_stamps_nothing(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
     _invoke("backlog", "defer", owner, "--reason", "parked")
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 2, r.output
-    assert "is deferred" in r.output
+    code, out = _native_contain(tmp_graph, owner, *kids)
+    assert code == 2, out
+    assert "is deferred" in out
     assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_refuses_a_missing_owner(tmp_graph):
     kid = _seed_idea(tmp_graph, "lone child")
-    r = _invoke("backlog", "contain", "x-dead0001", kid)
-    assert r.exit_code == 3, r.output
-    assert "owner not found" in r.output
+    code, out = _native_contain(tmp_graph, "x-dead0001", kid)
+    assert code == 3, out
+    assert "owner not found" in out
     assert _by_id(tmp_graph)[kid].get("contained_in") is None
 
 
 def test_contain_refuses_the_owner_naming_itself(tmp_graph):
     owner, _kids = _seed_owner_with_children(tmp_graph, 1)
-    r = _invoke("backlog", "contain", owner, owner)
-    assert r.exit_code == 1, r.output
+    code, out = _native_contain(tmp_graph, owner, owner)
+    assert code == 1, out
 
 
 def test_contain_refuses_one_id_spelled_two_ways(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
     prefix, hex_part = kids[0].split("-")
     short = f"{prefix}-{hex_part[:4]}"  # fuzzy prefix of the same node
-    r = _invoke("backlog", "contain", owner, kids[0], short)
-    assert r.exit_code == 1, r.output
-    assert "resolve to the same node" in r.output
+    code, out = _native_contain(tmp_graph, owner, kids[0], short)
+    assert code == 1, out
+    assert "resolve to the same node" in out
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +234,9 @@ def test_contain_refuses_one_id_spelled_two_ways(tmp_graph):
 def test_contain_refuses_a_target_with_children(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     grandchild = _seed_idea(tmp_graph, "grandchild", "--parent", kids[0])
-    r = _invoke("backlog", "contain", owner, kids[0])
-    assert r.exit_code == 2, r.output
-    assert "containment is one level" in r.output
+    code, out = _native_contain(tmp_graph, owner, kids[0])
+    assert code == 2, out
+    assert "containment is one level" in out
     assert grandchild
 
 
@@ -223,30 +247,36 @@ def test_contain_refuses_a_target_with_an_open_pr_and_stamps_nothing_in_the_batc
     rows = _by_id(tmp_graph)
     rows[kids[0]]["pr_number"] = 4242
     _write_rows(tmp_graph, rows)
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 2, r.output
-    assert "own delivery unit mid-flight" in r.output
+    code, out = _native_contain(tmp_graph, owner, *kids)
+    assert code == 2, out
+    assert "own delivery unit mid-flight" in out
     fresh = _by_id(tmp_graph)
     assert all(fresh[k].get("contained_in") is None for k in kids)
 
 
 def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    import fno.graph.cli as graph_cli
+    import os as _os
 
-    monkeypatch.setattr(graph_cli, "_live_worker", lambda node_id: "worker-7")
-    r = _invoke("backlog", "contain", owner, *kids)
-    assert r.exit_code == 2, r.output
-    assert "being built right now by worker-7" in r.output
+    from fno.claims.core import acquire_claim
+
+    claims = tmp_graph.parent / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims))
+    acquire_claim(f"node:{kids[0]}", "worker-7", pid=_os.getpid(), root=claims)
+    code, out = _native_contain(tmp_graph, owner, kids[0])
+    assert code == 2, out
+    assert "being built right now by worker-7" in out
     assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_live_worker_positive_control_on_an_unclaimed_node(tmp_graph):
-    from fno.graph.cli import _live_worker
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
 
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    assert _live_worker(kids[0]) is None
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
+    info = claim_status(f"node:{kids[0]}", root=claims_root_for(f"node:{kids[0]}"))
+    assert info.get("state") not in ("live", "suspect")
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
 
 
 def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
@@ -255,17 +285,17 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     kid = kids[0]
     _native_update(tmp_graph, kid, "--completion-note", "setup: done target")
-    _invoke("backlog", "done", kid)
+    _mark_done(tmp_graph, kid)
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"
     rows[kid]["pr_number"] = 4243
     _write_rows(tmp_graph, rows)
-    r = _invoke("backlog", "contain", owner, kid)
-    assert r.exit_code == 0, r.output
+    code, out = _native_contain(tmp_graph, owner, kid)
+    assert code == 0, out
     row = _by_id(tmp_graph)[kid]
     assert row["parent"] == owner
     assert row.get("contained_in") is None
-    assert "did NOT mark it contained" in r.output
+    assert "did NOT mark it contained" in out
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +348,7 @@ def test_next_returns_the_owner_when_its_only_children_are_contained(tmp_graph):
     from fno.backlog.advance import selection_guards
 
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
     r = _invoke("backlog", "next", "--ideas")
     assert r.exit_code == 0, r.output
     assert owner in r.output
@@ -339,7 +369,7 @@ def test_kanban_column_and_card_for_a_contained_row(tmp_graph):
     from fno.graph.render import _kanban_column, render_graph_md
 
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
     kid_row = _by_id(tmp_graph)[kids[0]]
     assert _kanban_column(kid_row) is not None
     card = tmp_graph.with_name("card.md")
@@ -351,7 +381,7 @@ def test_kanban_column_hides_a_deferred_row(tmp_graph):
     from fno.graph.render import _kanban_column
 
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
     _invoke("backlog", "defer", kids[0], "--reason", "parked")
     assert _kanban_column(_by_id(tmp_graph)[kids[0]]) is None
 
@@ -365,7 +395,7 @@ def test_redirect_if_contained_exits_2_naming_the_owner(tmp_graph, capsys):
     from fno.target_cli import _redirect_if_contained
 
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    assert _invoke("backlog", "contain", owner, *kids).exit_code == 0
+    assert _native_contain(tmp_graph, owner, *kids)[0] == 0
     with pytest.raises(typer.Exit) as exc:
         _redirect_if_contained(_by_id(tmp_graph)[kids[0]])
     assert exc.value.exit_code == 2
@@ -445,7 +475,7 @@ def test_undefer_after_contain_keeps_containment(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
     kid = kids[0]
     _invoke("backlog", "defer", kid, "--reason", "waiting on the owner")
-    assert _invoke("backlog", "contain", owner, kid).exit_code == 0
+    assert _native_contain(tmp_graph, owner, kid)[0] == 0
     r = _invoke("backlog", "undefer", kid)
     assert r.exit_code == 0, r.output
     row = _by_id(tmp_graph)[kid]
@@ -467,7 +497,7 @@ def test_release_drops_owner_pr_link_and_records_released_from(tmp_graph):
     owner = _seed_idea(tmp_graph, "owner epic")
     child = _seed_idea(tmp_graph, "child")
     other = _seed_idea(tmp_graph, "other epic")
-    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    assert _native_contain(tmp_graph, owner, child)[0] == 0
 
     def _stamp(entries):
         for e in entries:
@@ -495,7 +525,7 @@ def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
     node again."""
     owner = _seed_idea(tmp_graph, "owner epic")
     child = _seed_idea(tmp_graph, "child")
-    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    assert _native_contain(tmp_graph, owner, child)[0] == 0
 
     def _stamp(entries):
         for e in entries:
@@ -518,7 +548,7 @@ def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
         {"number": 901, "url": "https://github.com/o/r/pull/901"}
     ]
     assert c.get("released_from") == owner
-    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    assert _native_contain(tmp_graph, owner, child)[0] == 0
     c2 = _by_id(tmp_graph)[child]
     assert c2["contained_in"] == owner
     assert "released_from" not in c2
@@ -530,7 +560,7 @@ def test_release_keeps_same_number_pr_from_another_repo(tmp_graph):
     release keeps it and drops only the same-repo #900."""
     owner = _seed_idea(tmp_graph, "owner epic")
     child = _seed_idea(tmp_graph, "child")
-    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    assert _native_contain(tmp_graph, owner, child)[0] == 0
 
     def _stamp(entries):
         for e in entries:

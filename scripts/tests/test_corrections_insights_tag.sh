@@ -33,7 +33,7 @@ mkdir -p "$FNO_HOME" "$HOME"
 bash "$SCRIPT_DIR/../corrections-log-init.sh" >/dev/null 2>&1
 
 # S2 row count via awk (field 2 of the pipe-delimited row).
-count_s2() { awk -F' \\| ' '$2 == "S2"' "$FNO_HOME/corrections.log" | wc -l | tr -d ' '; }
+count_s2() { awk -F' \\| ' '$2 == "S2"' "$FNO_HOME/logs/corrections.log" | wc -l | tr -d ' '; }
 
 # Fixture reports in the shape of skills/intel/references/report-shape.md.
 cat > "$D/report-a.md" <<'EOF'
@@ -56,7 +56,7 @@ bash "$INGEST" --insights-file "$D/report-a.md" >/dev/null 2>&1
 RC=$?
 if [[ $RC -eq 0 ]]; then pass "rc=0"; else fail "rc=$RC (expected 0)"; fi
 if [[ "$(count_s2)" == "2" ]]; then pass "two S2 rows"; else fail "want 2 S2 rows, got $(count_s2)"; fi
-SIGNAL_ROWS=$(awk -F' \\| ' '$2 == "S2" && $5 ~ /signal=/' "$FNO_HOME/corrections.log" | wc -l | tr -d ' ')
+SIGNAL_ROWS=$(awk -F' \\| ' '$2 == "S2" && $5 ~ /signal=/' "$FNO_HOME/logs/corrections.log" | wc -l | tr -d ' ')
 if [[ "$SIGNAL_ROWS" == "2" ]]; then pass "rows carry signal="; else fail "want 2 rows with signal=, got $SIGNAL_ROWS"; fi
 
 # ---- T02: second run on the same report adds zero ----
@@ -97,7 +97,7 @@ if [[ $RC -eq 1 ]]; then pass "rc=1"; else fail "rc=$RC (expected 1)"; fi
 echo "T07: placement rule"
 STRAY=$(find "$HOME/.claude" -type f 2>/dev/null)
 if [[ -z "$STRAY" ]]; then pass "no file under \$HOME/.claude"; else fail "files under \$HOME/.claude: $STRAY"; fi
-if [[ -f "$FNO_HOME/corrections.log.wm" ]]; then pass "watermark beside the log"; else fail "watermark missing at \$FNO_HOME/corrections.log.wm"; fi
+if [[ -f "$FNO_HOME/logs/corrections.log.wm" ]]; then pass "watermark beside the log"; else fail "watermark missing at \$FNO_HOME/logs/corrections.log.wm"; fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

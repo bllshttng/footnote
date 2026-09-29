@@ -5161,7 +5161,6 @@ def cmd_drain_self(
                 )
 
 
-# Moved to fno.mail.hold (file budget); the ack/drain commands below import it.
 from fno.mail.hold import _emit_drain_marker, cmd_notify_self  # noqa: E402,F401
 
 mail_app.command("notify-self", hidden=True)(cmd_notify_self)

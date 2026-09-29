@@ -366,6 +366,7 @@ sleep 5
             provider="codex",
             cwd=repo,
             session=session,
+            yolo=True,
             codex_sessions_dir=tmp_path / "no-rollouts",
         )
 

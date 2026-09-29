@@ -630,7 +630,7 @@ def _candidate_record(entry: dict, deep: bool) -> dict:
         "claim_history": {
             "session_count": len(valid_sessions),
             "total_cost_usd": round(cost_total, 2),
-            "last_locked_at": entry.get("locked_at", entry.get("claimed_at")),
+            "last_locked_at": entry.get("locked_at") or entry.get("claimed_at"),
         },
         "ship_state": {
             "pr_number": entry.get("pr_number"),
@@ -1318,10 +1318,6 @@ def cmd_apply(
                 node["deferred_kind"] = resolved_kind
             else:
                 node.pop("deferred_kind", None)
-            # Clear the canonical lock field; _normalize_lock_fields re-syncs the
-            # session_id mirror and clears the harness stamp at serialize.
-            node["locked_by"] = None
-            node["locked_at"] = None
             applied["deferred"] += 1
         applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])
         return entries
@@ -1830,7 +1826,7 @@ def cmd_health(
             # never raises TypeError. Same shape for retain_days.
             history_path_str = (
                 history_cfg.get("path")
-                or str(_paths.state_dir() / "health-history.jsonl")
+                or str(_paths.state_dir() / "history" / "health-history.jsonl")
             )
             try:
                 retain_days = int(history_cfg.get("retain_days", 90))
@@ -2029,7 +2025,7 @@ def cmd_trend(
 ) -> None:
     """Print a backlog-trend summary from health-check history.
 
-    Reads ``~/.fno/health-history.jsonl`` (or the path set via the
+    Reads ``~/.fno/history/health-history.jsonl`` (or the path set via the
     ``FNO_HEALTH_HISTORY`` env var, used by tests). Emits a
     first-vs-latest delta per metric over the requested window.
     """

@@ -1,4 +1,4 @@
-//! Persisted per-client sideline view state (`~/.fno/mux-view.json`).
+//! Persisted per-client sideline view state (`~/.fno/mux/mux-view.json`).
 //!
 //! Client-local display preference, NOT session state: which sideline sections
 //! the operator left expanded, live-only, or collapsed. Keyed by squad NAME
@@ -124,7 +124,7 @@ pub fn view_path() -> PathBuf {
         return PathBuf::from(v).join("mux-view.json");
     }
     #[cfg(not(test))]
-    return crate::proto::mux_sidecar_root().join("mux-view.json");
+    return crate::proto::mux_sidecar_path("mux-view.json");
     #[cfg(test)]
     {
         let base = std::env::var_os("HOME")

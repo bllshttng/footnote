@@ -192,6 +192,51 @@ pub(crate) fn config_lookup_global(keys: &[&str]) -> Option<toml::Value> {
     Some(cur.clone())
 }
 
+/// The guardrail preset for `cwd`: `FNO_GUARD_PRESET` wins over the
+/// `guards.preset` config key, so the preset works before the config schema
+/// carries the field. `strict` runs every gatable guard, `standard` (the
+/// default when nothing is set) keeps the two destructive-write guards on,
+/// `off` runs none. A malformed value reads as `strict`, so a typo never
+/// drops a guard.
+fn normalize_guard_preset(raw: &str) -> &'static str {
+    match raw.trim().trim_matches('"') {
+        "standard" => "standard",
+        "off" => "off",
+        _ => "strict",
+    }
+}
+
+pub(crate) fn guard_preset(cwd: &Path) -> &'static str {
+    if let Some(v) = non_empty_env("FNO_GUARD_PRESET") {
+        return normalize_guard_preset(&v.to_string_lossy());
+    }
+    match config_lookup(cwd, &["guards", "preset"]) {
+        Some(v) => normalize_guard_preset(v.as_str().unwrap_or("bogus")),
+        None => "standard",
+    }
+}
+
+/// Whether one gatable guard runs under the project's preset. Names are the
+/// guard ids the hooks know: pipe, test-run, bin-install, recursive-grep,
+/// bg-process, git-protection. The state-integrity guards (graph write
+/// protection and friends) never gate here.
+pub(crate) fn guard_enabled(cwd: &Path, guard: &str) -> bool {
+    preset_runs(guard_preset(cwd), guard)
+}
+
+/// The same verdict from an already-resolved preset, so a caller gating
+/// several guards resolves the config once, not once per guard.
+pub(crate) fn preset_runs(preset: &str, guard: &str) -> bool {
+    match preset {
+        "strict" => true,
+        "off" => false,
+        _ => !matches!(
+            guard,
+            "recursive-grep" | "test-run" | "bin-install" | "bg-process"
+        ),
+    }
+}
+
 /// Per-field merged table across the candidates, the way Python's loader
 /// deep-merges candidate files: the highest-priority candidate that defines a
 /// field wins that field, and a lower candidate's other fields still fill in.
@@ -1294,6 +1339,20 @@ pub fn slot_cutover_enabled(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// `[slot_cutover] threshold_pct` (default 90, valid 1-100): the shared Claude
+/// slot cuts over once its worst binding usage window reaches this share. A
+/// non-number or out-of-range value reads as the default.
+pub fn slot_cutover_threshold_pct(cwd: &Path) -> f64 {
+    resolve(cwd, |t| {
+        t.get("slot_cutover")?
+            .as_table()?
+            .get("threshold_pct")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+    })
+    .filter(|pct| (1.0..=100.0).contains(pct))
+    .unwrap_or(90.0)
+}
+
 /// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
 /// safe repairs (dead flight holds, the launchd refresh, the install from
 /// main) before it pages. Off, the rows still name the repair verb.
@@ -1543,6 +1602,31 @@ mod tests {
             "[slot_cutover]\nenabled = \"yes\"\n",
         );
         assert!(!slot_cutover_enabled(&cwd));
+        clear_config_env();
+    }
+
+    #[test]
+    fn slot_cutover_threshold_pct_defaults_and_rejects_non_numbers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("slot-threshold-default", "schema_version = 1\n");
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
+
+        let cwd =
+            write_project_settings("slot-threshold-set", "[slot_cutover]\nthreshold_pct = 99\n");
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 99.0);
+
+        let cwd = write_project_settings(
+            "slot-threshold-string",
+            "[slot_cutover]\nthreshold_pct = \"high\"\n",
+        );
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
+
+        let cwd = write_project_settings(
+            "slot-threshold-range",
+            "[slot_cutover]\nthreshold_pct = 150\n",
+        );
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
         clear_config_env();
     }
 
@@ -2120,6 +2204,35 @@ mod tests {
         f
     }
 
+    // --- guardrail presets --------------------------------------
+
+    #[test]
+    fn guard_preset_ladder_env_config_and_malformed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_config_env();
+        std::env::remove_var("FNO_GUARD_PRESET");
+        // Absent everywhere: standard, and only the preset-gated guards answer.
+        let dir =
+            write_project_settings("guard-absent", "[target.defaults]\nmax_iterations = 40\n");
+        assert_eq!(guard_preset(&dir), "standard");
+        assert!(guard_enabled(&dir, "pipe"));
+        assert!(guard_enabled(&dir, "git-protection"));
+        assert!(!guard_enabled(&dir, "recursive-grep"));
+        // The config key on its own: off disables everything gatable.
+        let off = write_project_settings("guard-off", "guards.preset = \"off\"\n");
+        assert!(!guard_enabled(&off, "recursive-grep"));
+        assert!(!guard_enabled(&off, "pipe"));
+        // The env beats the config key.
+        std::env::set_var("FNO_GUARD_PRESET", "strict");
+        assert!(guard_enabled(&off, "recursive-grep"));
+        // A malformed value reads as strict, never as weaker.
+        std::env::set_var("FNO_GUARD_PRESET", "bogus");
+        assert!(guard_enabled(&off, "bg-process"));
+        std::env::set_var("FNO_GUARD_PRESET", "off");
+        assert!(!guard_enabled(&off, "pipe"));
+        std::env::remove_var("FNO_GUARD_PRESET");
+    }
+
     // --- retirement sweep cadence -------------------------------
 
     #[test]
@@ -2131,23 +2244,18 @@ mod tests {
     }
 
     #[test]
-    fn retirement_sweep_interval_clamps_to_a_fraction_of_grace() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_config_env();
-        let cwd = write_project_settings(
-            "retire-interval-clamp",
-            "[agents]\nretire_interval_s = 1800\n",
-        );
-        assert_eq!(retire_interval_s(&cwd, 900), 300);
-    }
-
-    #[test]
     fn retirement_sweep_interval_never_allows_the_every_tick_bug() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let zero =
             write_project_settings("retire-interval-zero", "[agents]\nretire_interval_s = 0\n");
         assert_eq!(retire_interval_s(&zero, 900), 300);
+        // A large interval still clamps to a fraction of the grace window.
+        let clamp = write_project_settings(
+            "retire-interval-clamp",
+            "[agents]\nretire_interval_s = 1800\n",
+        );
+        assert_eq!(retire_interval_s(&clamp, 900), 300);
         let garbage = write_project_settings(
             "retire-interval-garbage",
             "[agents]\nretire_interval_s = \"banana\"\n",

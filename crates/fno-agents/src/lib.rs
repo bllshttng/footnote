@@ -231,6 +231,7 @@ pub mod loops_pause;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
@@ -238,6 +239,7 @@ pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_close;
+pub mod merge_freeze;
 pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
@@ -250,6 +252,7 @@ pub mod model_env_scrub;
 pub mod model_family;
 pub mod naming;
 pub mod needs;
+pub mod node_branch;
 pub mod node_origin;
 pub mod node_reading;
 pub mod node_route;
@@ -278,6 +281,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
 pub mod pr_push;
@@ -311,6 +315,7 @@ pub mod registry_guard;
 pub mod registry_json;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod removals;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
@@ -355,6 +360,7 @@ pub mod spawn_axes;
 pub mod spawn_backends;
 pub mod spawn_context;
 pub mod spawn_contract;
+pub mod spawn_cwd;
 pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
@@ -1452,7 +1458,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // even on outcome none, so a quiet run cannot be mistaken for a sweep
     // that never ran.
     "question_sweep",
-    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 10-minute
     // floor and un-parked open rows whose head moved or whose park passed
     // 24h, marking finished rows handled. Emitted even on a quiet or skipped
     // run, so a quiet run cannot be mistaken for a sweep that never ran.
@@ -1546,6 +1552,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // arm and `fno agents reap`). Python's attended `king done` emits the
     // same kind through the shared emitter.
     "agent_crown_vacated",
+    // A succession reverted: the reap sweep restored the predecessor's
+    // session after an heir died unbound past the window (crown_reap.rs;
+    // the daemon retire arm and `fno agents reap`).
+    "crown_succession_reverted",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

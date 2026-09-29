@@ -218,6 +218,9 @@ fn sync_event_store() {
     let Ok(text) = std::fs::read_to_string(&canonical) else {
         return;
     };
+    // A Windows checkout can carry CRLF while the generated copies are LF:
+    // the suffix strip below and write_if_different both compare LF shapes.
+    let text = text.replace("\r\n", "\n");
     let copy = root.join("crates/fno/src/event_store.rs");
     if !copy.is_file() {
         return;
@@ -234,6 +237,7 @@ fn sync_event_store() {
     let Ok(observation_text) = std::fs::read_to_string(&observation) else {
         return;
     };
+    let observation_text = observation_text.replace("\r\n", "\n");
     let observation_copy = root.join("crates/fno/src/event_store/observation.rs");
     if !observation_copy.is_file() {
         return;

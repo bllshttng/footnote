@@ -26,79 +26,10 @@ pub(crate) const FAIL_STATES: [&str; 7] = [
 // PRs: one listing, binding classification, mergeable filter
 // ---------------------------------------------------------------------------
 
-/// Delimiter-bounded node-id candidates of a head ref (pr/closure.branch_node_ids).
-/// Hand-rolled: the pattern needs lookaheads (`(?=$|[/-])`) that the regex
-/// crate does not support, including the compact legacy `x` form.
-pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
-    let b = head_ref.as_bytes();
-    let mut ids: Vec<String> = Vec::new();
-    // Non-overlapping left-to-right scan, exactly like Python's finditer: a
-    // match is consumed and the scan resumes after it, so "feature/x-aaaa-1234"
-    // never yields the bogus "cdef-1234" from inside the first match's tail.
-    let mut i = 0;
-    while i < b.len() {
-        // A candidate starts at the string head or after '-' / '/'.
-        if !(i == 0 || b[i - 1] == b'-' || b[i - 1] == b'/') {
-            i += 1;
-            continue;
-        }
-        if !b[i].is_ascii_lowercase() {
-            i += 1;
-            continue;
-        }
-        // [a-z][a-z0-9]{0,7} then an optional '-' then [0-9a-f]{4,8}: the
-        // dash-less minter shape stays a candidate. The run bounds the whole
-        // body (prefix 1-8 + hex 4-8 = 16), and each branch re-checks its own
-        // prefix/hex lengths.
-        let mut j = i + 1;
-        let mut alnum = 0;
-        while j < b.len() && alnum < 15 && (b[j].is_ascii_lowercase() || b[j].is_ascii_digit()) {
-            j += 1;
-            alnum += 1;
-        }
-        let mut matched: Option<(usize, usize)> = None; // (hex_start, hex_end)
-        if j < b.len() && b[j] == b'-' && j - i - 1 <= 7 {
-            // Dashed: prefix ran 1-8 chars, then '-' then 4-8 hex.
-            let hex_start = j + 1;
-            let mut k = hex_start;
-            while k < b.len()
-                && k - hex_start < 8
-                && (b[k].is_ascii_digit() || (b'a'..=b'f').contains(&b[k]))
-            {
-                k += 1;
-            }
-            let hex_len = k - hex_start;
-            if (4..=8).contains(&hex_len) && (k == b.len() || b[k] == b'-' || b[k] == b'/') {
-                matched = Some((hex_start, k));
-            }
-        }
-        if matched.is_none() {
-            // Compact: the alnum run's own tail is the hex, greedy head first
-            // (shortest hex, head 1-8 chars); the run end is a boundary or EOL.
-            let min_tail = 4.max((j - i).saturating_sub(8));
-            for tail in min_tail..=(8.min(alnum)) {
-                let hex_start = j - tail;
-                let hex_ok = b[hex_start..j]
-                    .iter()
-                    .all(|&c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
-                if hex_ok && (j == b.len() || b[j] == b'-' || b[j] == b'/') {
-                    matched = Some((hex_start, j));
-                    break;
-                }
-            }
-        }
-        let Some((_, hex_end)) = matched else {
-            i += 1;
-            continue;
-        };
-        let candidate = &head_ref[i..hex_end];
-        if !ids.iter().any(|c| c == candidate) {
-            ids.push(candidate.to_string());
-        }
-        i = hex_end;
-    }
-    ids
-}
+/// Delimiter-bounded node-id candidates of a head ref: the one parser lives
+/// in `node_branch`; this re-export keeps the call sites (and heal.rs's
+/// import path) compiling unchanged.
+pub(crate) use crate::node_branch::node_ids as branch_node_ids;
 
 /// A rollup entry's pass/fail/pending class (pr/_status._classify).
 pub(crate) fn classify_check(check: &Value) -> &'static str {
@@ -350,27 +281,20 @@ pub(crate) fn read_pr_gates(
     // The merge slot is the fact that ORDERS this queue: name its
     // holder on every row, and when the holder's own row is absent (the
     // listing filter or a spent gate slice dropped it), carry a synthetic
-    // row so the queue names the PR every queued merge waits behind. One
-    // store: the space db the claim verb reads with no root.
-    match crate::claim_store::list_db(Some("merge-slot:"), false, None) {
-        Ok(rows_json) => {
-            // list_db answers {"rows": [...]}; each row carries the claim's
-            // key and holder, so the stamp names WHICH base's slot it is.
-            let slots: Vec<(u64, String)> = rows_json
-                .get("rows")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|r| {
-                            let holder = r.get("holder").and_then(Value::as_str)?;
-                            let pr = crate::authorized_merge::parse_slot_holder(holder)?;
-                            let key = r.get("key").and_then(Value::as_str).unwrap_or("");
-                            let base = key.strip_prefix("merge-slot:").unwrap_or(key);
-                            Some((pr, base.to_string()))
-                        })
-                        .collect()
+    // row so the queue names the PR every queued merge waits behind.
+    match crate::claim_store::list_repo_space("merge-slot:", false) {
+        Ok(records) => {
+            let slots: Vec<(u64, String)> = records
+                .iter()
+                .filter_map(|record| {
+                    let pr = crate::authorized_merge::parse_slot_holder(&record.holder)?;
+                    let base = record
+                        .key
+                        .strip_prefix("merge-slot:")
+                        .unwrap_or(&record.key);
+                    Some((pr, base.to_string()))
                 })
-                .unwrap_or_default();
+                .collect();
             for (holder, base) in &slots {
                 for row in rows.iter_mut() {
                     row.as_object_mut().map(|o| {
@@ -497,25 +421,44 @@ pub(crate) fn pr_binding_keys(
     }
 }
 
-/// Binding classification over already-fetched open-PR rows and graph
-/// entries: the pure half of `read_prs`, returns (bound node rows, warnings).
-/// Three keys, in order: delimiter-bounded branch matching; then - only when
-/// the branch names nothing - the graph's own `(pr_number, pr_url)`
+/// One open PR's binding verdict: `bound` (the node points back at this PR),
+/// `missing` (a unique node resolves but does not point back), `untracked`
+/// (no key names a real node), or `ambiguous` (several nodes, or one node
+/// named by several open PRs). Mirrors _reconcile.classify_open_pr_bindings.
+pub(crate) struct PrVerdict {
+    pub number: i64,
+    pub verdict: &'static str,
+    pub node_id: Option<String>,
+    pub detail: Option<String>,
+    board_unbound_detail: Option<String>,
+    url: Option<String>,
+    head: String,
+    /// The key that decided an `ambiguous` verdict: `branch`, `backref`,
+    /// `trailer`, or `sibling`. The board warns only on backref and trailer.
+    via: &'static str,
+    candidates: Vec<String>,
+}
+
+/// Per-row binding verdicts over already-fetched open-PR rows and graph
+/// entries. Three keys, in order: delimiter-bounded branch matching; then -
+/// only when the branch names nothing - the graph's own `(pr_number, pr_url)`
 /// back-pointer, scoped by normalized URL because a pr_number is only unique
-/// within one repository; then the body's exact `Backlog-Closure:` trailer
-/// (mirrors _reconcile.classify_open_pr_bindings). The keys come from
-/// [`pr_binding_keys`], the same predicate the merge owner reads.
-fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
+/// within one repository; then the body's exact `Backlog-Closure:` trailer.
+/// The keys come from [`pr_binding_keys`], the same predicate the merge owner
+/// reads.
+pub(crate) fn pr_binding_verdicts<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    entries: &[Value],
+) -> Vec<PrVerdict> {
     let node_by_id: HashMap<&str, &Value> = entries
         .iter()
         .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
         .collect();
-    let mut warnings: Vec<String> = Vec::new();
     // First pass: which nodes have exactly one open PR. A trailer-resolved
     // row competes for its node like a branch-resolved one, so one node named
     // by a branch PR and a trailer PR reads ambiguous on both.
     let mut open_prs_by_node: HashMap<String, Vec<i64>> = HashMap::new();
-    let mut parsed: Vec<(i64, Option<String>, String, PrBinding)> = Vec::new();
+    let mut parsed: Vec<(i64, Option<String>, String, PrBinding, bool)> = Vec::new();
     for row in rows {
         let Some(number) = s_i64(row, "number") else {
             continue;
@@ -550,67 +493,164 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
             row.get("url").and_then(Value::as_str).map(str::to_string),
             head.to_string(),
             keys,
+            row.get("body").is_some(),
         ));
     }
-    let mut bound: Vec<Value> = Vec::new();
-    for (number, url, head, keys) in parsed {
+    let mut out: Vec<PrVerdict> = Vec::new();
+    for (number, url, head, keys, body_supplied) in parsed {
+        let verdict = |verdict, node_id, detail, via, candidates| PrVerdict {
+            number,
+            verdict,
+            node_id,
+            detail,
+            board_unbound_detail: None,
+            url: url.clone(),
+            head: head.clone(),
+            via,
+            candidates,
+        };
         let unbound = keys.unbound_detail();
         let mut matched = keys.branch;
+        let mut via = "branch";
         if matched.is_empty() {
             match keys.backrefs.as_slice() {
                 [] => {
                     if keys.trailer.is_empty() {
-                        warnings.push(format!(
-                            "pr_node_binding_untracked: #{number} {head} ({})",
-                            unbound.unwrap_or_default()
-                        ));
+                        let detail = format!(
+                            "branch '{head}' names no real node; {}; {}",
+                            url.as_deref()
+                                .filter(|url| !url.is_empty())
+                                .map(|url| format!("no node carries #{number} at {url}"))
+                                .unwrap_or_else(|| "no url, back-pointer not read".to_string()),
+                            if body_supplied {
+                                "body carries no closure line"
+                            } else {
+                                "body not supplied, trailer not read"
+                            }
+                        );
+                        let mut row = verdict("untracked", None, Some(detail), "", Vec::new());
+                        row.board_unbound_detail = unbound;
+                        out.push(row);
                         continue;
                     }
                     if keys.trailer.len() > 1 {
-                        warnings.push(format!(
-                            "pr_node_binding_ambiguous: #{number} -> {}",
+                        let detail = format!(
+                            "trailer names {} real nodes: {}",
+                            keys.trailer.len(),
                             keys.trailer.join(" ")
+                        );
+                        out.push(verdict(
+                            "ambiguous",
+                            None,
+                            Some(detail),
+                            "trailer",
+                            keys.trailer,
                         ));
                         continue;
                     }
                     matched = keys.trailer;
+                    via = "trailer";
                 }
-                [only] => matched = vec![(*only).to_string()],
+                [only] => {
+                    matched = vec![(*only).to_string()];
+                    via = "backref";
+                }
                 many => {
-                    warnings.push(format!(
-                        "pr_node_binding_ambiguous: #{number} -> {}",
-                        many.join(" ")
+                    let detail = format!("{} nodes carry this PR: {}", many.len(), many.join(" "));
+                    out.push(verdict(
+                        "ambiguous",
+                        None,
+                        Some(detail),
+                        "backref",
+                        many.to_vec(),
                     ));
-                    continue; // ambiguous: a list-order guess is the wrong-node bind
+                    continue;
                 }
             }
         }
         if matched.len() > 1 {
-            continue; // ambiguous: a list-order guess is the wrong-node bind
+            let detail = format!(
+                "branch names {} real nodes: {}",
+                matched.len(),
+                matched.join(" ")
+            );
+            out.push(verdict("ambiguous", None, Some(detail), "branch", matched));
+            continue;
         }
-        let nid = &matched[0];
+        let nid = matched[0].clone();
         let mut siblings = open_prs_by_node
             .get(nid.as_str())
             .cloned()
             .unwrap_or_default();
         siblings.sort();
         if siblings.len() > 1 {
-            continue; // ambiguous
+            let shown: Vec<String> = siblings.iter().map(|n| format!("#{n}")).collect();
+            let detail = format!(
+                "{nid} has {} open PRs: {}",
+                siblings.len(),
+                shown.join(", ")
+            );
+            out.push(verdict(
+                "ambiguous",
+                Some(nid),
+                Some(detail),
+                "sibling",
+                Vec::new(),
+            ));
+            continue;
         }
         let Some(node) = node_by_id.get(nid.as_str()) else {
             continue;
         };
-        let refs_this_pr = node_pr_refs(node).iter().any(|(n, _)| *n == number);
-        if !refs_this_pr {
-            warnings.push(format!("pr_node_binding_missing: #{number} -> {nid}"));
-            continue;
+        if node_pr_refs(node).iter().any(|(n, _)| *n == number) {
+            out.push(verdict("bound", Some(nid), None, via, Vec::new()));
+        } else {
+            let detail = format!("{nid} resolved via {via} but does not point back at #{number}");
+            out.push(verdict("missing", Some(nid), Some(detail), via, Vec::new()));
         }
-        let mut row = (*node).clone();
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert("pr_number".to_string(), json!(number));
-            obj.insert("pr_url".to_string(), json!(url));
+    }
+    out
+}
+
+/// The board's reading of [`pr_binding_verdicts`]: (bound node rows,
+/// warnings). A branch or sibling ambiguity stays silent here; a list-order
+/// guess is the wrong-node bind, and the board has always skipped them.
+fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
+    let node_by_id: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
+        .collect();
+    let mut bound: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for v in pr_binding_verdicts(rows.iter(), entries) {
+        let number = v.number;
+        match v.verdict {
+            "untracked" => warnings.push(format!(
+                "pr_node_binding_untracked: #{number} {} ({})",
+                v.head,
+                v.board_unbound_detail.unwrap_or_default()
+            )),
+            "ambiguous" if matches!(v.via, "backref" | "trailer") => warnings.push(format!(
+                "pr_node_binding_ambiguous: #{number} -> {}",
+                v.candidates.join(" ")
+            )),
+            "missing" => warnings.push(format!(
+                "pr_node_binding_missing: #{number} -> {}",
+                v.node_id.unwrap_or_default()
+            )),
+            "bound" => {
+                let Some(node) = v.node_id.as_deref().and_then(|n| node_by_id.get(n)) else {
+                    continue;
+                };
+                let mut row = (*node).clone();
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("pr_number".to_string(), json!(number));
+                    obj.insert("pr_url".to_string(), json!(v.url));
+                }
+                bound.push(row);
+            }
+            _ => {}
         }
-        bound.push(row);
     }
     (bound, warnings)
 }
@@ -702,33 +742,6 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .starts_with("undriven_pr:"));
-    }
-
-    #[test]
-    fn branch_ids_never_match_a_partial_hex_prefix() {
-        assert_eq!(
-            branch_node_ids("feature/x-aaaa-1234"),
-            vec!["x-aaaa".to_string()]
-        );
-        assert_eq!(
-            branch_node_ids("x-5b667-fixes-x-bbbb"),
-            vec!["x-5b667".to_string(), "x-bbbb".to_string()]
-        );
-        // Uppercase is not id body ([0-9a-f], not [0-9a-fA-F]): the hex run
-        // stops at 'E', so "x-cccc" binds and the tail never reads as id.
-        assert_eq!(branch_node_ids("x-cccc-EF12"), vec!["x-cccc".to_string()]);
-        // Dash-less minter shape: prefix + hex as one segment.
-        assert_eq!(branch_node_ids("feature/xbbbb"), vec!["xbbbb".to_string()]);
-        assert_eq!(branch_node_ids("xbbbb-fix"), vec!["xbbbb".to_string()]);
-        assert!(branch_node_ids("main").is_empty());
-    }
-
-    #[test]
-    fn branch_ids_accept_compact_legacy_ids_at_segment_boundaries() {
-        assert_eq!(branch_node_ids("feature/xd863"), vec!["xd863"]);
-        assert_eq!(branch_node_ids("feature/xd863-close"), vec!["xd863"]);
-        assert!(branch_node_ids("feature/xd863g").is_empty());
-        assert!(branch_node_ids("feature/xg863").is_empty());
     }
 
     #[test]
@@ -1019,5 +1032,39 @@ mod tests {
                 "body {body:?}"
             );
         }
+    }
+
+    #[test]
+    fn per_row_verdicts_name_untracked_and_the_ambiguity_the_board_keeps_silent() {
+        let entries = vec![
+            json!({"id": "x-aaaa", "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1"}),
+            json!({"id": "x-bbbb"}),
+        ];
+        let rows = vec![
+            json!({"number": 1, "headRefName": "feature/x-aaaa", "url": "https://github.com/o/r/pull/1"}),
+            json!({"number": 2, "headRefName": "docs/faq", "url": "https://github.com/o/r/pull/2", "body": ""}),
+            json!({"number": 3, "headRefName": "x-aaaa-and-x-bbbb", "url": "https://github.com/o/r/pull/3"}),
+        ];
+        let verdicts = pr_binding_verdicts(&rows, &entries);
+        let got: Vec<(i64, &str, Option<&str>)> = verdicts
+            .iter()
+            .map(|v| (v.number, v.verdict, v.node_id.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, "bound", Some("x-aaaa")),
+                (2, "untracked", None),
+                (3, "ambiguous", None),
+            ]
+        );
+        assert!(verdicts[1]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("branch 'docs/faq' names no real node"));
+        let (_, warnings) = classify_pr_bindings(&rows, &entries);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("pr_node_binding_untracked: #2 docs/faq"));
     }
 }

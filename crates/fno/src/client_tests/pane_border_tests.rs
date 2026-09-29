@@ -214,33 +214,80 @@ fn pane_border_press_route_names_the_ring() {
 }
 
 #[test]
-fn pane_border_renders_before_after_dumps() {
-    // The PR body's render proof: the branch's framed render of framed_pair,
-    // plus one edge layout per drop step (AC2-EDGE).
-    let v = framed_pair();
-    println!("=== branch render: two framed panes, pane 11 focused ===");
-    println!("{}", frame_text(&v.compose()));
-    let f = crate::pane_border::EdgeFields {
-        name: "king-5317-succeed-g3",
-        status: Some(('●', "Work")),
-        model: Some("opus-5"),
-        node: Some("x-0e67"),
-        branch: Some("main"),
-        ctx: Some("49%"),
-    };
-    for w in [100u16, 44, 40, 35, 30, 20] {
-        let e = crate::pane_border::edges(
-            &f,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 12,
-                cols: w,
-            },
-            w >= 40,
+fn the_focused_edge_reads_theme_border_under_both_footnote_themes() {
+    // The PR capture: the real composed frame under both footnote themes.
+    // Pass one composes with the mux.theme.border override active and
+    // asserts the focused edge wears it (a fixed white proves paint reads
+    // the border field, not brand) while the name label keeps the brand.
+    // Pass two composes without the override for the TSV cell dump, so the
+    // PNGs show the theme's own look; the dump lands in the ambient temp
+    // dir (the one env the test wrapper leaves through).
+    let mut dump = String::new();
+    for name in ["footnote-superscript", "footnote-paper"] {
+        let mut v = framed_pair();
+        v.theme = Theme::from_name(name).0;
+        let (base, text, brand, border) =
+            (v.theme.base, v.theme.title, v.theme.brand, v.theme.border);
+        v.theme.border = Color::Rgb(0xff, 0xff, 0xff);
+        let frame = v.compose();
+        let ch_at = |c: usize| frame.cells[frame.cols as usize + c].c;
+        let fg_at = |c: usize| frame.cells[frame.cols as usize + c].fg;
+        assert_eq!(
+            fg_at(64),
+            Color::Rgb(0xff, 0xff, 0xff),
+            "{name}: the focused corner reads t.border"
         );
-        println!("=== edges at {w} cols (grip {}) ===", w >= 40);
-        println!("{}", e.top.iter().map(|(c, _)| c).collect::<String>());
-        println!("{}", e.bottom.iter().map(|(c, _)| c).collect::<String>());
+        assert_eq!(
+            fg_at(65),
+            Color::Rgb(0xff, 0xff, 0xff),
+            "{name}: the focused rule reads t.border"
+        );
+        assert_eq!(ch_at(64), '╭', "{name}");
+        let name_col = (64..99)
+            .find(|&c| ch_at(c) == 'p')
+            .expect("name label present");
+        assert_eq!(fg_at(name_col), brand, "{name}: the name label keeps brand");
+        // Pass two: the theme's own look for the capture.
+        let mut v = framed_pair();
+        v.theme = Theme::from_name(name).0;
+        let frame = v.compose();
+        assert_eq!(
+            frame.cells[frame.cols as usize + 64].fg,
+            border,
+            "{name}: the focused corner wears the theme border"
+        );
+        let color_tag = |c: Color| match c {
+            Color::Default => "D".to_string(),
+            Color::Indexed(n) => format!("i{n}"),
+            Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        };
+        let mut out = format!(
+            "THEME\t{}\t{}\t{}\t{}\t{}\n",
+            name,
+            frame.cols,
+            frame.rows,
+            color_tag(text),
+            color_tag(base)
+        );
+        for r in 0..frame.rows as usize {
+            for c in 0..frame.cols as usize {
+                let cell = frame.cells[r * frame.cols as usize + c];
+                if cell.c == ' ' && cell.fg == Color::Default && cell.bg == Color::Default {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    r,
+                    c,
+                    cell.c,
+                    color_tag(cell.fg),
+                    color_tag(cell.bg),
+                    cell.flags
+                ));
+            }
+        }
+        dump.push_str(&out);
     }
+    let path = std::env::temp_dir().join("fno-theme-border-capture.tsv");
+    std::fs::write(&path, &dump).expect("write the capture TSV");
 }

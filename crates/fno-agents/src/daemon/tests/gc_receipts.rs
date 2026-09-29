@@ -2464,6 +2464,7 @@ async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
         "deadbeef",
         std::path::Path::new("/nonexistent/registry.json"),
         false,
+        false,
     )
     .await
     .expect_err("ambiguous token must not fall back to the matching row name");
@@ -3110,8 +3111,7 @@ fn recovery_skips_stopped_codex_thread_rows() {
     row.codex_session_id = row.harness_session_id.clone();
     row.cwd = "/tmp/codex-thread-worktree".into();
 
-    // The identity is complete, so resume WOULD be possible; the Exited
-    // status from `fno agents stop` is what must veto the resurrection.
+    // The identity is complete; the Exited stop status vetoes resurrection.
     assert!(codex_thread_resume_identity(&row).ok().flatten().is_some());
     assert!(!codex_thread_recovery_candidate(&row));
 

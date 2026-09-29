@@ -7,8 +7,6 @@ and the consumers. Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR,
 AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
-
 import json
 import os
 import subprocess
@@ -85,21 +83,20 @@ def test_ensure_closure_trailer_lets_a_dead_reader_stop_the_pr(monkeypatch):
         ensure_closure_trailer("Some summary.", "feature/x-49ec")
 
 
-def test_bind_created_pr_maps_one_real_branch_node_and_owner():
+def test_bind_created_pr_maps_one_real_branch_node_without_stamping_claim():
     entries = [_node(id="x-38e0"), _node(id="x-9999")]
 
     result = bind_created_pr(
         entries,
         head_ref="feature/x-38e0-live-node",
         pr_url="https://github.com/o/r/pull/1038",
-        owner="worker-session",
     )
 
     assert result.outcome == "bound"
     assert entries[0]["pr_number"] == 1038
     assert entries[0]["pr_url"] == "https://github.com/o/r/pull/1038"
-    assert entries[0]["locked_by"] == "worker-session"
-    assert entries[0]["session_id"] == "worker-session"
+    assert "locked_by" not in entries[0]
+    assert "session_id" not in entries[0]
 
 
 # --- resolve_branch_node_id (the --from-branch producer, x-5625) -----------
@@ -163,7 +160,6 @@ def test_bind_created_pr_is_idempotent():
     kwargs = {
         "head_ref": "feature/x-38e0-live-node",
         "pr_url": "https://github.com/o/r/pull/1038",
-        "owner": "worker-session",
     }
 
     first = bind_created_pr(entries, **kwargs)
@@ -200,7 +196,7 @@ def test_bind_created_pr_refuses_unknown_ambiguous_and_malformed_without_mutatio
         entries = [_node(id="x-38e0"), _node(id="x-9999")]
         snapshot = [dict(entry) for entry in entries]
 
-        result = bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url, owner="worker-session")
+        result = bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url)
 
         assert result.outcome == "refused"
         assert entries == snapshot
@@ -927,96 +923,3 @@ def test_rest_listing_details_carry_the_body_at_no_extra_request():
     assert reason == ""
     assert rows[0]["body"] == "Backlog-Closure: x-0001"
     assert rows[0]["mergedAt"] is None
-
-
-def test_pr_list_surfaces_the_binding_detail_and_drops_the_body(monkeypatch, tmp_path):
-    # AC4-HP from the listing surface: an unbindable row carries
-    # node_binding_detail naming its head ref, and the raw body never leaks
-    # into the listing output.
-    from fno import paths
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    graph_path = tmp_path / "graph.json"
-    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 932,
-                    "state": "OPEN",
-                    "title": "untracked",
-                    "headRefName": "chore/tidy-docs",
-                    "url": "https://github.com/o/r/pull/932",
-                    "body": "Just a fix.",
-                }
-            ],
-            "",
-        ),
-    )
-
-    result = CliRunner().invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    row = json.loads(result.stdout)[0]
-    assert row["node_binding"] == "untracked"
-    assert "chore/tidy-docs" in row["node_binding_detail"]
-    assert "body" not in row
-
-
-def test_pr_list_bound_rows_keep_their_verdict_and_carry_no_detail(monkeypatch, tmp_path):
-    # A bound row's node_id / node_binding are unchanged, and the detail key
-    # is absent - a bound verdict names no consulted inputs.
-    from fno import paths
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    graph_path = tmp_path / "graph.json"
-    seed_graph(graph_path, json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-2222",
-                        "status": "ready",
-                        "pr_number": 931,
-                        "pr_url": "https://github.com/o/r/pull/931",
-                    }
-                ]
-            }
-        ))
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 931,
-                    "state": "OPEN",
-                    "title": "bound",
-                    "headRefName": "chore/no-node-here",
-                    "url": "https://github.com/o/r/pull/931",
-                    "body": "Bound through the reverse key.",
-                }
-            ],
-            "",
-        ),
-    )
-
-    result = CliRunner().invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    row = json.loads(result.stdout)[0]
-    assert row["node_id"] == "x-2222"
-    assert row["node_binding"] == "bound"
-    assert "node_binding_detail" not in row
-    assert "body" not in row

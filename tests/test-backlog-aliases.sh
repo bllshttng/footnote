@@ -192,7 +192,10 @@ else
     if [[ "$stamp_rc" -ne 0 ]]; then
         fail "native update could not stamp the completion record (rc=$stamp_rc)"
     fi
-    done_out=$(run_fno backlog done "$node_id" 2>&1)
+    # The close is native now: the wheel spelling tombstones, so the done
+    # scenarios drive the same binary the stamp rode (the deployed `fno` IS
+    # this binary; the wheel's refusal names it).
+    done_out=$("$native_fno" backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
     else
@@ -209,7 +212,7 @@ fi
 
 # --- Scenario 6: done is idempotent on re-run -------------------------------
 if [[ -n "$node_id" ]]; then
-    done_again=$(run_fno backlog done "$node_id" 2>&1)
+    done_again=$("$native_fno" backlog done "$node_id" 2>&1)
     rc=$?
     if [[ $rc -eq 0 ]]; then
         pass "done rerun exits 0 (idempotent)"

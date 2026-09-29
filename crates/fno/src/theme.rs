@@ -32,8 +32,8 @@ pub struct Theme {
     /// byte-identical while an override still reaches every border.
     pub border: Color,
     pub title: Color,
-    /// The brand accent: selection, the active tab, the focused frame, the
-    /// `[no]` stamp's surroundings. `Indexed(3)` under `terminal` because index
+    /// The brand accent: selection, the active tab, the focused frame's name
+    /// label, the `[no]` stamp's surroundings. `Indexed(3)` under `terminal` because index
     /// 3 follows the emulator's own palette, so it is the one color that
     /// cannot clash.
     pub brand: Color,
@@ -55,6 +55,10 @@ pub struct Theme {
     /// `Default` under `terminal` - the emulator's own scheme IS the ground
     /// there, and fno paints nothing over it.
     pub base: Color,
+    /// The built-in a user theme inherited from, naming its 16-slot OSC
+    /// palette table ([`terminal16_slot`]). Empty for the built-ins. A user
+    /// theme keeps its parent's palette slots unless the parent has none.
+    pub inherit_from: &'static str,
 }
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
@@ -141,6 +145,24 @@ impl Theme {
                     "unknown mux theme {name:?}, using footnote-superscript"
                 ))),
             ),
+        }
+    }
+
+    /// Resolve a theme by name across the built-ins AND a user theme table
+    /// (config `[mux.themes.<name>]`, materialized by
+    /// [`crate::digest_overlay::user_themes`]). Built-ins resolve first, so a
+    /// user theme cannot shadow a shipped name. An unknown name still falls
+    /// back to the default carrying the same warning [`Theme::from_name`]
+    /// returns.
+    pub fn from_name_in(name: &str, user: &[(String, Theme)]) -> (Theme, Option<KeymapWarning>) {
+        let trimmed = name.trim();
+        let (t, warn) = Self::from_name(trimmed);
+        if warn.is_none() {
+            return (t, None);
+        }
+        match user.iter().find(|(n, _)| n.as_str() == trimmed) {
+            Some((_, t)) => (*t, None),
+            None => (t, warn),
         }
     }
 
@@ -295,6 +317,7 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",
+        inherit_from: "",
         inherit: true,
         // Indexed(3), the brand: the pane-frame outline reads this field
         // directly (cell_style never does under `inherit` - byte-identity),
@@ -320,40 +343,44 @@ fn theme_terminal() -> Theme {
 fn theme_footnote_superscript() -> Theme {
     Theme {
         name: "footnote-superscript",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0xff, 0x34, 0x34),    // brand red
-        title: rgb(0xe8, 0xe8, 0xe8),     // text
-        brand: rgb(0xff, 0x34, 0x34),     // brand red
+        border: rgb(0xe8, 0xe8, 0xe8), // text (the monochrome ruling)
+        title: rgb(0xe8, 0xe8, 0xe8),  // text
+        brand: rgb(0xe8, 0xe8, 0xe8),  // text
         needs_you: rgb(0xc5, 0xb7, 0x84), // needs-you yellow
-        sel: rgb(0x2b, 0x2b, 0x2b),       // surface0
-        dim: rgb(0xb4, 0xb4, 0xb4),       // subtext0
-        chip: rgb(0xe1, 0xa6, 0xa3),      // red accent
-        stamp: rgb(0xe8, 0xe8, 0xe8),     // off-white stamp label
-        base: rgb(0x14, 0x14, 0x14),      // base: the theme ground
+        sel: rgb(0x2b, 0x2b, 0x2b),    // surface0
+        dim: rgb(0xb4, 0xb4, 0xb4),    // subtext0
+        chip: rgb(0xe1, 0xa6, 0xa3),   // red accent
+        stamp: rgb(0xe8, 0xe8, 0xe8),  // off-white stamp label
+        base: rgb(0x14, 0x14, 0x14),   // base: the theme ground
     }
 }
 
 /// The footnote brand theme, light twin (Footnote Paper: the same palette
-/// with the lightness ladder flipped).
+/// with the lightness ladder flipped). The ink is the dark twin's ground:
+/// one mirror pair (e8e8e8 on 141414, 141414 on f7f7f7 paper), swapped.
 fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0xe0, 0x01, 0x19),    // brand red
-        title: rgb(0x29, 0x29, 0x29),     // text
-        brand: rgb(0xe0, 0x01, 0x19),     // brand red
+        border: rgb(0x14, 0x14, 0x14), // the dark twin's ground (the mirror pair)
+        title: rgb(0x14, 0x14, 0x14),  // text
+        brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
-        sel: rgb(0xd7, 0xd7, 0xd7),       // surface0
-        dim: rgb(0x50, 0x50, 0x50),       // subtext0
-        chip: rgb(0x96, 0x53, 0x51),      // red accent
-        stamp: rgb(0x29, 0x29, 0x29),     // ink stamp label
-        base: rgb(0xf7, 0xf7, 0xf7),      // base: the theme ground
+        sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
+        dim: rgb(0x50, 0x50, 0x50),    // subtext0
+        chip: rgb(0x96, 0x53, 0x51),   // red accent
+        stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
+        base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
     }
 }
 
 fn theme_catppuccin() -> Theme {
     Theme {
         name: "catppuccin",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x89, 0xb4, 0xfa),    // blue (the theme's primary)
         title: rgb(0x89, 0xb4, 0xfa),     // blue
@@ -370,6 +397,7 @@ fn theme_catppuccin() -> Theme {
 fn theme_tokyo_night() -> Theme {
     Theme {
         name: "tokyo-night",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x7a, 0xa2, 0xf7),    // blue (the theme's primary)
         title: rgb(0x7a, 0xa2, 0xf7),     // blue
@@ -386,6 +414,7 @@ fn theme_tokyo_night() -> Theme {
 fn theme_gruvbox() -> Theme {
     Theme {
         name: "gruvbox",
+        inherit_from: "",
         inherit: false,
         border: rgb(0x8e, 0xc0, 0x7c), // aqua (the theme's signature accent)
         title: rgb(0x83, 0xa5, 0x98),  // blue
@@ -450,11 +479,19 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
     if i >= 16 {
         return None;
     }
-    match theme.name {
-        "footnote-superscript" => Some(DARK[i]),
-        "footnote-paper" => Some(LIGHT[i]),
-        _ => None,
-    }
+    // A user theme rides its parent's 16-slot table (`inherit_from`); a
+    // theme with neither its own name nor a slot-defining parent paints no
+    // palette and only the OSC 11/10 ground.
+    let table = match theme.name {
+        "footnote-superscript" => Some(&DARK),
+        "footnote-paper" => Some(&LIGHT),
+        _ => match theme.inherit_from {
+            "footnote-superscript" => Some(&DARK),
+            "footnote-paper" => Some(&LIGHT),
+            _ => None,
+        },
+    };
+    table.map(|t| t[i])
 }
 
 /// The `#rrggbb` string of an RGB color, for the hex a swatch shows beside
@@ -690,15 +727,16 @@ mod tests {
     }
 
     #[test]
-    fn borders_paint_the_theme_brand_and_the_three_themes_drop_orange() {
+    fn borders_paint_the_theme_brand_and_the_three_themes_pick_a_signature_accent() {
         // The ruling: every border paints the running theme's brand. Each
         // named theme's border field names its own brand value, and the
         // three orange-family brands become each palette's signature accent
         // (catppuccin blue, tokyo-night blue, gruvbox aqua); the footnote
-        // themes keep their red.
+        // themes went monochrome: their text color (superscript) and their
+        // ink (paper).
         let expected = [
-            ("footnote-superscript", (0xff, 0x34, 0x34)),
-            ("footnote-paper", (0xe0, 0x01, 0x19)),
+            ("footnote-superscript", (0xe8, 0xe8, 0xe8)),
+            ("footnote-paper", (0x14, 0x14, 0x14)),
             ("catppuccin", (0x89, 0xb4, 0xfa)),
             ("tokyo-night", (0x7a, 0xa2, 0xf7)),
             ("gruvbox", (0x8e, 0xc0, 0x7c)),
