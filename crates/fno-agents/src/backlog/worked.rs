@@ -473,11 +473,7 @@ fn now_epoch_s() -> f64 {
 }
 
 fn claude_projects_root() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".claude")
-        .join("projects")
+    crate::claude_roster::config_dir().join("projects")
 }
 
 /// Resolve one harness session's transcript file. claude walks the projects
