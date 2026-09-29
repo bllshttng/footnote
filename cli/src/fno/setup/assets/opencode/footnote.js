@@ -40,7 +40,7 @@
 //
 // If the gate refuses, a plain native OpenCode session is unaffected.
 
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs"
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { execFile } from "node:child_process"
 
@@ -159,7 +159,7 @@ function makeHandler(io, dir) {
         // Presence via the resolver: a plain native session pays nothing.
         if (sid && (await resolveManifest(dir, io))) {
           try {
-            const out = await io.run([process.env.FNO_AGENTS_BIN || "fno-agents", "whoami"], dir)
+            const out = await io.run([process.env.FNO_BIN || "fno", "whoami"], dir)
             const crown = (String(out).match(/^crown:.*$/m) || [])[0]
             if (crown) {
               await io.sendSynthetic(
@@ -317,10 +317,226 @@ function makeHandler(io, dir) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// hooks.json host. footnote's claude/codex hook surface, driven through
+// opencode's plugin events: one reader, one runner, one decision parser;
+// the 1.x and 2.x wirings both call runHooksJson. Fail-open by design: a
+// missing root, a missing script, a timeout or non-JSON stdout is reported
+// once per key and the tool proceeds - a hook gap never becomes a silent
+// block. (Bodies moved from .opencode/plugins/fno.ts, which kept only the
+// repo-local extras.)
+// ---------------------------------------------------------------------------
+
+/** opencode tool name -> the claude name hooks.json matchers read. */
+const TOOL_TO_CLAUDE = {
+  bash: "Bash",
+  shell: "Bash",
+  edit: "Edit",
+  write: "Write",
+  patch: "Edit",
+  apply_patch: "Edit",
+  read: "Read",
+  glob: "Glob",
+  grep: "Grep",
+  skill: "Skill",
+  task: "Task",
+  subagent: "Task",
+  webfetch: "WebFetch",
+  websearch: "WebSearch",
+  todowrite: "TodoWrite",
+}
+
+function toClaudeTool(tool) {
+  return TOOL_TO_CLAUDE[(tool || "").toLowerCase()] || tool
+}
+
+// Foreign session markers a shell.env hook blanks (the resolver reads only
+// nonblank values), so a session spawned under another harness cannot
+// inherit its identity. The pairs live in
+// cli/src/fno/harness_identity.py (HARNESS_SESSION_MARKERS +
+// LEGACY_HARNESS_SESSION_MARKERS + SELF_SET_HARNESS_MARKERS minus this
+// harness's own); a bun test reads that file and fails when this list
+// drifts.
+const FOREIGN_SESSION_MARKERS = [
+  "CODEX_THREAD_ID",
+  "CLAUDE_CODE_SESSION_ID",
+  "CODEX_SESSION_ID",
+  "GEMINI_SESSION_ID",
+  "CLAUDE_SESSION_ID",
+  "CLAUDECODE",
+]
+
+/** Resolve the plugin root the hooks.json lives under: env hints first,
+ * then the install pointer, then the legacy pointer. A root counts only
+ * when hooks/hooks.json exists under it. */
+function resolveHookRoot(env = process.env) {
+  const candidates = []
+  const hint = env.FNO_PLUGIN_ROOT || env.CLAUDE_PLUGIN_ROOT || env.CODEX_PLUGIN_ROOT
+  if (hint) candidates.push(hint)
+  const home = env.FNO_HOME || env.HOME || ""
+  try {
+    candidates.push(readFileSync(join(home, ".fno", "install", "plugin-root"), "utf8").trim())
+  } catch {}
+  try {
+    candidates.push(readFileSync(join(home, ".fno", "plugin-root"), "utf8").trim())
+  } catch {}
+  for (const c of candidates) {
+    if (c && existsSync(join(c, "hooks", "hooks.json"))) return c
+  }
+  return null
+}
+
+let hooksDocCache = null
+let hooksDocRoot = null
+
+function hooksGroups(root, event) {
+  if (!hooksDocCache || hooksDocRoot !== root) {
+    hooksDocRoot = root
+    try {
+      hooksDocCache = JSON.parse(readFileSync(join(root, "hooks", "hooks.json"), "utf8"))
+    } catch {
+      hooksDocCache = {}
+    }
+  }
+  return (hooksDocCache.hooks && hooksDocCache.hooks[event]) || []
+}
+
+function matcherMatches(matcher, claudeTool) {
+  if (!matcher) return true
+  try {
+    return new RegExp(matcher).test(claudeTool)
+  } catch {
+    return false
+  }
+}
+
+const reportedOnce = new Set()
+
+function reportOnce(key, line) {
+  if (reportedOnce.has(key)) return
+  reportedOnce.add(key)
+  console.error(line)
+}
+
+/** Read a claude-shaped hook decision from stdout. `{}`/empty = allow. */
+function parseHookDecision(stdout) {
+  const t = (stdout || "").trim()
+  if (!t || t === "{}") return { deny: false, reason: "" }
+  try {
+    const v = JSON.parse(t)
+    const decision = v.hookSpecificOutput?.permissionDecision
+    const blocked = "block" === v.decision
+    if (decision === "deny" || (decision === undefined && blocked)) {
+      return {
+        deny: true,
+        reason: v.hookSpecificOutput?.permissionDecisionReason ?? v.reason ?? "denied by footnote hook",
+      }
+    }
+    return { deny: false, reason: "" }
+  } catch {
+    return { deny: false, reason: "" }
+  }
+}
+
+/** The additionalContext a UserPromptSubmit/PreCompact hook hands back:
+ * the JSON field when the stdout carries one, else the stdout itself. */
+function hookContextText(stdout) {
+  const t = (stdout || "").trim()
+  if (!t) return ""
+  try {
+    const v = JSON.parse(t)
+    const ctx = v.hookSpecificOutput?.additionalContext
+    if (typeof ctx === "string" && ctx) return ctx
+    return ""
+  } catch {
+    return t
+  }
+}
+
+/** Run every hooks.json group matching the payload's claude tool for one
+ * event; returns the collected stdouts. */
+async function runHooksJson(root, event, payload, runProc) {
+  const claudeTool = payload.tool_name || ""
+  const stdouts = []
+  for (const group of hooksGroups(root, event)) {
+    if (!matcherMatches(group.matcher, claudeTool)) continue
+    for (const hook of group.hooks || []) {
+      const command = String(hook.command || "").replaceAll("${CLAUDE_PLUGIN_ROOT}", root)
+      const timeoutMs = (typeof hook.timeout === "number" ? hook.timeout : 10) * 1000
+      try {
+        stdouts.push((await runProc(command, JSON.stringify(payload), timeoutMs)) || "")
+      } catch (e) {
+        reportOnce(`hook:${event}:${command}`, `[footnote] hook failed (${event} ${command}): ${e}`)
+      }
+    }
+  }
+  return stdouts
+}
+
+function firstDenial(stdouts) {
+  for (const s of stdouts) {
+    const d = parseHookDecision(s)
+    if (d.deny) return d
+  }
+  return null
+}
+
 // The 1.x arm: a function returning the event hook object, driven by the
 // OpenCode 1.x plugin loader.
 async function server({ directory, worktree, client, $ }) {
   const dir = directory || worktree || process.cwd()
+  const root = resolveHookRoot()
+  if (!root) {
+    reportOnce(
+      ":no-root",
+      "[footnote] no plugin root with hooks/hooks.json resolved; hook scripts run unprotected",
+    )
+  }
+  const eventLog = (event, sid) => {
+    try {
+      client
+        ?.app?.log?.({
+          body: { service: "footnote", level: "info", message: `${event} ${sid ?? ""}`.trim() },
+        })
+        ?.catch?.(() => {})
+    } catch {
+      // logging is best-effort
+    }
+  }
+  // hooks.json runner: /bin/sh with the claude-shaped payload on stdin and
+  // CLAUDE_PLUGIN_ROOT pointed at the resolved root.
+  const runProcSh = async (command, payload, timeoutMs) => {
+    const proc = Bun.spawn(["/bin/sh", "-c", command], {
+      cwd: dir,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root ?? "" },
+    })
+    proc.stdin.write(payload)
+    proc.stdin.end()
+    const timer = setTimeout(() => proc.kill(), timeoutMs)
+    const stdout = await new Response(proc.stdout).text()
+    await proc.exited
+    clearTimeout(timer)
+    return stdout
+  }
+  // additionalContext queued per session, drained into the system prompt.
+  const contextQueue = new Map()
+  // SessionStart output queues the same way: the session's first system
+  // transform carries it.
+  const runSessionStartHooks = async (sid) => {
+    if (!root || !sid) return
+    const payload = { hook_event_name: "SessionStart", cwd: dir, session_id: sid }
+    const stdouts = await runHooksJson(root, "SessionStart", payload, runProcSh)
+    const texts = stdouts.map(hookContextText).filter(Boolean)
+    if (texts.length) {
+      const q = contextQueue.get(sid) || []
+      q.push(...texts)
+      contextQueue.set(sid, q)
+      eventLog("session.created:hooks", sid)
+    }
+  }
   const io = {
     readAssistantTexts: async (sid) => {
       const res = await client.session.messages({ path: { id: sid } })
@@ -341,9 +557,84 @@ async function server({ directory, worktree, client, $ }) {
   const handle = makeHandler(io, dir)
   return {
     event: async ({ event }) => {
-      if (event?.type === "session.created") return handle("created", event.properties?.sessionID)
+      if (event?.type === "session.created") {
+        eventLog("session.created", event.properties?.sessionID)
+        await runSessionStartHooks(event.properties?.sessionID)
+        return handle("created", event.properties?.sessionID)
+      }
       if (event?.type !== "session.idle") return
       return handle("idle", event.properties?.sessionID)
+    },
+    "tool.execute.before": async (input, output) => {
+      eventLog("tool.execute.before", input?.sessionID)
+      if (!root) return
+      const payload = {
+        hook_event_name: "PreToolUse",
+        tool_name: toClaudeTool(input.tool),
+        tool_input: output.args ?? {},
+        cwd: dir,
+        session_id: input.sessionID,
+      }
+      const stdouts = await runHooksJson(root, "PreToolUse", payload, runProcSh)
+      const deny = firstDenial(stdouts)
+      if (deny) throw new Error(deny.reason)
+    },
+    "tool.execute.after": async (input) => {
+      if (!root) return
+      const payload = {
+        hook_event_name: "PostToolUse",
+        tool_name: toClaudeTool(input.tool),
+        tool_input: input.args ?? {},
+        cwd: dir,
+        session_id: input.sessionID,
+      }
+      await runHooksJson(root, "PostToolUse", payload, runProcSh)
+    },
+    "chat.message": async (input) => {
+      eventLog("chat.message", input?.sessionID)
+      if (!root) return
+      const prompt = (input.message?.parts || [])
+        .filter((p) => p?.type === "text" && typeof p.text === "string")
+        .map((p) => p.text)
+        .join("")
+      const payload = {
+        hook_event_name: "UserPromptSubmit",
+        cwd: dir,
+        session_id: input.sessionID,
+        prompt,
+      }
+      const stdouts = await runHooksJson(root, "UserPromptSubmit", payload, runProcSh)
+      const texts = stdouts.map(hookContextText).filter(Boolean)
+      if (texts.length) {
+        const q = contextQueue.get(input.sessionID) || []
+        q.push(...texts)
+        contextQueue.set(input.sessionID, q)
+      }
+    },
+    "experimental.chat.system.transform": async (input, output) => {
+      const q = contextQueue.get(input?.sessionID)
+      if (q && q.length) {
+        output.system.push(...q)
+        contextQueue.delete(input.sessionID)
+      }
+    },
+    "experimental.session.compacting": async (input, output) => {
+      if (!root) return
+      const payload = {
+        hook_event_name: "PreCompact",
+        cwd: dir,
+        session_id: input.sessionID,
+      }
+      const stdouts = await runHooksJson(root, "PreCompact", payload, runProcSh)
+      for (const s of stdouts) {
+        const text = hookContextText(s)
+        if (text) output.context.push(text)
+      }
+    },
+    "shell.env": (input, output) => {
+      eventLog("shell.env", input?.sessionID)
+      if (input?.sessionID) output.env.OPENCODE_SESSION_ID = input.sessionID
+      for (const name of FOREIGN_SESSION_MARKERS) output.env[name] = ""
     },
   }
 }
@@ -374,6 +665,10 @@ function makeV2Io(ctx) {
 async function setup(ctx) {
   const dir = ctx.directory || process.cwd()
   const handle = makeHandler(makeV2Io(ctx), dir)
+  reportOnce(
+    ":v2-no-shell-env",
+    "[footnote] opencode 2.x exposes no shell.env seam; the OPENCODE_SESSION_ID identity stamp is 1.x-only",
+  )
   const controller = new AbortController()
   ;(async () => {
     try {
@@ -391,4 +686,5 @@ async function setup(ctx) {
   return () => controller.abort()
 }
 
+export { resolveHookRoot, FOREIGN_SESSION_MARKERS }
 export default { id: "footnote", server, setup }

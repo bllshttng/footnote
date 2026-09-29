@@ -12,7 +12,7 @@ import { describe, test, expect } from "bun:test"
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import footnote from "../../src/fno/setup/assets/opencode/footnote.js"
+import footnote, { resolveHookRoot, FOREIGN_SESSION_MARKERS } from "../../src/fno/setup/assets/opencode/footnote.js"
 
 const FootnotePlugin = footnote.server
 const setupV2 = footnote.setup
@@ -496,7 +496,7 @@ describe("opencode 2 setup arm", () => {
     const streamA = eventStream()
     const a = stubCtx([], { directory: dirA })
     a.ctx.event = { subscribe: streamA.subscribe }
-    await withEnv({ FNO_AGENTS_BIN: binA }, async () => {
+    await withEnv({ FNO_AGENTS_BIN: binA, FNO_BIN: binA }, async () => {
       const cleanup = await setupV2(a.ctx)
       streamA.push({ type: "session.created", data: { sessionID: "ses_v2c" } })
       await until(() => a.synthetics.length > 0)
@@ -514,7 +514,7 @@ describe("opencode 2 setup arm", () => {
     const streamB = eventStream()
     const b = stubCtx([], { directory: dirB })
     b.ctx.event = { subscribe: streamB.subscribe }
-    await withEnv({ FNO_AGENTS_BIN: binB }, async () => {
+    await withEnv({ FNO_AGENTS_BIN: binB, FNO_BIN: binB }, async () => {
       const cleanup = await setupV2(b.ctx)
       streamB.push({ type: "session.created", data: { sessionID: "ses_v2u" } })
       await new Promise((r) => setTimeout(r, 80))
@@ -566,9 +566,12 @@ describe("opencode 2 setup arm", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("AC2-ONEEXPORT: a default export with id, server and setup, and no named export", async () => {
+  test("AC2-ONEEXPORT: a default export with id, server and setup, plus the test seams", async () => {
     const m = await import("../../src/fno/setup/assets/opencode/footnote.js")
-    expect(Object.keys(m).filter((k) => k !== "default")).toEqual([])
+    expect(Object.keys(m).filter((k) => k !== "default").sort()).toEqual([
+      "FOREIGN_SESSION_MARKERS",
+      "resolveHookRoot",
+    ])
     expect(m.default.id).toBe("footnote")
     expect(typeof m.default.server).toBe("function")
     expect(typeof m.default.setup).toBe("function")
@@ -585,5 +588,152 @@ describe("opencode 2 setup arm", () => {
     expect(src.match(/const gates = new Map\(\)/g).length).toBe(1)
     expect(src.match(/function synthesizeTranscript/g).length).toBe(1)
     expect(src.match(/decision === "block"/g).length).toBe(1)
+  })
+})
+
+describe("opencode hooks.json host", () => {
+  function makeHookRoot() {
+    const root = mkdtempSync(join(tmpdir(), "fno-hookroot-"))
+    mkdirSync(join(root, "hooks"), { recursive: true })
+    writeFileSync(join(root, "hooks", "hooks.json"), JSON.stringify({ hooks: {} }))
+    return root
+  }
+
+  function makeClient() {
+    const logs = []
+    return {
+      logs,
+      app: { log: async ({ body }) => { logs.push(body.message) } },
+    }
+  }
+
+  test("root resolution: env hint with hooks.json wins; a hint without the file does not", async () => {
+    const root = makeHookRoot()
+    await withEnv({ FNO_PLUGIN_ROOT: root, FNO_HOME: "/nonexistent-home" }, async () => {
+      expect(resolveHookRoot()).toBe(root)
+    })
+    await withEnv({ FNO_PLUGIN_ROOT: join(root, "empty"), FNO_HOME: "/nonexistent-home" }, async () => {
+      expect(resolveHookRoot()).toBe(null)
+    })
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test("PreToolUse deny throws for the mapped tool; an unmatched tool never runs the script", async () => {
+    const root = makeHookRoot()
+    writeFileSync(
+      join(root, "hooks", "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Bash",
+              hooks: [
+                {
+                  type: "command",
+                  command:
+                    "echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"no bash here\"}}'",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    )
+    const dir = makeProject()
+    await withEnv({ FNO_PLUGIN_ROOT: root }, async () => {
+      const hooks = await FootnotePlugin({ directory: dir, client: makeClient(), $: async () => "" })
+      await expect(
+        hooks["tool.execute.before"]({ tool: "bash", sessionID: "ses_A" }, { args: { command: "ls" } }),
+      ).rejects.toThrow("no bash here")
+      await hooks["tool.execute.before"]({ tool: "read", sessionID: "ses_A" }, { args: {} })
+    })
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test("SessionStart text queues per session and drains once into that session's system prompt", async () => {
+    const root = makeHookRoot()
+    writeFileSync(
+      join(root, "hooks", "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { matcher: "", hooks: [{ type: "command", command: "echo 'session-start context line'" }] },
+          ],
+        },
+      }),
+    )
+    const dir = makeProject()
+    await withEnv({ FNO_PLUGIN_ROOT: root }, async () => {
+      const hooks = await FootnotePlugin({ directory: dir, client: makeClient(), $: async () => "" })
+      await hooks.event({ event: { type: "session.created", properties: { sessionID: "ses_A" } } })
+      const outA = { system: [] }
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_A" }, outA)
+      expect(outA.system).toEqual(["session-start context line"])
+      const outB = { system: [] }
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_B" }, outB)
+      expect(outB.system).toEqual([])
+      const outA2 = { system: [] }
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_A" }, outA2)
+      expect(outA2.system).toEqual([])
+    })
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test("shell.env stamps OPENCODE_SESSION_ID and blanks the foreign markers", async () => {
+    const dir = makeProject()
+    await withEnv({ CLAUDE_CODE_SESSION_ID: "claude-parent", CODEX_THREAD_ID: "thread-1", CLAUDECODE: "1" }, async () => {
+      const hooks = await FootnotePlugin({ directory: dir, client: makeClient(), $: async () => "" })
+      const output = { env: {} }
+      await hooks["shell.env"]({ cwd: dir, sessionID: "ses_A" }, output)
+      expect(output.env.OPENCODE_SESSION_ID).toBe("ses_A")
+      expect(output.env.CLAUDE_CODE_SESSION_ID).toBe("")
+      expect(output.env.CODEX_THREAD_ID).toBe("")
+      expect(output.env.CLAUDECODE).toBe("")
+    })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("no resolvable root: the tool call proceeds", async () => {
+    const dir = makeProject()
+    await withEnv(
+      { FNO_PLUGIN_ROOT: undefined, CLAUDE_PLUGIN_ROOT: undefined, CODEX_PLUGIN_ROOT: undefined, FNO_HOME: dir, HOME: dir },
+      async () => {
+        expect(resolveHookRoot()).toBe(null)
+        const hooks = await FootnotePlugin({ directory: dir, client: makeClient(), $: async () => "" })
+        await hooks["tool.execute.before"]({ tool: "bash", sessionID: "ses_A" }, { args: {} })
+      },
+    )
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("FOREIGN_SESSION_MARKERS covers harness_identity.py's marker tables", () => {
+    const py = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "fno", "harness_identity.py"),
+      "utf8",
+    )
+    // Only the marker tables themselves (HARNESS_SESSION_MARKERS,
+    // LEGACY_HARNESS_SESSION_MARKERS, SELF_SET_HARNESS_MARKERS), not the
+    // wider scrub lists further down the module.
+    const tables = py.split("\n").slice(116, 155).join("\n")
+    const names = new Set()
+    for (const m of tables.matchAll(/\("([A-Z_]+)", "[a-z]+"\)/g)) names.add(m[1])
+    names.delete("OPENCODE_SESSION_ID")
+    expect(names.size).toBeGreaterThan(4)
+    for (const name of names) {
+      expect(FOREIGN_SESSION_MARKERS).toContain(name)
+    }
+  })
+
+  test("handled events leave a client.app.log line", async () => {
+    const dir = makeProject()
+    const client = makeClient()
+    await withEnv({ FNO_PLUGIN_ROOT: undefined, FNO_HOME: dir, HOME: dir }, async () => {
+      const hooks = await FootnotePlugin({ directory: dir, client, $: async () => "" })
+      await hooks.event({ event: { type: "session.created", properties: { sessionID: "ses_A" } } })
+      expect(client.logs.some((l) => l.startsWith("session.created"))).toBe(true)
+    })
+    rmSync(dir, { recursive: true, force: true })
   })
 })
