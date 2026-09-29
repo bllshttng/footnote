@@ -372,78 +372,6 @@ fn reaching_an_occupied_portal_repoints_only_that_index() {
 }
 
 #[test]
-fn stored_tab_trees_captures_every_portal_seat_tiled_in_one_tab() {
-    // AC1-HP: a tab with two tiled portals plus one ordinary pane captures
-    // THREE slots. This is the discriminating fixture the old prune test
-    // used in reverse: two portals in one tab is the shape the single-slot
-    // prune hid, and the shape the operator's report named (two tiled in
-    // tab 1, one alone in tab 2).
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, _rx) = thread_core();
-    core.agents = vec![
-        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
-        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
-    ];
-    core.command(client_id, portal_reach_cmd("deadbee1", 0));
-    core.command(client_id, portal_reach_cmd("deadbee2", 1));
-    let seats: Vec<u64> = core.portals.values().map(|e| e.seat).collect();
-    assert_eq!(seats.len(), 2, "fixture: two portals are open");
-
-    // Tile them: BOTH seats plus one ordinary pane in ONE named tab.
-    let (sid, ti) = core.session.find_pane(seats[0]).expect("seat 0 placed");
-    let plain = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
-    let tab = &mut core.session.squad_mut(sid).expect("live squad").tabs[ti];
-    tab.name = Some("tiled".into());
-    tab.root = Node::Branch {
-        axis: Axis::Vertical,
-        children: vec![
-            (0.34, Node::Leaf(plain)),
-            (0.33, Node::Leaf(seats[0])),
-            (0.33, Node::Leaf(seats[1])),
-        ],
-    };
-    tab.focus = plain;
-
-    let (trees, _active) = core.stored_tab_trees(sid).expect("squad captured");
-    let tiled = trees
-        .iter()
-        .find(|t| t.tab_name.as_deref() == Some("tiled"))
-        .expect("the tiled tab is captured");
-    assert_eq!(
-        tiled.slots.len(),
-        3,
-        "all three leaves are captured: slots = {:?}",
-        tiled.slots
-    );
-    // The split is preserved: three leaves under one branch.
-    assert!(
-        matches!(&tiled.tree, LayoutTreeSpec::Split { children, .. } if children.len() == 3),
-        "the tile survives as a split: {:?}",
-        tiled.tree
-    );
-    let portal_slots: Vec<(u8, &str)> = tiled
-        .slots
-        .iter()
-        .filter_map(|s| s.portal.as_ref().map(|p| (p.index, p.row.as_str())))
-        .collect();
-    assert_eq!(
-        portal_slots,
-        vec![(0, "deadbee1"), (1, "deadbee2")],
-        "two slots carry the open indices and row keys"
-    );
-    assert!(
-        tiled.slots.iter().any(|s| s.portal.is_none()
-            && matches!(&s.binding, LayoutBinding::Shell)
-            && s.name.starts_with('p')),
-        "the ordinary pane stays an ordinal shell slot"
-    );
-
-    // Positive control: capture touched the STORED shape, not the live tree.
-    assert_eq!(core.portals.len(), 2, "both portals still open");
-    assert!(core.session.find_pane(seats[1]).is_some());
-}
-
-#[test]
 fn every_viewer_death_parks_its_portal_on_no_signal() {
     // AC1-HP (x-3349, re-ruled as the TV model). A portal outlives its
     // viewer: whichever portal's viewer dies, its seat stays at the same
@@ -614,7 +542,7 @@ pub(super) fn thread_core() -> (Core, u64, u64, mpsc::Receiver<ServerMsg>) {
 }
 
 #[test]
-fn thread_pane_opens_one_pane_and_persists_no_member() {
+fn thread_pane_open_rows() {
     // AC3-HP: no slot, a reach on thread row A opens exactly one pane
     // running A's tier argv, records the slot, and persists no squad
     // member - the deliberate difference from the ordinary attach tail.
@@ -655,10 +583,7 @@ fn thread_pane_opens_one_pane_and_persists_no_member() {
         .iter()
         .any(|t| t.contains("thread pane ->")));
     core.reap_pane(new_pid); // don't leak the stand-in child
-}
 
-#[test]
-fn thread_pane_repoints_the_same_slot_with_no_pane_count_change() {
     // AC4-EDGE: a slot showing A, a reach on B: the same tree slot now
     // runs B, the pane count is unchanged, and no other pane moved.
     set_attach_program(&["/bin/cat"]);
@@ -704,10 +629,7 @@ fn thread_pane_repoints_the_same_slot_with_no_pane_count_change() {
         tab.root
     );
     core.reap_pane(new_pid);
-}
 
-#[test]
-fn thread_pane_stale_slot_never_reaches_an_argv() {
     // AC5-ERR: a recorded pane id the tree no longer knows reads as
     // absent - a fresh pane opens and the stale id never touches a spawn.
     set_attach_program(&["/bin/cat"]);
@@ -738,10 +660,7 @@ fn thread_pane_stale_slot_never_reaches_an_argv() {
         "the stale id stayed dead"
     );
     core.reap_pane(new_pid);
-}
 
-#[test]
-fn thread_pane_same_row_refocuses_without_respawn() {
     // The "show me" rule: reaching the row the slot already shows is a
     // no-op focus, never a respawn and never a toggle-close.
     set_attach_program(&["/bin/cat"]);
@@ -771,10 +690,7 @@ fn thread_pane_same_row_refocuses_without_respawn() {
         .iter()
         .any(|t| t.contains("already showing")));
     core.reap_pane(pid);
-}
 
-#[test]
-fn thread_pane_same_row_through_the_other_door_is_a_focus() {
     // The TUI door keys the slot by the attach id; `fno agents attach`
     // keys it by the registry name. Same row, so "show me": no respawn,
     // no repoint - reaching the row either way must never kill the viewer
@@ -803,7 +719,7 @@ fn thread_pane_same_row_through_the_other_door_is_a_focus() {
 }
 
 #[test]
-fn thread_pane_ctl_by_name_on_an_attach_id_slot_replies_a_landing() {
+fn thread_pane_ctl_rows() {
     // The control door reaches by name while the slot is keyed by the
     // attach id: the focus path emits no Err. A key-only `landed` check
     // would turn that success into "no such agent".
@@ -831,10 +747,7 @@ fn thread_pane_ctl_by_name_on_an_attach_id_slot_replies_a_landing() {
         "the slot keeps the row and its pane"
     );
     core.reap_pane(pid);
-}
 
-#[test]
-fn thread_pane_ctl_names_the_session_of_a_foreign_hosted_row() {
     // A row pane-hosted in ANOTHER session is that server's to view: the
     // reply names where it lives. "no such agent" would lie about a row
     // the registry knows (and the inline attach this verb replaced
@@ -855,10 +768,77 @@ fn thread_pane_ctl_names_the_session_of_a_foreign_hosted_row() {
         other => panic!("expected a Notice, got {other:?}"),
     }
     assert!(core.portals.is_empty(), "no thread pane minted");
+
+    // AC8-HP (server half): the control verb drives the SAME reach a TUI
+    // gesture drives, records the slot, persists nothing, and replies
+    // with the landing.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    let new_pid = core.next_pane_id;
+
+    core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents), tx);
+
+    assert!(
+        core.portals.get(&0).is_some_and(|e| {
+            let (k, p) = (&e.row_key, &e.seat);
+            k == "deadbee1" && *p == new_pid
+        }),
+        "the control reach records the slot"
+    );
+    assert!(core.squad_members.is_empty(), "no squad member persisted");
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Notice { text } => assert!(
+            text.contains("thread pane -> target-a"),
+            "the reply names the landing: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    // The observer's removal rides the core queue (CoreMsg::Gone), so it
+    // happens on the loop's next drain, not synchronously here.
+    core.reap_pane(new_pid);
+
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl("nosuchrow", 0, PanePlacement::default(), None, tx);
+
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("no live row answers"),
+            "names the door and the key it could not find: {msg}"
+        ),
+        other => panic!("expected an Err refusal, got {other:?}"),
+    }
+    assert!(core.portals.is_empty());
+    assert!(core.panes.len() == 1, "nothing spawned");
+
+    // A row already pane-hosted in this session has its viewport: the
+    // verb answers with the pane instead of opening a second one.
+    let (mut core, _client_id, p1, _rx) = thread_core();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let mut hosted = bg_row("hosted-row", "/tmp/seen", None);
+    hosted.mux = Some(("test".to_string(), p1));
+    let name = core.session_name.clone();
+    core.session_name = "test".to_string();
+    let agents = vec![hosted];
+
+    core.portal_ctl("hosted-row", 0, PanePlacement::default(), Some(agents), tx);
+
+    core.session_name = name;
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Notice { text } => assert!(
+            text.contains("hosts pane") && text.contains("hosted-row"),
+            "names the existing pane: {text}"
+        ),
+        other => panic!("expected a Notice, got {other:?}"),
+    }
+    assert!(core.portals.is_empty(), "no thread pane minted");
 }
 
 #[test]
-fn thread_pane_follow_and_locate_rows_spawn_their_tier_argv() {
+fn thread_pane_tier_rows() {
     // A paneless codex row (Follow) tails its transcript; a gemini row
     // (Locate) renders the self-teaching screen. Both reach by NAME -
     // neither carries an attach id - and neither maps into `attached`.
@@ -899,10 +879,7 @@ fn thread_pane_follow_and_locate_rows_spawn_their_tier_argv() {
     );
     core.reap_pane(locate_pid);
     core.reap_pane(follow_pid);
-}
 
-#[test]
-fn peek_argv_is_the_peek_verb_with_follow() {
     // The real (un-overridden) Follow argv, asserted directly so the
     // program override in the spawn tests never hides the shipped
     // command.
@@ -917,10 +894,7 @@ fn peek_argv_is_the_peek_verb_with_follow() {
             "--follow".into()
         ]
     );
-}
 
-#[test]
-fn thread_pane_locate_screen_names_the_row_and_its_routes() {
     // The Locate pane is self-teaching runtime text, not an empty pane:
     // the pure builder alone is asserted here (no spawn needed) - name,
     // harness, cwd, the why sentence, and the mail route that does reach
@@ -947,10 +921,7 @@ fn thread_pane_locate_screen_names_the_row_and_its_routes() {
         screen.contains("fno agents mail send gem-row'$(reboot)'"),
         "names the route that reaches it"
     );
-}
 
-#[test]
-fn thread_pane_refuses_an_unresolvable_or_ambiguous_key() {
     // A key no paneless live row answers, and a name two rows share:
     // both refuse fail-closed with a named reason, nothing spawns.
     let (mut core, client_id, _p1, mut rx) = thread_core();
@@ -972,40 +943,7 @@ fn thread_pane_refuses_an_unresolvable_or_ambiguous_key() {
 }
 
 #[test]
-fn thread_pane_ctl_lands_the_reach_and_replies_where() {
-    // AC8-HP (server half): the control verb drives the SAME reach a TUI
-    // gesture drives, records the slot, persists nothing, and replies
-    // with the landing.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, _client_id, _p1, _rx) = thread_core();
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-    let agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    let new_pid = core.next_pane_id;
-
-    core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents), tx);
-
-    assert!(
-        core.portals.get(&0).is_some_and(|e| {
-            let (k, p) = (&e.row_key, &e.seat);
-            k == "deadbee1" && *p == new_pid
-        }),
-        "the control reach records the slot"
-    );
-    assert!(core.squad_members.is_empty(), "no squad member persisted");
-    match rx.blocking_recv().expect("a reply") {
-        ServerMsg::Notice { text } => assert!(
-            text.contains("thread pane -> target-a"),
-            "the reply names the landing: {text}"
-        ),
-        other => panic!("expected a Notice landing, got {other:?}"),
-    }
-    // The observer's removal rides the core queue (CoreMsg::Gone), so it
-    // happens on the loop's next drain, not synchronously here.
-    core.reap_pane(new_pid);
-}
-
-#[test]
-fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
+fn portal_new_rows() {
     // AC2-HP (x-3ea6): a machine reach asking for `portal new` takes the
     // next free index in a NEW tab. Portal 0 still seats row A, tab T's
     // focus never moves, and the reply names the index the server picked.
@@ -1068,10 +1006,7 @@ fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
     );
     core.reap_pane(a_seat);
     core.reap_pane(b_seat);
-}
 
-#[test]
-fn thread_pane_ctl_new_portal_joins_the_portal_already_showing_the_row() {
     // A `portal new --tab new` reach for a row a portal already shows must
     // join that portal, not refuse: the focus is the landing, and the
     // caller's resolved index stays empty by design. Before the fix this
@@ -1121,50 +1056,7 @@ fn thread_pane_ctl_new_portal_joins_the_portal_already_showing_the_row() {
         "the focus counts as a landing for the caller's resolved index"
     );
     core.reap_pane(a_seat);
-}
 
-#[test]
-fn portal_landed_check_does_not_count_a_stand_in_seat() {
-    // The landed check reads a focus of the row's live viewer as a landing,
-    // but a stand-in shell shows the row to nobody: it must never count.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, _client_id, _p1, _rx) = thread_core();
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-    core.portal_ctl(
-        "deadbee1",
-        0,
-        PanePlacement::default(),
-        Some(vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))]),
-        tx,
-    );
-    let _ = rx.blocking_recv().expect("seed reply");
-    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
-    assert!(
-        core.portal_landed("target-a", 1),
-        "fixture: a live viewer elsewhere is a landing"
-    );
-
-    core.close_viewer_died(a_seat, "viewer exited");
-    let stand_in = core
-        .portals
-        .get(&0)
-        .expect("portal 0 holds a parked screen")
-        .seat;
-    assert!(
-        core.panes
-            .get(&stand_in)
-            .is_some_and(|e| e.portal_hold.is_some()),
-        "fixture: the seat now holds a parked screen, not a viewer"
-    );
-    assert!(
-        !core.portal_landed("target-a", 1),
-        "a parked screen is not a landing"
-    );
-    core.reap_pane(stand_in);
-}
-
-#[test]
-fn thread_pane_ctl_new_portal_refuses_when_no_index_is_free() {
     // AC2-ERR (x-3ea6): a `new` reach on a full portal space replies Err
     // naming the ceiling and spawns nothing - it never repoints an index.
     set_attach_program(&["/bin/cat"]);
@@ -1208,50 +1100,7 @@ fn thread_pane_ctl_new_portal_refuses_when_no_index_is_free() {
 }
 
 #[test]
-fn thread_pane_ctl_refuses_an_unknown_name() {
-    let (mut core, _client_id, _p1, _rx) = thread_core();
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-
-    core.portal_ctl("nosuchrow", 0, PanePlacement::default(), None, tx);
-
-    match rx.blocking_recv().expect("a reply") {
-        ServerMsg::Err { msg, .. } => assert!(
-            msg.contains("no live row answers"),
-            "names the door and the key it could not find: {msg}"
-        ),
-        other => panic!("expected an Err refusal, got {other:?}"),
-    }
-    assert!(core.portals.is_empty());
-    assert!(core.panes.len() == 1, "nothing spawned");
-}
-
-#[test]
-fn thread_pane_ctl_answers_a_pane_hosted_row_with_its_location() {
-    // A row already pane-hosted in this session has its viewport: the
-    // verb answers with the pane instead of opening a second one.
-    let (mut core, _client_id, p1, _rx) = thread_core();
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-    let mut hosted = bg_row("hosted-row", "/tmp/seen", None);
-    hosted.mux = Some(("test".to_string(), p1));
-    let name = core.session_name.clone();
-    core.session_name = "test".to_string();
-    let agents = vec![hosted];
-
-    core.portal_ctl("hosted-row", 0, PanePlacement::default(), Some(agents), tx);
-
-    core.session_name = name;
-    match rx.blocking_recv().expect("a reply") {
-        ServerMsg::Notice { text } => assert!(
-            text.contains("hosts pane") && text.contains("hosted-row"),
-            "names the existing pane: {text}"
-        ),
-        other => panic!("expected a Notice, got {other:?}"),
-    }
-    assert!(core.portals.is_empty(), "no thread pane minted");
-}
-
-#[test]
-fn stored_tab_trees_captures_a_portal_only_tab_whole() {
+fn tab_capture_rows() {
     // (x-a9b4) AC1-EDGE: a tab holding ONLY a portal is captured with its
     // name, and if it was the active tab it stays the active one. This is
     // the operator's tab 2: the prune used to skip it whole and lose the
@@ -1303,10 +1152,7 @@ fn stored_tab_trees_captures_a_portal_only_tab_whole() {
         core.portals.get(&0).map(|entry| entry.seat),
         Some(thread_pid)
     );
-}
 
-#[test]
-fn stored_tab_trees_keeps_the_active_tab_when_it_holds_only_portals() {
     // (x-a9b4) The remap the old prune needed is gone with the prune: a
     // portal-only ACTIVE tab sandwiched between ordinary siblings is
     // captured in its position and active_tab points at it, not at some
@@ -1342,47 +1188,79 @@ fn stored_tab_trees_keeps_the_active_tab_when_it_holds_only_portals() {
             .any(|s| s.portal.as_ref().is_some_and(|p| p.row == "deadbee1")),
         "the middle tree carries the portal slot"
     );
-}
 
-#[test]
-fn same_row_reach_on_a_stand_in_respawns_the_viewer_in_place() {
-    // A same-row reach on a stand-in seat is NOT "already showing" - the
-    // seat holds a shell, not the row. It repoints the shell into a fresh
-    // viewer of the SAME row, in the same tab.
+    // AC1-HP: a tab with two tiled portals plus one ordinary pane captures
+    // THREE slots. This is the discriminating fixture the old prune test
+    // used in reverse: two portals in one tab is the shape the single-slot
+    // prune hid, and the shape the operator's report named (two tiled in
+    // tab 1, one alone in tab 2).
     set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, thread_reach_cmd("deadbee1"));
-    let (a_viewer, a_tid) = {
-        let e = core.portals.get(&0).expect("portal 0 open");
-        (e.seat, e.tab)
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let seats: Vec<u64> = core.portals.values().map(|e| e.seat).collect();
+    assert_eq!(seats.len(), 2, "fixture: two portals are open");
+
+    // Tile them: BOTH seats plus one ordinary pane in ONE named tab.
+    let (sid, ti) = core.session.find_pane(seats[0]).expect("seat 0 placed");
+    let plain = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
+    let tab = &mut core.session.squad_mut(sid).expect("live squad").tabs[ti];
+    tab.name = Some("tiled".into());
+    tab.root = Node::Branch {
+        axis: Axis::Vertical,
+        children: vec![
+            (0.34, Node::Leaf(plain)),
+            (0.33, Node::Leaf(seats[0])),
+            (0.33, Node::Leaf(seats[1])),
+        ],
     };
-    core.close_viewer_died(a_viewer, "viewer exited");
-    let panes_before = core.panes.len();
+    tab.focus = plain;
 
-    core.command(client_id, thread_reach_cmd("deadbee1"));
-
-    assert!(
-        !drain_notices(&mut rx)
-            .iter()
-            .any(|t| t.contains("already showing")),
-        "a stand-in seat never reads as already showing"
-    );
-    assert!(
-        core.portals.get(&0).is_some_and(|e| {
-            e.row_key == "deadbee1" && e.tab == a_tid && core.panes[&e.seat].cmd.is_some()
-        }),
-        "the portal names a fresh live viewer in the same tab"
-    );
+    let (trees, _active) = core.stored_tab_trees(sid).expect("squad captured");
+    let tiled = trees
+        .iter()
+        .find(|t| t.tab_name.as_deref() == Some("tiled"))
+        .expect("the tiled tab is captured");
     assert_eq!(
-        core.panes.len(),
-        panes_before,
-        "the respawn reused the seat pane"
+        tiled.slots.len(),
+        3,
+        "all three leaves are captured: slots = {:?}",
+        tiled.slots
     );
+    // The split is preserved: three leaves under one branch.
+    assert!(
+        matches!(&tiled.tree, LayoutTreeSpec::Split { children, .. } if children.len() == 3),
+        "the tile survives as a split: {:?}",
+        tiled.tree
+    );
+    let portal_slots: Vec<(u8, &str)> = tiled
+        .slots
+        .iter()
+        .filter_map(|s| s.portal.as_ref().map(|p| (p.index, p.row.as_str())))
+        .collect();
+    assert_eq!(
+        portal_slots,
+        vec![(0, "deadbee1"), (1, "deadbee2")],
+        "two slots carry the open indices and row keys"
+    );
+    assert!(
+        tiled.slots.iter().any(|s| s.portal.is_none()
+            && matches!(&s.binding, LayoutBinding::Shell)
+            && s.name.starts_with('p')),
+        "the ordinary pane stays an ordinal shell slot"
+    );
+
+    // Positive control: capture touched the STORED shape, not the live tree.
+    assert_eq!(core.portals.len(), 2, "both portals still open");
+    assert!(core.session.find_pane(seats[1]).is_some());
 }
 
 #[test]
-fn portal_open_here_is_refused_before_any_lookup() {
+fn portal_refusal_rows() {
     // (x-9b60) open-here repoints the sender's focused pane; a portal
     // mints its own seat. The one geometry refused in BOTH cases
     // (repoint and fresh open), exactly as the decode edge refused it
@@ -1407,10 +1285,74 @@ fn portal_open_here_is_refused_before_any_lookup() {
     assert!(drain_notices(&mut rx)
         .iter()
         .any(|t| t.contains("a portal takes no split")));
+
+    // (x-9b60, AC4-EDGE) A caller tab the server cannot resolve refuses
+    // BEFORE a pane exists: no spawn, no portal entry, a notice that
+    // names the problem.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    let panes_before = core.panes.len();
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(0),
+                tab: Some(crate::proto::TabSel::Id(9999)),
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+        },
+    );
+    assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+    assert!(core.portals.is_empty(), "no portal entry written");
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices.iter().any(|t| t.contains("tab")),
+        "the refusal names the tab: {notices:?}"
+    );
+
+    // The landed check reads a focus of the row's live viewer as a landing,
+    // but a stand-in shell shows the row to nobody: it must never count.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee1",
+        0,
+        PanePlacement::default(),
+        Some(vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))]),
+        tx,
+    );
+    let _ = rx.blocking_recv().expect("seed reply");
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    assert!(
+        core.portal_landed("target-a", 1),
+        "fixture: a live viewer elsewhere is a landing"
+    );
+
+    core.close_viewer_died(a_seat, "viewer exited");
+    let stand_in = core
+        .portals
+        .get(&0)
+        .expect("portal 0 holds a parked screen")
+        .seat;
+    assert!(
+        core.panes
+            .get(&stand_in)
+            .is_some_and(|e| e.portal_hold.is_some()),
+        "fixture: the seat now holds a parked screen, not a viewer"
+    );
+    assert!(
+        !core.portal_landed("target-a", 1),
+        "a parked screen is not a landing"
+    );
+    core.reap_pane(stand_in);
 }
 
 #[test]
-fn portal_fresh_open_honors_caller_tab_and_split() {
+fn portal_placement_rows() {
     // (x-9b60, AC1-HP) A fresh open at an index has no geometry to own
     // yet, so the caller's tab and split are honored: the second
     // portal's viewer lands beside the first, in the tab the caller
@@ -1464,24 +1406,7 @@ fn portal_fresh_open_honors_caller_tab_and_split() {
             .any(|t| t.contains("tab full")),
         "a fresh open with room never falls back"
     );
-}
 
-/// The new-portal reach the `P` picker's shift+HJKL sends: allocate the
-/// index, split beside the viewed workspace.
-fn portal_new_split_cmd(id: &str) -> Command {
-    Command::AttachAgent {
-        id: id.into(),
-        placement: PanePlacement {
-            portal_new: true,
-            split: Some(Dir::Right),
-            target: PaneTarget::SquadId(1),
-            ..Default::default()
-        },
-    }
-}
-
-#[test]
-fn portal_new_split_lands_beside_the_focused_pane() {
     // (x-4572, AC2-HP + AC2-EDGE) A new-portal reach with split Right lands
     // in the TARGET tab beside its shell - no tab added - and the STALE
     // reuse of that index keeps the direction: the open-close-split-again
@@ -1588,6 +1513,170 @@ fn portal_new_split_lands_beside_the_focused_pane() {
     let mut expected = vec![neighbour, seat2];
     expected.sort_unstable();
     assert_eq!(leaves, expected, "beside the neighbour pane");
+
+    // (x-9b60, AC2-REG) A portal with a live viewer owns its geometry: a
+    // reach for another row carrying a tab/split for somewhere else is
+    // repointed IN PLACE, the tab never moves, and the caller is TOLD
+    // the geometry was refused rather than silently dropped.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, thread_reach_cmd("deadbee1"));
+    let (seat_a, tab_a) = {
+        let e = core.portals.get(&0).expect("portal 0 open");
+        (e.seat, e.tab)
+    };
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee2".into(),
+            placement: PanePlacement {
+                portal: Some(0),
+                tab: Some(crate::proto::TabSel::Id(9999)),
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+        },
+    );
+    let entry = core.portals.get(&0).expect("portal 0 still open");
+    assert_eq!(entry.tab, tab_a, "the repoint never moves the tab");
+    assert_ne!(entry.seat, seat_a, "the viewer was replaced in place");
+    assert_eq!(entry.row_key, "deadbee2");
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t.contains("a portal takes no split")),
+        "the geometry refusal is visible: {notices:?}"
+    );
+
+    // (re-ruled by the TV model) An operator close removes the entry, so
+    // the next reach at that index opens FRESH and the caller's placement
+    // wins: no remembered tab outlives the gesture. The seat's tab keeps
+    // a second pane so the operator close leaves the tab alive (an
+    // operator close of a LONE-leaf tab closes the tab, the AC7 rule).
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, thread_reach_cmd("deadbee1"));
+    let tab_a = core.portals.get(&0).expect("portal 0 open").tab;
+    let seat_a = core.portals.get(&0).unwrap().seat;
+    // A second, real tab for the caller to name: mint the id so it
+    // cannot collide the way a manual push would.
+    let tab_b = core.session.mint_tab_id();
+    let shell_b = core.spawn_pane(24, 40, "/tmp/seen").expect("pane b");
+    core.session.squad_mut(1).unwrap().tabs.push(Tab {
+        name: None,
+        id: tab_b,
+        root: Node::Leaf(shell_b),
+        focus: shell_b,
+    });
+    // A neighbour pane shares the seat's tab, so the operator close below
+    // stales the seat without removing the tab.
+    let (sid_a, ti_a) = core.session.find_pane(seat_a).unwrap();
+    let neighbour = core
+        .spawn_pane(24, 40, "/tmp/seen")
+        .expect("neighbour pane");
+    {
+        let squad = core.session.squad_mut(sid_a).unwrap();
+        let tab = &mut squad.tabs[ti_a];
+        let leaf = std::mem::replace(&mut tab.root, Node::Leaf(neighbour));
+        tab.root = Node::Branch {
+            axis: crate::tree::Axis::Horizontal,
+            children: vec![(0.5, leaf), (0.5, Node::Leaf(neighbour))],
+        };
+    }
+    // An operator close removes the entry; the tab (with the neighbour)
+    // survives the leaf close.
+    core.close_pane(seat_a);
+    assert!(
+        core.portals.get(&0).is_none(),
+        "the operator close removed the entry"
+    );
+    assert!(
+        core.session
+            .squad(sid_a)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == tab_a),
+        "fixture: the shared tab survives the operator close"
+    );
+
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(0),
+                tab: Some(crate::proto::TabSel::Id(tab_b)),
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+        },
+    );
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already showing")),
+        "a dead viewer never reads as already showing"
+    );
+    let entry = core.portals.get(&0).expect("portal 0 reopened");
+    assert_eq!(
+        entry.tab, tab_b,
+        "the caller's tab wins: nothing stale steers a fresh open"
+    );
+
+    // A same-row reach on a stand-in seat is NOT "already showing" - the
+    // seat holds a shell, not the row. It repoints the shell into a fresh
+    // viewer of the SAME row, in the same tab.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, thread_reach_cmd("deadbee1"));
+    let (a_viewer, a_tid) = {
+        let e = core.portals.get(&0).expect("portal 0 open");
+        (e.seat, e.tab)
+    };
+    core.close_viewer_died(a_viewer, "viewer exited");
+    let panes_before = core.panes.len();
+
+    core.command(client_id, thread_reach_cmd("deadbee1"));
+
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already showing")),
+        "a stand-in seat never reads as already showing"
+    );
+    assert!(
+        core.portals.get(&0).is_some_and(|e| {
+            e.row_key == "deadbee1" && e.tab == a_tid && core.panes[&e.seat].cmd.is_some()
+        }),
+        "the portal names a fresh live viewer in the same tab"
+    );
+    assert_eq!(
+        core.panes.len(),
+        panes_before,
+        "the respawn reused the seat pane"
+    );
+}
+
+/// The new-portal reach the `P` picker's shift+HJKL sends: allocate the
+/// index, split beside the viewed workspace.
+fn portal_new_split_cmd(id: &str) -> Command {
+    Command::AttachAgent {
+        id: id.into(),
+        placement: PanePlacement {
+            portal_new: true,
+            split: Some(Dir::Right),
+            target: PaneTarget::SquadId(1),
+            ..Default::default()
+        },
+    }
 }
 
 #[tokio::test]
@@ -1683,162 +1772,10 @@ async fn portal_new_split_on_a_claude_row_survives_the_reentry_replay() {
     core.reap_pane(seat); // don't leak the stand-in child
 }
 
-#[test]
-fn portal_repoint_keeps_its_geometry_and_says_so() {
-    // (x-9b60, AC2-REG) A portal with a live viewer owns its geometry: a
-    // reach for another row carrying a tab/split for somewhere else is
-    // repointed IN PLACE, the tab never moves, and the caller is TOLD
-    // the geometry was refused rather than silently dropped.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![
-        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
-        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
-    ];
-    core.command(client_id, thread_reach_cmd("deadbee1"));
-    let (seat_a, tab_a) = {
-        let e = core.portals.get(&0).expect("portal 0 open");
-        (e.seat, e.tab)
-    };
-    core.command(
-        client_id,
-        Command::AttachAgent {
-            id: "deadbee2".into(),
-            placement: PanePlacement {
-                portal: Some(0),
-                tab: Some(crate::proto::TabSel::Id(9999)),
-                split: Some(Dir::Right),
-                ..Default::default()
-            },
-        },
-    );
-    let entry = core.portals.get(&0).expect("portal 0 still open");
-    assert_eq!(entry.tab, tab_a, "the repoint never moves the tab");
-    assert_ne!(entry.seat, seat_a, "the viewer was replaced in place");
-    assert_eq!(entry.row_key, "deadbee2");
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices
-            .iter()
-            .any(|t| t.contains("a portal takes no split")),
-        "the geometry refusal is visible: {notices:?}"
-    );
-}
-
-#[test]
-fn an_operator_closed_portal_honors_the_next_callers_placement() {
-    // (re-ruled by the TV model) An operator close removes the entry, so
-    // the next reach at that index opens FRESH and the caller's placement
-    // wins: no remembered tab outlives the gesture. The seat's tab keeps
-    // a second pane so the operator close leaves the tab alive (an
-    // operator close of a LONE-leaf tab closes the tab, the AC7 rule).
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, thread_reach_cmd("deadbee1"));
-    let tab_a = core.portals.get(&0).expect("portal 0 open").tab;
-    let seat_a = core.portals.get(&0).unwrap().seat;
-    // A second, real tab for the caller to name: mint the id so it
-    // cannot collide the way a manual push would.
-    let tab_b = core.session.mint_tab_id();
-    let shell_b = core.spawn_pane(24, 40, "/tmp/seen").expect("pane b");
-    core.session.squad_mut(1).unwrap().tabs.push(Tab {
-        name: None,
-        id: tab_b,
-        root: Node::Leaf(shell_b),
-        focus: shell_b,
-    });
-    // A neighbour pane shares the seat's tab, so the operator close below
-    // stales the seat without removing the tab.
-    let (sid_a, ti_a) = core.session.find_pane(seat_a).unwrap();
-    let neighbour = core
-        .spawn_pane(24, 40, "/tmp/seen")
-        .expect("neighbour pane");
-    {
-        let squad = core.session.squad_mut(sid_a).unwrap();
-        let tab = &mut squad.tabs[ti_a];
-        let leaf = std::mem::replace(&mut tab.root, Node::Leaf(neighbour));
-        tab.root = Node::Branch {
-            axis: crate::tree::Axis::Horizontal,
-            children: vec![(0.5, leaf), (0.5, Node::Leaf(neighbour))],
-        };
-    }
-    // An operator close removes the entry; the tab (with the neighbour)
-    // survives the leaf close.
-    core.close_pane(seat_a);
-    assert!(
-        core.portals.get(&0).is_none(),
-        "the operator close removed the entry"
-    );
-    assert!(
-        core.session
-            .squad(sid_a)
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|t| t.id == tab_a),
-        "fixture: the shared tab survives the operator close"
-    );
-
-    core.command(
-        client_id,
-        Command::AttachAgent {
-            id: "deadbee1".into(),
-            placement: PanePlacement {
-                portal: Some(0),
-                tab: Some(crate::proto::TabSel::Id(tab_b)),
-                split: Some(Dir::Right),
-                ..Default::default()
-            },
-        },
-    );
-    assert!(
-        !drain_notices(&mut rx)
-            .iter()
-            .any(|t| t.contains("already showing")),
-        "a dead viewer never reads as already showing"
-    );
-    let entry = core.portals.get(&0).expect("portal 0 reopened");
-    assert_eq!(
-        entry.tab, tab_b,
-        "the caller's tab wins: nothing stale steers a fresh open"
-    );
-}
-
-#[test]
-fn portal_fresh_open_refuses_a_missing_tab_before_any_pane() {
-    // (x-9b60, AC4-EDGE) A caller tab the server cannot resolve refuses
-    // BEFORE a pane exists: no spawn, no portal entry, a notice that
-    // names the problem.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    let panes_before = core.panes.len();
-    core.command(
-        client_id,
-        Command::AttachAgent {
-            id: "deadbee1".into(),
-            placement: PanePlacement {
-                portal: Some(0),
-                tab: Some(crate::proto::TabSel::Id(9999)),
-                split: Some(Dir::Right),
-                ..Default::default()
-            },
-        },
-    );
-    assert_eq!(core.panes.len(), panes_before, "no pane spawned");
-    assert!(core.portals.is_empty(), "no portal entry written");
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices.iter().any(|t| t.contains("tab")),
-        "the refusal names the tab: {notices:?}"
-    );
-}
-
 // ---- (x-d545) the remembered tab outlives its viewer ----
 
 #[test]
-fn close_pane_viewer_seat_lone_leaf_keeps_tab_with_a_parked_screen() {
+fn close_pane_rows() {
     // AC1-HP + AC3-HP: the viewport tab is the only tab of its squad; the
     // recorded viewer's child exits; the tab survives with the SAME id
     // and one parked screen, the squad and the session survive, and the
@@ -1899,10 +1836,76 @@ fn close_pane_viewer_seat_lone_leaf_keeps_tab_with_a_parked_screen() {
         !core.panes.contains_key(&lone_viewer),
         "the dead viewer is reaped"
     );
-}
 
-#[test]
-fn reach_after_viewer_death_opens_in_the_same_tab() {
+    // AC8-FR: the new arm fires only for the recorded thread pane. A
+    // plain pane alone in its tab keeps today's semantics: the tab goes.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let p2 = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
+    core.session.squad_mut(1).unwrap().tabs.push(Tab {
+        name: None,
+        id: 901,
+        root: Node::Leaf(p2),
+        focus: p2,
+    });
+    core.portals.insert(
+        0,
+        Portal {
+            row_key: "row-x".to_string(),
+            seat: 99_999,
+            tab: 0,
+        },
+    ); // viewer elsewhere
+
+    let flow = core.close_pane(p2);
+
+    assert!(
+        matches!(flow, Flow::Continue),
+        "the session survives (tab 1 remains)"
+    );
+    assert!(
+        !core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == 901),
+        "a plain pane's tab is removed exactly as today"
+    );
+
+    // The parked screen must stay closable by hand: its own close removes
+    // the tab as today and removes the portal entry with it (a portal
+    // lives until the operator closes it - no stale row survives the
+    // gesture).
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, thread_reach_cmd("deadbee1"));
+    let (a_viewer, a_tid) = {
+        let e = core.portals.get(&0).expect("portal 0 open");
+        (e.seat, e.tab)
+    };
+    core.close_viewer_died(a_viewer, "viewer exited"); // the parked screen takes the seat
+    let screen = core.portals.get(&0).expect("portal 0 open").seat;
+
+    core.close_pane(screen);
+
+    assert!(
+        !core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == a_tid),
+        "the hand-closed parked screen still removes the tab"
+    );
+    assert!(
+        core.portals.get(&0).is_none(),
+        "the operator close removed the portal entry: no stale row survives"
+    );
+
     // AC2-HP: reach A, A's viewer child exits (the swap leaves the idle
     // shell stand-in), reach B: B's viewer opens in the SAME TabId, the
     // repoint reuses the seat pane, and no second viewport tab is minted.
@@ -1962,46 +1965,6 @@ fn reach_after_viewer_death_opens_in_the_same_tab() {
         "A's viewer stays reaped"
     );
     core.reap_pane(b_pid);
-}
-
-#[test]
-fn close_pane_plain_lone_pane_still_removes_its_tab() {
-    // AC8-FR: the new arm fires only for the recorded thread pane. A
-    // plain pane alone in its tab keeps today's semantics: the tab goes.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, _client_id, _p1, _rx) = thread_core();
-    let p2 = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
-    core.session.squad_mut(1).unwrap().tabs.push(Tab {
-        name: None,
-        id: 901,
-        root: Node::Leaf(p2),
-        focus: p2,
-    });
-    core.portals.insert(
-        0,
-        Portal {
-            row_key: "row-x".to_string(),
-            seat: 99_999,
-            tab: 0,
-        },
-    ); // viewer elsewhere
-
-    let flow = core.close_pane(p2);
-
-    assert!(
-        matches!(flow, Flow::Continue),
-        "the session survives (tab 1 remains)"
-    );
-    assert!(
-        !core
-            .session
-            .squad(1)
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|t| t.id == 901),
-        "a plain pane's tab is removed exactly as today"
-    );
 }
 
 /// A live paneless claude row (the Drive tier): harness claude plus an
@@ -2173,41 +2136,6 @@ async fn portal_ctl_reaches_a_paneless_row_whose_key_also_matches_a_hosted_row()
     core.reap_pane(new_pid); // don't leak the stand-in child
 }
 
-#[test]
-fn close_pane_a_parked_screen_still_removes_its_tab() {
-    // The parked screen must stay closable by hand: its own close removes
-    // the tab as today and removes the portal entry with it (a portal
-    // lives until the operator closes it - no stale row survives the
-    // gesture).
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, _rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, thread_reach_cmd("deadbee1"));
-    let (a_viewer, a_tid) = {
-        let e = core.portals.get(&0).expect("portal 0 open");
-        (e.seat, e.tab)
-    };
-    core.close_viewer_died(a_viewer, "viewer exited"); // the parked screen takes the seat
-    let screen = core.portals.get(&0).expect("portal 0 open").seat;
-
-    core.close_pane(screen);
-
-    assert!(
-        !core
-            .session
-            .squad(1)
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|t| t.id == a_tid),
-        "the hand-closed parked screen still removes the tab"
-    );
-    assert!(
-        core.portals.get(&0).is_none(),
-        "the operator close removed the portal entry: no stale row survives"
-    );
-}
-
 // ---- (x-a9b4) portals survive the restart: capture, hold, fill ----------
 
 /// A store row whose named tab is a two-child split of a portal slot
@@ -2282,7 +2210,7 @@ fn empty_core_with_output() -> (Core, mpsc::Receiver<(u64, PaneChunk)>) {
 }
 
 #[test]
-fn restore_held_seat_feeds_the_message_and_never_types_a_command() {
+fn restore_seat_rows() {
     // AC1-HP: the held message paints once onto the seat's screen. No
     // shell input is typed at the placeholder, so the message cannot come
     // back a second time as an echoed command or a third time as command
@@ -2315,10 +2243,7 @@ fn restore_held_seat_feeds_the_message_and_never_types_a_command() {
         1,
         "the message paints exactly once: {text:?}"
     );
-}
 
-#[test]
-fn restore_message_with_an_apostrophe_is_literal_text_never_shell_input() {
     // AC1-EDGE: the message is screen text. An apostrophe feeds to the VT
     // verbatim; nothing is quoted for a shell and nothing is executed.
     let (mut core, mut out_rx) = empty_core_with_output();
@@ -2343,10 +2268,7 @@ fn restore_message_with_an_apostrophe_is_literal_text_never_shell_input() {
         text.contains("it's held, across restart"),
         "the message is literal: {text:?}"
     );
-}
 
-#[test]
-fn restore_holds_a_portal_slot_idle_in_its_seat() {
     // AC3-HP: the named tab comes back with its split, the portal entry
     // names the first child of the split with the stored row key, that
     // pane runs no command, and the pane says what it waits for.
@@ -2397,173 +2319,7 @@ fn restore_holds_a_portal_slot_idle_in_its_seat() {
         notices.contains("held 0 worker pane(s) and 1 portal(s)"),
         "the restore receipt names the held portal: {notices}"
     );
-}
 
-#[test]
-fn the_held_live_reading_keys_on_provenance_not_command_presence() {
-    // AC2: one classifier behind every portal door. A marked placeholder
-    // reads held even though its wrapper argv gives it `cmd: Some` (the
-    // state a keeper re-adoption produces); a bare shell reads held; only
-    // a real command with no marker reads live.
-    let _s = hold_fixture("portal-classifier");
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    let (c, _rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.restore_squads(24, 80, 999);
-    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
-    assert!(
-        core.panes[&seat].cmd.is_some(),
-        "fixture: the placeholder's argv yields cmd"
-    );
-    assert!(
-        !core.portal_seat_is_viewer(seat),
-        "the marker keeps the seat held"
-    );
-    // A bare shell (no wrapper, no marker) is held too.
-    core.panes.get_mut(&seat).unwrap().cmd = None;
-    core.panes.get_mut(&seat).unwrap().portal_hold = None;
-    assert!(
-        !core.portal_seat_is_viewer(seat),
-        "a bare shell is not a viewer"
-    );
-    // A surviving viewer: a real command and no marker.
-    core.panes.get_mut(&seat).unwrap().cmd = Some("cat".into());
-    assert!(core.portal_seat_is_viewer(seat), "a real viewer is live");
-}
-
-#[test]
-fn a_surviving_viewer_rearmed_live_still_focuses_without_a_second_viewer() {
-    // AC2-EDGE: a viewer that genuinely survived the restart re-adopts
-    // with `cmd: Some` and no marker. A default reach focuses that pane
-    // instead of minting a second viewer.
-    set_attach_program(&["/bin/cat"]);
-    let _s = hold_fixture("portal-survivor");
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.restore_squads(24, 80, 999);
-    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
-    core.panes.get_mut(&seat).unwrap().portal_hold = None;
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    let panes_before = core.panes.len();
-
-    core.command(1, thread_reach_cmd("deadbee1"));
-
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices.iter().any(|t| t.contains("already showing")),
-        "the surviving viewer is the row's home: {notices:?}"
-    );
-    assert_eq!(core.panes.len(), panes_before, "no second viewer spawned");
-    assert_eq!(
-        core.portals.get(&1).map(|p| p.seat),
-        Some(seat),
-        "the seat is untouched"
-    );
-}
-
-#[test]
-fn a_fill_under_a_foreign_session_id_refuses_naming_both_ids() {
-    // AC2-ERR: the recorded session guard binds the seat to the row's
-    // incarnation at capture. A different full id under the same key is a
-    // different thread wearing a familiar label: the fill refuses, names
-    // both ids, and the seat stays held.
-    let _s = hold_fixture("portal-guard");
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.restore_squads(24, 80, 999);
-    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
-    core.portal_session_guards
-        .insert(1, "sid-recorded".to_string());
-    let mut row = bg_row("target-a", "/tmp/seen", Some("deadbee1"));
-    row.harness_session_id = Some("sid-arrived".to_string());
-    core.agents = vec![row];
-    let panes_before = core.panes.len();
-
-    core.command(1, Command::FocusPane(seat));
-
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices
-            .iter()
-            .any(|t| t.contains("sid-recorded") && t.contains("sid-arrived")),
-        "the refusal names both ids: {notices:?}"
-    );
-    assert_eq!(core.panes.len(), panes_before, "nothing spawned");
-    assert_eq!(
-        core.portals.get(&1).map(|p| p.seat),
-        Some(seat),
-        "the seat stays held"
-    );
-    assert!(
-        core.portal_session_guards.contains_key(&1),
-        "the guard stays armed"
-    );
-}
-
-#[test]
-fn a_fill_with_no_live_row_names_the_register_action_once_per_attempt() {
-    // AC3-ERR/EDGE: a held seat whose row is gone keeps the shell and
-    // answers an attempted fill with ONE refusal naming the index, the
-    // row, and one action. No per-frame notices: a second gesture earns
-    // exactly one more refusal, nothing between.
-    let _s = hold_fixture("portal-fill-norow");
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.restore_squads(24, 80, 999);
-    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
-    core.agents = vec![]; // no live row answers deadbee1
-    let panes_before = core.panes.len();
-
-    core.command(1, Command::FocusPane(seat));
-
-    let notices = drain_notices(&mut rx);
-    let refusals: Vec<_> = notices
-        .iter()
-        .filter(|t| t.contains("no live row answers"))
-        .collect();
-    assert_eq!(
-        refusals.len(),
-        1,
-        "one refusal for the attempt: {notices:?}"
-    );
-    assert!(
-        refusals[0].contains("portal 1") && refusals[0].contains("deadbee1"),
-        "the index and the row are named: {}",
-        refusals[0]
-    );
-    assert!(
-        refusals[0].contains("fno agents register"),
-        "one action is named: {}",
-        refusals[0]
-    );
-    assert_eq!(core.panes.len(), panes_before, "no viewer starts");
-    assert_eq!(
-        core.portals.get(&1).map(|p| p.seat),
-        Some(seat),
-        "the seat stays held"
-    );
-
-    core.command(1, Command::FocusPane(seat));
-    let notices = drain_notices(&mut rx);
-    assert_eq!(
-        notices
-            .iter()
-            .filter(|t| t.contains("no live row answers"))
-            .count(),
-        1,
-        "one refusal per attempt, none between: {notices:?}"
-    );
-}
-
-#[test]
-fn restore_holds_a_duplicate_index_once_and_closes_the_second_seat() {
     // AC3-EDGE: two stored squads both carry a portal slot at index 1.
     // Portal 1 is held ONCE at 1; the duplicate seat closes with a notice;
     // no index is moved and none above the stored maximum appears.
@@ -2628,10 +2384,7 @@ fn restore_holds_a_duplicate_index_once_and_closes_the_second_seat() {
         notices.contains("portal 1 stored twice"),
         "the duplicate is named: {notices}"
     );
-}
 
-#[test]
-fn the_restore_notice_names_both_held_kinds() {
     // AC4-HP: one worker pane and two portal seats held; the startup
     // notice reads both counts.
     let s = hold_fixture("portal-hold-notice");
@@ -2702,7 +2455,164 @@ fn the_restore_notice_names_both_held_kinds() {
 }
 
 #[test]
-fn focusing_a_held_portal_seat_fills_it_in_place() {
+fn a_surviving_viewer_rearmed_live_still_focuses_without_a_second_viewer() {
+    // AC2-EDGE: a viewer that genuinely survived the restart re-adopts
+    // with `cmd: Some` and no marker. A default reach focuses that pane
+    // instead of minting a second viewer.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-survivor");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.panes.get_mut(&seat).unwrap().portal_hold = None;
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    let panes_before = core.panes.len();
+
+    core.command(1, thread_reach_cmd("deadbee1"));
+
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices.iter().any(|t| t.contains("already showing")),
+        "the surviving viewer is the row's home: {notices:?}"
+    );
+    assert_eq!(core.panes.len(), panes_before, "no second viewer spawned");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat is untouched"
+    );
+}
+
+#[test]
+fn held_fill_refusal_rows() {
+    // AC2-ERR: the recorded session guard binds the seat to the row's
+    // incarnation at capture. A different full id under the same key is a
+    // different thread wearing a familiar label: the fill refuses, names
+    // both ids, and the seat stays held.
+    let _s = hold_fixture("portal-guard");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.portal_session_guards
+        .insert(1, "sid-recorded".to_string());
+    let mut row = bg_row("target-a", "/tmp/seen", Some("deadbee1"));
+    row.harness_session_id = Some("sid-arrived".to_string());
+    core.agents = vec![row];
+    let panes_before = core.panes.len();
+
+    core.command(1, Command::FocusPane(seat));
+
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t.contains("sid-recorded") && t.contains("sid-arrived")),
+        "the refusal names both ids: {notices:?}"
+    );
+    assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat stays held"
+    );
+    assert!(
+        core.portal_session_guards.contains_key(&1),
+        "the guard stays armed"
+    );
+
+    // AC3-ERR/EDGE: a held seat whose row is gone keeps the shell and
+    // answers an attempted fill with ONE refusal naming the index, the
+    // row, and one action. No per-frame notices: a second gesture earns
+    // exactly one more refusal, nothing between.
+    let _s = hold_fixture("portal-fill-norow");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.agents = vec![]; // no live row answers deadbee1
+    let panes_before = core.panes.len();
+
+    core.command(1, Command::FocusPane(seat));
+
+    let notices = drain_notices(&mut rx);
+    let refusals: Vec<_> = notices
+        .iter()
+        .filter(|t| t.contains("no live row answers"))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "one refusal for the attempt: {notices:?}"
+    );
+    assert!(
+        refusals[0].contains("portal 1") && refusals[0].contains("deadbee1"),
+        "the index and the row are named: {}",
+        refusals[0]
+    );
+    assert!(
+        refusals[0].contains("fno agents register"),
+        "one action is named: {}",
+        refusals[0]
+    );
+    assert_eq!(core.panes.len(), panes_before, "no viewer starts");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat stays held"
+    );
+
+    core.command(1, Command::FocusPane(seat));
+    let notices = drain_notices(&mut rx);
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|t| t.contains("no live row answers"))
+            .count(),
+        1,
+        "one refusal per attempt, none between: {notices:?}"
+    );
+
+    // AC2: one classifier behind every portal door. A marked placeholder
+    // reads held even though its wrapper argv gives it `cmd: Some` (the
+    // state a keeper re-adoption produces); a bare shell reads held; only
+    // a real command with no marker reads live.
+    let _s = hold_fixture("portal-classifier");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    assert!(
+        core.panes[&seat].cmd.is_some(),
+        "fixture: the placeholder's argv yields cmd"
+    );
+    assert!(
+        !core.portal_seat_is_viewer(seat),
+        "the marker keeps the seat held"
+    );
+    // A bare shell (no wrapper, no marker) is held too.
+    core.panes.get_mut(&seat).unwrap().cmd = None;
+    core.panes.get_mut(&seat).unwrap().portal_hold = None;
+    assert!(
+        !core.portal_seat_is_viewer(seat),
+        "a bare shell is not a viewer"
+    );
+    // A surviving viewer: a real command and no marker.
+    core.panes.get_mut(&seat).unwrap().cmd = Some("cat".into());
+    assert!(core.portal_seat_is_viewer(seat), "a real viewer is live");
+}
+
+#[test]
+fn held_reach_rows() {
     // AC6-HP: the held seat at portal 1 shows a shell; focusing it swaps
     // the row's viewer into THAT seat; portals[1] names the new pane.
     set_attach_program(&["/bin/cat"]);
@@ -2733,10 +2643,7 @@ fn focusing_a_held_portal_seat_fills_it_in_place() {
         Some(tab_id),
         "the viewer landed in the same tab the seat held"
     );
-}
 
-#[test]
-fn a_default_reach_fills_the_held_seat_naming_the_row() {
     // AC7-HP: Enter on the row carries no explicit index. A held portal
     // at index 1 names the row; the reach fills THAT seat instead of
     // stranding it while a fresh viewer mints at 0.
@@ -2778,10 +2685,7 @@ fn a_default_reach_fills_the_held_seat_naming_the_row() {
         notices.contains("portal 1: resuming"),
         "the resume is named: {notices}"
     );
-}
 
-#[test]
-fn an_explicit_reach_never_hijacks_a_held_seat() {
     // AC7-EDGE: `--portal 0` means portal 0. The held seat at 1 stays
     // held; a fresh viewer opens at 0.
     set_attach_program(&["/bin/cat"]);
@@ -2809,10 +2713,7 @@ fn an_explicit_reach_never_hijacks_a_held_seat() {
         "the held seat at 1 is untouched"
     );
     assert!(core.panes.get(&held_seat).is_some());
-}
 
-#[test]
-fn a_held_seat_whose_row_is_gone_stays_a_readable_shell() {
     // AC8-EDGE: the held row never appears in the registry. Focus falls
     // through to a plain focus: the pane stays a readable shell naming
     // the row and nothing is spawned.
@@ -2843,89 +2744,6 @@ fn a_held_seat_whose_row_is_gone_stays_a_readable_shell() {
         core.portals.get(&1).map(|p| p.seat),
         Some(seat),
         "the seat is still the held portal"
-    );
-}
-
-#[test]
-fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
-    // AC5-HP: the only slot is a portal onto attach id deadbee1 and the
-    // done set carries that id (the forgotten-tombstone arm fills it).
-    // No pane is minted and the skipped-tab count includes the tab.
-    let s = StoreScratch::new("portal-done");
-    let origin = s.dir.join("repo");
-    std::fs::create_dir_all(&origin).unwrap();
-    let origin_str = origin.to_string_lossy().into_owned();
-    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
-    crate::squad_store::upsert("", &key, &[origin_str.clone()], &[]).unwrap();
-    // The member died and the registry forgot its attach id: the same
-    // arm that prunes the member puts the id in done_bindings.
-    crate::squad_store::upsert(
-        "",
-        &key,
-        &[origin_str.clone()],
-        &[crate::squad_store::StoredMember {
-            attach_id: "deadbee1".into(),
-            tombstone: true,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: None,
-            harness_session_id: None,
-            pane_id: None,
-        }],
-    )
-    .unwrap();
-    crate::squad_store::set_tab_trees(
-        "",
-        &key,
-        &[],
-        &[crate::squad_store::StoredTabTree {
-            tab_name: None,
-            tree: crate::proto::LayoutTreeSpec::Slot("portal1".into()),
-            slots: vec![crate::proto::LayoutSlot {
-                name: "portal1".into(),
-                binding: LayoutBinding::Shell,
-                cwd: None,
-                portal: Some(PortalSlot {
-                    index: 1,
-                    row: "deadbee1".into(),
-                    harness: None,
-                    session_id: None,
-                }),
-                pane_id: None,
-            }],
-            focus: None,
-        }],
-        None,
-    )
-    .unwrap();
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    core.agents = vec![bg_row("other", "/tmp/seen", Some("cafebabe"))];
-    // The forgotten-tombstone arm reads the registry, not core.agents; pin
-    // the seam to rows naming OTHER ids so deadbee1 reads as forgotten even
-    // on a machine with no registry file (CI).
-    let _registry = RestoreRegistryRowsGuard;
-    set_restore_registry_rows(vec![bg_row("other", "/tmp/seen", Some("cafebabe"))]);
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.restore_squads(24, 80, 999);
-
-    assert!(
-        core.portals.is_empty(),
-        "no portal came back for a done row"
-    );
-    assert_eq!(
-        core.panes.len(),
-        1,
-        "only the empty-squad fallback shell exists; the done portal slot minted nothing"
-    );
-    let notices = drain_notices(&mut rx).join("\n");
-    assert!(
-        notices.contains("1 done tab(s)"),
-        "the skipped tab is counted: {notices}"
     );
 }
 
@@ -2968,43 +2786,6 @@ fn the_notice_latch_holds_through_the_restart_path() {
 /// closes only that viewer's pane. The neighbour's pane, its portal entry,
 /// and its tab all survive. x-3349 sharpens the pin: the reaped viewer's
 /// seat now KEEPS its place as a shell, which still never cascades.
-#[test]
-fn reaping_one_portals_subject_leaves_the_sibling_portal_alone() {
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![
-        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
-        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
-    ];
-
-    core.command(client_id, portal_reach_cmd("deadbee1", 0));
-    core.command(client_id, portal_reach_cmd("deadbee2", 1));
-    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
-    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
-
-    core.close_viewer_died(a_seat, "child exited");
-
-    assert!(
-        !core.panes.contains_key(&a_seat),
-        "the reaped subject's viewer is gone"
-    );
-    let kept = core.portals.get(&0).expect("portal 0 keeps its seat").seat;
-    assert_ne!(kept, a_seat, "a shell stand-in took the seat");
-    assert!(
-        core.panes.contains_key(&b_seat),
-        "the sibling portal's pane survives the neighbour's reap"
-    );
-    assert_eq!(
-        core.portals.get(&1).map(|p| p.seat),
-        Some(b_seat),
-        "portal 1 still seats the sibling viewer"
-    );
-    assert!(
-        core.session.find_pane(b_seat).is_some(),
-        "the tab still exists for the sibling"
-    );
-    let _ = drain_notices(&mut rx);
-}
 
 /// (x-9b37 AC3, reshaped by x-3349) a VANISHING portal says so, naming the
 /// portal index, the row, and the reason. What vanishes a portal now is an
@@ -3106,7 +2887,7 @@ fn the_row_a_held_portal_shows_wears_its_mark_not_the_seat() {
 // ---- (x-3349) closing a portal is its own gesture -------------------------
 
 #[test]
-fn close_portal_closes_only_the_seat_and_leaves_the_row_live() {
+fn close_portal_rows() {
     // AC4-HP. ClosePortal closes the viewer pane with no stand-in, never
     // touches the registry (no Stop, no Remove), and the operator close
     // removes the portal entry: a portal lives until the operator closes
@@ -3138,96 +2919,7 @@ fn close_portal_closes_only_the_seat_and_leaves_the_row_live() {
     assert!(row.pane_id.is_none(), "the row shows through no pane now");
     assert_eq!(row.portal, None, "the row wears no portal marker now");
     assert!(!row.exited, "the row reads live, not stopped or removed");
-}
 
-#[test]
-fn close_portal_refuses_a_pane_that_is_no_portal_seat() {
-    // AC5-ERR. A pane id that is not a live portal seat (a worker pane,
-    // a plain shell) gets the notice and nothing closes.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, portal_reach_cmd("deadbee1", 0));
-    while rx.try_recv().is_ok() {}
-
-    core.command(client_id, Command::ClosePortal { seat: p1 });
-
-    assert!(
-        core.panes.contains_key(&p1),
-        "the non-seat pane is untouched"
-    );
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices
-            .iter()
-            .any(|t| t == &format!("pane {p1} is not a portal seat")),
-        "the notice names the pane: {notices:?}"
-    );
-    assert!(
-        core.portals.get(&0).is_some(),
-        "the real portal is untouched"
-    );
-}
-
-#[test]
-fn close_portal_refuses_a_seat_that_already_closed() {
-    // AC5-ERR, the stale-seat half. The portals entry still NAMES a seat
-    // whose pane an operator close already took; the close must refuse
-    // with the same notice, not no-op through the stale entry.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, _p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, portal_reach_cmd("deadbee1", 0));
-    let seat = core.portals.get(&0).expect("portal 0 open").seat;
-    core.close_by_operator(seat);
-    assert!(
-        !core.panes.contains_key(&seat),
-        "fixture: the seat pane is gone"
-    );
-    while rx.try_recv().is_ok() {}
-
-    core.command(client_id, Command::ClosePortal { seat });
-
-    assert_eq!(
-        core.panes.len(),
-        1,
-        "nothing closed: the seat was already gone"
-    );
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices
-            .iter()
-            .any(|t| t == &format!("pane {seat} is not a portal seat")),
-        "the stale seat gets the refusal, not a silent no-op: {notices:?}"
-    );
-}
-
-#[test]
-fn close_portal_refuses_the_sessions_only_pane() {
-    // AC6-EDGE. Closing the seat that is the session's last pane would
-    // end the session; ClosePortal refuses and says so instead.
-    set_attach_program(&["/bin/cat"]);
-    let (mut core, client_id, p1, mut rx) = thread_core();
-    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
-    core.command(client_id, portal_reach_cmd("deadbee1", 0));
-    // Retire the fixture's plain shell so the seat is the only pane left.
-    core.close_pane(p1);
-    let seat = core.portals.get(&0).expect("portal 0 open").seat;
-    assert_eq!(core.panes.len(), 1, "fixture: the seat is the only pane");
-    while rx.try_recv().is_ok() {}
-
-    core.command(client_id, Command::ClosePortal { seat });
-
-    assert!(core.panes.contains_key(&seat), "the last pane stays open");
-    let notices = drain_notices(&mut rx);
-    assert!(
-        notices.iter().any(|t| t.contains("would end the session")),
-        "the refusal says why: {notices:?}"
-    );
-}
-
-#[test]
-fn an_operator_close_of_the_last_portal_mints_no_stand_in() {
     // AC7-HP. prefix+x (`Command::ClosePane`, routed through
     // close_by_operator) on the last open portal closes the pane like any
     // pane's: no stand-in, and a tab left with no leaves closes.
@@ -3257,6 +2949,201 @@ fn an_operator_close_of_the_last_portal_mints_no_stand_in() {
             .iter()
             .any(|t| t.id == a_tid),
         "a tab left with no leaves closes"
+    );
+
+    // AC5-HP: the only slot is a portal onto attach id deadbee1 and the
+    // done set carries that id (the forgotten-tombstone arm fills it).
+    // No pane is minted and the skipped-tab count includes the tab.
+    let s = StoreScratch::new("portal-done");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
+    crate::squad_store::upsert("", &key, &[origin_str.clone()], &[]).unwrap();
+    // The member died and the registry forgot its attach id: the same
+    // arm that prunes the member puts the id in done_bindings.
+    crate::squad_store::upsert(
+        "",
+        &key,
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: "deadbee1".into(),
+            tombstone: true,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+            pane_id: None,
+        }],
+    )
+    .unwrap();
+    crate::squad_store::set_tab_trees(
+        "",
+        &key,
+        &[],
+        &[crate::squad_store::StoredTabTree {
+            tab_name: None,
+            tree: crate::proto::LayoutTreeSpec::Slot("portal1".into()),
+            slots: vec![crate::proto::LayoutSlot {
+                name: "portal1".into(),
+                binding: LayoutBinding::Shell,
+                cwd: None,
+                portal: Some(PortalSlot {
+                    index: 1,
+                    row: "deadbee1".into(),
+                    harness: None,
+                    session_id: None,
+                }),
+                pane_id: None,
+            }],
+            focus: None,
+        }],
+        None,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    core.agents = vec![bg_row("other", "/tmp/seen", Some("cafebabe"))];
+    // The forgotten-tombstone arm reads the registry, not core.agents; pin
+    // the seam to rows naming OTHER ids so deadbee1 reads as forgotten even
+    // on a machine with no registry file (CI).
+    let _registry = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![bg_row("other", "/tmp/seen", Some("cafebabe"))]);
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+
+    assert!(
+        core.portals.is_empty(),
+        "no portal came back for a done row"
+    );
+    assert_eq!(
+        core.panes.len(),
+        1,
+        "only the empty-squad fallback shell exists; the done portal slot minted nothing"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("1 done tab(s)"),
+        "the skipped tab is counted: {notices}"
+    );
+
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+
+    core.close_viewer_died(a_seat, "child exited");
+
+    assert!(
+        !core.panes.contains_key(&a_seat),
+        "the reaped subject's viewer is gone"
+    );
+    let kept = core.portals.get(&0).expect("portal 0 keeps its seat").seat;
+    assert_ne!(kept, a_seat, "a shell stand-in took the seat");
+    assert!(
+        core.panes.contains_key(&b_seat),
+        "the sibling portal's pane survives the neighbour's reap"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(b_seat),
+        "portal 1 still seats the sibling viewer"
+    );
+    assert!(
+        core.session.find_pane(b_seat).is_some(),
+        "the tab still exists for the sibling"
+    );
+    let _ = drain_notices(&mut rx);
+}
+
+#[test]
+fn close_portal_refusal_rows() {
+    // AC5-ERR. A pane id that is not a live portal seat (a worker pane,
+    // a plain shell) gets the notice and nothing closes.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    while rx.try_recv().is_ok() {}
+
+    core.command(client_id, Command::ClosePortal { seat: p1 });
+
+    assert!(
+        core.panes.contains_key(&p1),
+        "the non-seat pane is untouched"
+    );
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t == &format!("pane {p1} is not a portal seat")),
+        "the notice names the pane: {notices:?}"
+    );
+    assert!(
+        core.portals.get(&0).is_some(),
+        "the real portal is untouched"
+    );
+
+    // AC5-ERR, the stale-seat half. The portals entry still NAMES a seat
+    // whose pane an operator close already took; the close must refuse
+    // with the same notice, not no-op through the stale entry.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    core.close_by_operator(seat);
+    assert!(
+        !core.panes.contains_key(&seat),
+        "fixture: the seat pane is gone"
+    );
+    while rx.try_recv().is_ok() {}
+
+    core.command(client_id, Command::ClosePortal { seat });
+
+    assert_eq!(
+        core.panes.len(),
+        1,
+        "nothing closed: the seat was already gone"
+    );
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t == &format!("pane {seat} is not a portal seat")),
+        "the stale seat gets the refusal, not a silent no-op: {notices:?}"
+    );
+
+    // AC6-EDGE. Closing the seat that is the session's last pane would
+    // end the session; ClosePortal refuses and says so instead.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    // Retire the fixture's plain shell so the seat is the only pane left.
+    core.close_pane(p1);
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    assert_eq!(core.panes.len(), 1, "fixture: the seat is the only pane");
+    while rx.try_recv().is_ok() {}
+
+    core.command(client_id, Command::ClosePortal { seat });
+
+    assert!(core.panes.contains_key(&seat), "the last pane stays open");
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices.iter().any(|t| t.contains("would end the session")),
+        "the refusal says why: {notices:?}"
     );
 }
 
@@ -3323,7 +3210,7 @@ fn feed_seat_title(core: &mut Core, seat: u64, title: &str) {
 }
 
 #[test]
-fn a_portal_follows_the_session_its_viewer_title_names() {
+fn title_claim_rows() {
     // AC2-HP: a claude viewer switches from A to B inside its own TUI; the
     // 1s follow repoints the slot, the attach mapping and the pane name to
     // B, and a second tick is a no-op.
@@ -3368,10 +3255,7 @@ fn a_portal_follows_the_session_its_viewer_title_names() {
         "the second tick emits no notice"
     );
     core.reap_pane(seat);
-}
 
-#[test]
-fn a_title_naming_no_single_row_drops_the_claim() {
     // AC2-ERR: a title naming two rows drops the claim instead of guessing;
     // the channel and the pane name keep the key a row answered, the drop
     // is silent, and a later unambiguous title claims its row.
@@ -3435,10 +3319,7 @@ fn a_title_naming_no_single_row_drops_the_claim() {
         "an unclaimed seat is not stuck"
     );
     core.reap_pane(seat);
-}
 
-#[test]
-fn a_glyph_only_title_leaves_the_seat_alone() {
     // AC2-EDGE: a bare spinner frame names no session. The seat keeps its
     // row instead of unclaiming onto the glyph.
     set_attach_program(&["/bin/cat"]);
@@ -3461,10 +3342,7 @@ fn a_glyph_only_title_leaves_the_seat_alone() {
         "a glyph-only title is silent"
     );
     core.reap_pane(seat);
-}
 
-#[test]
-fn a_portal_whose_title_names_its_own_row_is_left_alone() {
     // AC2-EDGE: the seated row named by `name`, by `harness_title`, an
     // unset title, a held stand-in seat and a non-claude viewer seat all
     // leave the slot, the mapping and the pane name untouched, with no
@@ -3505,10 +3383,7 @@ fn a_portal_whose_title_names_its_own_row_is_left_alone() {
         "an agreeing seat is silent"
     );
     core.reap_pane(seat);
-}
 
-#[test]
-fn a_title_naming_a_row_another_portal_shows_does_not_steal_it() {
     // AC2-EDGE: portal 1 already shows B; portal 0's viewer switches to B.
     // Portal 1 keeps its row, its mapping and its pane name; portal 0 drops
     // its claim rather than minting a second viewer.

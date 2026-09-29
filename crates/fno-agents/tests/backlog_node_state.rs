@@ -68,7 +68,7 @@ fn a_fresh_graph_write_does_not_wait_on_its_own_creation_lock() {
         elapsed
     );
     assert!(
-        dir.path().join("graph.db").exists(),
+        fno_agents::backlog::database_path(&graph).exists(),
         "the store was created"
     );
 }

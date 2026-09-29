@@ -407,6 +407,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        // The layout resolver answers the new spelling for a fresh root;
+        // this seeder opens the resolved path directly, so the db/ folder
+        // must exist before the connection.
+        std::fs::create_dir_all(dir.path().join("db")).unwrap();
         let connection = Connection::open(super::super::database_path(&graph)).unwrap();
         connection.execute_batch(V3_FIXTURE).unwrap();
         drop(connection);

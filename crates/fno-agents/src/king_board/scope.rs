@@ -24,10 +24,11 @@ pub(crate) fn home_dot_fno() -> PathBuf {
 
 /// The graph store path is rooted under the configured state directory.
 pub(crate) fn graph_json_path(_cwd: &Path) -> PathBuf {
-    if let Some(home) = std::env::var_os("FNO_HOME") {
-        return PathBuf::from(home).join("graph.json");
-    }
-    home_dot_fno().join("graph.json")
+    let root = match std::env::var_os("FNO_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => home_dot_fno(),
+    };
+    crate::state_layout::place(&root, "graph.json")
 }
 
 /// `paths.operator_lane()`: pinned global like the ledger - one file per

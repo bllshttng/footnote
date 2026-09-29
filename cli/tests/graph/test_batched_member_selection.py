@@ -60,7 +60,7 @@ def _node(node_id: str, **overrides) -> dict:
 
 @pytest.fixture
 def graph_file(tmp_path, monkeypatch):
-    path = tmp_path / "graph.json"
+    path = tmp_path / "db" / "graph.json"
 
     def write(entries):
         seed_graph(path, entries)
