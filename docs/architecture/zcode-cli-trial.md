@@ -35,7 +35,7 @@ zcode's client overhead is roughly half of Claude Code's on a trivial turn. One 
 
 ## Decision
 
-- Declared harness row: yes, since 2026-09-29. The row declares the measured headless lane: `zcode -p` mints `sess_<uuid>`, `--resume` recalls it from a second process, and the stream-json tee makes a run watchable live. The create-and-resume journey seats the spawn feature.
+- Declared harness row: yes, since 2026-09-29. The row declares the measured headless lane. `zcode -p` mints `sess_<uuid>`, and `--resume` recalls it from a second process. The stream-json tee makes a run watchable live. The create-and-resume journey seats the spawn feature.
 - The interactive TUI forms stay unsupported: the 3.14.3 bundle resolves no `@zcode/tui`, so a TUI launch exits 1 before painting. Captured twice on 2026-09-29.
 - The callee-minted session binding shipped as read-back from the create turn's own stream. No separate mint turn and no store reader were needed.
 - Looping dispatch stays refused until a live fire proves the plugin Stop hook inside a `-p` turn. The three-continuation cap (`hooks.ts`) is the re-drive follow-up.
