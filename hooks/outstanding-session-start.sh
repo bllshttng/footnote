@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - outstanding session start
 # SessionStart hook: what is waiting on a human - the session's own open
 # questions plus one count line, read from the daemon's projection cache
 # (~/.fno/attention/items.json, rewritten every beat) instead of the 3s

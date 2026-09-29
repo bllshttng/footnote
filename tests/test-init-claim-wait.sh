@@ -139,6 +139,12 @@ ACQUIRE_RC_FILE="${ACQUIRE_RC_FILE:-}"
 ACQUIRE_RC_COUNTER_FILE="${ACQUIRE_RC_COUNTER_FILE:-}"
 echo "fno $*" >> "$CALL_LOG"
 
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
+  printf 'HARNESS=claude\nSESSION_ID=%s\nDISPOSITION=proven\nCOLLISION=\n' \
+    "${CLAUDE_CODE_SESSION_ID:-}"
+  exit 0
+fi
+
 subcmd1="${1:-}"
 subcmd2="${2:-}"
 if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
@@ -169,8 +175,13 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
-    exit 0
+    case " $* " in
+      *" --field _archived"*) printf 'null\n'; exit 0 ;;
+      *" --field id"*)        printf '%s\n' "${3:-unknown}"; exit 0 ;;
+      *" --field status"*)    printf 'ready\n'; exit 0 ;;
+      *" --field pr_number"*) printf '4242\n'; exit 0 ;;
+    esac
+    exit 1
     ;;
   *)
     exit 0

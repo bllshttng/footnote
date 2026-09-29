@@ -162,13 +162,8 @@ fn observe_model(harness: &str, session_id: &str) -> Value {
     }
     let path = match harness {
         "claude" => {
-            let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
-                return json!({"kind": "no-transcript"});
-            };
-            super::super::claude_transcript_paths::resolve_transcript(
-                &home.join(".claude").join("projects"),
-                session_id,
-            )
+            let projects = crate::claude_drive::claude_projects_dir();
+            super::super::claude_transcript_paths::resolve_transcript(&projects, session_id)
         }
         _ => crate::codex_store::codex_rollout_path(None, session_id),
     };
@@ -619,7 +614,7 @@ fn find_nodes_for_pr(rows: &[Value], pr: i64, repo: Option<&str>) -> Vec<String>
 }
 /// Best-effort `owner/repo` for this checkout: git origin, parsed. None on
 /// every failure; the caller degrades to unscoped resolution.
-fn resolve_current_repo_slug() -> Option<String> {
+pub(crate) fn resolve_current_repo_slug() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .output()
@@ -1205,20 +1200,8 @@ fn run_reap_open(args: &[String]) -> i32 {
             && row.get("harness").and_then(Value::as_str) == Some(harness.trim())
             && row.get("session_id").and_then(Value::as_str) == Some(session_id.trim())
     });
-    let remaining = node_rows
-        .iter()
-        .filter(|row| crate::graph_store::is_open_phase_row(row, "execute"))
-        .count();
-    let higher_precedence = ["completed_at", "superseded_by", "deferred_at", "pr_number"]
-        .iter()
-        .any(|f| entry.get(*f).map(|v| !v.is_null()).unwrap_or(false))
-        || entry.get("persisted_status").and_then(Value::as_str) == Some("blocked")
-        || entry.get("status").and_then(Value::as_str) == Some("blocked");
-    let locked_by = entry
-        .get("locked_by")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    let expected_in_progress = locked_by || remaining > 0;
+    let (higher_precedence, expected_in_progress, remaining) =
+        crate::graph_keeper::reap_settlement_state(entry);
     let status = entry.get("status").and_then(Value::as_str).unwrap_or("");
     let status_ok = higher_precedence || (status == "in_progress") == expected_in_progress;
     if matching_open || !status_ok {

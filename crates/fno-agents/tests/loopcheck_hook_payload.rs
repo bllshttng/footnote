@@ -384,7 +384,8 @@ fn write_same_harness_pending(cwd: &Path) {
 #[test]
 fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
     let (_tmp, cwd, transcript, mock) = delivery_finalize_retry_fixture();
-    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let shim =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/footnote-agy-target-stop-hook.sh");
     let payload = serde_json::json!({
         "conversationId": "sess-delivery-retry",
         "transcriptPath": transcript,
@@ -508,7 +509,8 @@ exit 2
 #[test]
 fn agy_stale_pending_cannot_bypass_a_live_session() {
     let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
-    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let shim =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/footnote-agy-target-stop-hook.sh");
     let payload = serde_json::json!({
         "conversationId": "sess-delivery-retry",
         "transcriptPath": transcript,
@@ -542,7 +544,8 @@ fn agy_stale_pending_cannot_bypass_a_live_session() {
 #[test]
 fn agy_foreign_conversation_cannot_judge_a_live_session() {
     let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
-    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let shim =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/footnote-agy-target-stop-hook.sh");
     let payload = serde_json::json!({
         "conversationId": "conversation-foreign",
         "transcriptPath": transcript,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: WorktreeRemove - worktree remove
 # WorktreeRemove hook: cleanup with lifecycle awareness
 #
 # Contract (Claude Code delegation): when this hook is configured, the harness

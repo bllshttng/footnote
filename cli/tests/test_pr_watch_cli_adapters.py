@@ -1185,6 +1185,64 @@ def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_e
     assert any(t == "pr_watch_tick" for t, _d in _no_global_tick_events)
 
 
+def test_king_wake_row_names_refusal_counts(monkeypatch, _no_global_tick_events):
+    """The king_wake row says why crowns were not evaluated: refused=<kind>:<n>
+    pairs, sorted, so evaluated=2/5 next to refused=truth-timeout:3 explains
+    itself instead of hiding where the pass spent its time."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    settings = _cadence_settings()
+    settings.king = SimpleNamespace(wake_enabled=True, wake_debounce_seconds=900)
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+
+    def _wake(_settings, emit, **_kw):
+        return {
+            "armed": True,
+            "crowns": 5,
+            "woke": [],
+            "truth_reads": 2,
+            "evaluated": 2,
+            "refused": [
+                {"scope": "a", "refusal": "truth-timeout"},
+                {"scope": "b", "refusal": "truth-timeout"},
+                {"scope": "c", "refusal": "truth-timeout"},
+                {"scope": "d", "refusal": "working"},
+                {"scope": "e", "refusal": "working"},
+            ],
+        }
+
+    monkeypatch.setattr("fno.pr_watch._king_wake.run_king_wake", _wake, raising=True)
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+    monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    rows = [d for _t, d in _no_global_tick_events if d.get("arm") == "king_wake"]
+    assert rows and rows[0]["detail"]
+    assert "evaluated=2/5" in rows[0]["detail"]
+    assert "refused=truth-timeout:3,working:2" in rows[0]["detail"]
+
+
 def test_completed_sweep_stamps_its_arm_row(monkeypatch, _no_global_tick_events):
     """A successful sweep minted no control_plane_tick row, so the arm's
     newest row stayed its last cut and a healthy sweep read stale for hours.

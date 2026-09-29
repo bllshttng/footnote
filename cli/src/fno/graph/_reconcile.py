@@ -1498,7 +1498,7 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
 def stamp_reopen_warning(parent: dict, child: object, node_id: str) -> None:
     """Stamp which child reopened this done-on-its-own-evidence parent, and when.
 
-    ``_cascade_reopen_parents``'s stderr warning is gone the moment that
+    The reopen stderr warning is gone the moment that
     terminal closes; this survives on the graph node instead. ``child`` is
     ``cur`` at the call site (falls back to ``node_id`` when not a dict, same
     as before this was extracted). Cleared by

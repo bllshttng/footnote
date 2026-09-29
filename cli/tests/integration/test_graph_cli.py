@@ -120,14 +120,23 @@ class _NativeResult:
 
 
 def _native_verb(verb: str, *args: str) -> _NativeResult:
-    """The add/idea door: the create verbs are native; this execs the binary
-    against the same store the fixture wired through FNO_CONFIG."""
+    """The native backlog door: execs the binary against the same store the
+    fixture wired through FNO_CONFIG. The difficulty default rides only the
+    create verbs, where the retired add shim auto-appended it."""
     from tests._native_door import run_native
 
     argv = list(args)
-    if "--difficulty" not in argv:
+    if verb in ("add", "idea") and "--difficulty" not in argv:
         argv.extend(["--difficulty", "medium"])
     code, out, err = run_native("backlog", verb, *argv)
+    return _NativeResult(code, out, err)
+
+
+def _native_session(*args: str) -> _NativeResult:
+    """The Rust-owned session lifecycle door, migrated out of the Python app."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "session", *args)
     return _NativeResult(code, out, err)
 
 
@@ -140,11 +149,15 @@ def _read_graph(g: Path) -> list[dict]:
 
 
 def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
-    """AC3: observer reap fills the exact open row and reads it back."""
+    """AC3: observer reap fills the exact open row and reads it back.
+
+    Seeded in_progress with nothing else open: the settle rolls the node off
+    in_progress (the x-9657 red), so status_after reads idea."""
     _seed_graph_text(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-reap0001",
             "title": "Reap me",
+            "status": "in_progress",
             "sessions": [{
                 "phase": "execute",
                 "harness": "codex",
@@ -154,8 +167,8 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
         }]
     }) + "\n")
 
-    result = _invoke(
-        "backlog", "session", "reap-open", "x-reap0001",
+    result = _native_session(
+        "reap-open", "x-reap0001",
         "--harness", "codex", "--session-id", "dead-session", "--json",
     )
 
@@ -209,8 +222,8 @@ def test_session_reap_open_without_node_settles_every_node_holding_the_identity(
         ]
     }) + "\n")
 
-    result = _invoke(
-        "backlog", "session", "reap-open",
+    result = _native_session(
+        "reap-open",
         "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
     )
 
@@ -446,7 +459,8 @@ def test_done_clears_queued_state(tmp_graph):
         "queued-state fixture"
     )
     _seed_graph_text(tmp_graph, json.dumps(data))
-    _invoke("backlog", "done", nid)
+    # The bare close is native; the queued-ghost clear is its mutation.
+    _native_verb("done", nid)
     data = json.loads(_native_get(nid))
     assert data.get("queued_at") is None
     assert data["completed_at"] is not None
@@ -1536,8 +1550,8 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-clast002")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-clast002")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-clast002"]["completed_at"]               # child closed
     assert nodes["ab-epic0000"]["completed_at"]                # epic auto-closed
@@ -1557,8 +1571,8 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-cdone001")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-cdone001")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-cdone001"]["completed_at"]
     assert not nodes["ab-epic0000"].get("completed_at")        # epic stays open
@@ -1577,8 +1591,8 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-leaf0002")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-leaf0002")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-leaf0002"]["completed_at"]
     assert nodes["ab-sub00001"]["completed_at"]               # sub-epic closed
@@ -1597,8 +1611,8 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
          "artifact_url": "https://example.test/artifact"},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "done", "ab-leaf0001")
-    assert r.exit_code == 0, r.stdout + r.stderr
+    r = _native_verb("done", "ab-leaf0001")
+    assert r.exit_code == 0, r.output + r.stderr
     nodes = _by_id(tmp_graph)
     assert nodes["ab-epic0000"]["completed_at"]                # closed despite diff project
 

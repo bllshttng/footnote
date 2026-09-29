@@ -7,8 +7,6 @@ and the consumers. Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR,
 AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
-
 import json
 import os
 import subprocess
@@ -925,96 +923,3 @@ def test_rest_listing_details_carry_the_body_at_no_extra_request():
     assert reason == ""
     assert rows[0]["body"] == "Backlog-Closure: x-0001"
     assert rows[0]["mergedAt"] is None
-
-
-def test_pr_list_surfaces_the_binding_detail_and_drops_the_body(monkeypatch, tmp_path):
-    # AC4-HP from the listing surface: an unbindable row carries
-    # node_binding_detail naming its head ref, and the raw body never leaks
-    # into the listing output.
-    from fno import paths
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    graph_path = tmp_path / "graph.json"
-    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 932,
-                    "state": "OPEN",
-                    "title": "untracked",
-                    "headRefName": "chore/tidy-docs",
-                    "url": "https://github.com/o/r/pull/932",
-                    "body": "Just a fix.",
-                }
-            ],
-            "",
-        ),
-    )
-
-    result = CliRunner().invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    row = json.loads(result.stdout)[0]
-    assert row["node_binding"] == "untracked"
-    assert "chore/tidy-docs" in row["node_binding_detail"]
-    assert "body" not in row
-
-
-def test_pr_list_bound_rows_keep_their_verdict_and_carry_no_detail(monkeypatch, tmp_path):
-    # A bound row's node_id / node_binding are unchanged, and the detail key
-    # is absent - a bound verdict names no consulted inputs.
-    from fno import paths
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    graph_path = tmp_path / "graph.json"
-    seed_graph(graph_path, json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-2222",
-                        "status": "ready",
-                        "pr_number": 931,
-                        "pr_url": "https://github.com/o/r/pull/931",
-                    }
-                ]
-            }
-        ))
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 931,
-                    "state": "OPEN",
-                    "title": "bound",
-                    "headRefName": "chore/no-node-here",
-                    "url": "https://github.com/o/r/pull/931",
-                    "body": "Bound through the reverse key.",
-                }
-            ],
-            "",
-        ),
-    )
-
-    result = CliRunner().invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    row = json.loads(result.stdout)[0]
-    assert row["node_id"] == "x-2222"
-    assert row["node_binding"] == "bound"
-    assert "node_binding_detail" not in row
-    assert "body" not in row

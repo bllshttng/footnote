@@ -191,11 +191,8 @@ pub struct RecoveryReport {
     pub interrupted_write_temps: Vec<String>,
 }
 
-/// Resolve the resume identity for a daemon-hosted Codex thread.
-///
-/// An empty `short_id` is expected for this lane, so it cannot participate in
-/// the old state-directory recovery path. The full harness session id and cwd
-/// are the only durable inputs accepted for a resume.
+/// Resolve the resume identity for a daemon-hosted Codex thread: the full
+/// harness session id and cwd are the only durable inputs.
 fn codex_thread_resume_identity(
     entry: &RegistryEntry,
 ) -> Result<Option<(String, PathBuf)>, String> {
@@ -4619,6 +4616,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         &requested_name,
         &ctx.home.registry_json(),
         cross_project,
+        true,
     )
     .await
     {
@@ -4668,15 +4666,12 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     if is_codex_thread_entry(&entry) {
         // Stop means INTERRUPT the in-flight turn, then DROP the actor
         // (closing its connection to the shared daemon), and only then stamp
-        // Exited. The old shape removed the handle and stamped Exited without
-        // interrupting: a driving turn still held an Arc clone and the verb
-        // reported a stop it did not perform.
+        // Exited.
         //
         // The interrupt IS the stop now. There is no child to kill: the
         // shared daemon owns the thread, so a turn that survives the bounded
-        // settle keeps running there, and the report below says exactly that
-        // rather than claiming a kill this verb cannot perform.
-        let interrupt_report = match rm_teardown::end_codex_thread(ctx, &name).await {
+        // settle keeps running there, and the report below says exactly that.
+        let interrupt_report = match rm_teardown::end_codex_thread_confirmed(ctx, &entry).await {
             Ok(report) => report,
             // Keep the handle and leave the row non-terminal. The actor still
             // holds the interrupt handle for the live turn, so a retry can
@@ -5338,6 +5333,7 @@ async fn handle_rm_with(
         &requested_name,
         &ctx.home.registry_json(),
         cross_project,
+        false,
     )
     .await
     {
@@ -5437,7 +5433,7 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &entry, force).await {
             return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }
@@ -6510,8 +6506,8 @@ pub(crate) fn run_reconcile_sweep(
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
-    // (docs/architecture/codex-thread-driver.md); its existence is what makes
-    // an unhosted thread Orphaned (resumable) instead of Exited.
+    // (docs/architecture/codex-thread-driver.md): existence separates an
+    // unhosted thread's Orphaned from Exited; freshness keeps working ones unsettled.
     let rollout_exists = |e: &RegistryEntry| -> bool {
         e.log_path
             .as_deref()

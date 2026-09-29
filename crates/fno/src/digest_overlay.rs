@@ -129,11 +129,15 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
 /// fold in here and at the settings modal's swap, so they hold under every
 /// theme.
 pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
+    // The user's own themes resolve by name here, and their parse problems
+    // ride the same notice even when no config key names one: a theme the
+    // picker will list must not fail silently.
+    let (user, mut user_warns) = user_themes(cwd);
     let resolved = match mux_str(cwd, "theme").as_deref() {
         // An empty value is "no preference", the same as the unset key: it
         // rides the light-background ladder instead of pinning the dark
         // default.
-        Some(name) if !name.trim().is_empty() => crate::theme::Theme::from_name(name),
+        Some(name) if !name.trim().is_empty() => crate::theme::Theme::from_name_in(name, &user),
         _ => {
             let env = std::env::var("COLORFGBG").ok();
             (
@@ -142,7 +146,200 @@ pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::Keymap
             )
         }
     };
-    theme_role_overrides(cwd, resolved)
+    let (t, warn) = theme_role_overrides(cwd, resolved);
+    if let Some(w) = warn {
+        user_warns.push(w);
+    }
+    (t, join_warnings(user_warns))
+}
+
+/// The user's own themes: config `[mux.themes.<name>]` materialized through
+/// the same file ladder the keymap walks (`$FNO_CONFIG` sole, else project
+/// roots over the global file, a higher layer wins per role key - the
+/// Python loader's deep-merge, mirrored). Built-ins win name collisions, so
+/// a user theme can never shadow a shipped one. `inherit` names a built-in
+/// to start from (default `footnote-superscript`); every other key is a
+/// Theme role in the sideline color vocabulary, and a value the reader
+/// cannot parse is reported, never silently ignored. File-level problems
+/// (bad TOML, unreadable file) stay the keymap reader's warnings - it reads
+/// these same files and already reports them once.
+pub fn user_themes(
+    cwd: &Path,
+) -> (
+    Vec<(String, crate::theme::Theme)>,
+    Vec<crate::keys::KeymapWarning>,
+) {
+    let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
+        Some(explicit) => vec![PathBuf::from(explicit)],
+        None => {
+            let global = global_config_toml();
+            global
+                .into_iter()
+                .chain(
+                    config_roots(cwd)
+                        .into_iter()
+                        .rev()
+                        .map(|r| r.join(".fno/config.toml")),
+                )
+                .collect()
+        }
+    };
+    let merged = merge_theme_layers(layers.iter().map(|p| themes_from_file(p)));
+    let mut themes: Vec<(String, crate::theme::Theme)> = Vec::new();
+    let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
+    for (name, spec) in &merged {
+        // A blank key (`[mux.themes.""]`) materializes a theme whose name
+        // matches nothing the picker can label - report it, never quietly
+        // drop it.
+        if name.trim().is_empty() {
+            warnings.push(crate::keys::KeymapWarning(
+                "mux.themes.\"\": a theme name is required; ignored".to_string(),
+            ));
+            continue;
+        }
+        let (t, mut w) = materialize_user_theme(name, spec);
+        themes.push((name.clone(), t));
+        warnings.append(&mut w);
+    }
+    // TOML tables iterate in an arbitrary order; a stable list is a picker
+    // that does not reshuffle between opens.
+    themes.sort_by(|a, b| a.0.cmp(&b.0));
+    (themes, warnings)
+}
+
+/// One config file's `[mux.themes.<name>]` as `(name, [(key, value)])`. A
+/// non-string role value is reported here (it is a THEME problem, not a
+/// file problem).
+fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(themes) = table
+        .get("mux")
+        .and_then(|m| m.as_table())
+        .and_then(|m| m.get("themes"))
+        .and_then(|t| t.as_table())
+    else {
+        return Vec::new();
+    };
+    themes
+        .iter()
+        .filter_map(|(name, v)| {
+            let spec = v.as_table()?;
+            Some((
+                name.clone(),
+                spec.iter()
+                    .map(|(k, v)| match v.as_str() {
+                        Some(s) => (k.clone(), s.to_string()),
+                        // A non-string (e.g. `base = 3`) rides as its TOML
+                        // display so the materialize warning names what the
+                        // operator actually wrote.
+                        None => (k.clone(), v.to_string()),
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect()
+}
+
+/// Collapse theme layers, lowest precedence first, one (theme, role) pair at
+/// a time - the same shape as [`merge_key_layers`], keyed by theme name.
+fn merge_theme_layers(
+    layers: impl Iterator<Item = Vec<(String, Vec<(String, String)>)>>,
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut merged: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for layer in layers {
+        for (name, spec) in layer {
+            match merged.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, held)) => {
+                    for (k, v) in spec {
+                        held.retain(|(hk, _)| *hk != k);
+                        held.push((k, v));
+                    }
+                }
+                None => merged.push((name, spec)),
+            }
+        }
+    }
+    merged
+}
+
+/// Build one user theme from its merged `(role, value)` spec. The name and
+/// the parent's palette identity are interned with `Box::leak`: `Theme.name`
+/// is `&'static str`, and a config read is attach-rate, so the ceiling is
+/// bytes per distinct theme name per attach, not per render.
+fn materialize_user_theme(
+    name: &str,
+    spec: &[(String, String)],
+) -> (crate::theme::Theme, Vec<crate::keys::KeymapWarning>) {
+    let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
+    let trimmed = name.trim();
+    let inherit = spec
+        .iter()
+        .find(|(k, _)| k == "inherit")
+        .map(|(_, v)| v.trim().to_string());
+    let (mut t, parent_name) = match inherit.as_deref() {
+        None => (
+            crate::theme::Theme::from_name("footnote-superscript").0,
+            "footnote-superscript",
+        ),
+        Some(b) => match crate::theme::Theme::from_name(b) {
+            (t, None) => (t, t.name),
+            (_, Some(w)) => {
+                warnings.push(crate::keys::KeymapWarning(format!(
+                    "mux.themes.{trimmed}.inherit: {}",
+                    w.0
+                )));
+                let t = crate::theme::Theme::from_name("footnote-superscript").0;
+                (t, t.name)
+            }
+        },
+    };
+    for (key, raw) in spec {
+        if key == "inherit" {
+            continue;
+        }
+        let Some(color) = parse_override_color(raw) else {
+            warnings.push(crate::keys::KeymapWarning(format!(
+                "mux.themes.{trimmed}.{key} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
+            )));
+            continue;
+        };
+        match key.as_str() {
+            "base" => t.base = color,
+            "stamp" => t.stamp = color,
+            "border" => t.border = color,
+            "title" => t.title = color,
+            "brand" => t.brand = color,
+            "needs_you" => t.needs_you = color,
+            "sel" => t.sel = color,
+            "dim" => t.dim = color,
+            "chip" => t.chip = color,
+            other => warnings.push(crate::keys::KeymapWarning(format!(
+                "mux.themes.{trimmed}.{other}: not a theme role; ignored"
+            ))),
+        }
+    }
+    t.name = Box::leak(trimmed.to_string().into_boxed_str());
+    t.inherit_from = parent_name;
+    (t, warnings)
+}
+
+fn join_warnings(warnings: Vec<crate::keys::KeymapWarning>) -> Option<crate::keys::KeymapWarning> {
+    match warnings.len() {
+        0 => None,
+        1 => warnings.into_iter().next(),
+        _ => Some(crate::keys::KeymapWarning(
+            warnings
+                .into_iter()
+                .map(|w| w.0)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )),
+    }
 }
 
 /// Whether `COLORFGBG` reports a light terminal background. The rxvt
@@ -163,25 +360,33 @@ fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
     crate::sideline_color::parse_color(s)
 }
 
-/// Fold the `mux.theme.brand` / `mux.theme.needs_you` role overrides into
-/// `t`: the two roles are config's to pin under ANY theme -
-/// brand recolors selection, the active tab and the focused frame;
-/// needs_you recolors the waiting-on-you accent. The tab-bar mark's stamp
-/// takes NO override - the mark keeps its theme's own label. In TOML the
-/// keys are quoted dotted keys inside `[mux]` (`"theme.brand" =
-/// "#ff3434"`), which coexists with the scalar `theme` name. An unparseable
-/// value is reported, never silently ignored (the keymap-notice channel).
+/// Fold the `mux.theme.brand` / `mux.theme.needs_you` / `mux.theme.border`
+/// role overrides into `t`: the three roles are config's to pin under ANY
+/// theme - brand recolors selection, the active tab and the interaction
+/// accents; needs_you recolors the waiting-on-you accent; border recolors
+/// every border at once (the pane frame and the modal/popover borders,
+/// which default to the theme's brand). The tab-bar mark's stamp takes NO
+/// override - the mark keeps its theme's own label. In TOML the keys are
+/// quoted dotted keys inside `[mux]` (`"theme.border" = "#ff3434"`), which
+/// coexists with the scalar `theme` name. An unparseable value is reported,
+/// never silently ignored (the keymap-notice channel).
 /// Injectable so tests never touch process env.
 fn apply_overrides_to(
     t: &mut crate::theme::Theme,
     brand: Option<&str>,
     needs_you: Option<&str>,
+    border: Option<&str>,
 ) -> Option<crate::keys::KeymapWarning> {
     let mut bad: Vec<String> = Vec::new();
-    for (raw, role) in [(brand, "brand"), (needs_you, "needs_you")] {
+    for (raw, role) in [
+        (brand, "brand"),
+        (needs_you, "needs_you"),
+        (border, "border"),
+    ] {
         let Some(raw) = raw else { continue };
         match parse_override_color(raw) {
             Some(c) if role == "brand" => t.brand = c,
+            Some(c) if role == "border" => t.border = c,
             Some(c) => t.needs_you = c,
             None => bad.push(format!(
                 "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
@@ -200,7 +405,13 @@ pub fn theme_role_overrides(
 ) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
     let brand = mux_str(cwd, "theme.brand");
     let needs_you = mux_str(cwd, "theme.needs_you");
-    let override_warn = apply_overrides_to(&mut t, brand.as_deref(), needs_you.as_deref());
+    let border = mux_str(cwd, "theme.border");
+    let override_warn = apply_overrides_to(
+        &mut t,
+        brand.as_deref(),
+        needs_you.as_deref(),
+        border.as_deref(),
+    );
     let warn = match (warn, override_warn) {
         (Some(a), Some(b)) => Some(crate::keys::KeymapWarning(format!("{}; {}", a.0, b.0))),
         (Some(a), None) => Some(a),
@@ -229,7 +440,7 @@ mod colorfgbg_tests {
 mod theme_role_override_tests {
     use super::{apply_overrides_to, parse_override_color};
     use crate::proto::Color;
-    use crate::theme::Theme;
+    use crate::theme::{cell_style, Role, Theme};
 
     #[test]
     fn override_colors_take_the_sideline_palette_vocabulary() {
@@ -247,28 +458,42 @@ mod theme_role_override_tests {
     }
 
     #[test]
-    fn overrides_repin_the_two_roles_under_any_theme_and_the_stamp_is_untouched() {
+    fn overrides_repin_the_three_roles_under_any_theme_and_the_stamp_is_untouched() {
         for name in crate::theme::THEME_NAMES {
             let (mut t, _) = Theme::from_name(name);
             let (stamp, sel) = (t.stamp, t.sel);
-            let warn = apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"));
+            let warn =
+                apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"), Some("#654321"));
             assert!(warn.is_none(), "{name}");
             assert_eq!(t.brand, Color::Rgb(0x12, 0x34, 0x56), "{name}");
             assert_eq!(t.needs_you, Color::Rgb(0xab, 0xcd, 0xef), "{name}");
+            assert_eq!(t.border, Color::Rgb(0x65, 0x43, 0x21), "{name}");
             assert_eq!(t.stamp, stamp, "{name}: the mark takes no override");
-            assert_eq!(t.sel, sel, "{name}: only the two roles move");
+            assert_eq!(t.sel, sel, "{name}: only the overridden roles move");
         }
     }
 
     #[test]
     fn an_unparseable_override_is_reported_not_ignored() {
         let (mut t, _) = Theme::from_name("terminal");
-        let warn =
-            apply_overrides_to(&mut t, Some("notacolor"), None).expect("a bad value must warn");
+        let warn = apply_overrides_to(&mut t, Some("notacolor"), None, None)
+            .expect("a bad value must warn");
         assert!(warn.0.contains("mux.theme.brand"), "{warn:?}");
         assert!(warn.0.contains("notacolor"), "{warn:?}");
         // The untouched role keeps its theme value.
         assert_eq!(t.brand, Color::Indexed(3));
+    }
+
+    #[test]
+    fn border_override_recolors_every_border_under_any_theme() {
+        // AC4-OVERRIDE: the border key recolors modal borders AND the focused
+        // pane frame at once, because both read t.border.
+        for name in crate::theme::THEME_NAMES {
+            let (mut t, _) = Theme::from_name(name);
+            apply_overrides_to(&mut t, None, None, Some("#112233"));
+            assert_eq!(t.border, Color::Rgb(0x11, 0x22, 0x33), "{name}");
+            assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
+        }
     }
 }
 
@@ -1490,5 +1715,122 @@ mod tests {
         assert!(detach_file("a/b").is_none());
         assert!(detach_file("").is_none());
         assert!(detach_file("main").is_some());
+    }
+}
+
+#[cfg(test)]
+mod user_theme_tests {
+    use super::{join_warnings, materialize_user_theme, merge_theme_layers};
+    use crate::keys::KeymapWarning;
+    use crate::proto::Color;
+    use crate::theme::{ground_set, Theme};
+
+    fn spec(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_user_theme_loads_inherits_and_overrides() {
+        let (t, w) = materialize_user_theme(
+            "midnight",
+            &spec(&[
+                ("inherit", "tokyo-night"),
+                ("base", "#101018"),
+                ("brand", " RED "),
+            ]),
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(t.name, "midnight");
+        assert_eq!(t.inherit_from, "tokyo-night");
+        assert_eq!(t.base, Color::Rgb(0x10, 0x10, 0x18));
+        assert_eq!(t.brand, Color::Indexed(1));
+        // Untouched roles ride the parent.
+        assert_eq!(t.sel, Theme::from_name("tokyo-night").0.sel);
+    }
+
+    #[test]
+    fn the_default_inherit_is_the_brand_default_and_unknown_inherit_warns() {
+        let (t, w) = materialize_user_theme("bare", &spec(&[]));
+        assert!(w.is_empty());
+        assert_eq!(t.inherit_from, "footnote-superscript");
+        let (t, w) = materialize_user_theme("typo", &spec(&[("inherit", "solarized")]));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].0.contains("mux.themes.typo.inherit"), "{w:?}");
+        assert_eq!(t.inherit_from, "footnote-superscript");
+    }
+
+    #[test]
+    fn a_bad_hex_and_an_unknown_role_warn_and_are_ignored() {
+        let (t, w) =
+            materialize_user_theme("sloppy", &spec(&[("base", "#zzzzzz"), ("wat", "#112233")]));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].0.contains("mux.themes.sloppy.base"), "{w:?}");
+        assert!(w[1].0.contains("not a theme role"), "{w:?}");
+        assert_eq!(
+            t.base,
+            Theme::from_name("footnote-superscript").0.base,
+            "the bad hex is ignored, the role keeps its parent value"
+        );
+    }
+
+    #[test]
+    fn a_user_theme_paints_its_ground_through_its_parents_palette() {
+        let (t, w) = materialize_user_theme(
+            "midnight",
+            &spec(&[("inherit", "footnote-superscript"), ("base", "#0f0f14")]),
+        );
+        assert!(w.is_empty());
+        let osc = ground_set(&t).expect("an inherited slot table means a ground");
+        let s = String::from_utf8(osc).unwrap();
+        assert!(
+            s.contains("\x1b]11;#0f0f14"),
+            "the user base is the OSC 11 ground: {s:?}"
+        );
+        // The parent's 16-slot table rides (OSC 4 slots emitted).
+        assert!(s.contains("\x1b]4;0;"), "parent palette slots ride: {s:?}");
+    }
+
+    #[test]
+    fn built_ins_outrank_user_names_and_unknown_names_still_warn() {
+        let shipped = Theme::from_name("gruvbox").0;
+        let (user, _) = materialize_user_theme("gruvbox-custom", &spec(&[("base", "#000000")]));
+        let table = vec![("gruvbox-custom".to_string(), user)];
+        let (t, w) = Theme::from_name_in("gruvbox", &table);
+        assert_eq!(t.name, "gruvbox");
+        assert_eq!(t.base, shipped.base);
+        assert!(w.is_none());
+        let (t, w) = Theme::from_name_in("gruvbox-custom", &table);
+        assert_eq!(t.name, "gruvbox-custom");
+        assert!(w.is_none());
+        let (_, w) = Theme::from_name_in("nowhere", &table);
+        assert!(w.is_some_and(|x| x.0.contains("nowhere")));
+    }
+
+    #[test]
+    fn a_higher_layer_wins_per_role() {
+        let layers = vec![
+            vec![("a".to_string(), spec(&[("brand", "#000000")]))],
+            vec![(
+                "a".to_string(),
+                spec(&[("brand", "#111111"), ("base", "#222222")]),
+            )],
+        ];
+        let merged = merge_theme_layers(layers.into_iter());
+        let a = merged.iter().find(|(n, _)| n == "a").unwrap();
+        assert!(a.1.iter().any(|(k, v)| k == "brand" && v == "#111111"));
+        assert!(a.1.iter().any(|(k, v)| k == "base" && v == "#222222"));
+        assert_eq!(a.1.len(), 2, "no key is dropped across layers");
+    }
+
+    #[test]
+    fn multiple_warnings_join_into_one_notice() {
+        assert_eq!(join_warnings(vec![]), None);
+        let one = join_warnings(vec![KeymapWarning("a".into())]);
+        assert_eq!(one.unwrap().0, "a");
+        let two = join_warnings(vec![KeymapWarning("a".into()), KeymapWarning("b".into())]);
+        assert_eq!(two.unwrap().0, "a; b");
     }
 }

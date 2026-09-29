@@ -116,7 +116,7 @@ pub(crate) fn notify_signals_path() -> PathBuf {
         return PathBuf::from(v);
     }
     let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("."));
-    PathBuf::from(home).join(".fno").join("notify-signals.json")
+    crate::state_layout::place(&PathBuf::from(home).join(".fno"), "notify-signals.json")
 }
 
 fn load_store(path: &Path) -> Map<String, Value> {

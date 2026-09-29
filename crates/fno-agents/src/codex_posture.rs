@@ -11,6 +11,12 @@
 
 use serde_json::Value;
 
+/// The `-c` override every bounded codex posture carries. workspace-write with
+/// network off cannot reach GitHub, and the graph keeper socket rides AF_UNIX
+/// under the same switch (the thread lane forces it in
+/// `sandbox_policy_with_roots`); every bounded lane must force it too.
+pub const BOUNDED_NETWORK_OVERRIDE: &str = "sandbox_workspace_write.network_access=true";
+
 /// The sandbox half, in the spellings codex's own CLI takes (`--sandbox
 /// <MODE>`, and the scalar `sandbox` on `thread/start` / `thread/resume`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +225,8 @@ pub fn resolve_thread_posture(
             _ => Err(format!(
                 "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
                  (full-auto, yolo) or the <sandbox>:<approval> form \
-                 (e.g. workspace-write:on-request)"
+                 (e.g. workspace-write:on-request); words from other harnesses do not \
+                 map here, and codex reads agents.*.harness.codex.permission_mode"
             )),
         },
     }
@@ -368,7 +375,8 @@ pub fn entry_posture_is_full_access(entry: &crate::state::RegistryEntry) -> bool
 /// Python, `fno.agents.mux_spawn.permission_pane_tokens`, which shrinks to a
 /// bridge over this answer). Fail-closed: an unmappable (provider, value)
 /// pair refuses with the harness's own vocabulary, never a silent downgrade.
-/// Keep every refusal message byte-identical to the Python it replaced.
+/// The vocabulary is Rust-owned: the Python seam prints these refusals
+/// verbatim, so an edit here is the one edit.
 /// ---------------------------------------------------------------------------
 pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>, String> {
     if mode.is_empty() {
@@ -389,17 +397,26 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
             "yolo" => Ok(vec!["--dangerously-bypass-approvals-and-sandbox".into()]),
             _ => match mode.split_once(':') {
                 Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
-                    Ok(vec![
+                    let mut tokens = vec![
                         "--sandbox".into(),
                         sandbox.to_string(),
                         "--ask-for-approval".into(),
                         approval.to_string(),
-                    ])
+                    ];
+                    // The exec lanes' bounded arm forces network on; the pane
+                    // pair must not be the one bounded posture that leaves a
+                    // worker unable to reach gh or the graph keeper socket.
+                    if sandbox == "workspace-write" {
+                        tokens.push("-c".into());
+                        tokens.push(BOUNDED_NETWORK_OVERRIDE.into());
+                    }
+                    Ok(tokens)
                 }
                 _ => Err(format!(
                     "codex --permission-mode {mode:?} unmappable; use a shortcut \
                      (full-auto, yolo) or the <sandbox>:<approval> form \
-                     (e.g. workspace-write:on-request)"
+                     (e.g. workspace-write:on-request); words from other harnesses do \
+                     not map here, and codex reads agents.*.harness.codex.permission_mode"
                 )),
             },
         },
@@ -523,7 +540,9 @@ mod mappable_tests {
                 "--sandbox",
                 "workspace-write",
                 "--ask-for-approval",
-                "on-request"
+                "on-request",
+                "-c",
+                BOUNDED_NETWORK_OVERRIDE
             ]
         );
         assert_eq!(

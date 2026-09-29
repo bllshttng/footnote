@@ -21,7 +21,7 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
-GRAPH_MD="$HOME/.fno/graph.md"
+GRAPH_MD="$HOME/.fno/pages/graph.md"
 printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
 
 PASS=0

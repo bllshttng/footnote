@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - claude config write guard
 # claude-config-write-guard.sh - PreToolUse hook: refuse a write or redirect
 # to a file DIRECTLY inside the Claude config dir (~/.claude, or
 # CLAUDE_CONFIG_DIR), top level only, and refuse a NEW top-level entry in the

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - hold the active review slot
 # Register (and clear) the hold that says a review of this branch is RUNNING.
 #
 # Merge readiness models a review as a RECORDED VERDICT: `review_coverage`

@@ -341,7 +341,7 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let adapter = Path::new("/plugin/hooks/agy-target-stop-hook.sh");
+        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
         let receipt = install(&path, adapter, None).expect("install succeeds");
         assert!(!receipt.enabled, "receipt carries disabled state");
         let text = std::fs::read_to_string(&path).unwrap();
@@ -381,12 +381,12 @@ mod tests {
     fn install_creates_absent_file_with_parents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deep/nested/hooks.json");
-        let adapter = Path::new("/plugin/hooks/agy-target-stop-hook.sh");
+        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
         install(&path, adapter, None).expect("install into absent path");
         let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             data["footnote"]["Stop"][0]["command"],
-            "/plugin/hooks/agy-target-stop-hook.sh"
+            "/plugin/hooks/footnote-agy-target-stop-hook.sh"
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
         let path = dir.path().join("hooks.json");
         let crown = Path::new("/plugin/hooks/agy-crown-inject.sh");
         std::fs::write(&path, r#"{"footnote": {"Stop": [], "note": "keep me"}}"#).unwrap();
-        let adapter = Path::new("/plugin/hooks/agy-target-stop-hook.sh");
+        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
         install(&path, adapter, Some(crown)).expect("install");
         install(&path, adapter, Some(crown)).expect("second install");
         let data: Value = serde::de::Deserialize::deserialize(

@@ -196,6 +196,12 @@ def resolve_id(
     """
     q = (query or "").strip()
 
+    # A dash-leading token is a leaked flag, never a node id (the grammar is
+    # lowercase-led): refuse before any graph lookup so it cannot exact-hit or
+    # substring-match a title.
+    if q.startswith("-"):
+        return IdMatch(kind="none", note=f"flag-shaped query '{q}' is not a node id")
+
     # Exact id match is format-agnostic (any configured prefix/width AND legacy
     # ab-): a graph lookup, not a regex, so a graph holding mixed-format ids all
     # resolves. Exact equality wins regardless of suffix shape - test fixtures
@@ -304,6 +310,8 @@ def resolve_node(query: Optional[str], entries: list[Entry]) -> IdMatch:
     q = (query or "").strip()
     if not q:
         return IdMatch(kind="none", note="empty query")
+    if q.startswith("-"):
+        return IdMatch(kind="none", note=f"flag-shaped query '{q}' is not a node id")
 
     # Tier 1: exact ab-id (canonical, unchanged behavior).
     for e in entries:

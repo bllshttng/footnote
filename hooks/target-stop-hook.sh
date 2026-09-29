@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: Stop - target stop hook
 # Stop: relay to the native handler (policy: crates/fno-agents/src/hook/stop.rs).
 # Run each candidate, deployed binary first, never exec one. Relay only a real
 # answer: 0 (allow / JSON) or 2 (continue block on stderr). Any other exit is a

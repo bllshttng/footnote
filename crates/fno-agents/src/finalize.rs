@@ -3011,7 +3011,7 @@ fn assistant_text_blocks(val: &Value) -> String {
     String::new()
 }
 
-/// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
+/// Best-effort: append a pointer line to `~/.fno/logs/corrections.log` so the
 /// autocorrect monthly review picks the postmortem up. Creates the log when
 /// absent (mode 0600): both launchd jobs were live while the file never
 /// existed, so every pointer before 2026-09 was dropped on "autocorrect not
@@ -3031,10 +3031,12 @@ fn assistant_text_blocks(val: &Value) -> String {
 pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
     match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
         Some(p) => Some(PathBuf::from(p)),
-        None => match std::env::var_os("FNO_HOME") {
-            Some(p) => Some(PathBuf::from(p).join("corrections.log")),
-            None => home.map(|h| h.join(".fno/corrections.log")),
-        },
+        None => {
+            let root = std::env::var_os("FNO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.map(|h| h.join(".fno")))?;
+            Some(crate::state_layout::place(&root, "corrections.log"))
+        }
     }
 }
 

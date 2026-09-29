@@ -6,7 +6,39 @@
 //! disagree with the routing the dispatch doors answer.
 use serde_json::{json, Value};
 
+use std::collections::HashMap;
 use std::path::Path;
+
+/// The unplanned rows this crown must not dispatch: node id -> the canonical
+/// scope of the live crown that owns it, other than this crown's own. The
+/// fold's owner read is the one instrument; an unread read is the caller's
+/// error, never an empty map that would let another king's node print.
+pub(crate) fn other_owned_scopes(
+    folded: &Result<Value, String>,
+    scope: &str,
+) -> Result<HashMap<String, String>, String> {
+    let folded = folded.as_ref().map_err(Clone::clone)?;
+    let mine = crate::territory::canonical_scope(scope);
+    let scopes = folded
+        .get("owned_scopes")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            folded
+                .get("fold")
+                .and_then(|f| f.get("owned_reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("the fold names no owner map")
+                .to_string()
+        })?;
+    Ok(scopes
+        .iter()
+        .filter_map(|(id, sc)| {
+            sc.as_str()
+                .filter(|s| *s != mine)
+                .map(|s| (id.clone(), s.to_string()))
+        })
+        .collect())
+}
 
 /// The default blueprint-subagent ceiling when no provider budget applies
 /// (no new config key: a registry row is barred, so the default is a named
@@ -25,7 +57,11 @@ const DEFAULT_BLUEPRINT_CEILING: usize = 1;
 /// a zero: an unreadable claim list read as `running 0` would name starts
 /// past the ceiling. Starts also wait until plans ready fall below the
 /// king's worker slots - a blueprint nobody can build is the exact spend the
-/// wake meter exists to name.
+/// wake meter exists to name. `other_owned` is the fold's owner read, the
+/// nodes a deeper live crown holds: the scope line counts owned active with
+/// it, so the starts and target-ready lines answer with the same one and a
+/// child of another king's crown never prints. An unread map is this
+/// reading's error - an empty read would name starts in foreign territory.
 pub(crate) fn r_blueprint(
     board: &Result<Value, String>,
     cwd: &Path,
@@ -33,10 +69,12 @@ pub(crate) fn r_blueprint(
     claims: Result<Vec<String>, String>,
     slots: Result<usize, String>,
     floor: &str,
+    other_owned: &Result<HashMap<String, String>, String>,
 ) -> Result<Value, String> {
     let session_id = session_id
         .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
     let holders = claims?;
+    let other_owned = other_owned.as_ref().map_err(Clone::clone)?;
     let holder = format!("blueprint-session:{session_id}");
     let running = holders.iter().filter(|h| **h == holder).count();
     let board = board.as_ref()?;
@@ -58,6 +96,10 @@ pub(crate) fn r_blueprint(
                 continue;
             }
         };
+        if let Some(owner) = other_owned.get(&id) {
+            skips.push(json!({"id": id, "reason": format!("owned by crown {owner}")}));
+            continue;
+        }
         match crate::backlog_ready::effective_verb_with_floor(row, floor) {
             Ok((verb, _)) if verb.as_deref() == Some("/blueprint") => candidates.push(id),
             Ok((verb, _)) if verb.as_deref() == Some("/target") => target_ready.push(id),
@@ -163,6 +205,29 @@ mod tests {
         slots: Result<usize, String>,
         floor: &str,
     ) -> Result<Value, String> {
+        blueprint_reading_owned(
+            dir,
+            config_toml,
+            board,
+            session_id,
+            holders,
+            slots,
+            floor,
+            Ok(HashMap::new()),
+        )
+    }
+
+    /// The same call with the owner map named, for the deeper-crown filter.
+    fn blueprint_reading_owned(
+        dir: &std::path::Path,
+        config_toml: &str,
+        board: Value,
+        session_id: Option<&str>,
+        holders: Vec<String>,
+        slots: Result<usize, String>,
+        floor: &str,
+        other_owned: Result<HashMap<String, String>, String>,
+    ) -> Result<Value, String> {
         // The FNO_CONFIG pin below is the SOLE config candidate for every
         // concurrent reader, so it must not interleave with another test's
         // config read (the spawn-gate reservation suite reads max_live under
@@ -186,6 +251,7 @@ mod tests {
             Ok(holders),
             slots,
             floor,
+            &other_owned,
         );
         match prior_provider {
             Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
@@ -510,5 +576,90 @@ mod tests {
             "{reading}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child of a deeper live crown never prints, on either dispatch line:
+    /// on 2026-09-28 two p0 children of an L2-held epic leaked as
+    /// target-ready past the outer crown's beat, and a king that trusted the
+    /// line would have seated a duplicate worker in another king's territory.
+    /// The row skips naming the crown that owns it.
+    #[test]
+    fn a_child_of_a_deeper_live_crown_never_prints_as_start_or_target_ready() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-owned-{}", std::process::id()));
+        let reading = blueprint_reading_owned(
+            &dir,
+            "",
+            unplanned_board(
+                &[("x-c1", "low"), ("x-c2", "low"), ("x-mine", "low")],
+                Some(0),
+            ),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "high",
+            Ok(HashMap::from([
+                ("x-c1".to_string(), "x-cccc".to_string()),
+                ("x-c2".to_string(), "x-cccc".to_string()),
+            ])),
+        )
+        .unwrap();
+        assert_eq!(reading["target_ready"], json!(["x-mine"]), "{reading}");
+        assert_eq!(reading["starts"], json!([]), "{reading}");
+        assert_eq!(
+            reading["skips"],
+            json!([
+                {"id": "x-c1", "reason": "owned by crown x-cccc"},
+                {"id": "x-c2", "reason": "owned by crown x-cccc"},
+            ]),
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unread owner read is the reading's error, never an empty filter:
+    /// an empty map would print a foreign crown's nodes as dispatchable.
+    #[test]
+    fn an_unread_owner_map_fails_the_blueprint_reading() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-unowned-{}", std::process::id()));
+        let reading = blueprint_reading_owned(
+            &dir,
+            "",
+            unplanned_board(&[("x-1", "low")], Some(0)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "high",
+            Err("a live crown's scope does not compile: e-x: unknown".to_string()),
+        );
+        assert!(reading.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dispatch filter keeps only the rows another live crown owns: the
+    /// map values are canonical scopes, so the caller's own scope never
+    /// leaks through, and the fold's owner-read failure names the reason
+    /// instead of reading as empty.
+    #[test]
+    fn other_owned_scopes_keep_only_foreign_crown_rows() {
+        let folded = Ok(json!({
+            "owned_scopes": {"x-1": "x-cccc", "x-2": "x-dddd", "x-3": "x-bbbb"},
+            "fold": {"owned_reason": Value::Null}
+        }));
+        let owned = other_owned_scopes(&folded, "x-bbbb").unwrap();
+        assert_eq!(
+            owned,
+            HashMap::from([
+                ("x-1".to_string(), "x-cccc".to_string()),
+                ("x-2".to_string(), "x-dddd".to_string()),
+            ])
+        );
+        let failed = Ok(json!({
+            "owned_scopes": Value::Null,
+            "fold": {"owned_reason": "territory: registry unreadable (x)"}
+        }));
+        let err = other_owned_scopes(&failed, "x-bbbb").unwrap_err();
+        assert!(err.contains("registry unreadable"), "{err}");
+        let no_map = Ok(json!({"fold": {}}));
+        assert!(other_owned_scopes(&no_map, "x-bbbb").is_err());
     }
 }

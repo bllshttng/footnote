@@ -8,7 +8,7 @@ command makes that skew detectable and self-explaining, **network-free**.
 Python-side signals, each degrading to ``unknown`` rather than crying wolf:
 
 1. **Revision compare** (when a source checkout is resolvable): compare
-   ``~/.fno/installed-rev`` (written by ``fno doctor update``) against ``git rev-parse
+   ``~/.fno/install/installed-rev`` (written by ``fno doctor update``) against ``git rev-parse
    HEAD`` of the resolved source.
 2. **Capability probe** (always-available fallback): run ``fno backlog capture
    --help`` against the *installed* CLI; a "No such command" failure proves a
@@ -2470,7 +2470,7 @@ def _emit_human(
     gr = result.get("groom") or {}
     if gr.get("state") == "never":
         if gr.get("agent_installed"):
-            remedy = " despite an installed agent; check ~/.fno/groom.err.log."
+            remedy = " despite an installed agent; check ~/.fno/logs/groom.err.log."
         elif sys.platform == "darwin":
             remedy = "; run `fno backlog groom --install-agent` to schedule it daily."
         else:
@@ -2481,7 +2481,7 @@ def _emit_human(
         out(
             f"fno doctor: backlog grooming last ran {gr['hours']:.0f}h ago "
             "(the daily pass is not running); check `launchctl list | grep sh.fno.groom` "
-            "and ~/.fno/groom.err.log."
+            "and ~/.fno/logs/groom.err.log."
         )
 
 
@@ -2491,7 +2491,7 @@ def _emit_human(
             f"fno doctor: post-merge sync STALE - the canonical checkout is not "
             f"synced with recent merges ({pms.get('detail')}); run "
             "`fno do pr sync-canonical --pr-number <n>` and check "
-            "~/.fno/pr-watcher.err.log."
+            "~/.fno/logs/pr-watcher.err.log."
         )
     elif pms.get("state") == "unknown":
         # "Could not tell" must not read as "fine". An unauthenticated gh was

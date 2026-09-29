@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - session start
 # SessionStart hook for fno plugin — cross-platform
 # Injects project vision into session context.
 # Wraps existing Claude Code-specific hooks and re-formats output per platform.
@@ -29,7 +30,7 @@ PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 STATE_FILE=".fno/target-state.md"
 
 # ── Plugin-root pointer (best-effort, idempotent) ────────────────────
-# Persist the plugin root to ~/.fno/plugin-root so `fno do target init` and
+# Persist the plugin root to ~/.fno/install/plugin-root so `fno do target init` and
 # `fno gate set` can find their plugin scripts when run from a foreign project
 # with no env hint. `fno` is a uv-tool install whose wheel does not carry
 # hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to arbitrary `fno`

@@ -33,7 +33,8 @@ trap 'rm -rf "$D"' EXIT
 mkdir -p "$D/fno/postmortems" "$D/claude/rules"
 
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-LOG="$D/fno/corrections.log"
+LOG="$D/fno/logs/corrections.log"
+mkdir -p "$(dirname "$LOG")"
 real_pm="$D/fno/postmortems/pm-a.md"
 printf '# body\n' > "$real_pm"
 printf 'the rule text\n' > "$D/claude/rules/a.md"

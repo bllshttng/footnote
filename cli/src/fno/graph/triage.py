@@ -1826,7 +1826,7 @@ def cmd_health(
             # never raises TypeError. Same shape for retain_days.
             history_path_str = (
                 history_cfg.get("path")
-                or str(_paths.state_dir() / "health-history.jsonl")
+                or str(_paths.state_dir() / "history" / "health-history.jsonl")
             )
             try:
                 retain_days = int(history_cfg.get("retain_days", 90))
@@ -2025,7 +2025,7 @@ def cmd_trend(
 ) -> None:
     """Print a backlog-trend summary from health-check history.
 
-    Reads ``~/.fno/health-history.jsonl`` (or the path set via the
+    Reads ``~/.fno/history/health-history.jsonl`` (or the path set via the
     ``FNO_HEALTH_HISTORY`` env var, used by tests). Emits a
     first-vs-latest delta per metric over the requested window.
     """

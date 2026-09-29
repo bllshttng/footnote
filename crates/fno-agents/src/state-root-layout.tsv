@@ -58,6 +58,7 @@ pr-watcher.err.log	logs/pr-watcher.err.log	append	daemon
 groom.out.log	logs/groom.out.log	append	daemon
 groom.err.log	logs/groom.err.log	append	daemon
 corrections.log	logs/corrections.log	append	daemon
+corrections.log.wm	logs/corrections.log.wm	overwrite	daemon
 merge-gate-overrides.log	logs/merge-gate-overrides.log	append	daemon
 # history/ - append-only jsonl journals.
 health-history.jsonl	history/health-history.jsonl	append	daemon
