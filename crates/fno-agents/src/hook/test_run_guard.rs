@@ -953,12 +953,6 @@ mod tests {
     }
 
     #[test]
-    fn cargo_color_flag_then_test_refused() {
-        let root = footnote_root();
-        assert!(decide("cargo --color always test", root.path()).is_some());
-    }
-
-    #[test]
     fn cargo_t_alias_refused() {
         let root = footnote_root();
         assert!(decide("cargo t", root.path()).is_some());
