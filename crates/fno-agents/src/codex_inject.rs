@@ -3082,8 +3082,12 @@ mod tests {
     /// the posture's own.
     #[tokio::test]
     async fn deliver_carries_the_writable_roots_grant_on_the_turn() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::path_test_guard();
-        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t13-a:/tmp/fno-t13-b");
+        let _add_dirs =
+            crate::claims::EnvVarGuard::set("FNO_WORKER_ADD_DIRS", "/tmp/fno-t13-a:/tmp/fno-t13-b");
         let daemon = crate::codex_fake_daemon::FakeDaemon::start(
             crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
                 "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t13-own"]
@@ -3091,7 +3095,6 @@ mod tests {
         );
         let result = deliver_via_codex_daemon("thread-t", "hello GRANT").await;
         assert!(result.is_ok(), "delivery must succeed: {result:?}");
-        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         let turn = daemon
             .first_params("turn/start")
             .expect("turn/start must have run");
@@ -3131,8 +3134,12 @@ mod tests {
     /// the posture's own roots.
     #[tokio::test]
     async fn seed_delivery_carries_the_roots_and_skips_thread_read() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::path_test_guard();
-        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-a:/tmp/fno-t14-b");
+        let _add_dirs =
+            crate::claims::EnvVarGuard::set("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-a:/tmp/fno-t14-b");
         let daemon = crate::codex_fake_daemon::FakeDaemon::start(
             crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
                 "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t14-own"]
@@ -3142,7 +3149,6 @@ mod tests {
             deliver_seed_via_codex_daemon("thread-t", "hello SEED", Path::new("/tmp/fno-t14-cwd"))
                 .await;
         assert!(result.is_ok(), "seed delivery must succeed: {result:?}");
-        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         let turn = daemon
             .first_params("turn/start")
             .expect("seed turn/start must have run");
