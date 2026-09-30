@@ -33,6 +33,8 @@ pub(crate) struct Entry {
     pub target: String,
     #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,6 +593,7 @@ fn append_entry(
         tool,
         target,
         text,
+        tool_use_id: None,
     });
 }
 
@@ -638,6 +641,67 @@ fn claude_tool_target(tool: &str, input: &Value) -> String {
     }
 }
 
+pub(crate) fn claude_row_entries(row: &Value, entries: &mut Vec<Entry>) {
+    let message = row.get("message").unwrap_or(row);
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| row.get("type").and_then(Value::as_str))
+        .unwrap_or("");
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    if let Some(blocks) = content.as_array() {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "tool_use" => {
+                    let tool = block.get("name").and_then(Value::as_str).unwrap_or("");
+                    let input = block.get("input").unwrap_or(&Value::Null);
+                    let entry_idx = entries.len();
+                    append_entry(
+                        entries,
+                        "tool_use",
+                        Some(tool.to_string()),
+                        claude_tool_target(tool, input),
+                        String::new(),
+                    );
+                    if let Some(entry) = entries.get_mut(entry_idx) {
+                        entry.tool_use_id =
+                            block.get("id").and_then(Value::as_str).map(str::to_string);
+                    }
+                }
+                "text" => {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    if role == "assistant" {
+                        append_entry(
+                            entries,
+                            "assistant_text",
+                            None,
+                            String::new(),
+                            text.to_string(),
+                        );
+                    } else if role == "user" && !user_text_is_injected(text) {
+                        append_entry(entries, "user_text", None, String::new(), text.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(text) = content.as_str() {
+        if role == "assistant" {
+            append_entry(
+                entries,
+                "assistant_text",
+                None,
+                String::new(),
+                text.to_string(),
+            );
+        } else if role == "user" && !user_text_is_injected(text) {
+            append_entry(entries, "user_text", None, String::new(), text.to_string());
+        }
+    }
+}
+
 fn claude_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for (line_index, line) in raw.lines().enumerate() {
@@ -651,71 +715,7 @@ fn claude_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
                 line_index + 1
             )
         })?;
-        let message = row.get("message").unwrap_or(&row);
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .or_else(|| row.get("type").and_then(Value::as_str))
-            .unwrap_or("");
-        let Some(content) = message.get("content") else {
-            continue;
-        };
-        if let Some(blocks) = content.as_array() {
-            for block in blocks {
-                match block.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "tool_use" => {
-                        let tool = block.get("name").and_then(Value::as_str).unwrap_or("");
-                        let input = block.get("input").unwrap_or(&Value::Null);
-                        append_entry(
-                            &mut entries,
-                            "tool_use",
-                            Some(tool.to_string()),
-                            claude_tool_target(tool, input),
-                            String::new(),
-                        );
-                    }
-                    "text" => {
-                        let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                        if role == "assistant" {
-                            append_entry(
-                                &mut entries,
-                                "assistant_text",
-                                None,
-                                String::new(),
-                                text.to_string(),
-                            );
-                        } else if role == "user" && !user_text_is_injected(text) {
-                            append_entry(
-                                &mut entries,
-                                "user_text",
-                                None,
-                                String::new(),
-                                text.to_string(),
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        } else if let Some(text) = content.as_str() {
-            if role == "assistant" {
-                append_entry(
-                    &mut entries,
-                    "assistant_text",
-                    None,
-                    String::new(),
-                    text.to_string(),
-                );
-            } else if role == "user" && !user_text_is_injected(text) {
-                append_entry(
-                    &mut entries,
-                    "user_text",
-                    None,
-                    String::new(),
-                    text.to_string(),
-                );
-            }
-        }
+        claude_row_entries(&row, &mut entries);
     }
     Ok(entries)
 }
@@ -837,6 +837,7 @@ mod tests {
             tool: tool.map(str::to_string),
             target: target.to_string(),
             text: text.to_string(),
+            tool_use_id: None,
         }
     }
 

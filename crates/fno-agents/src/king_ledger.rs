@@ -790,12 +790,14 @@ pub struct Arm {
 }
 
 /// The production runner: the page render, cwd-bound (config, the graph and
-/// the default out path all resolve per cwd). The argv is the spelling the
-/// Python leg answers; `org rundown` is the front door's lexical rewrite of
-/// it and fno-py itself serves no `org` group.
-fn run_ledger() -> Result<(), String> {
-    let output = std::process::Command::new(crate::scrape::fno_py())
-        .args(["agents", "king", "ledger"])
+/// the default out path all resolve per cwd). The Rust front is the program:
+/// `org rundown` is its rewrite of `king ledger` plus the faithful-root
+/// `--out`; fno-py serves no `org` group and bare `king ledger` defaults to
+/// reign.html, which the /crown route does not read. Returns the page path
+/// the child named, so a tick can never call the wrong file rendered.
+fn run_ledger() -> Result<String, String> {
+    let output = std::process::Command::new(crate::scrape::fno_bin())
+        .args(["agents", "org", "rundown"])
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("spawn: {e}"))?;
@@ -812,20 +814,30 @@ fn run_ledger() -> Result<(), String> {
             output.status.code().unwrap_or(-1)
         ));
     }
-    Ok(())
+    let prefix = "reign ledger: ";
+    let named = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find(|l| l.starts_with(prefix))
+        .map(|l| l[prefix.len()..].trim().to_string())
+        .ok_or_else(|| "ledger printed no path".to_string())?;
+    if !std::path::Path::new(&named).exists() {
+        return Err(format!("named path missing: {named}"));
+    }
+    Ok(named)
 }
 
 /// One pass of the arm body: the run, then exactly one tick row - on every
 /// path, so a silent tick cannot be told from one that never ran.
 fn emit_one(
     home: &crate::paths::AgentsHome,
-    run: impl FnOnce() -> Result<(), String>,
+    run: impl FnOnce() -> Result<String, String>,
 ) -> crate::merge_close::CloseOutcome {
     let outcome = match run() {
-        Ok(()) => crate::merge_close::CloseOutcome {
+        Ok(path) => crate::merge_close::CloseOutcome {
             acted: 1,
             skip_reason: None,
-            detail: "rundown.html rendered".to_string(),
+            detail: format!("{path} rendered"),
         },
         Err(e) => crate::merge_close::CloseOutcome {
             acted: 0,
@@ -860,7 +872,7 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
 fn maybe_tick_with(
     arm: &Arm,
     home: crate::paths::AgentsHome,
-    run: impl FnOnce() -> Result<(), String> + Send + 'static,
+    run: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) {
     let interval = std::time::Duration::from_secs(CROWN_LEDGER_INTERVAL_S);
     {
@@ -1716,18 +1728,58 @@ mod tests {
     }
 
     #[test]
-    fn crown_ledger_success_writes_one_acted_row() {
+    #[cfg(unix)]
+    fn crown_ledger_success_writes_one_acted_row_through_the_rust_front() {
+        // The real runner, not a synthetic Ok: FNO_BIN pins a stub naming a
+        // real page and FNO_PY a sentinel, so a regression to fno-py - which
+        // has no `org` command - fails this row instead of a daemon beat.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_bin = std::env::var_os("FNO_BIN");
+        let prior_py = std::env::var_os("FNO_PY");
+        let dir = tempfile::tempdir().unwrap();
+        let page = dir.path().join("rundown.html");
+        std::fs::write(&page, b"<html></html>").unwrap();
+        let stub = crate::write_exec_stub(
+            dir.path(),
+            "fno",
+            &format!("#!/bin/sh\necho \"reign ledger: {}\"\n", page.display()),
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        std::env::set_var("FNO_PY", "/nonexistent/fno-py-sentinel");
         let h = home();
-        let o = emit_one(&h, || Ok(()));
+        let o = emit_one(&h, run_ledger);
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
+        assert_eq!(o.detail, format!("{} rendered", page.display()));
+        // The wrong-page defense: exit 0 naming an absent page is an error
+        // row, so a rename can never again read as rendered.
+        let ghost = crate::write_exec_stub(
+            dir.path(),
+            "fno",
+            "#!/bin/sh\necho \"reign ledger: /nonexistent/ghost.html\"\n",
+        );
+        std::env::set_var("FNO_BIN", &ghost);
+        let o = emit_one(&h, run_ledger);
+        match prior_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        match prior_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("error"));
+        assert!(o.detail.contains("named path missing"), "{}", o.detail);
         let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert_eq!(
             log.matches("\"arm\":\"crown_ledger\"").count(),
-            1,
+            2,
             "log: {log}"
         );
-        assert!(log.contains("\"acted\":1"), "log: {log}");
+        assert_eq!(log.matches("\"acted\":1").count(), 1, "log: {log}");
         assert!(log.contains("\"interval_s\":300"), "log: {log}");
     }
 

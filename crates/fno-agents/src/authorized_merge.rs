@@ -278,6 +278,17 @@ pub struct Request {
     /// value: only the preview walk reads this, decide's own chain always
     /// probes live).
     pub supplied_dispatch_hold: Option<Option<String>>,
+    /// The review-hold answer the caller already probed (`review_activity`
+    /// reads the same registry the `review-hold check` verb does), as a
+    /// refusal sentence in `review_hold_refusal`'s own shape. `Some(None)` =
+    /// probed clear; `None` = not supplied (probe). Preview-only, same law as
+    /// the dispatch-hold answer above.
+    pub supplied_review_hold: Option<Option<String>>,
+    /// The caller's own PR read (the status payload's projection), parsed by
+    /// [`facts_from_pulls`] in place of the `fno do pr info` spawn. A payload
+    /// too old to parse stays a fallback to the spawn, never a wrong fact.
+    /// Preview-only.
+    pub supplied_facts: Option<Value>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -355,11 +366,11 @@ pub trait Probes {
     /// Does the graph see this PR? `Refused` when no binding key names a
     /// node, `Inconclusive` when the graph or the body cannot be read.
     fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
-    fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
-    fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn base_lineage(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     /// Compile the merge result (merge-tree + the repo-wide static step).
-    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn merge_result(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn require_fresh_ci(&self, cwd: &Path) -> bool;
     /// The PR number holding `merge-slot:<base_ref>` when the claim reads
@@ -467,7 +478,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         ProbeOutcome::Inconclusive(reason) => return Err(Outcome::Unknown { reason }),
     }
 
-    if let Some(blocked) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
+    if let Some(blocked) = probes.dispatch_hold(cwd, &facts).fail_closed() {
         return Err(Outcome::Held { reason: blocked });
     }
 
@@ -503,7 +514,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         });
     }
 
-    if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.base_lineage(cwd, &facts).fail_open() {
         return Err(Outcome::Refused {
             reason: format!("stale base: {reason}"),
         });
@@ -512,7 +523,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // Two green parents can merge red: git joins hunks that never met on one
     // machine (3334b826a133 broke main with F821 out of a clean textual
     // merge). Held, not refused: the remedy is rebase, fix, push, retry.
-    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.merge_result(cwd, &facts).fail_open() {
         return Err(Outcome::Held {
             reason: format!("red merge result: {reason}"),
         });
@@ -608,18 +619,19 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                             // ordering the slot exists to keep.
                             if let Some(m) = holder {
                                 if m != n {
-                                    let holder_held =
-                                        probes.dispatch_hold(cwd, m).fail_open().is_some();
-                                    let stale_holder = holder_held
-                                        || match probes.pr_facts(cwd, Some(m)) {
-                                            Ok(holder_facts) => {
-                                                is_terminal_state(&holder_facts.state)
-                                                    || probes.checks_read(cwd, m).verdict == "red"
-                                            }
-                                            // Unreadable holder PR keeps the
-                                            // slot; the TTL bounds it.
-                                            Err(_) => false,
-                                        };
+                                    let stale_holder = match probes.pr_facts(cwd, Some(m)) {
+                                        Ok(holder_facts) => {
+                                            probes
+                                                .dispatch_hold(cwd, &holder_facts)
+                                                .fail_open()
+                                                .is_some()
+                                                || is_terminal_state(&holder_facts.state)
+                                                || probes.checks_read(cwd, m).verdict == "red"
+                                        }
+                                        // Unreadable holder PR keeps the
+                                        // slot; the TTL bounds it.
+                                        Err(_) => false,
+                                    };
                                     if stale_holder {
                                         probes.release_slot(cwd, &facts.base_ref, m);
                                         holder = None;
@@ -784,12 +796,20 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     let dispatch_hold_outcome = match &request.supplied_dispatch_hold {
         Some(None) => ProbeOutcome::Clear,
         Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
-        None => probes.dispatch_hold(cwd, facts.number),
+        None => probes.dispatch_hold(cwd, facts),
     };
     if let Some(reason) = dispatch_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("dispatch_hold", reason));
     }
-    if let Some(reason) = probes.review_hold(cwd, facts.number).fail_closed() {
+    // The supplied review-hold answer rides the preview exactly like the
+    // dispatch-hold answer above: a probed clear is `Some(None)`, decide's own
+    // chain never sees a supplied value.
+    let review_hold_outcome = match &request.supplied_review_hold {
+        Some(None) => ProbeOutcome::Clear,
+        Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
+        None => probes.review_hold(cwd, facts.number),
+    };
+    if let Some(reason) = review_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("review_in_flight", reason));
     }
 
@@ -820,13 +840,13 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     }
 
     // (6) lineage + merge result, in decide's order.
-    if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.base_lineage(cwd, &facts).fail_open() {
         blockers.push(Blocker::refused(
             "stacked_base",
             format!("stale base: {reason}"),
         ));
     }
-    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.merge_result(cwd, &facts).fail_open() {
         blockers.push(Blocker::held(
             "red_merge_result",
             format!("red merge result: {reason}"),
@@ -939,15 +959,14 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         match probes.slot_holder(cwd, &facts.base_ref) {
             Err(_) => {}
             Ok(Some(m)) if m != n => {
-                let holder_held = probes.dispatch_hold(cwd, m).fail_open().is_some();
-                let evictable = holder_held
-                    || match probes.pr_facts(cwd, Some(m)) {
-                        Ok(hf) => {
-                            is_terminal_state(&hf.state)
-                                || probes.checks_read(cwd, m).verdict == "red"
-                        }
-                        Err(_) => false,
-                    };
+                let evictable = match probes.pr_facts(cwd, Some(m)) {
+                    Ok(hf) => {
+                        probes.dispatch_hold(cwd, &hf).fail_open().is_some()
+                            || is_terminal_state(&hf.state)
+                            || probes.checks_read(cwd, m).verdict == "red"
+                    }
+                    Err(_) => false,
+                };
                 if !evictable {
                     blockers.push(Blocker::held(
                         "merge_slot_held",
@@ -1403,13 +1422,8 @@ impl Probes for RealProbes {
         node_binding_probe(cwd, facts)
     }
 
-    fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "hold-check", &pr.to_string()]) {
-            Ok((code, stdout, stderr)) => classify_hold_probe(code == Some(0), &stdout, &stderr),
-            Err(error) => ProbeOutcome::Inconclusive(format!(
-                "dispatch hold check unavailable ({error}); refusing to assume unheld"
-            )),
-        }
+    fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        crate::gate_probes::dispatch_hold(cwd, facts)
     }
 
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
@@ -1437,36 +1451,22 @@ impl Probes for RealProbes {
         }
     }
 
-    fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "base-lineage-check", &pr.to_string()]) {
-            Ok((code, _stdout, stderr)) => match code {
-                Some(0) => ProbeOutcome::Clear,
-                Some(3) => {
-                    ProbeOutcome::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
-                }
-                other => ProbeOutcome::Inconclusive(format!(
-                    "exit {other:?}: {}",
-                    String::from_utf8_lossy(&stderr).trim()
-                )),
-            },
-            Err(error) => ProbeOutcome::Inconclusive(format!("spawn error: {error}")),
-        }
+    fn base_lineage(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        let run = |args: &[&str], dir: &Path| {
+            let mut cmd = Command::new(args[0]);
+            cmd.args(&args[1..]).current_dir(dir);
+            crate::gate_probes::run_probe(cmd)
+        };
+        crate::gate_probes::base_lineage(cwd, facts, &run)
     }
 
-    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "merge-result-check", &pr.to_string()]) {
-            Ok((code, _stdout, stderr)) => match code {
-                Some(0) => ProbeOutcome::Clear,
-                Some(3) => {
-                    ProbeOutcome::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
-                }
-                other => ProbeOutcome::Inconclusive(format!(
-                    "exit {other:?}: {}",
-                    String::from_utf8_lossy(&stderr).trim()
-                )),
-            },
-            Err(error) => ProbeOutcome::Inconclusive(format!("spawn error: {error}")),
-        }
+    fn merge_result(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        let run = |args: &[&str], dir: &Path| {
+            let mut cmd = Command::new(args[0]);
+            cmd.args(&args[1..]).current_dir(dir);
+            crate::gate_probes::run_probe(cmd)
+        };
+        crate::gate_probes::merge_result(cwd, facts, &run)
     }
 
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
@@ -1944,6 +1944,64 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
     ProbeOutcome::Clear
 }
 
+/// Parse the status read's own pull projection into [`PrFacts`]: the same
+/// facts the `fno do pr info` spawn answers, from the payload the read
+/// already fetched. A projection older than the `url`/`body` fields is NOT a
+/// fact - the caller falls back to the spawn rather than walking with an
+/// unevaluable backref key or a dead-instrument head.
+pub fn facts_from_pulls(pulls: &Value, fallback_pr: Option<u64>) -> Result<PrFacts, String> {
+    let number = pulls
+        .get("number")
+        .and_then(Value::as_u64)
+        .or(fallback_pr)
+        .ok_or_else(|| "the pull payload carried no PR number".to_string())?;
+    let head_sha = pulls
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if head_sha.is_empty() {
+        return Err(format!(
+            "the pull payload carried no head sha for PR {number}"
+        ));
+    }
+    let url = pulls
+        .get("html_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let body = pulls.get("body").and_then(Value::as_str);
+    if url.is_empty() || body.is_none() {
+        return Err("the pull payload predates the url/body fields".to_string());
+    }
+    Ok(PrFacts {
+        number,
+        head_sha,
+        head_ref: pulls
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        base_ref: pulls
+            .get("baseRefName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        url,
+        body: Some(body.unwrap_or("").to_string()),
+        state: pulls
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("OPEN")
+            .to_string(),
+        armed: pulls
+            .get("auto_merge")
+            .map(|v| !v.is_null())
+            .unwrap_or(false),
+    })
+}
+
 /// Parse `fno do pr info`. An error field, a missing number, or a missing head
 /// sha is a dead instrument, never a PR with no head.
 pub fn parse_pr_facts(payload: &Value) -> Result<PrFacts, String> {
@@ -2331,7 +2389,17 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
 /// verdicts.
 pub(crate) fn preview_receipt(request: &Request) -> Value {
     let cwd = request.cwd.as_path();
-    match RealProbes.pr_facts(cwd, request.pr) {
+    // Supplied facts win (preview-only): the status read's own projection
+    // parses in process, and a payload too old to carry the fields falls back
+    // to the guarded spawn so the walk never rides half a fact.
+    let facts = request
+        .supplied_facts
+        .as_ref()
+        .and_then(|p| facts_from_pulls(p, request.pr).ok());
+    match match facts {
+        Some(facts) => Ok(facts),
+        None => RealProbes.pr_facts(cwd, request.pr),
+    } {
         Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
         Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
             PreviewVerdict::Go { waiver } => {
@@ -2466,6 +2534,13 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             Value::Null => None,
             other => Some(other.to_string()),
         }),
+        // Same tri-state as the dispatch-hold answer above.
+        supplied_review_hold: payload.get("review_hold_reason").map(|v| match v {
+            Value::String(reason) => Some(reason.to_owned()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        }),
+        supplied_facts: payload.get("facts").filter(|v| v.is_object()).cloned(),
     })
 }
 
@@ -2666,8 +2741,8 @@ mod tests {
         fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn dispatch_hold(&self, _cwd: &Path, pr: u64) -> ProbeOutcome {
-            if let Some(hold) = self.other_holds.borrow().get(&pr) {
+        fn dispatch_hold(&self, _cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+            if let Some(hold) = self.other_holds.borrow().get(&facts.number) {
                 return hold.clone();
             }
             self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
@@ -2675,10 +2750,10 @@ mod tests {
         fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.review_hold.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn base_lineage(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.lineage.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn merge_result(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.merge_result.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn ci_base(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
@@ -2810,6 +2885,8 @@ mod tests {
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
             supplied_dispatch_hold: None,
+            supplied_review_hold: None,
+            supplied_facts: None,
         }
     }
 
@@ -3300,7 +3377,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_base_verdict_refuses_the_pr_2094_shape() {
+    fn ci_base_verdict_reads_each_branch() {
         let runs = (0..8)
             .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
             .collect::<Vec<_>>();
@@ -3308,10 +3385,6 @@ mod tests {
         assert!(
             matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_uses_each_workflows_newest_run() {
         let runs = vec![
             ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
             ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
@@ -3321,27 +3394,15 @@ mod tests {
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_clears_when_head_contains_base() {
         let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
         assert_eq!(
             ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_clears_without_runs() {
         assert_eq!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_is_inconclusive_for_malformed_timestamps() {
         let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
         assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
@@ -3350,7 +3411,7 @@ mod tests {
     }
 
     #[test]
-    fn oldest_current_run_uses_each_workflows_newest_run_then_takes_the_oldest() {
+    fn oldest_current_run_reads_each_branch() {
         let runs = vec![
             ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
             ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
@@ -3360,15 +3421,11 @@ mod tests {
             oldest_current_run(&runs),
             Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
         );
-    }
-
-    #[test]
-    fn oldest_current_run_returns_none_without_workflow_runs() {
         assert_eq!(oldest_current_run(&[]), None);
     }
 
     #[test]
-    fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
+    fn stale_overlap_verdict_reads_each_branch() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             2094,
@@ -3379,10 +3436,6 @@ mod tests {
             }),
         );
         assert_eq!(outcome, ProbeOutcome::Clear);
-    }
-
-    #[test]
-    fn a_stale_ci_base_refuses_with_shared_paths_and_a_bounded_list() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             8,
@@ -3398,24 +3451,20 @@ mod tests {
             }),
         );
         assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-            if reason.starts_with("ci_base_stale")
-                && reason.contains("docs/guide.md")
-                && reason.contains("hooks/a.json")
-                && reason.contains("hooks/b.json")
-                && reason.contains("and 1 more")
-                && !reason.contains("hooks/c.json")));
-    }
-
-    #[test]
-    fn an_unreadable_stale_overlap_fails_closed() {
+        if reason.starts_with("ci_base_stale")
+            && reason.contains("docs/guide.md")
+            && reason.contains("hooks/a.json")
+            && reason.contains("hooks/b.json")
+            && reason.contains("and 1 more")
+            && !reason.contains("hooks/c.json")));
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             8,
             Err("fetch failed".to_string()),
         );
         assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-            if reason.starts_with("ci_base_stale")
-                && reason.contains("file overlap unreadable (fetch failed)")));
+        if reason.starts_with("ci_base_stale")
+            && reason.contains("file overlap unreadable (fetch failed)")));
     }
 
     #[test]
@@ -3461,7 +3510,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inconclusive_ci_base_probe_fails_open() {
+    fn ci_base_freshness_gates_the_chain() {
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Inconclusive("gh unavailable".to_string())),
             ..clean()
@@ -3469,10 +3518,6 @@ mod tests {
         let mut req = request(Effect::Merge);
         req.require_checks = true;
         assert_eq!(run(&fake, &req).word(), "merged");
-    }
-
-    #[test]
-    fn disabled_fresh_ci_requirement_skips_the_probe() {
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
             fresh_ci: Some(false),
@@ -3941,7 +3986,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ruleset_hold_holds_and_names_the_missing_context() {
+    fn a_ruleset_hold_holds() {
         // The door fetched the hold's own name moments before `gh pr merge`
         // and used to spend a failure on it. Held, not Failed: a required
         // check that is merely pending still arrives.
@@ -3956,10 +4001,6 @@ mod tests {
         assert_eq!(outcome.word(), "held");
         assert!(outcome.detail().contains("smoke"));
         assert!(fake.gh_calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn a_ruleset_hold_outranks_the_require_checks_flag() {
         // A ruleset hold is not a question about CI greenness. A door gated on
         // the flag would attempt the bypass its own reader just refused.
         let fake = Fake {

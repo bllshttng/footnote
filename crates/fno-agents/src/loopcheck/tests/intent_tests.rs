@@ -151,7 +151,7 @@ fn detect_intent_payload_aborted_beats_promise() {
 #[test]
 fn watching_intent_parses_all_attrs() {
     let (intent, source) = detect_intent(
-        Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\">"),
+        Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\" task_id=\"task-123\">"),
         Path::new("/nonexistent"),
     );
     assert_eq!(source, "payload");
@@ -161,6 +161,7 @@ fn watching_intent_parses_all_attrs() {
             reason: "ci".into(),
             pr: Some("404".into()),
             timeout: Some("30m".into()),
+            task_id: Some("task-123".into()),
         }
     );
 }
@@ -176,7 +177,13 @@ fn watching_intent_malformed_attrs_default_to_absent() {
             reason: String::new(),
             pr: None,
             timeout: None,
+            task_id: None,
         }
+    );
+    assert_eq!(
+        detect_intent_from_text("<watching reason=\"local\" task_id=\"bad id\">"),
+        Intent::None,
+        "malformed task ids must not produce an accepted watch intent"
     );
 }
 

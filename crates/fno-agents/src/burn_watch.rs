@@ -246,7 +246,7 @@ fn node_facts(rows: &[Value]) -> HashMap<String, (String, Option<i64>)> {
 /// The production runner every arm shares with the pr-nudge ladder.
 pub type Runner<'a> = &'a mut dyn FnMut(&[String], &str) -> (i32, String, String);
 
-fn production_run(argv: &[String], cwd: &str) -> (i32, String, String) {
+pub(crate) fn run_command(argv: &[String], cwd: &str) -> (i32, String, String) {
     let bin = argv[0].clone();
     let refs: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
     let dir = if cwd.is_empty() {
@@ -359,18 +359,27 @@ fn escalation_text(node: &str, sid: &str, reason: &str, attempts: u32) -> String
 /// at the worker's next turn, so a mid-turn worker never takes a resume
 /// typed over its turn.
 fn wake(sid: &str, node: &str, busy: bool, reason: &str, runner: Runner) -> (bool, &'static str) {
-    let text = wake_text(node, reason);
+    wake_with_text(sid, busy, &wake_text(node, reason), SENDER, runner)
+}
+
+pub(crate) fn wake_with_text(
+    sid: &str,
+    busy: bool,
+    text: &str,
+    sender: &str,
+    runner: Runner,
+) -> (bool, &'static str) {
     let mail_argv = vec![
         "fno".to_string(),
         "agents".to_string(),
         "mail".to_string(),
         "send".to_string(),
         "--from-name".to_string(),
-        SENDER.to_string(),
+        sender.to_string(),
         "--origin".to_string(),
         "scheduler".to_string(),
         sid.to_string(),
-        text.clone(),
+        text.to_string(),
     ];
     let (code, stdout, _) = runner(&mail_argv, "");
     if crate::mail_inject::mail_send_accepted(code, &stdout) {
@@ -386,7 +395,7 @@ fn wake(sid: &str, node: &str, busy: bool, reason: &str, runner: Runner) -> (boo
         "resume".to_string(),
         sid.to_string(),
         "--message".to_string(),
-        text,
+        text.to_string(),
     ];
     if durable {
         resume_argv.insert(4, "--message-already-queued".to_string());
@@ -618,7 +627,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 .filter(|v| *v >= 0.0)
                 .unwrap_or(DEFAULT_SPEND_USD);
         let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
-        let mut runner: Runner = &mut production_run;
+        let mut runner: Runner = &mut run_command;
         run_pass(
             &home,
             &emitter,
@@ -872,5 +881,163 @@ mod tests {
         assert!(landed);
         assert_eq!(via, "resume");
         assert_eq!(calls[1][2], "resume");
+
+        let watch = crate::watch_expiry::Watch {
+            event_id: "watch-1".into(),
+            seq: 1,
+            session_id: "s-1".into(),
+            node: "x-1".into(),
+            blocker: "local".into(),
+            task_id: Some("task-7".into()),
+            reason: Some("local build".into()),
+            expires_at_ms: 100,
+            ts_ms: 50,
+        };
+        assert!(!crate::watch_expiry::should_wake(&watch, 99, &[]));
+        assert!(crate::watch_expiry::should_wake(&watch, 100, &[]));
+        let paired_idle = crate::watch_expiry::Evidence {
+            event_id: "loop-check-watch".into(),
+            seq: 2,
+            ts_ms: 51,
+            kind: "loop_check".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({"intent": "watching"}),
+        };
+        assert!(crate::watch_expiry::should_wake(
+            &watch,
+            100,
+            &[paired_idle]
+        ));
+        let acted = crate::watch_expiry::Evidence {
+            event_id: "activity-1".into(),
+            seq: 2,
+            ts_ms: 101,
+            kind: "loop_check".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({"intent": "plain"}),
+        };
+        assert!(!crate::watch_expiry::should_wake(&watch, 101, &[acted]));
+        let renewed = crate::watch_expiry::Evidence {
+            event_id: "watch-2".into(),
+            seq: 3,
+            ts_ms: 102,
+            kind: "loop_check_watch_idle".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({}),
+        };
+        assert!(!crate::watch_expiry::should_wake(&watch, 102, &[renewed]));
+        let receipt = crate::watch_expiry::Evidence {
+            event_id: "wake-1".into(),
+            seq: 4,
+            ts_ms: 103,
+            kind: "loop_check_watch_expiry_wake".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({"watch_event_id": "watch-1"}),
+        };
+        assert!(crate::watch_expiry::is_current_watch(
+            &watch,
+            &[receipt.clone()]
+        ));
+        assert!(!crate::watch_expiry::should_wake(&watch, 103, &[receipt]));
+
+        let mut review_watch = watch.clone();
+        review_watch.reason = Some("review".into());
+        let review_message = crate::watch_expiry::message(&review_watch);
+        assert!(!review_message.contains("local watch expired"));
+        assert!(review_message.contains("Your review watch expired"));
+        assert!(review_message.contains("reason: review"));
+
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestoreClaimsRoot(Option<std::ffi::OsString>);
+        impl Drop for RestoreClaimsRoot {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("FNO_CLAIMS_ROOT", value);
+                } else {
+                    std::env::remove_var("FNO_CLAIMS_ROOT");
+                }
+            }
+        }
+        let _restore_claims_root = RestoreClaimsRoot(std::env::var_os("FNO_CLAIMS_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let claims_root = temp.path().join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let home = crate::paths::AgentsHome::at(temp.path().join("agents"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let mut legacy_entry = crate::state::RegistryEntry::default();
+        legacy_entry.name = "legacy-watch-owner".into();
+        legacy_entry.session_id = Some("s-legacy".into());
+        legacy_entry.status = crate::AgentStatus::Live;
+        let mut registry = crate::state::Registry::default();
+        registry.entries.push(legacy_entry.clone());
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let acquired = crate::claims::acquire(
+            "node:x-legacy",
+            "target-session:s-legacy",
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                identity: Some(("s-legacy".into(), "codex".into())),
+                root: None,
+                events_dir: Some(temp.path().join("claim-events")),
+                ..Default::default()
+            },
+        );
+        let legacy_claims = crate::watch_expiry::current_node_claims(&home).unwrap();
+        let legacy_owner = legacy_claims.get("s-legacy").cloned().unwrap();
+
+        let global_events = crate::daemon::global_events_path(&home);
+        std::fs::write(
+            &global_events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "type": "loop_check_watch_idle",
+                    "source": "hook",
+                    "data": {
+                        "session_id": "s-legacy",
+                        "node": "x-legacy",
+                        "blocker": "local",
+                        "reason": "local build",
+                        "task_id": "task-7",
+                        "expires_at_ms": 0,
+                        "lease_ms": 1000
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        let overdue = crate::watch_expiry::overdue(&home).unwrap();
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].session_id, "s-legacy");
+        assert!(overdue[0].overdue_ms > 0);
+
+        std::fs::remove_file(home.registry_json()).unwrap();
+        std::fs::create_dir(home.registry_json()).unwrap();
+        let registry_error = crate::watch_expiry::run_pass(&home);
+        std::fs::remove_dir(home.registry_json()).unwrap();
+
+        legacy_entry.harness_session_id = Some("s-legacy".into());
+        registry.entries = vec![legacy_entry];
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let broken_claims_root = temp.path().join("claims-root-file");
+        std::fs::write(&broken_claims_root, "unreadable claims root").unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &broken_claims_root);
+        let claims_error = crate::watch_expiry::run_pass(&home);
+
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert_eq!(legacy_owner, Ok(Some("x-legacy".into())));
+        assert!(
+            registry_error.is_err(),
+            "registry read failure must surface"
+        );
+        assert!(claims_error.is_err(), "claim read failure must surface");
     }
 }

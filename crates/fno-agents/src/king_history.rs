@@ -1033,7 +1033,7 @@ struct CrownLineage {
     from_session: Option<String>,
 }
 
-fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
     }

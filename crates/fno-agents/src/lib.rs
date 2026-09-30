@@ -166,6 +166,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
 pub mod gc_claude_stop;
@@ -176,6 +177,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -294,6 +296,7 @@ pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
+pub mod process_owner;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;
@@ -319,6 +322,7 @@ pub mod refusal_rate;
 pub mod refusal_trend;
 pub mod registry_guard;
 pub mod registry_json;
+pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
 pub mod removals;
@@ -406,6 +410,7 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
 
@@ -1411,6 +1416,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
     // the footprint verb killed on the daemon's behalf.
     "orphan_test_binary_reaped",
+    "orphan_owner_server_reaped",
     // Late bind (daemon-emitted, task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
@@ -1503,6 +1509,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // task through the pr-nudge store.
     "burn_watch_wake",
     "burn_watch_escalated",
+    "loop_check_watch_expiry_wake",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     //. The roots reach a spawn as an RPC param from the Python seam,
