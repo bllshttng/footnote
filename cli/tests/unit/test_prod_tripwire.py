@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.prod_tripwire import find_leaks, snapshot
+from tests.prod_tripwire import find_leaks, live_roots, snapshot
 
 
 def test_find_leaks_names_marked_entries_only(tmp_path: Path) -> None:
@@ -27,6 +27,30 @@ def test_find_leaks_names_marked_entries_only(tmp_path: Path) -> None:
     leaks = find_leaks(before, roots, markers)
 
     assert leaks == [root / "plan.md", root / "x-pytest-of-u-pytest-7-y"]
+
+    # Root selection honors EXPLICIT sandbox declarations only, by canonical
+    # path containment: a declared sandbox home is never watched, an
+    # undeclared home with a matching layout (even a basename that extends a
+    # declared one) stays watched, and an undeclared home keeps today's
+    # behavior exactly.
+    declared = tmp_path / "fno-test-sandbox-declared"
+    (declared / "home" / ".fno").mkdir(parents=True)
+    excludes = frozenset({str(declared.resolve())})
+    assert live_roots(declared / "home", tmp_path, None, exclude=excludes) == []
+    adjacent = tmp_path / "fno-test-sandbox-declaredx"
+    (adjacent / "home" / ".fno").mkdir(parents=True)
+    adjacent_roots = live_roots(adjacent / "home", tmp_path, None, exclude=excludes)
+    assert [path for path, _ in adjacent_roots] == [adjacent / "home" / ".fno"]
+    unlabeled = tmp_path / "real-home"
+    (unlabeled / ".fno").mkdir(parents=True)
+    unlabeled_roots = live_roots(unlabeled, tmp_path, None, exclude=excludes)
+    assert [path for path, _ in unlabeled_roots] == [unlabeled / ".fno"]
+    # An undeclared home with the sandbox's own layout stays watched: the name
+    # alone is never the proof, the runner's declaration is.
+    undeclared = tmp_path / "fno-test-sandbox-undeclared"
+    (undeclared / "home" / ".fno").mkdir(parents=True)
+    undeclared_roots = live_roots(undeclared / "home", tmp_path, None)
+    assert [path for path, _ in undeclared_roots] == [undeclared / "home" / ".fno"]
 
 
 def test_find_leaks_respects_depth(tmp_path: Path) -> None:
