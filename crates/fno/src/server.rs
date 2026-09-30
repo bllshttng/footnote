@@ -13386,7 +13386,7 @@ async fn serve(
     core.emit_server_stopped(&flow);
     if flow == Flow::Shutdown {
         // Capture only from a safe restore state and current store generation.
-        core.capture_topology_now();
+        core.record_exit();
         core.kill_all_panes();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as

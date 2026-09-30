@@ -102,12 +102,8 @@ impl Core {
     }
 
     /// Emit [`server_stopped_row`] at the serve exit. Best-effort like
-    /// [`Self::emit_pane_closed`]; the cause word is the loop flow's.
-    pub(super) fn emit_server_stopped(&self, flow: &Flow) {
-        let cause = match flow {
-            Flow::Shutdown => "shutdown",
-            _ => "ended",
-        };
+    /// [`Self::emit_pane_closed`].
+    pub(super) fn emit_server_stopped(&self, cause: &str) {
         let event = server_stopped_row(&self.session_name, cause, self.panes.len());
         if crate::pane_send_audit::append_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
