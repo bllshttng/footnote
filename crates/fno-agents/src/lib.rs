@@ -128,6 +128,7 @@ pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
+pub mod court_rivals;
 pub mod crown_alarm;
 pub mod crown_identity;
 pub mod crown_names;
@@ -177,6 +178,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;

@@ -126,7 +126,7 @@ def _node(node_id: str = "zz-0001", **over) -> dict:
     entry = {
         "id": node_id,
         "slug": f"slug-{node_id}",
-        "title": f"node {node_id}",
+        "title": "seed node",
         "status": "ready",
         "priority": "p2",
         "_kanban_column": "Next",
