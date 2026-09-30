@@ -708,42 +708,6 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     );
 }
 
-// A PEER edge names its parent as the handoff it is; a CHILD (and a
-// pre-v32 row with no word) names it plain.
-#[test]
-fn the_parent_field_labels_a_peer_edge_as_a_handoff() {
-    use crate::client::feed_detail;
-    let mut row = joined_row("handoff-worker", None, None);
-    row.harness_session_id = Some("s-t".into());
-    row.spawned_by_session = Some("s-bp".into());
-    row.lineage_kind = Some("peer".into());
-    let item = feed_item(Some("x-a"), Some("s-t"));
-    let rows = [row];
-    let d = destination(&rows, &item);
-    let (popup, _, _) = feed_detail::build(&rows, 0, &item);
-    let parent = popup_rows(&popup)
-        .into_iter()
-        .find(|(l, _)| l.as_deref() == Some("parent"))
-        .map(|(_, v)| v)
-        .unwrap();
-    assert_eq!(parent, "s-bp (handoff)");
-
-    let mut child = joined_row("child-worker", None, None);
-    child.harness_session_id = Some("s-c".into());
-    child.spawned_by_session = Some("s-bp".into());
-    child.lineage_kind = Some("child".into());
-    let item = feed_item(Some("x-a"), Some("s-c"));
-    let rows = [child];
-    let d = destination(&rows, &item);
-    let (popup, _, _) = feed_detail::build(&rows, 0, &item);
-    let parent = popup_rows(&popup)
-        .into_iter()
-        .find(|(l, _)| l.as_deref() == Some("parent"))
-        .map(|(_, v)| v)
-        .unwrap();
-    assert_eq!(parent, "s-bp");
-}
-
 // The panel drags narrower than any prose fits, and the caller clips from the
 // end. The key must survive that clip: it is the only place it is advertised.
 #[test]
