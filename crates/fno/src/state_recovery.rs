@@ -637,6 +637,12 @@ pub(super) fn apply(
         serde_json::to_vec_pretty(&snapshots).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    std::fs::File::open(dir.join("snapshots.json"))
+        .and_then(|file| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    std::fs::File::open(&dir)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| e.to_string())?;
     let mut inserted = BTreeMap::new();
     for family in &FAMILIES[..3] {
         for record in &batch.records {
@@ -874,6 +880,9 @@ fn approved_sidecars(
     }
     let decisions: serde_json::Value =
         serde_json::from_slice(&result.stdout).map_err(|e| format!("approval unreadable: {e}"))?;
+    if decisions["damaged"] != 0 || decisions["truncated"] != false {
+        return Err("operator approval index is incomplete".into());
+    }
     let expected = format!(
         "approve state recovery {} {digest} {packet_hash}",
         root.display()
