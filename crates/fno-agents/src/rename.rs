@@ -226,28 +226,34 @@ pub(crate) fn respond(
         Err(error) => return Response::err(req.id, ErrorCode::Internal, error),
     };
     let crown = match (crown, session.as_deref()) {
-        (Some(_), Some(session)) => match crate::crown_names::rename_crown(
-            &home.crown_names_json(),
-            &registry_path,
-            session,
-            new_name,
-            true,
-        ) {
-            Ok(crown) => crown,
-            Err(crown_error) => {
-                let rollback =
-                    crate::state::rename_agent(&registry_path, session, &old_label, None);
-                let rollback_result = match rollback {
-                    Ok(_) => "registry label rolled back".to_string(),
-                    Err(error) => format!("registry rollback failed: {error}"),
-                };
-                return Response::err(
-                    req.id,
-                    ErrorCode::Internal,
-                    format!("crown rename failed: {crown_error}; {rollback_result}"),
-                );
+        (Some(_), Some(session)) => {
+            let result = crate::crown_names::rename_crown(
+                &home.crown_names_json(),
+                &registry_path,
+                session,
+                new_name,
+                true,
+            )
+            .and_then(|crown| {
+                crown.ok_or_else(|| "the named live crown changed before rename".to_string())
+            });
+            match result {
+                Ok(crown) => Some(crown),
+                Err(crown_error) => {
+                    let rollback =
+                        crate::state::rename_agent(&registry_path, session, &old_label, None);
+                    let rollback_result = match rollback {
+                        Ok(_) => "registry label rolled back".to_string(),
+                        Err(error) => format!("registry rollback failed: {error}"),
+                    };
+                    return Response::err(
+                        req.id,
+                        ErrorCode::Internal,
+                        format!("crown rename failed: {crown_error}; {rollback_result}"),
+                    );
+                }
             }
-        },
+        }
         _ => None,
     };
     Response::ok(
