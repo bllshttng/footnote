@@ -301,8 +301,14 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
     } else {
         "first boundary"
     };
-    let projection =
-        crate::feed::project(&inputs.questions_raw, &inputs.graph_entries, &[], "", "");
+    let projection = crate::feed::project(
+        &inputs.questions_raw,
+        &inputs.graph_entries,
+        &[],
+        "",
+        "",
+        "",
+    );
     // node_ended rows carry no PR reference; the graph entry does. Join the
     // completion card to its PR through the entry the feed already walked.
     let mut pr_by_node: HashMap<&str, Option<i64>> = HashMap::new();
