@@ -70,16 +70,22 @@ impl Core {
             })
             .collect();
         let mut flow = Flow::Continue;
+        // The 60s guard, whole identity: typing into ANY pane of this
+        // session holds the retirement - no closes and no store tombstone -
+        // so the store can never name a member retired while one of its
+        // panes still runs. The reply counts every held pane.
+        if targets.iter().any(|pid| self.typed_recently(*pid)) {
+            let _ = reply.send(ServerMsg::SessionRetired {
+                retired: 0,
+                panes_closed: 0,
+                closed_panes: Vec::new(),
+                tabs_removed: Vec::new(),
+                skipped_typing: targets.len(),
+            });
+            return Flow::Continue;
+        }
         let closed = targets.len();
-        let mut skipped_typing = 0usize;
         for pid in targets {
-            // The 60s guard: no automatic path closes a pane the
-            // operator typed into in the last minute. The skip leaves the
-            // store untouched for that member and is counted in the reply.
-            if self.typed_recently(pid) {
-                skipped_typing += 1;
-                continue;
-            }
             // close_pane inherits the established close semantics: empty-tab
             // removal, portal stand-in replacement and the de-persist
             // contract all stay one code path with every other close.
@@ -117,7 +123,7 @@ impl Core {
             panes_closed: closed,
             closed_panes,
             tabs_removed,
-            skipped_typing,
+            skipped_typing: 0,
         });
         flow
     }
