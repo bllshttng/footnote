@@ -4,6 +4,7 @@ use crate::paths::AgentsHome;
 use crate::provenance::BusIndex;
 use crate::session_activity::{Activity, ActivityFold};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -144,15 +145,17 @@ fn normalized_lead(text: &str) -> String {
     out
 }
 
-fn content_text(content: &Value) -> String {
+fn content_text(content: &Value) -> Cow<'_, str> {
     match content {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => String::new(),
+        Value::String(s) => Cow::Borrowed(s),
+        Value::Array(parts) => Cow::Owned(
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+        _ => Cow::Borrowed(""),
     }
 }
 
