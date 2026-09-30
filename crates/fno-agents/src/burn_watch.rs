@@ -1065,7 +1065,7 @@ fn run_pass(
                         SENDER,
                         &key,
                         &task_cwd,
-                        "row left the open-do scope",
+                        "row left the open execute scope",
                         SENDER,
                     ) {
                         eprintln!("burn-watch: task close refused: {e}");
