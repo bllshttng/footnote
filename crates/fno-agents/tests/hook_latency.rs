@@ -1054,12 +1054,23 @@ fn latency_stop_target_promise_green() {
             assert_eq!(code, 0, "terminal allow exits 0: {stderr}");
             let b = bench();
             // The fire journals to the HOME-resolved project log
-            // (<HOME>/.fno/events.jsonl), not the --events read path.
-            let events =
-                fs::read_to_string(b.base.join(".fno").join("events.jsonl")).unwrap_or_default();
+            // (<HOME>/.fno/events.jsonl), not the --events read path. The
+            // termination reason rides the session_finalized row in that
+            // journal's store, so the read goes through the store reader and
+            // whatever place() the routed root resolves.
+            let rows = fno_agents::event_store::query_events(
+                &b.base.join(".fno").join("events.jsonl"),
+                &fno_agents::event_store::EventQuery::of_types(&["session_finalized"]),
+            )
+            .unwrap_or_default();
+            let fired = rows.iter().any(|row| row.line.contains("DonePRGreen"));
             assert!(
-                events.contains("DonePRGreen"),
-                "no DonePRGreen termination row: {events}"
+                fired,
+                "no DonePRGreen termination row: {}",
+                rows.iter()
+                    .map(|r| r.line.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         },
     );
