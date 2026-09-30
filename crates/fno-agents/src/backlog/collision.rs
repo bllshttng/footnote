@@ -787,7 +787,10 @@ mod tests {
             ("u".to_string(), BTreeSet::new()),
         ];
         let (groups, unevaluated) = partition(&items, &[]);
-        assert_eq!(groups.len(), 2);
+        // {x,y} merged by b.py; z is its own group; u is a singleton group
+        // as well (python: "an unevaluated item is a singleton group as
+        // well") AND carries the unevaluated verdict.
+        assert_eq!(groups.len(), 3);
         let merged: BTreeSet<String> = groups.iter().find(|g| g.contains("x")).unwrap().clone();
         assert_eq!(merged, BTreeSet::from(["x".into(), "y".into()]));
         assert_eq!(unevaluated, BTreeSet::from(["u".into()]));

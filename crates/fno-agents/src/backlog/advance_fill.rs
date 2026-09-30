@@ -687,6 +687,23 @@ mod tests {
         dir
     }
 
+    /// Declare the claims root for the guard: claim_dirs consults the
+    /// global side even when the test passes an explicit root, and the
+    /// undeclared $HOME fallback panics under test (the finalize.rs
+    /// save/set/restore pattern).
+    fn declare_claims_root(dir: &Path) -> Option<std::ffi::OsString> {
+        let prior = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", dir);
+        prior
+    }
+
+    fn restore_claims_root(prior: Option<std::ffi::OsString>) {
+        match prior {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+    }
+
     fn plan_with_files(dir: &Path, name: &str, files: &[&str]) -> PathBuf {
         let path = dir.join(name);
         let rows: String = files
@@ -715,6 +732,7 @@ mod tests {
     #[test]
     fn peer_lane_holds_back_its_node() {
         let dir = sandbox("peer-lane");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         acquire_lane_slot(2, "ab-held0001", None, None, None, root)
             .unwrap()
@@ -728,12 +746,14 @@ mod tests {
             root,
         );
         assert_eq!(verdict.as_deref(), Some("peer-lane"));
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn no_surface_answers_the_unevaluated_fail_open_token() {
         let dir = sandbox("no-surface");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         // An empty plan and a plan_path that resolves to nothing are both
         // "the gate did not run", never a silent pass: the token is loud.
@@ -759,6 +779,7 @@ mod tests {
     #[test]
     fn same_domain_annotation_joins_the_token() {
         let dir = sandbox("same-domain");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         let mut used = BTreeSet::new();
         used.insert("code".to_string());
@@ -774,12 +795,14 @@ mod tests {
             verdict.as_deref(),
             Some("unevaluated:no-surface+same-domain:code")
         );
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn high_collision_holds_back_the_candidate() {
         let dir = sandbox("high-collision");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         let candidate = plan_with_files(&dir, "cand.md", &["a.py", "b.py", "c.py", "d.py"]);
         let other = plan_with_files(&dir, "other.md", &["a.py", "b.py", "c.py", "z.py"]);
@@ -802,22 +825,29 @@ mod tests {
     #[test]
     fn clean_candidate_is_selectable() {
         let dir = sandbox("clean");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
+        // A selectable candidate has a REAL file surface with nothing in
+        // flight against it; an empty plan answers the unevaluated token,
+        // which the live fill fails open on but the classifier must report.
+        let plan = plan_with_files(&dir, "clean.md", &["clean-only.py"]);
         let verdict = classify_lane_candidate(
-            &node("ab-clean001", "", "code"),
+            &node("ab-clean001", &plan.to_string_lossy(), "code"),
             &BTreeSet::new(),
             &[],
             &dir,
             &Thresholds::default(),
             root,
         );
-        assert!(verdict.is_none(), "no slot, no surface, no collision");
+        assert!(verdict.is_none(), "surface with no collision is selectable");
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_lane_domains_reads_slot_domains() {
         let dir = sandbox("domains");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         for (lane, domain) in [("ab-dom0001", "code"), ("ab-dom0002", "docs")] {
             let mut metadata = serde_json::Map::new();
@@ -831,12 +861,14 @@ mod tests {
             domains,
             BTreeSet::from(["code".to_string(), "docs".to_string()])
         );
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_worked_entries_joins_slots_and_node_claims() {
         let dir = sandbox("worked");
+        let prior = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         acquire_lane_slot(2, "ab-lane0001", None, None, None, root)
             .unwrap()
@@ -854,7 +886,9 @@ mod tests {
             outcome,
             crate::claims::AcquireOutcome::Acquired(_)
         ));
-        let graph = dir.join("graph.db");
+        // The .json anchor: seed_rows and read_rows resolve the physical
+        // store from the anchor, so both sides must name the same file.
+        let graph = dir.join("graph.json");
         crate::graph_store::seed_rows(
             &graph,
             &[
@@ -871,6 +905,7 @@ mod tests {
             .collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["ab-lane0001", "ab-node0002"]);
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
