@@ -70,16 +70,16 @@ impl Probes for FakeGitHub {
     fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
-    fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+    fn dispatch_hold(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
     fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
-    fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+    fn base_lineage(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
-    fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+    fn merge_result(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
     fn ci_base(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
@@ -150,6 +150,8 @@ fn ask(effect: Effect) -> Request {
         supplied_optional_unresolved: None,
         supplied_github_blockers: None,
         supplied_dispatch_hold: None,
+        supplied_review_hold: None,
+        supplied_facts: None,
     }
 }
 
