@@ -109,6 +109,19 @@ pub(crate) async fn run_fno_captured(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Option<(bool, String, String)> {
+    run_fno_captured_full(argv, timeout, deadline)
+        .await
+        .map(|(ok, out, err, _)| (ok, out, err))
+}
+
+/// The same capture carrying the child's real exit code, for the spawn
+/// legs that record a refusal row. `-1` is the killed-by-signal sentinel,
+/// never a real code.
+pub(crate) async fn run_fno_captured_full(
+    argv: &[&str],
+    timeout: Duration,
+    deadline: tokio::time::Instant,
+) -> Option<(bool, String, String, i32)> {
     let mut command = crate::process_admission::tokio_command(argv[0]);
     command
         .args(&argv[1..])
@@ -126,6 +139,7 @@ pub(crate) async fn run_fno_captured(
             o.status.success(),
             String::from_utf8_lossy(&o.stdout).to_string(),
             String::from_utf8_lossy(&o.stderr).to_string(),
+            o.status.code().unwrap_or(-1),
         )),
     }
 }
@@ -259,6 +273,17 @@ pub(crate) async fn run_fno_captured_with_stdin(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Option<(bool, String, String)> {
+    run_fno_captured_with_stdin_full(argv, stdin_bytes, timeout, deadline)
+        .await
+        .map(|(ok, out, err, _)| (ok, out, err))
+}
+
+pub(crate) async fn run_fno_captured_with_stdin_full(
+    argv: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+    deadline: tokio::time::Instant,
+) -> Option<(bool, String, String, i32)> {
     let mut command = crate::process_admission::tokio_command(argv[0]);
     command
         .args(&argv[1..])
@@ -286,6 +311,7 @@ pub(crate) async fn run_fno_captured_with_stdin(
                 o.status.success(),
                 String::from_utf8_lossy(&o.stdout).to_string(),
                 String::from_utf8_lossy(&o.stderr).to_string(),
+                o.status.code().unwrap_or(-1),
             )
         })
     };
@@ -344,6 +370,32 @@ const VERDICT_MARKER: &str = "spawn-gate: refused on ";
 
 /// The pass-path note prefix from the same contract: never a refusal.
 const GATE_NOTE_PREFIX: &str = "spawn-gate note:";
+
+/// A launch the door watched FAIL leaves the feed row the operator watched
+/// for. A born worker (exit 0) rows nothing: its acceptance is the spawn
+/// row the child itself writes. The spawn gate writes its own refusal rows
+/// (its verdict marker rides the stderr, so a gate refusal never doubles
+/// here); a python-leg refusal, a crashed child or an unreachable binary
+/// never reach that emitter, and this is theirs. Best-effort like every
+/// events write: the shared `append_agents_event` floor, the FILE is the
+/// contract with fno-agents.
+pub(crate) fn note_spawn_refused(argv: &[&str], exit_code: i32, stdout: &str, stderr: &str) {
+    if exit_code == 0 || stderr.contains(VERDICT_MARKER) {
+        return;
+    }
+    let row = serde_json::json!({
+        "ts": crate::review_invocation::review_invocation_timestamp(),
+        "type": "agent_spawn_refused",
+        "source": "daemon",
+        "data": {
+            "argv": argv.iter().skip(1).map(|s| (*s).to_string()).collect::<Vec<String>>(),
+            "exit_code": exit_code,
+            "reason": refusal_detail(stderr, stdout),
+        },
+    });
+    let path = crate::pane_send_audit::pane_send_audit_events_path();
+    let _ = crate::pane_send_audit::append_agents_event(&path, &row);
+}
 
 /// The door's own error line: the gate's verdict line when one is present,
 /// else the LAST non-empty stderr line that is not a passing note, else the
@@ -698,6 +750,65 @@ mod tests {
             "grab work failed: fno agents spawn: --mux-session is pane-only; \
              substrate 'bg' has no mux session to spawn into"
         );
+        // The same door-watched refusal leaves the feed row the operator
+        // watched for: argv (binary dropped), the real exit code, and the
+        // fatal line as the reason.
+        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-door-refusal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        let argv = ["fno", "agents", "spawn", "--harness", "claude"];
+        note_spawn_refused(
+            &argv,
+            2,
+            "",
+            "fno agents spawn: applied slot=operator-pin-override (routing)\n\
+             fno agents spawn: --route owns the model; not injecting agents.profiles.target.lanes",
+        );
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(
+            events
+                .lines()
+                .find(|l| l.contains("agent_spawn_refused"))
+                .expect("one refusal row"),
+        )
+        .unwrap();
+        assert_eq!(row["type"], "agent_spawn_refused");
+        assert_eq!(row["source"], "daemon");
+        assert_eq!(row["data"]["argv"][0], "agents");
+        assert_eq!(row["data"]["exit_code"], 2);
+        assert!(row["data"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("--route owns the model"));
+        // A gate refusal: the verdict marker is on the stderr and the gate
+        // already wrote the row; a door row would double the feed.
+        std::fs::write(dir.join("events.jsonl"), "").unwrap();
+        note_spawn_refused(
+            &argv,
+            79,
+            "",
+            "spawn-gate: refused on permissions (mappability)",
+        );
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(
+            events.is_empty(),
+            "a gate refusal writes no door row: {events}"
+        );
+        // A born worker (exit 0) rows nothing: its acceptance is the spawn
+        // row the child itself writes.
+        note_spawn_refused(&argv, 0, r#"{"pane_id":7}"#, "");
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(
+            events.is_empty(),
+            "a successful launch writes no door row: {events}"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1744,57 +1744,27 @@ def make_agents_group_cls() -> type:
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
-                    # The whole seam sits under one stderr tee so EVERY
-                    # refusal leaves a feed-visible row: these raises bypass
-                    # cmd_spawn's own refusal watch, so the emit lives here.
-                    # The reason is the refusing helper's just-printed
-                    # stderr line.
-                    seam_err: list[str] = []
-                    real_err = sys.stderr
+                    if verb == "spawn":
+                        from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
-                    class _SeamTee:
-                        def write(self, text: str) -> int:
-                            seam_err.append(text)
-                            return real_err.write(text)
-
-                        def flush(self) -> None:
-                            real_err.flush()
-
-                    sys.stderr = _SeamTee()  # type: ignore[assignment]
-                    try:
-                        if verb == "spawn":
-                            from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
-
-                            _refuse_codex_code_spawn_without_git_grant(args)
-                            _refuse_seedless_thread_spawn(args)
-                            _refuse_lost_verb_payload(args)
-                            _refuse_unfireable_seed(args)
-                            try:
-                                args, node_verb = _node_seed_at_seam(args)
-                                args, existing_pane = extract_existing_pane(
-                                    inject_spawn_defaults(args, node_verb=node_verb)
-                                )
-                            except ValueError as exc:
-                                print(f"fno agents spawn: {exc}", file=sys.stderr)
-                                raise SystemExit(2) from exc
-                        _export_worker_dirs_at_seam(args)
-                        if verb == "spawn":  # after the export: the probe needs its roots
-                            _refuse_codex_spawn_with_unreachable_tools(args)
-                        args = _pick_account_at_seam(args)
-                        _scrub_account_auth_at_seam(args)
-                        _refuse_inherited_tier_remap(args)
-                    except SystemExit as exc:
-                        from fno.agents.events import emit_spawn_refused
-
-                        code = exc.code
-                        emit_spawn_refused(
-                            argv=list(args),
-                            exit_code=code if isinstance(code, int) else 2,
-                            reason="".join(seam_err).strip().rsplit("\n", 1)[-1].strip(),
-                        )
-                        raise
-                    finally:
-                        sys.stderr = real_err
+                        _refuse_codex_code_spawn_without_git_grant(args)
+                        _refuse_seedless_thread_spawn(args)
+                        _refuse_lost_verb_payload(args)
+                        _refuse_unfireable_seed(args)
+                        try:
+                            args, node_verb = _node_seed_at_seam(args)
+                            args, existing_pane = extract_existing_pane(
+                                inject_spawn_defaults(args, node_verb=node_verb)
+                            )
+                        except ValueError as exc:
+                            print(f"fno agents spawn: {exc}", file=sys.stderr)
+                            raise SystemExit(2) from exc
+                    _export_worker_dirs_at_seam(args)
+                    if verb == "spawn":  # after the export: the probe needs its roots
+                        _refuse_codex_spawn_with_unreachable_tools(args)
+                    args = _pick_account_at_seam(args)
+                    _scrub_account_auth_at_seam(args)
+                    _refuse_inherited_tier_remap(args)
                 elif verb == "rm":
                     if not _gate_rm_at_seam(args):
                         raise SystemExit(RM_DECLINED_EXIT)

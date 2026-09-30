@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use crate::dispatch_launch::{
-    decode_launch_outcome, launch_spawn_argv, run_fno_captured, run_fno_captured_with_stdin,
+    decode_launch_outcome, launch_spawn_argv, run_fno_captured, run_fno_captured_with_stdin_full,
     LaunchOutcome,
 };
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
@@ -68,15 +68,19 @@ pub(crate) async fn run_dispatch_one(
     let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Step 4: the outcome maps to the operator's one-liner. Both streams are
     // captured - the door's refusal receipt lives on stderr.
-    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout, deadline).await {
+    match crate::dispatch_launch::run_fno_captured_full(&borrowed, dispatch_timeout, deadline).await
+    {
         None => "grab work: timed out".to_string(),
-        Some((exit_ok, out, err)) => crate::dispatch_launch::dispatch_notice(
-            exit_ok,
-            &out,
-            &err,
-            &node_id,
-            slug.as_deref().unwrap_or(""),
-        ),
+        Some((exit_ok, out, err, code)) => {
+            crate::dispatch_launch::note_spawn_refused(&borrowed, code, &out, &err);
+            crate::dispatch_launch::dispatch_notice(
+                exit_ok,
+                &out,
+                &err,
+                &node_id,
+                slug.as_deref().unwrap_or(""),
+            )
+        }
     }
 }
 
@@ -454,7 +458,7 @@ impl super::Core {
             let fno = super::fno_bin().display().to_string();
             let argv = launch_spawn_argv(&fno, &req, &session);
             let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let state = match run_fno_captured_with_stdin(
+            let state = match run_fno_captured_with_stdin_full(
                 &borrowed,
                 req.message.as_bytes(),
                 timeout,
@@ -467,19 +471,22 @@ impl super::Core {
                 None => LaunchState::Unknown {
                     reason: "launch timed out; a worker may have been born".to_string(),
                 },
-                Some((ok, out, err)) => match decode_launch_outcome(ok, &out, &err) {
-                    LaunchOutcome::Launched {
-                        name,
-                        pane,
-                        seed_delivered,
-                    } => LaunchState::Launched {
-                        name,
-                        pane,
-                        seed_delivered,
-                    },
-                    LaunchOutcome::Refused(reason) => LaunchState::Refused { reason },
-                    LaunchOutcome::Unknown(reason) => LaunchState::Unknown { reason },
-                },
+                Some((ok, out, err, code)) => {
+                    crate::dispatch_launch::note_spawn_refused(&borrowed, code, &out, &err);
+                    match decode_launch_outcome(ok, &out, &err) {
+                        LaunchOutcome::Launched {
+                            name,
+                            pane,
+                            seed_delivered,
+                        } => LaunchState::Launched {
+                            name,
+                            pane,
+                            seed_delivered,
+                        },
+                        LaunchOutcome::Refused(reason) => LaunchState::Refused { reason },
+                        LaunchOutcome::Unknown(reason) => LaunchState::Unknown { reason },
+                    }
+                }
             };
             let _ = core_tx
                 .send(super::CoreMsg::AgentLaunchUpdate {
