@@ -97,7 +97,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Review my changes" | `/fno:review` |
 | "Which task next?" | `fno backlog next` / `ready` |
 | "Lead a territory" | `/fno:lead <scope>` |
-| "What state am I in after compaction?" | `fno whoami` then `fno whoami status` |
+| "Rename (Codex has no /rename)" | `fno agents rename <you> --name <new>` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |
 | "Is this PR ready to merge?" | `fno do pr status <n>` |
