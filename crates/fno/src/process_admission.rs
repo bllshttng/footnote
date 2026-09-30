@@ -583,6 +583,9 @@ pub fn admit_shell_pane() -> Result<AdmissionPermit, AdmissionFailure> {
 }
 
 fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
+    if human {
+        return Ok(admit_human());
+    }
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
         Ok(false) => {}
@@ -594,7 +597,7 @@ fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
             ))
         }
     }
-    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human)?;
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, false)?;
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -663,6 +666,49 @@ fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
             detail: census.reason().map(enrich_fd_ceiling).unwrap_or_default(),
         }),
     }
+}
+
+/// A human's own start or attach always gets in. Gates may warn or slow
+/// agents, never refuse the user's own fno. So this door takes no lock (it
+/// never queues behind agent spawns) and turns every refusal into one
+/// warning a minute. The census still runs, so an over-full fleet is named,
+/// and the permit still records children, so agents count the human's panes.
+fn admit_human() -> AdmissionPermit {
+    let ceiling = configured_max_processes()
+        .unwrap_or(MaxProcesses::new(DEFAULT_MAX_PROCESSES))
+        .get();
+    let permit = |count| AdmissionPermit {
+        _lock: None,
+        scope: Scope::Fleet,
+        count,
+        ceiling,
+        #[cfg(test)]
+        track_children: true,
+    };
+    // Waived brakes warn inside the check.
+    let _ = brake_check(Scope::Fleet, ceiling, true);
+    #[cfg(test)]
+    if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
+        return test_permit(Scope::Fleet, 0, ceiling);
+    }
+    if matches!(admission_disabled(), Ok(true)) {
+        return permit(0);
+    }
+    let census = process_census();
+    if let Some(refusal) = decide_processes(&census, MaxProcesses::new(ceiling)).refusal() {
+        static WARNED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = WARNED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 60 {
+            WARNED_AT.store(now, std::sync::atomic::Ordering::Relaxed);
+            let refusal = refusal.strip_suffix(BYPASS_HINT).unwrap_or(&refusal);
+            eprintln!("fno: {refusal}; admitting a human's own start anyway");
+        }
+    }
+    permit(census.count().unwrap_or(0))
 }
 
 /// When the census died to descriptor exhaustion, the refusal is the
@@ -882,7 +928,18 @@ pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comman
 }
 
 pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    let permit = admit_fleet().map_err(admission_io_error)?;
+    spawn_permitted(command, admit_fleet().map_err(admission_io_error)?)
+}
+
+/// A spawn on a human's attach path, which never waits on or meets a gate.
+pub fn std_spawn_for_human(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    spawn_permitted(command, admit_human())
+}
+
+fn spawn_permitted(
+    command: &mut std::process::Command,
+    permit: AdmissionPermit,
+) -> io::Result<std::process::Child> {
     let track_child = !is_root_program(command.get_program());
     let mut child = command.spawn()?;
     if track_child {
