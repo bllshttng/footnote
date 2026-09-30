@@ -25,6 +25,7 @@ pub(super) struct FleetArms {
     machine_watch: crate::machine_watch::Arm,
     merge_close: crate::merge_close::Arm,
     crown_ledger: crate::king_ledger::Arm,
+    reign_eval: crate::reign_eval::Arm,
     fleet_page: crate::fleet_page::Arm,
     arm_watch: crate::arm_watch::Arm,
     provider_cap: crate::provider_cap_verbs::Arm,
@@ -62,6 +63,7 @@ impl FleetArms {
             machine_watch: crate::machine_watch::Arm::default(),
             merge_close: crate::merge_close::Arm::default(),
             crown_ledger: crate::king_ledger::Arm::default(),
+            reign_eval: crate::reign_eval::Arm::default(),
             fleet_page: crate::fleet_page::Arm::new(opts.agents_config_cwd.clone()),
             arm_watch: crate::arm_watch::Arm::new(opts.agents_config_cwd.clone()),
             provider_cap: crate::provider_cap_verbs::Arm::new(opts.agents_config_cwd.clone()),
@@ -177,6 +179,7 @@ impl FleetArms {
         crate::machine_watch::maybe_tick(&self.machine_watch, ctx.home.clone());
         crate::merge_close::maybe_tick(&self.merge_close, ctx.home.clone());
         crate::king_ledger::maybe_tick(&self.crown_ledger, ctx.home.clone());
+        crate::reign_eval::maybe_tick(&self.reign_eval, ctx.home.clone());
         crate::fleet_page::maybe_tick(&self.fleet_page, ctx.home.clone());
         crate::arm_watch::maybe_tick(&self.arm_watch, ctx.home.clone());
         crate::provider_cap_verbs::maybe_tick(&self.provider_cap, ctx.home.clone());

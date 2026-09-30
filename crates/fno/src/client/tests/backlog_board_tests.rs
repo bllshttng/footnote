@@ -347,6 +347,11 @@ fn board_column_resolves_no_agents_rows_or_chrome_hits() {
 #[test]
 fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
     let mut v = key_view(board_with(board_inputs()));
+    // "Holds the keyboard" is now explicit: a windowed board owns the input
+    // only after the operator opened or clicked it, which in the real flow
+    // also points the sideline at the backlog view.
+    v.region_owner = crate::client::region_focus::RegionOwner::Board;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     let mut scanner = crate::keys::Scanner::default();
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -388,6 +393,10 @@ fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
 #[test]
 fn a_modal_opened_over_the_board_owns_the_keyboard() {
     let mut v = key_view(board_with(board_inputs()));
+    // The board holds the keyboard until the composer chord hands it over;
+    // the sideline rides the backlog view as every real open does.
+    v.region_owner = crate::client::region_focus::RegionOwner::Board;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     let mut scanner = crate::keys::Scanner::default();
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();

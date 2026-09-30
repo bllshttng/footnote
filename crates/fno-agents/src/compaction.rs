@@ -146,10 +146,7 @@ fn first_boundary_after(transcript: &Path, after_epoch: i64) -> Result<Option<St
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if row.get("subtype").and_then(|v| v.as_str()) != Some("compact_boundary") {
-            continue;
-        }
-        let Some(ts) = row.get("timestamp").and_then(|v| v.as_str()) else {
+        let Some(ts) = boundary_ts(&row) else {
             continue;
         };
         if let Some(epoch) = rfc3339_to_epoch(ts) {
@@ -244,6 +241,12 @@ fn past_ceiling_or_compacting(stamp: &CompactionStamp, now_epoch: i64) -> Compac
     }
 }
 
+pub(crate) fn boundary_ts(row: &serde_json::Value) -> Option<&str> {
+    (row.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary"))
+        .then(|| row.get("timestamp").and_then(|v| v.as_str()))
+        .flatten()
+}
+
 fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Result<(), String> {
     let file =
         std::fs::File::open(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
@@ -255,10 +258,7 @@ fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Resu
         let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if row.get("subtype").and_then(|v| v.as_str()) != Some("compact_boundary") {
-            continue;
-        }
-        let Some(ts) = row.get("timestamp").and_then(|v| v.as_str()) else {
+        let Some(ts) = boundary_ts(&row) else {
             continue;
         };
         if let Some(epoch) = rfc3339_to_epoch(ts) {
@@ -307,7 +307,9 @@ pub fn run_compaction(args: &[String]) -> i32 {
         Some((action, rest)) if action == "operator-turns" => crate::operator_turns::run(rest),
         Some((action, rest)) if action == "ack" => crate::operator_turns::run_ack(rest),
         _ => {
-            eprintln!("usage: compaction mark --session <id> | status --harness <h> --session <id> [--transcript <path>] [--json] | operator-turns --session <id> --transcript <path> --capture-dir <dir> | ack --session <id> --turn <id> --outcome <o> [--why <w>] --capture-dir <dir>");
+            eprintln!(
+                "usage: compaction mark --session <id> | status --harness <h> --session <id> [--transcript <path>] [--json] | operator-turns --session <id> --transcript <path> --capture-dir <dir> | ack --session <id> --turn <id> --outcome <o> [--why <w>] --capture-dir <dir>"
+            );
             2
         }
     }
