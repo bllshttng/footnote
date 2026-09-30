@@ -6596,16 +6596,14 @@ pub(crate) fn run_reconcile_sweep(
         }
     }
 
-    // Single batched write (US4-gemini pattern): apply all status changes and
-    // bump last_reconciled_at for every probed entry in one lock window.
     let now = now_rfc3339_like();
     // Surface a persistence failure rather than emitting reconcile_done and
     // returning updated/orphans/recovered as if the sweep applied (Codex P1): on
     // a lock/IO failure the registry is unchanged, so reporting success would
     // mislead automation and hide stale lifecycle state.
-    if let Err(err) = state::update_registry(&home.registry_json(), |r| {
-        liveness_sweep::apply_reconcile_changes(r, &entries, &changes, &titles, &mode, &now);
-    }) {
+    if let Err(err) =
+        liveness_sweep::persist_reconcile_changes(home, &entries, &changes, &titles, &mode, &now)
+    {
         let _ = emitter.emit("reconcile_error", &json!({"error": err.to_string()}));
         return Err(format!(
             "reconcile computed {} change(s) but the registry write failed: {err}",

@@ -98,6 +98,33 @@ fn read_cursor(bus_dir: &Path, form: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+pub(crate) fn unread_count(bus_dir: &Path, msgs: &[Value], name: &str) -> usize {
+    let cursor = std::fs::read_to_string(bus_dir.join("cursors").join(format!("{name}.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| {
+            v.get("last_seen_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let after = cursor.and_then(|id| {
+        msgs.iter()
+            .position(|m| m.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    });
+    let withdrawn = withdrawn_ids(msgs);
+    msgs.iter()
+        .enumerate()
+        .filter(|(i, m)| {
+            after.is_none_or(|pos| *i > pos)
+                && m.get("to").and_then(Value::as_str) == Some(name)
+                && deliverable(m)
+                && m.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty() && !withdrawn.contains(id))
+        })
+        .count()
+}
+
 fn write_cursor(bus_dir: &Path, form: &str, msg_id: &str) {
     let path = cursor_path(bus_dir, form);
     if let Some(parent) = path.parent() {
@@ -421,6 +448,24 @@ mod tests {
         cursor_position_contract();
         tombstone_contract();
         defang_contract();
+        let (_d, bus) = bus_fixture("ordinary");
+        let name = "t-x-1-glm";
+        let msgs = vec![
+            json!({"id":"one", "from":"lead", "to":name}),
+            json!({"id":"two", "from":"lead", "to":name}),
+            json!({"id":"three", "from":"lead", "to":name}),
+            json!({"id":"withdraw", "kind":"withdraw", "from":"lead", "to":name, "meta":{"withdraws":"three"}}),
+            json!({"id":"hosted", "from":"lead", "to":name, "delivery":"hosted"}),
+            json!({"id":"other", "from":"lead", "to":"other"}),
+        ];
+        assert_eq!(unread_count(&bus, &msgs, name), 2);
+        std::fs::create_dir_all(bus.join("cursors")).unwrap();
+        std::fs::write(
+            bus.join("cursors").join(format!("{name}.json")),
+            r#"{"last_seen_id":"one"}"#,
+        )
+        .unwrap();
+        assert_eq!(unread_count(&bus, &msgs, name), 1);
     }
 
     fn control_lands_contract() {

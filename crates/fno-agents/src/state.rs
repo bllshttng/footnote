@@ -753,6 +753,16 @@ pub struct RegistryEntry {
     pub liveness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_measured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_unread: Option<u32>,
     /// The LAST title the harness reported for this session (claude's
     /// Ctrl+R agent-name record; codex/opencode's index title), kept ONLY as
     /// the diff baseline the sweep's `agent_renamed` emit compares against.
