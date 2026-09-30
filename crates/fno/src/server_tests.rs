@@ -7587,11 +7587,7 @@ fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
     core.worker_session_pane
         .insert(("codex".into(), uuid.into()), 77);
     // The stale registry ref alone does not resolve the new pane...
-    assert_eq!(
-        core.fno_id_for_pane(999),
-        Some(own_id.to_string()),
-        "the stale row still resolves ITS OWN recorded pane"
-    );
+    assert_eq!(core.fno_id_for_pane(999), Some(own_id.to_string()));
     // The resume birthright maps the recorded harness session to the row,
     // so the re-homed pane reads the row's own id, not the harness session.
     assert_eq!(core.fno_id_for_pane(77), Some(own_id.to_string()));

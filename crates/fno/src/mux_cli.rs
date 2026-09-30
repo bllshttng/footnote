@@ -4389,13 +4389,10 @@ fn render_reply(
 ) -> i32 {
     match reply {
         ServerMsg::PaneList { mut panes } => {
-            // `pane ls --fno-id <id>` filters to panes carrying that id: the
-            // row's own id or its harness session id, either spelling.
+            // `pane ls --fno-id <id>` keeps panes whose row id or harness
+            // session id equals the wanted id.
             if let Some(want) = ls_fno_id {
-                panes.retain(|p| {
-                    p.fno_id.as_deref() == Some(want)
-                        || p.harness_session_id.as_deref() == Some(want)
-                });
+                panes.retain(|p| p.answers_id(want));
             }
             if json {
                 // Each row carries `fno_id_state` beside the raw

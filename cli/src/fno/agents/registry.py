@@ -1903,8 +1903,8 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                         file=sys.stderr,
                     )
             # No fno_id backfill: a row's id is minted at birth (mint_agent_entry)
-            # or it stays empty until the next runtime write mints one. No
-            # harness id is ever copied into it.
+            # or stays empty until the next runtime write mints one; no harness
+            # id is ever copied into it.
             # `session_id` is a computed @property on AgentEntry, not an init field.
             # A Rust PTY row may serialize it (Rust skips it when None, so this only
             # fires for a row that recorded one); passing it to AgentEntry(**row)

@@ -185,12 +185,10 @@ def call_binary_json(
 
 
 def mint_fno_id() -> str:
-    """Footnote's session-id mint lives in Rust: `fno-agents state mint-id`.
+    """Footnote's one session-id mint lives in Rust: `fno-agents state mint-id`.
 
-    The one mint every id site forwards to, so a Python caller can never mint a
-    second id shape. Raises VerbUnavailable when the binary is missing or
-    answers nothing: no Python-side fallback exists, by the same rule that
-    keeps the mint single.
+    Raises VerbUnavailable when the binary is missing or answers nothing; no
+    Python-side fallback exists, by the rule that keeps the mint single.
     """
     import subprocess
 

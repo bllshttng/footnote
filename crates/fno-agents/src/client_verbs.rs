@@ -1108,9 +1108,8 @@ impl ResolveError {
 use crate::identity::session_handle_tier;
 
 fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
-    // The row's own id addresses it at the FULL tier when the token is
-    // session-shaped. A legacy short or name-valued fno_id keeps resolving
-    // through the tiers below, which read the harness id.
+    // The row's own id addresses it at the full tier; a legacy short or
+    // name-valued fno_id keeps resolving through the tiers below.
     if is_session_shaped(token) {
         if let Some(fno) = entry.get("fno_id").and_then(Value::as_str) {
             if token == fno {
@@ -1321,10 +1320,9 @@ fn derived_short_id(session_id: &str) -> String {
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
 /// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
 /// the harness-appropriate session id comes from the manifest, claude
-/// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
-/// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
-/// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
-/// pid -> `gc_action` Keep).
+/// also records the full uuid for its dead-arm `claude --resume`. `status: Idle`,
+/// no pid, default `exec` host_mode: a registered-but-not-driven row the GC
+/// keeps (non-terminal, no confirmed-dead pid -> `gc_action` Keep).
 fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
     use crate::state::{Lineage, RegistryEntry};
     let harness = if !id.harness.is_empty() {
@@ -3285,12 +3283,14 @@ mod tests {
         let fno_id = "0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b";
         let mut split_row = claude_row("split", "7c5dcf5e", "7c5dcf5e-1111-4222-8333-444444444444");
         split_row["fno_id"] = json!(fno_id);
-        let rows = vec![split_row];
-        let e = find_agent_entry(&rows, fno_id).expect("resolves");
+        let e = find_agent_entry(std::slice::from_ref(&split_row), fno_id).expect("resolves");
         assert_eq!(e["name"], "split");
+        assert!(find_agent_entry(std::slice::from_ref(&split_row), fno_id).is_ok());
+        let mut other = split_row.clone();
+        other["fno_id"] = json!("1f2e3d4c-5b6a-4988-9a0b-cdef01234567");
         assert!(
-            find_agent_entry(&rows, "0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b").is_err(),
-            "an fno_id no row carries refuses"
+            find_agent_entry(std::slice::from_ref(&other), fno_id).is_err(),
+            "a token no row answers to refuses"
         );
     }
 
