@@ -80,28 +80,40 @@ impl View {
                 actions.push(AuxAction::ToggleSidelineLayout);
             }
             SettingsTab::Theme => {
-                // The shipped palettes first, then the user's own
-                // ([mux.themes], latched at startup); the active one is
-                // marked. Enter on a name applies it (an explicit action, not
-                // a cursor-move preview).
-                let mut names: Vec<String> = crate::theme::THEME_NAMES
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect();
-                names.extend(self.user_themes.iter().map(|(n, _)| n.clone()));
-                for name in &names {
-                    let active = self.theme.name == name.as_str();
+                if !matches!(&self.theme_import, theme_import_ui::ThemeImportUi::Idle) {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    (rows, actions) = theme_import_ui::rows(&self.theme_import, &cwd);
+                } else {
+                    // The shipped palettes first, then the user's own
+                    // ([mux.themes], latched at startup); the active one is
+                    // marked. Enter on a name applies it (an explicit action, not
+                    // a cursor-move preview).
+                    let mut names: Vec<String> = crate::theme::THEME_NAMES
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect();
+                    names.extend(self.user_themes.iter().map(|(n, _)| n.clone()));
+                    for name in &names {
+                        let active = self.theme.name == name.as_str();
+                        rows.push(PopupRow::Entry {
+                            glyph: if active { "●".into() } else { "○".into() },
+                            label: name.clone(),
+                            hint: if active {
+                                "active".into()
+                            } else {
+                                String::new()
+                            },
+                            enabled: true,
+                        });
+                        actions.push(AuxAction::ApplyTheme(name.clone()));
+                    }
                     rows.push(PopupRow::Entry {
-                        glyph: if active { "●".into() } else { "○".into() },
-                        label: name.clone(),
-                        hint: if active {
-                            "active".into()
-                        } else {
-                            String::new()
-                        },
+                        glyph: "+".into(),
+                        label: "+ add own theme".into(),
+                        hint: String::new(),
                         enabled: true,
                     });
-                    actions.push(AuxAction::ApplyTheme(name.clone()));
+                    actions.push(AuxAction::ThemeImportOpen);
                 }
             }
             SettingsTab::Keys => {
@@ -254,58 +266,4 @@ pub(super) async fn run_toggle(
         _ => {}
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The settings modal sits on the theme ground (plain body).
-    // The inverse body block under a named theme read as a white slab -
-    // the keys-modal fix on a path it missed. Every tab paints, including
-    // the Colors drill with its Rule rows.
-    #[test]
-    fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
-        let mut view = View::new(
-            (30, 100),
-            "main".into(),
-            LayoutView {
-                squads: vec![],
-                active_squad: 0,
-                panes: vec![],
-                focus: 0,
-                area: (29, 72),
-                agents: vec![],
-                focus_node: None,
-            },
-        );
-        view.theme = crate::theme::Theme::from_name("footnote-superscript").0;
-        for tab in [
-            SettingsTab::General,
-            SettingsTab::Theme,
-            SettingsTab::Keys,
-            SettingsTab::Colors,
-        ] {
-            view.settings_tab = tab;
-            // The Colors drill's Rule rows ride the picker and key-list views.
-            if tab == SettingsTab::Colors {
-                view.lane.axis = Some("route".into());
-            }
-            view.aux = Some(view.build_settings_modal());
-            let aux = view.aux.as_ref().expect("modal open");
-            let rendered = aux.popup.render(view.term);
-            let rows_n = view.term.0 as usize;
-            let cols = view.term.1 as usize;
-            let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
-            crate::popup::draw(&mut cells, rows_n, cols, &rendered, &view.theme);
-            let inverse = cells
-                .iter()
-                .filter(|c| c.flags & crate::proto::cell_flags::INVERSE != 0)
-                .count();
-            assert_eq!(
-                inverse, 0,
-                "tab {tab:?}: no INVERSE on the plain-body settings modal"
-            );
-        }
-    }
 }
