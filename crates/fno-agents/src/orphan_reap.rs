@@ -330,7 +330,9 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String, PathBuf)> {
         {
             continue;
         }
-        let Some(socket) = words.next() else { continue };
+        let Some(socket) = words.next().map(str::to_string) else {
+            continue;
+        };
         candidates.push((pid, elapsed_seconds, command, PathBuf::from(socket)));
     }
     candidates
