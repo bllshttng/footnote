@@ -7276,7 +7276,10 @@ fn handle_register_channel(ctx: &Ctx, req: &Request) -> Response {
         .get("name")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let channel_id = uuid_v4();
+    let channel_id = match crate::identity::mint_fno_id() {
+        Ok(id) => id,
+        Err(e) => return Response::err(req.id, ErrorCode::Internal, e),
+    };
     let mut matched = false;
     // Surface a persist failure: without this, `matched` could be set in the
     // closure and the handler would return a successful mcp_channel_id even
@@ -7481,45 +7484,6 @@ fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d, hh, mm, ss)
-}
-
-/// Generate a RFC 4122 v4 UUID from OS randomness (`getentropy`/urandom via
-/// libc). No `uuid` crate dependency; the daemon needs exactly one generator.
-fn uuid_v4() -> String {
-    let mut b = [0u8; 16];
-    fill_random(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant 10
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-        b[14], b[15]
-    )
-}
-
-fn fill_random(buf: &mut [u8]) {
-    // Read from /dev/urandom; if unavailable, fall back to a time+pid mix (the
-    // mcp_channel_id uniqueness invariant tolerates this degraded path because
-    // collisions across one daemon's lifetime are astronomically unlikely).
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        if f.read_exact(buf).is_ok() {
-            return;
-        }
-    }
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64
-        ^ (std::process::id() as u64).rotate_left(17);
-    let mut x = seed | 1;
-    for byte in buf.iter_mut() {
-        // xorshift64
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        *byte = (x & 0xff) as u8;
-    }
 }
 
 /// The interval-gated maintenance sweeps (stale questions, park records),

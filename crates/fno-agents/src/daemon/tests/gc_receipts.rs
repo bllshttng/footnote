@@ -3143,22 +3143,6 @@ fn agent_name_validation() {
 }
 
 #[test]
-fn uuid_v4_shape_and_uniqueness() {
-    let a = uuid_v4();
-    let b = uuid_v4();
-    assert_ne!(a, b);
-    assert_eq!(a.len(), 36);
-    let parts: Vec<&str> = a.split('-').collect();
-    assert_eq!(
-        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
-        vec![8, 4, 4, 4, 12]
-    );
-    // version nibble is 4; variant nibble is 8/9/a/b.
-    assert_eq!(&a[14..15], "4");
-    assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
-}
-
-#[test]
 fn short_id_derivation_dedups() {
     let mut reg = state::Registry::default();
     assert_eq!(derive_short_id("worker-A", &reg), "workerA");
