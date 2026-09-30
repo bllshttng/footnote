@@ -588,8 +588,11 @@ pub(super) async fn mouse_pre_pass(
             // (AC9-EDGE); before the forward, so the frame never forwards.
             if let Some(pid) = view.border_pane_at(rep.row, rep.col) {
                 // A border click is an explicit pane focus: the client-local
-                // owner moves with the server one.
+                // owner moves with the server one, and a hover pending its
+                // settle dies here - the click is the operator's decision,
+                // and a stale pointer landing must not override it.
                 view.region_owner = RegionOwner::Pane;
+                view.hover_pending = None;
                 write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
                     .await
                     .map_err(|e| format!("focus send failed: {e}"))?;
@@ -687,6 +690,7 @@ pub(super) async fn mouse_pre_pass(
             // hover-settle the human path usually supplies first.
             if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
                 view.region_owner = RegionOwner::Pane;
+                view.hover_pending = None;
                 write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
                     .await
                     .map_err(|e| format!("focus send failed: {e}"))?;

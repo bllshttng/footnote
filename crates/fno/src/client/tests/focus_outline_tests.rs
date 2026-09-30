@@ -214,8 +214,16 @@ fn clicks_select_one_input_owner_and_route_bytes() {
     // sends nothing.
     // A content click on pane 11 forwards Mouse and moves the owner.
     let mut view = narrow_three(10);
+    // A pointer that swept across pane 12 left a hover pending its settle:
+    // the click must cancel it, or the settle timer refocuses pane 12 over
+    // the operator's explicit choice.
+    view.hover_pending = Some((12, std::time::Instant::now()));
     let wire = pre_pass(&mut view, press_left(5, 53)); // pane 11's content
     assert_eq!(view.input_owner(), RegionOwner::Pane);
+    assert!(
+        view.hover_pending.is_none(),
+        "an explicit click cancels a pending focus-follow"
+    );
     assert!(!wire.is_empty(), "a content click forwards Mouse");
 
     // A border click on a FRAMED pane sends FocusPane (pane 10's left ring).
