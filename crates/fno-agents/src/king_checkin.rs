@@ -1404,18 +1404,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     data
 }
 
-fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
-    match crate::king_history::scan(&ctx.events_paths, &ctx.scope) {
-        Ok(payload) => {
-            // Only the verb's own rows carry NUMERIC_DIFF_KEYS, so the diff
-            // baseline is the newest `loop` row; a hook row or a hand row
-            // must never baseline the diff.
-            let first = payload["events"]
-                .as_array()
-                .and_then(|e| e.iter().find(|r| s_str(r, "source") == Some("loop")))
-                .cloned();
-            (first, String::new())
-        }
+fn previous_row(ctx: &Ctx, holder: Option<&str>) -> (Option<Value>, String) {
+    match crate::king_history::previous_beat(&ctx.events_paths, &ctx.scope, holder, true) {
+        Ok(first) => (first, String::new()),
         Err(e) => (None, e),
     }
 }
@@ -2280,67 +2271,6 @@ fn finish_checkin(
     0
 }
 
-/// The stop hook's half of the reign record: when this scope's newest
-/// check-in is older than two check-in intervals, journal one row from what
-/// the previous fire measured. It never decides anything.
-pub(crate) fn hook_beat(
-    events_path: &Path,
-    cwd: &Path,
-    scope: &str,
-    session_id: &str,
-    history: &crate::loop_king::KingFireHistory,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    if scope.is_empty() {
-        return false;
-    }
-    let payload = match crate::king_history::scan(&[events_path.to_path_buf()], scope) {
-        Ok(p) => p,
-        // A blind due check must never write: a scan that cannot read the
-        // journal is no evidence a beat was missed.
-        Err(e) => {
-            eprintln!("king-checkin: WARNING: hook beat skipped: {e}");
-            return false;
-        }
-    };
-    let newest = payload["events"].as_array().and_then(|e| e.first());
-    let due = newest
-        .and_then(|r| s_str(r, "ts"))
-        .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
-        .map(|ts| {
-            now - ts
-                >= chrono::Duration::seconds(
-                    2 * crate::king_verdict_inputs::checkin_interval_secs(cwd),
-                )
-        })
-        .unwrap_or(true);
-    if !due {
-        return false;
-    }
-    // ponytail: two stops inside one second can both see the beat due and
-    // write two rows; a cross-process lock costs more than a doubled row.
-    let since = newest.and_then(|r| s_str(r, "ts")).unwrap_or("on record");
-    let undelivered = history
-        .last_undelivered
-        .map(|u| u.to_string())
-        .unwrap_or_else(|| "unread".into());
-    let data = json!({
-        "scope": scope,
-        "session_id": session_id,
-        "fires": history.total,
-        "dry": history.dry,
-        "last_actionable": history.last_ids.len(),
-        "last_undelivered": history.last_undelivered,
-        "change": format!(
-            "missed beat: no check-in since {since}; last fire actionable {}, undelivered {undelivered}, dry {} of {} fires",
-            history.last_ids.len(),
-            history.dry,
-            history.total
-        ),
-    });
-    emit_row(events_path, "hook", data.as_object().unwrap())
-}
-
 // ---------------------------------------------------------------------------
 // entry
 
@@ -2521,7 +2451,11 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     if let Err(error) = rename_harness_title_for_crown(&ctx.scope) {
         eprintln!("fno-agents king-checkin: harness title rename failed: {error}");
     }
-    let (previous, previous_error) = previous_row(&ctx);
+    // The beat stamps the reign clock first: the holder session it names is
+    // what the previous-beat lookup and the refusal trend key on.
+    let holder =
+        crate::crown_names::stamp_beat_reign(&home.crown_names_json(), &ctx.cwd, &ctx.scope);
+    let (previous, previous_error) = previous_row(&ctx, holder.as_deref());
     let since = previous
         .as_ref()
         .and_then(|p| p.get("ts"))
@@ -2532,15 +2466,18 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    if let Some(holder) = holder.as_deref() {
+        data.insert("holder_session".into(), json!(holder));
+    }
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
     let trend_dir = home.refusal_trend_dir();
-    let (previous_rate, second_previous_rate) =
-        crate::refusal_trend::priors(&trend_dir, &ctx.scope);
+    let trend_key = holder.as_deref().unwrap_or(&ctx.scope);
+    let (previous_rate, second_previous_rate) = crate::refusal_trend::priors(&trend_dir, trend_key);
     mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
     // The baseline advances on the measurement the beat just printed,
     // whether or not the full row journals below.
     if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
-        crate::refusal_trend::record(&trend_dir, &ctx.scope, &ts, rate);
+        crate::refusal_trend::record(&trend_dir, trend_key, &ts, rate);
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
@@ -4180,7 +4117,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let readings = sample_readings(
             board7(),
@@ -4217,7 +4154,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
@@ -4522,86 +4459,11 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty(), "err: {err}");
         let previous = previous.expect("the newest loop row is the baseline");
         assert_eq!(s_str(&previous, "source"), Some("loop"));
         assert_eq!(previous["data"]["open_prs"], 9);
-    }
-
-    #[test]
-    fn hook_beat_writes_one_row_per_missed_beat() {
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let prior_config = std::env::var_os("FNO_CONFIG");
-        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
-        let path = journal(
-            dir.path(),
-            &[
-                json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
-                     "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
-            ],
-        );
-        let history = crate::loop_king::KingFireHistory {
-            total: 3,
-            dry: 1,
-            last_ids: vec!["undispatched:x-1".into()],
-            last_undelivered: Some(4),
-            last_terminal: None,
-        };
-        let base = "2026-09-15T10:00:00Z"
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .unwrap();
-        let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 109 minutes old: under two 55-minute intervals, nothing writes.
-        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(109));
-        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
-        // 111 minutes old: the beat is due, one hook row.
-        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(111));
-        let rows = crate::events::committed_journal_text(&path);
-        // A fresh row resets the clock: the next stop writes nothing.
-        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(112));
-        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
-        match prior_config {
-            Some(value) => std::env::set_var("FNO_CONFIG", value),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-
-        assert!(!early);
-        assert_eq!(rows_after_early, 1);
-        assert!(due);
-        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
-        assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
-        let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
-        assert_eq!(written["data"]["scope"], "x-bbbb");
-        assert!(!written["data"]["change"].as_str().unwrap().is_empty());
-        // The fresh row resets the clock: the next stop writes nothing.
-        assert!(!fresh);
-        assert_eq!(rows_after_fresh, 2);
-    }
-
-    #[test]
-    fn hook_beat_never_writes_for_a_blank_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        let history = crate::loop_king::KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: vec![],
-            last_undelivered: None,
-            last_terminal: None,
-        };
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "",
-            "sess",
-            &history,
-            chrono::Utc::now()
-        ));
-        assert!(!path.exists());
     }
 
     fn pause_row(arm: &str) -> crate::tick_ledger::ArmStatus {
