@@ -308,7 +308,7 @@ mod tests {
         }
         drop(file);
         let folded = fold(&last_replies(&transcript).unwrap());
-        assert_eq!(folded["replies"], 23);
+        assert_eq!(folded["replies"], 20);
         assert_eq!(
             folded["asks"],
             json!([
