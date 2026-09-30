@@ -197,29 +197,62 @@ fn run_context_probe(args: &[String]) -> i32 {
         eprintln!("context-run --probe: --transcript is required");
         return 2;
     };
-    session = crate::context_window::rollout_session_id(Path::new(transcript)).unwrap_or(session);
-    let usage = match crate::context_window::read_last_usage(Path::new(transcript)) {
-        Ok(Some(usage)) => usage,
-        Ok(None) | Err(_) => return 3,
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let payload = match transcript_reading(Path::new(transcript), &session, &cwd) {
+        Ok(payload) => payload,
+        Err(error) => {
+            if error.starts_with("effective context window unreadable:") {
+                eprintln!("context-run --probe: {error}");
+            }
+            return 3;
+        }
     };
-    let used_tokens = match usage.used_tokens() {
-        Some(tokens) => tokens,
-        None => return 3,
+    let provenance = match payload["window_source"].as_str() {
+        Some("measured") => format!(
+            " [measured {}]",
+            payload["window_measured_at"].as_str().unwrap_or("")
+        ),
+        Some("harness") => " [harness window]".to_string(),
+        _ => " [unmeasured default]".to_string(),
     };
+    if json_output {
+        println!("{payload}");
+    } else {
+        println!(
+            "{}% used ({} of {} tokens), model {}{}",
+            payload["used_pct"],
+            payload["used_tokens"],
+            payload["window_tokens"],
+            payload["model"],
+            provenance
+        );
+    }
+    0
+}
+
+pub(crate) fn transcript_reading(
+    transcript: &Path,
+    session: &str,
+    cwd: &Path,
+) -> Result<Value, String> {
+    let session = crate::context_window::rollout_session_id(transcript)
+        .unwrap_or_else(|| session.to_string());
+    let usage = crate::context_window::read_last_usage(transcript)
+        .map_err(|error| format!("usage unreadable: {error:?}"))?
+        .ok_or_else(|| "no usage record".to_string())?;
+    let used_tokens = usage
+        .used_tokens()
+        .ok_or_else(|| "usage token count overflow".to_string())?;
     let (window_tokens, window_source, window_measured_at, window_evidence) =
         if crate::context_window::is_astra_model(&usage.model) {
             match crate::context_window::effective_window_for_model(&usage.model, &session) {
                 Ok(window) => (window, "harness", None, None),
                 Err(error) => {
-                    eprintln!(
-                        "context-run --probe: effective context window unreadable: {error:?}"
-                    );
-                    return 3;
+                    return Err(format!("effective context window unreadable: {error:?}"))
                 }
             }
         } else {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let reading = crate::context_window::window_reading(&usage.model, &cwd);
+            let reading = crate::context_window::window_reading(&usage.model, cwd);
             let source = if reading.measured_at.is_some() {
                 "measured"
             } else {
@@ -232,19 +265,10 @@ fn run_context_probe(args: &[String]) -> i32 {
                 reading.evidence,
             )
         };
-    let Some(used_pct) = crate::context_window::used_percent(used_tokens, window_tokens) else {
-        return 3;
-    };
+    let used_pct = crate::context_window::used_percent(used_tokens, window_tokens)
+        .ok_or_else(|| "context window is zero or percentage overflowed".to_string())?;
     let band = crate::context_window::compaction_band(&usage.model, used_tokens, window_tokens);
-    let provenance = match window_source {
-        "measured" => format!(
-            " [measured {}]",
-            window_measured_at.as_deref().unwrap_or("")
-        ),
-        "harness" => " [harness window]".to_string(),
-        _ => " [unmeasured default]".to_string(),
-    };
-    let payload = json!({
+    Ok(json!({
         "used_tokens": used_tokens,
         "window_tokens": window_tokens,
         "used_pct": used_pct,
@@ -253,16 +277,20 @@ fn run_context_probe(args: &[String]) -> i32 {
         "window_source": window_source,
         "window_measured_at": window_measured_at,
         "window_evidence": window_evidence,
-    });
-    if json_output {
-        println!("{payload}");
-    } else {
-        println!(
-            "{}% used ({} of {} tokens), model {}{}",
-            used_pct, used_tokens, window_tokens, payload["model"], provenance
-        );
+    }))
+}
+
+pub(crate) fn session_transcript(sid: &str, harness: &str) -> Option<PathBuf> {
+    match harness {
+        "claude" => crate::claude_drive::find_transcript(sid),
+        "codex" => {
+            let sessions = crate::gc_inventory::codex_store_sessions().ok()?;
+            sessions
+                .get(&sid.to_ascii_lowercase())
+                .and_then(|paths| paths.first().cloned())
+        }
+        _ => None,
     }
-    0
 }
 
 fn native_bound() -> Duration {
@@ -1095,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_json_output_counts_its_directive_not_its_json_bytes() {
+    fn output_measurement_counts_directives_trimmed_text_and_empty_json() {
         let fx = Fixture::new(
             "g",
             echo_group(json!([
@@ -1114,10 +1142,6 @@ mod tests {
         assert_eq!(row["content_hash"], format!("{:x}", hasher.finalize()));
         let parsed: Value = serde_json::from_str(&out.stdout).expect("stdout json");
         assert_eq!(parsed["hookSpecificOutput"]["additionalContext"], "abc");
-    }
-
-    #[test]
-    fn plain_text_counts_its_raw_trimmed_bytes_and_empty_json_is_observed() {
         let fx = Fixture::new(
             "g",
             echo_group(json!([
@@ -1244,5 +1268,36 @@ mod tests {
         let out = fx.run("missing-group", json!({"session_id": "s1"}), 5000);
         assert!(out.stdout.is_empty());
         assert!(out.snapshot.is_none());
+    }
+
+    #[test]
+    fn transcript_reading_preserves_probe_usage_and_unreadable_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":200000,\"cache_creation_input_tokens\":58687}}}\n").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let reading = transcript_reading(&path, "fixture", &cwd).unwrap();
+        assert_eq!(reading["used_tokens"], 258687);
+        assert_eq!(reading["model"], "claude-opus-5");
+        assert_eq!(
+            reading["used_pct"],
+            crate::context_window::used_percent(258687, reading["window_tokens"].as_u64().unwrap())
+                .unwrap()
+        );
+        let args = vec![
+            "--transcript".into(),
+            path.to_string_lossy().into_owned(),
+            "--session".into(),
+            "fixture".into(),
+            "--json".into(),
+        ];
+        assert_eq!(run_context_probe(&args), 0);
+        std::fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
+        assert!(transcript_reading(&path, "fixture", &cwd).is_err());
+        assert_eq!(run_context_probe(&args), 3);
+        std::fs::remove_file(&path).unwrap();
+        assert!(transcript_reading(&path, "fixture", &cwd).is_err());
+        assert_eq!(run_context_probe(&args), 3);
+        assert!(session_transcript("fixture", "unsupported").is_none());
     }
 }
