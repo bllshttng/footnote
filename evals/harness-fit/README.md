@@ -74,7 +74,7 @@ Two infrastructure stops hit the runs while they were in flight. This amendment 
 - Provider cap. When the fleet already holds every zai lane, the spawn gate refuses a Run 1 worker (`provider_cap`). The row reads `unavailable` and the worker never runs. After the lanes finish, a top-up pass reruns missing graded attempts. It stops at 3 graded attempts per task, or after 3 passes. Each refusal stays in history and is counted by reason.
 - Neither rerun touches a trial or attempt that started. A started attempt that fails is scored as it stands.
 - Stalls. A Run 1 worker that runs out its 45-minute budget started. The spawn exits 12 (opencode) or 124 (claude), and the runner files the row `unavailable` with no grade. This study scores that row as a stall: an attempt with no accepted change. run-1.md prints each lane's rate with and without stalls.
-- opencode identity. The observe door compared the requested `zai-coding-plan/glm-5.3-flash` with the stored modelID `glm-5.3-flash`. So every opencode row read `substituted`. It also left reasoning tokens out of output. The fix joins `providerID/modelID` and adds reasoning. The run keeps its binary, so run-1.md re-reads each opencode row from the opencode store by its session id, under the fixed rule.
+- opencode identity. The observe door compared the requested `zai-coding-plan/glm-5.3-flash` with the stored modelID `glm-5.3-flash`. So every opencode row read `substituted`. It also left reasoning tokens out of output. The fix joins `providerID/modelID` and adds reasoning. The run keeps its binary. So run-1.md re-reads each opencode row from the store by session id, under the fixed rule.
 
 ## Scope and limits
 
