@@ -184,6 +184,30 @@ def call_binary_json(
         return ("unreadable JSON receipt", None)
 
 
+def mint_fno_id() -> str:
+    """Footnote's session-id mint lives in Rust: `fno-agents state mint-id`.
+
+    The one mint every id site forwards to, so a Python caller can never mint a
+    second id shape. Raises VerbUnavailable when the binary is missing or
+    answers nothing: no Python-side fallback exists, by the same rule that
+    keeps the mint single.
+    """
+    import subprocess
+
+    binary = resolve_binary()
+    if binary is None:
+        raise VerbUnavailable("fno-agents binary not found; run `fno doctor update`")
+    proc = subprocess.run(
+        [str(binary), "state", "mint-id"], capture_output=True, text=True, timeout=10
+    )
+    minted = proc.stdout.strip()
+    if proc.returncode != 0 or not minted:
+        raise VerbUnavailable(
+            (proc.stderr or "fno-agents state mint-id answered nothing").strip()[:200]
+        )
+    return minted
+
+
 def resolve_installed_binary() -> Optional[Path]:
     """Locate an *installed* ``fno-agents``, deliberately excluding the cargo dev target.
 
