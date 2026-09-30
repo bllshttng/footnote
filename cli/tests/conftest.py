@@ -378,6 +378,18 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_runtest_logstart(nodeid: str, location: object) -> None:
     """Track the running test for the SIGTERM capture (see _install_sigterm_capture)."""
     _current_test[0] = nodeid
+    # The resource sampler pairs each python process's RSS with the test it is
+    # running; this pid-keyed line is its read side. Shard-gated like the
+    # capture, one tiny write per test start.
+    if os.environ.get("FNO_PYTEST_SHARD"):
+        try:
+            with open(
+                os.path.join(tempfile.gettempdir(), f"pytest-current-{os.getpid()}.txt"),
+                "w",
+            ) as fh:
+                fh.write(nodeid + "\n")
+        except OSError:
+            pass
 
 
 @pytest.hookimpl(tryfirst=True)

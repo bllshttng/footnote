@@ -1,0 +1,57 @@
+name: memory-baseline
+
+# PR-owned diagnostic: dispatch-only, runs MAIN's shard 3 under the same
+# resource sampler the cli-ci pytest shards carry, so the memory curve has a
+# main-branch baseline without a main commit. The checkout pins refs/heads/main
+# and every probe line is inline here, so nothing of this diagnostic lives on
+# the branch it measures.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: why this baseline run was dispatched
+        required: false
+        default: ""
+
+concurrency:
+  group: memory-baseline-main-shard
+  cancel-in-progress: false
+
+jobs:
+  main-shard3-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+
+      - name: Record measured main sha
+        run: git rev-parse HEAD
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Shard 3 under the resource sampler
+        run: |
+          start=$SECONDS
+          trap 'bash scripts/ci/smoke-duration-report.sh memory-baseline-main-shard3 "$(( SECONDS - start ))" 12 || true; [ -f /tmp/shard-resources.log ] && cat /tmp/shard-resources.log && rm -f /tmp/shard-resources.log; kill "$SAMPLER" || true' EXIT
+          : "$start"
+          ( while :; do
+              printf '%s ' "$(date -u +%FT%TZ)"
+              free -m 2>/dev/null | awk '/Mem:/ {printf "mem_used_mb=%s mem_avail_mb=%s ", $3, $7}'
+              df -m /tmp / 2>/dev/null | awk 'NR>1 {printf "fs=%s avail_mb=%s ", $6, $4}'
+              printf '\n'
+              for p in $(ps -eo pid=,rss=,comm= | awk '$3 ~ /python/ {print $1 ":" $2}'); do
+                pid=${p%%:*}
+                rss=${p##*:}
+                t=$(cat "/tmp/pytest-current-$pid.txt" 2>/dev/null)
+                printf 'pid=%s rss_mb=%s test=%s\n' "$pid" "$rss" "${t:-none}"
+              done
+              sleep 30
+            done ) >> /tmp/shard-resources.log 2>/dev/null &
+          SAMPLER=$!
+          disown "$SAMPLER"
+          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard 3/13
