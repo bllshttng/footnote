@@ -1994,23 +1994,33 @@ fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<S
         facts.body.as_deref(),
         entries,
     );
-    let carries_tag = |nid: &str| {
-        entries.iter().any(|e| {
-            crate::graph_store::entry_id(e) == Some(nid) && node_carries_tag(e, MAIN_REPAIR_TAG)
-        })
+    let entry_of = |nid: &str| {
+        entries
+            .iter()
+            .find(|e| crate::graph_store::entry_id(e) == Some(nid))
     };
-    if keys
+    let bound: Vec<&Value> = keys
         .branch
         .iter()
         .chain(&keys.backrefs)
         .chain(&keys.trailer)
-        .any(|nid| carries_tag(nid))
-    {
+        .filter_map(|nid| entry_of(nid))
+        .collect();
+    if bound.iter().any(|e| node_carries_tag(e, MAIN_REPAIR_TAG)) {
         return None;
     }
+    // The lane is named within the PR's own project: another project's
+    // main-repair tag declares that project's main, never this one.
+    let project = bound
+        .iter()
+        .find_map(|e| e.get("project").and_then(Value::as_str));
     let lanes: Vec<&str> = entries
         .iter()
         .filter(|e| node_carries_tag(e, MAIN_REPAIR_TAG))
+        .filter(|e| match project {
+            Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
+            None => true,
+        })
         .filter_map(|e| crate::graph_store::entry_id(e))
         .collect();
     Some(if lanes.is_empty() {
@@ -4756,7 +4766,7 @@ mod tests {
 
         // A pending main is not red, and an unreadable verdict never
         // manufactures one; the gate names main, not every base.
-        for mut clearing in [
+        for clearing in [
             Fake {
                 main_ci: Some(Ok(Value::String("pending".into()))),
                 main_repair: Some(Some(lane.to_string())),
