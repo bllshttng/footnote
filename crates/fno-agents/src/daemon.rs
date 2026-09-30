@@ -5083,9 +5083,8 @@ pub(crate) async fn stop_worker_confirmed_for_home(
     down
 }
 
-/// Probe whether the worker is still serving on its socket. PID-reuse-immune:
-/// the worker is identified by the socket it owns (per `short_id`), so a
-/// recycled unrelated pid never answers here (Codex P1).
+/// Resolve one registry entry by harness session id and stop it through the
+/// same confirmed worker path used by `fno agents stop`.
 pub(crate) async fn stop_session_for_home(
     home: &AgentsHome,
     session_id: &str,
@@ -5104,6 +5103,9 @@ pub(crate) async fn stop_session_for_home(
     Some((name, stopped))
 }
 
+/// Probe whether the worker is still serving on its socket. PID-reuse-immune:
+/// the worker is identified by the socket it owns (per `short_id`), so a
+/// recycled unrelated pid never answers here (Codex P1).
 async fn worker_socket_reachable(sock: &std::path::Path) -> bool {
     UnixStream::connect(sock).await.is_ok()
 }

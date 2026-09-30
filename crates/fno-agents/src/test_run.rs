@@ -420,8 +420,7 @@ pub fn declared_owner_from_env() -> Option<(u32, u64)> {
 /// `FNO_OWNER_*` vocabulary; cargo admission remains isolated on the
 /// `FNO_TEST_OWNER_*` pair and is never inferred from a sandbox lease.
 pub fn daemon_owner_from_env() -> Option<(u32, u64, Option<String>)> {
-    if sandbox_owner_from_env().is_some() {
-        let owner = sandbox_owner_from_env()?;
+    if let Some(owner) = sandbox_owner_from_env() {
         return Some((owner.0, owner.1, Some(owner.2)));
     }
     if ["FNO_OWNER_PID", "FNO_OWNER_BIRTH", "FNO_OWNER_SESSION"]

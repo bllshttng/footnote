@@ -328,13 +328,13 @@ fn server_spine_losing_contender_emits_no_raise_receipt() {
 fn server_spine_echo_roundtrips_via_fake_client() {
     // AC2-HP: keystrokes reach the PTY and the output renders, no TTY needed.
     let scratch = Scratch::new("echo");
-    let mut owner = Command::new("sleep").arg("30").spawn().unwrap();
-    let owner_birth = fno::proto::pid_start_time(owner.id()).unwrap();
+    let mut owner = Server(Command::new("sleep").arg("30").spawn().unwrap());
+    let owner_birth = fno::proto::pid_start_time(owner.0.id()).unwrap();
     let mut server = spawn_server_with_env(
         &scratch.sock(),
         "/bin/sh",
         &[
-            ("FNO_OWNER_PID", &owner.id().to_string()),
+            ("FNO_OWNER_PID", &owner.0.id().to_string()),
             ("FNO_OWNER_BIRTH", &owner_birth.to_string()),
             ("FNO_OWNER_SESSION", "owner-test-session"),
             ("FNO_IDLE_EXIT_GRACE_MS", "60000"),
@@ -353,8 +353,8 @@ fn server_spine_echo_roundtrips_via_fake_client() {
     wait_for_frame(&mut stream, 10, |text| {
         common::screen_has_line(text, "hello")
     });
-    owner.kill().unwrap();
-    owner.wait().unwrap();
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if server.0.try_wait().unwrap().is_some() {

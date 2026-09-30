@@ -2850,6 +2850,21 @@ event_types:
           type: string
         zombies:
           type: integer
+
+  - name: orphan_owner_server_reaped
+    description: "An owner-bound, parentless fno mux server was killed after its owner died and the server exceeded the 600-second age floor."
+    sources: [daemon]
+    data:
+      required: [pid, owner_session, command, elapsed_seconds]
+      properties:
+        pid:
+          type: integer
+        owner_session:
+          type: string
+        command:
+          type: string
+        elapsed_seconds:
+          type: integer
         elapsed_seconds:
           type: integer
 

@@ -344,7 +344,7 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String, PathBuf)> {
 fn reap_owner_server_rows(ps_output: &str, apply: bool) -> Vec<ReapRow> {
     let mut rows = Vec::new();
     for (pid, elapsed, command, socket) in owner_server_rows(ps_output) {
-        if elapsed < OWNER_SERVER_MIN_AGE_SECS {
+        if elapsed <= OWNER_SERVER_MIN_AGE_SECS {
             continue;
         }
         let server_birth = crate::daemon::process_start_time(pid);
