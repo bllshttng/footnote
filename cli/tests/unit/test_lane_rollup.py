@@ -53,6 +53,7 @@ def graph(tmp_path, monkeypatch):
     return path
 
 
+@pytest.mark.dev_build
 def test_lanes_rollup_joins_slots_with_graph(claims_root, graph):
     _seed_lane("x-aaaa", 3, "code")
     _seed_lane("x-bbbb", 3, "docs")
@@ -77,6 +78,7 @@ def test_lanes_rollup_empty(claims_root, graph):
     assert out["lanes"] == []
 
 
+@pytest.mark.dev_build
 def test_lanes_rollup_human_line(claims_root, graph):
     _seed_lane("x-aaaa", 2, "code")
     res = _runner.invoke(gcli.cli, ["lanes"])

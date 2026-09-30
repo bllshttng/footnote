@@ -505,7 +505,7 @@ pub fn schedule_shadow(
             &thresholds,
             claims_root,
         );
-        let verdict = match reason {
+        let verdict = match &reason {
             None => {
                 if selected.len() < effective_cap {
                     selected.push(node.clone());
@@ -569,7 +569,7 @@ pub fn run_lane_fill(args: &[String]) -> i32 {
         opts.mission.as_deref(),
         opts.claim,
         None,
-        &repo_root,
+        Path::new(&repo_root),
     ) {
         Ok((selected, report)) => {
             if opts.json {
@@ -612,7 +612,7 @@ pub fn run_schedule_shadow(args: &[String]) -> i32 {
         opts.project.as_deref(),
         opts.mission.as_deref(),
         None,
-        &repo_root,
+        Path::new(&repo_root),
     );
     println!(
         "{}",

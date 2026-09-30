@@ -21,6 +21,8 @@ import pytest
 
 from fno.rust_binary import resolve_binary
 
+pytestmark = pytest.mark.dev_build
+
 
 def _run_lane_race(root: Path, max_lanes: int, n_workers: int) -> list[tuple]:
     """Race n real `claim lane-acquire` processes on one claims root.

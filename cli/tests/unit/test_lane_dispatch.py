@@ -27,6 +27,8 @@ from fno.graph import cli as graph_cli
 from fno.config import WORKTREE_LOCAL_KEYS, _worktree_local_override
 from fno.rust_binary import resolve_binary
 
+pytestmark = pytest.mark.dev_build
+
 
 def _lane_count() -> int:
     """Live lane slots under the ambient (env-pinned) claims root."""

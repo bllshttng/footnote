@@ -37,12 +37,18 @@ pub fn run_lane_acquire(args: &[String]) -> i32 {
                 }
                 None => return usage(),
             },
-            "--ttl" => match args.get(index + 1) {
+            "--ttl" => match args
+                .get(index + 1)
+                .and_then(|v| crate::claims::parse_ttl_ms(v))
+            {
                 Some(value) => {
-                    ttl_ms = Some(crate::claims::parse_ttl_ms(value));
+                    ttl_ms = Some(value);
                     index += 1;
                 }
-                None => return usage(),
+                None => {
+                    eprintln!("validation error: --ttl must parse (e.g. 1h, 30m)");
+                    return 2;
+                }
             },
             "--domain" => match args.get(index + 1) {
                 Some(value) => {
