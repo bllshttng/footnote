@@ -209,18 +209,18 @@ pub(crate) fn main_ci_reading_cached(cwd: &Path) -> Result<Value, String> {
     Ok(token)
 }
 
-/// The workflow-run rows an `/actions/runs` page carries, in the fields
-/// the reducer reads; row order is free.
-fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
-    serde_json::json!({
-        "name": name, "head_sha": sha, "status": status,
-        "conclusion": conclusion, "created_at": created,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The workflow-run rows an `/actions/runs` page carries, in the fields
+    /// the reducer reads; row order is free.
+    fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
+        serde_json::json!({
+            "name": name, "head_sha": sha, "status": status,
+            "conclusion": conclusion, "created_at": created,
+        })
+    }
 
     #[test]
     fn main_ci_reads_green_when_every_workflows_newest_completed_run_passed() {
