@@ -166,6 +166,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
 pub mod gc_claude_stop;
