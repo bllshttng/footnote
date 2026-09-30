@@ -66,12 +66,80 @@ def _no_board_render(monkeypatch):
     board-render`), so an unstubbed graph write would fork a subprocess per
     write and a lagging install would print its stderr into CliRunner's
     mixed output, breaking --json parses far from any test about rendering.
-    The render's own tests re-stub `render_local_targets` from import-time
-    captures.
+    Tests about the render itself request `native_board_render`, which swaps
+    this no-op for an in-process fake of the native writer.
     """
     import fno.graph.roadmap_public as rp
 
     monkeypatch.setattr(rp, "render_local_targets", lambda: 0)
+
+
+@pytest.fixture
+def native_board_render(monkeypatch):
+    """An in-process fake of the native board render, for the render's own
+    tests.
+
+    Mirrors the native writer's observable contract at the Python seam: every
+    configured local target is written with the CURRENT (archive-overlaid)
+    rows; a named project matching no rows warns and counts as a failure (the
+    typo'd-project guard); a retired projection warns and skips; a failed
+    write warns with its error class and counts. The page internals remain
+    the Rust renderer's to prove.
+    """
+    import os
+    import sys
+    from pathlib import Path
+
+    import fno.graph.roadmap_public as rp
+
+    def render() -> int:
+        rows = rp.load_render_entries(None)
+        failures = 0
+        for target in rp._configured_targets():
+            scope, all_projects = rp._target_scope(target)
+            if target.projection != "local":
+                print(
+                    f"Warning: render target {target.path}: projection "
+                    f"{target.projection!r} is retired; the web backlog page "
+                    "replaces the rendered boards",
+                    file=sys.stderr,
+                )
+                continue
+            out = Path(os.path.expanduser(target.path))
+            scoped = rows if all_projects else [
+                r for r in rows if (r.get("project") or "") == scope
+            ]
+            if not all_projects and not scoped:
+                print(
+                    f"Warning: render target {out} matches no graph entry "
+                    f"with project {scope!r}; target left unchanged "
+                    "(check the project name)",
+                    file=sys.stderr,
+                )
+                failures += 1
+                continue
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                body = "".join(
+                    f"<div>{r.get('id', '')} {r.get('title', '')} "
+                    f"{r.get('plan_path') or ''}</div>"
+                    for r in scoped
+                )
+                out.write_text(
+                    f'<html><body id="stats">{body}</body></html>',
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                print(
+                    f"Warning: render target {out} failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                failures += 1
+        return failures
+
+    monkeypatch.setattr(rp, "render_local_targets", render)
+    return render
 
 
 @pytest.fixture(autouse=True)

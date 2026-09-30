@@ -403,7 +403,8 @@ mod tests {
             Some("internal/fno/plans/x.md")
         );
         assert_eq!(
-            canonical_plan_path("/wt/footnote/x-f0f6/internal/fno/plans/x.md", None).as_deref(),
+            canonical_plan_path("/wt/footnote/some-worktree/internal/fno/plans/x.md", None)
+                .as_deref(),
             Some("internal/fno/plans/x.md")
         );
         assert_eq!(canonical_plan_path("~/elsewhere/x.md", Some("c3po")), None);

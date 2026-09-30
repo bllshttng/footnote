@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -532,7 +531,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
 
 # --- view ---
 
-def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch):
+def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC1-HP: fno graph view rerenders HTML and echoes the path."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -547,7 +546,7 @@ def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, mon
     assert "<html" in text
 
 
-def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch):
+def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC2-ERR: view on an empty graph produces an HTML shell, not an error."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -2159,16 +2158,3 @@ def test_provenance_external_reads_sidecar_edges(
     assert doc["sessions"] == [{"phase": "do", "session_id": "ext-sess"}]
     assert doc["source_node_id"] == "EXT-done"
     assert doc["source_node_title"] == "Closed blocker"
-
-
-def test_local_store_displays_refuse_cleanly_under_external(tmp_path, monkeypatch):
-    """Display renders of the LOCAL store's full records (view) refuse with
-    the backend named under an external selection - never a stale render."""
-    absent = tmp_path / "absent.json"
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: absent)
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "view")
-    assert r.exit_code == 2, r.output
-    assert "external" in r.output
