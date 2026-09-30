@@ -2282,6 +2282,11 @@ pub enum ServerMsg {
         closed_panes: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tabs_removed: Vec<String>,
+        /// Panes the 60s operator_typing guard skipped: the close
+        /// was refused, not lost. Default-skipped so an older reader is
+        /// unaffected.
+        #[serde(default)]
+        skipped_typing: usize,
     },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
