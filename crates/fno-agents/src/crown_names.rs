@@ -12,7 +12,10 @@
 //!   "name": "Barnaby", "regnal": 1,
 //!   "holder_session": "<harness session uuid>" | null,
 //!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z",
-//!   "theme": "native backlog", "title": "Lead of native backlog"}}}
+//!   "theme": "native backlog", "title": "Lead of native backlog",
+//!   "reign": {"session": "<uuid>", "scope": "<canonical scope>",
+//!             "armed_at": "<ts>", "started_at": "<ts>",
+//!             "term": "span:200h"} | absent}}}
 //! ```
 //!
 //! `holder_session` is the live holder row's `harness_session_id` (law
@@ -26,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use crate::loopcheck::KingManifest;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrownNameRecord {
@@ -46,6 +51,10 @@ pub struct CrownNameRecord {
     /// mid-flight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_succession: Option<PendingSuccession>,
+    /// The reign clock carried across a re-scope (see [`ReignClock`]).
+    /// Skipped in the JSON while absent, like `pending_succession`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reign: Option<ReignClock>,
 }
 
 /// A succession carried but not yet proven: written when `carry_succession`
@@ -59,6 +68,22 @@ pub struct PendingSuccession {
     #[serde(default)]
     pub predecessor_session: Option<String>,
     pub ts: String,
+}
+
+/// When a holder's reign began and the term it declared. Keyed on the
+/// session: a re-scope by the same session carries it, a new session (an
+/// heir) or a same-scope re-arm starts fresh.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReignClock {
+    pub session: String,
+    /// Canonical scope of the manifest last stamped.
+    pub scope: String,
+    /// That manifest's created_at.
+    pub armed_at: String,
+    /// The reign's first arm.
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
 }
 
 /// One reverted succession: the receipt the reap sweep reports and journals.
@@ -315,6 +340,7 @@ pub fn name_crown(
                     .get(&canon)
                     .map(|c| title(c.level as u32, &canon, None)),
                 pending_succession: None,
+                reign: None,
             },
         );
         Ok(display(name, 1))
@@ -572,6 +598,170 @@ pub fn carry_succession(
         }
         Ok(())
     })
+}
+
+/// RFC3339 compare that survives `Z` and `+00:00` spellings; a string
+/// compare backstops an unparsable stamp.
+fn ts_earlier(a: &str, b: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(x), Ok(y)) => {
+            if x <= y {
+                a.to_string()
+            } else {
+                b.to_string()
+            }
+        }
+        _ if a <= b => a.to_string(),
+        _ => b.to_string(),
+    }
+}
+
+/// The live clock for this manifest, if one applies. Candidates are every
+/// record whose `reign.session` names the manifest's own session; the
+/// newest `armed_at` wins, parsed as a `DateTime` because `Z` and `+00:00`
+/// spellings coexist in written stores. It applies on a re-scope not yet
+/// stamped (the clock's scope differs and this manifest is newer than the
+/// clock's arm) or on the scope it was stamped for; a same-scope re-arm
+/// (a newer manifest, same scope) and an older manifest apply nothing.
+fn clock_for(store: &Store, m: &KingManifest) -> Option<ReignClock> {
+    let session = m
+        .harness_session_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())?;
+    let scope = crate::territory::canonical_scope(&m.scope);
+    let created = m.created_at.as_deref().unwrap_or_default();
+    let mut best: Option<ReignClock> = None;
+    for rec in store.crowns.values() {
+        let Some(reign) = rec.reign.as_ref() else {
+            continue;
+        };
+        if reign.session != session || reign.armed_at.is_empty() {
+            continue;
+        }
+        let take = match best.as_ref() {
+            None => true,
+            Some(cur) => match (
+                chrono::DateTime::parse_from_rfc3339(&reign.armed_at),
+                chrono::DateTime::parse_from_rfc3339(&cur.armed_at),
+            ) {
+                (Ok(a), Ok(b)) => a > b,
+                _ => reign.armed_at.as_str() > cur.armed_at.as_str(),
+            },
+        };
+        if take {
+            best = Some(reign.clone());
+        }
+    }
+    let clock = best?;
+    let applies = if clock.scope != scope {
+        !created.is_empty()
+            && match (
+                chrono::DateTime::parse_from_rfc3339(created),
+                chrono::DateTime::parse_from_rfc3339(&clock.armed_at),
+            ) {
+                (Ok(c), Ok(a)) => c >= a,
+                _ => created >= clock.armed_at.as_str(),
+            }
+    } else {
+        clock.armed_at == created
+    };
+    applies.then_some(clock)
+}
+
+/// The manifest as the reign reads it: with a carried clock, the start is
+/// the reign's first arm and an undeclared term takes the carried one. An
+/// unreadable store returns the manifest unchanged.
+pub(crate) fn reign_view_in(store_path: &Path, m: &KingManifest) -> KingManifest {
+    let Ok(store) = read(store_path) else {
+        return m.clone();
+    };
+    let view_from = |clock: ReignClock| {
+        let mut view = m.clone();
+        view.created_at = Some(match m.created_at.as_deref() {
+            Some(created) if !created.is_empty() => ts_earlier(&clock.started_at, created),
+            _ => clock.started_at.clone(),
+        });
+        view.term = m.term.clone().or(clock.term);
+        view
+    };
+    clock_for(&store, m).map_or_else(|| m.clone(), view_from)
+}
+
+/// [`reign_view_in`] against the ambient agents home. `None` there (a test
+/// that declared no home) reads the manifest unchanged.
+pub(crate) fn reign_view(m: &KingManifest) -> KingManifest {
+    match crate::paths::AgentsHome::from_env_opt() {
+        Some(home) => reign_view_in(&home.crown_names_json(), m),
+        None => m.clone(),
+    }
+}
+
+/// Stamp the reign clock for this manifest arm onto the record for its
+/// canonical scope, inside the store lock. A carried clock keeps the
+/// earlier start and the declared term; no record, or no session, stamps
+/// nothing - the clock never creates a record.
+pub(crate) fn stamp_reign(
+    store_path: &Path,
+    m: &KingManifest,
+    term: Option<&str>,
+) -> Result<(), String> {
+    let Some(session) = m
+        .harness_session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(created) = m.created_at.clone().filter(|c| !c.trim().is_empty()) else {
+        return Ok(());
+    };
+    let canon = crate::territory::canonical_scope(&m.scope);
+    update(store_path, |store| {
+        let carried = clock_for(store, m);
+        let Some(rec) = store.crowns.get_mut(&canon) else {
+            return Ok(());
+        };
+        rec.reign = Some(ReignClock {
+            session,
+            scope: canon.clone(),
+            armed_at: created.clone(),
+            started_at: match &carried {
+                Some(c) => ts_earlier(&c.started_at, &created),
+                None => created.clone(),
+            },
+            term: term
+                .map(str::to_string)
+                .or_else(|| m.term.clone())
+                .or_else(|| carried.as_ref().and_then(|c| c.term.clone())),
+        });
+        rec.updated_at = now_stamp();
+        Ok(())
+    })
+}
+
+/// Stamp the beat's manifest arm and return the holder session it named.
+/// Best-effort: any failure prints one warning and never fails the beat.
+pub(crate) fn stamp_beat_reign(store_path: &Path, cwd: &Path, scope: &str) -> Option<String> {
+    let stamped = (|| -> Result<String, String> {
+        let path = crate::loop_reign::manifest_path(&crate::paths::space_dir(cwd), scope)?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let manifest = crate::loopcheck::parse_king_manifest(&content)
+            .ok_or_else(|| format!("{}: no frontmatter", path.display()))?;
+        stamp_reign(store_path, &manifest, None)?;
+        Ok(manifest.harness_session_id.unwrap_or_default())
+    })();
+    match stamped {
+        Ok(s) if !s.is_empty() => Some(s),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("king-checkin: WARNING: reign clock not stamped: {e}");
+            None
+        }
+    }
 }
 
 /// Set (once per scope) a lead's theme. The crown must be live and named;
@@ -1116,6 +1306,21 @@ mod tests {
             let registry = registry_path(tmp.path());
             name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
             set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            // AC1-HP: the clock stamped on the old arm, the re-scope, and the
+            // next stamp on the new arm: the carried start and term survive.
+            let mk = |scope: &str, created: &str, term: Option<&str>| KingManifest {
+                scope: scope.to_string(),
+                created_at: Some(created.to_string()),
+                harness_session_id: Some("sess-k".to_string()),
+                term: term.map(str::to_string),
+                ..Default::default()
+            };
+            let (t0, t1, t2) = (
+                "2026-09-20T12:00:00Z",
+                "2026-09-29T21:00:00Z",
+                "2026-09-29T22:00:00Z",
+            );
+            stamp_reign(&store, &mk("x-aaaa", t0, Some("span:200h")), None).unwrap();
             // The told-to re-scope: the same holder now holds a new scope.
             write_registry(
                 tmp.path(),
@@ -1126,6 +1331,16 @@ mod tests {
             let rec = &dump["crowns"]["new-scope"];
             assert!(rec.get("theme").is_none() || rec["theme"].is_null());
             assert_eq!(rec["title"], json!("Lead of new-scope"));
+            // The next arm on the new scope folds the carried clock in.
+            stamp_reign(&store, &mk("new-scope", t1, None), None).unwrap();
+            let view = reign_view_in(&store, &mk("new-scope", t1, None));
+            assert_eq!(view.created_at.as_deref(), Some(t0));
+            assert_eq!(view.term.as_deref(), Some("span:200h"));
+            // AC4-EDGE: a same-scope re-arm (a newer manifest, same scope)
+            // starts fresh; the carried clock does not apply.
+            let view = reign_view_in(&store, &mk("new-scope", t2, None));
+            assert_eq!(view.created_at.as_deref(), Some(t2));
+            assert_eq!(view.term, None);
             let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "new-scope")
                 .unwrap_err();
             assert!(err.contains("--theme"), "{err}");
@@ -1273,6 +1488,7 @@ mod tests {
                         theme: None,
                         title: None,
                         pending_succession: None,
+                        reign: None,
                     },
                 )]),
             },
@@ -1392,6 +1608,19 @@ mod tests {
             "barnaby",
         )
         .unwrap();
+        // The predecessor's reign clock: the heir must not read it.
+        stamp_reign(
+            &store_path(tmp.path()),
+            &KingManifest {
+                scope: "x-aaaa".into(),
+                created_at: Some("2026-09-20T12:00:00Z".into()),
+                harness_session_id: Some("sess-a".into()),
+                term: Some("span:200h".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
         // An unmarked carry (an old caller) keeps the frozen wire shape.
         carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
@@ -1423,6 +1652,22 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("king-a"));
         assert_eq!(pending["predecessor_session"], json!("sess-a"));
         assert!(pending["ts"].is_string());
+        // AC3-EDGE: an heir is a new session. The carried clock keys on the
+        // predecessor's session, so the heir's manifest reads from its own
+        // arm; the predecessor's term is not read.
+        let heir_manifest = KingManifest {
+            scope: "x-aaaa".into(),
+            created_at: Some("2026-09-29T23:00:00Z".into()),
+            harness_session_id: Some("sess-heir".into()),
+            ..Default::default()
+        };
+        let view = reign_view_in(&store_path(tmp.path()), &heir_manifest);
+        assert_eq!(
+            view.created_at.as_deref(),
+            Some("2026-09-29T23:00:00Z"),
+            "an heir starts from its own manifest"
+        );
+        assert_eq!(view.term, None);
     }
 
     #[test]
@@ -1519,6 +1764,7 @@ mod tests {
                     theme: None,
                     title: None,
                     pending_succession: None,
+                    reign: None,
                 },
             )]),
         };
@@ -1551,6 +1797,7 @@ mod tests {
                     theme: None,
                     title: None,
                     pending_succession: None,
+                    reign: None,
                 },
             )]),
         };
@@ -1592,6 +1839,7 @@ mod tests {
                 predecessor_session: session.map(String::from),
                 ts: ts.into(),
             }),
+            reign: None,
         }
     }
 
