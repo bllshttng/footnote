@@ -21,7 +21,7 @@ pub fn refuse_worktree_build_on_operator_store(store: &Path) -> Result<(), Strin
     refusal(exe.as_deref(), home.as_deref(), store)
 }
 
-pub(crate) fn operator_state_root() -> Option<PathBuf> {
+pub fn operator_state_root() -> Option<PathBuf> {
     passwd_home().map(|home| home.join(".fno"))
 }
 
