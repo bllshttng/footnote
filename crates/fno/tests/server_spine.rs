@@ -343,6 +343,11 @@ fn server_spine_echo_roundtrips_via_fake_client() {
     let mut stream = attach(&scratch.sock(), 24, 80);
     // First frame = full resync of the current screen.
     wait_for_frame(&mut stream, 10, |_| true);
+    let owner_sidecar = fno::proto::owner_sidecar_path(&scratch.sock());
+    assert!(
+        owner_sidecar.is_file(),
+        "owner lease is persisted beside the socket"
+    );
     send(&mut stream, &ClientMsg::Input(b"echo he\"ll\"o\r".to_vec()));
     // The typed line contains the quotes; only the OUTPUT is bare "hello".
     wait_for_frame(&mut stream, 10, |text| {
@@ -358,6 +363,10 @@ fn server_spine_echo_roundtrips_via_fake_client() {
         assert!(Instant::now() < deadline, "server outlived its dead owner");
         std::thread::sleep(Duration::from_millis(25));
     }
+    assert!(
+        !owner_sidecar.exists(),
+        "server teardown removes the owner lease"
+    );
 }
 
 #[test]
