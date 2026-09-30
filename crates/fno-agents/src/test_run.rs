@@ -45,7 +45,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Where cargo's own arguments start, when `argv` is a cargo test run:
 /// `test`/`t`, or `nextest run`/`r`, past any `+toolchain` pins. Any other
 /// program reads `None`.
-fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
+pub(crate) fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
     let is_cargo = argv
         .first()
         .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));

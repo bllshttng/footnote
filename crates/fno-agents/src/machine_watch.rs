@@ -576,6 +576,10 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
     let state = Arc::clone(&arm.state);
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
+        // Resume tests an expired hold paused; pause a test started mid-hold.
+        if let Err(error) = crate::test_hold::reconcile(&home) {
+            tracing::warn!(%error, "test hold reconcile failed");
+        }
         let (mut sample, ticks) = {
             let previous = state.lock().unwrap_or_else(|e| e.into_inner()).prev_ticks;
             crate::machine_sample::read(&home, previous)
@@ -651,6 +655,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             let stop_home = home.clone();
             let runtime = tokio::runtime::Handle::current();
             let brake_error = std::cell::RefCell::new(None);
+            let tests_first = std::cell::RefCell::new(None::<String>);
             tick_machine_watch_with_thresholds(
                 &mut guard,
                 Ok(&sample),
@@ -659,7 +664,11 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     if let Some(error) = brake_error.borrow_mut().take() {
                         body.push_str(&format!("; spawn brake write failed: {error}"));
                     }
-                    if title.ends_with("box runaway") {
+                    if let Some(held) = tests_first.borrow_mut().take() {
+                        body.push_str(&format!(
+                            "; {held}; the spawn brake and session stop wait for the next runaway tick"
+                        ));
+                    } else if title.ends_with("box runaway") {
                         let stop_result = top_session_id(&sample).and_then(|session| {
                             runtime.block_on(crate::daemon::stop_session_for_home(
                                 &stop_home, &session,
@@ -676,6 +685,20 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 },
                 Instant::now(),
                 |sample, reason| {
+                    // Tests yield first: with no stop armed, a runaway holds
+                    // tests and brakes nothing else this tick.
+                    match crate::test_hold::hold_for_runaway(
+                        &stop_home,
+                        reason,
+                        MACHINE_BRAKE_HOLD_SECS,
+                    ) {
+                        Ok(Some(held)) => {
+                            *tests_first.borrow_mut() = Some(held);
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "tests-first hold failed"),
+                    }
                     if let Err(error) = write_brake_file(sample, reason) {
                         tracing::error!(%error, "machine runaway brake write failed");
                         *brake_error.borrow_mut() = Some(error);

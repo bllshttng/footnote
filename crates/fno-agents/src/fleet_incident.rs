@@ -59,6 +59,9 @@ pub const LEGACY_HOLDS: &[&str] = &["spawns", "tests", "loops"];
 pub const EXIT_CHECK_STOPPED: i32 = 90;
 pub const EXIT_CHECK_UNAVAILABLE: i32 = 91;
 
+/// `origin` of the machine arm's tests-first hold.
+pub const MACHINE_ORIGIN: &str = "machine_watch";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IncidentRecord {
     pub version: u32,
@@ -894,6 +897,12 @@ fn write_transition_locked(
             Verdict::Stopped(_) | Verdict::Clear(_) => {}
         }
     }
+    // The machine arm's tests-first hold never replaces a stop someone armed.
+    if metadata.origin.as_deref() == Some(MACHINE_ORIGIN)
+        && !matches!(read_at(path), Verdict::Clear(_))
+    {
+        return Err("a stop is already armed".into());
+    }
     let generation = current_generation(path)? + 1;
     let record = IncidentRecord {
         version: STATE_VERSION,
@@ -1274,6 +1283,7 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
                     return 2;
                 }
             };
+            let machine_wide = target.is_none();
             match write_transition_with_metadata(
                 &path,
                 if action == "stop" { "stopped" } else { "clear" },
@@ -1288,6 +1298,20 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             ) {
                 Ok(record) => {
                     print_receipt(&record);
+                    // The doors hold new tests; the running ones follow the
+                    // record here, paused or resumed, with one bus line.
+                    if machine_wide {
+                        match crate::test_hold::reconcile(&home) {
+                            Ok(outcome) => {
+                                if let Some(line) = outcome.line() {
+                                    eprintln!("fleet-incident: {line}");
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("fleet-incident: test hold not applied: {error}")
+                            }
+                        }
+                    }
                     0
                 }
                 Err(e) => {
