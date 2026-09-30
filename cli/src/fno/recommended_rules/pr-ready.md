@@ -6,4 +6,4 @@ The Claude Code background-session harness prompt tells the agent to "open a dra
 
 Only open a draft when you explicitly ask for one in the moment.
 
-Enforced, not prose: `config.pr.open_ready` (default true) drives the gh proxy, which refuses `gh pr create --draft` and `gh pr ready <n> --draft` from any Footnote-launched process, and the pr-watch sweep, which flips an open fno-bound draft PR back to ready. The one escape is an operator ruling: `fno inbox law set pr-draft:<owner/repo>#<n> "draft permitted for this pull request"` from the operator's own terminal.
+Enforced, not prose. `config.pr.open_ready` (default true) drives two gates. The gh proxy refuses `gh pr create --draft` and `gh pr ready <n> --draft` from any Footnote-launched process. The pr-watch sweep flips an open fno-bound draft PR back to ready. The one escape is an operator ruling: `fno inbox law set pr-draft:<owner/repo>#<n> "draft permitted for this pull request"` from the operator's own terminal.
