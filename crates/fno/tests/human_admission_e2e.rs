@@ -18,9 +18,12 @@ const HUMAN_ADMIT: &str = "admitting a human's own start anyway";
 /// meets a ceiling of 1, so the pre-fix client refused its own server spawn.
 #[test]
 fn human_start_passes_the_fleet_process_ceiling() {
+    // The stand-in lives in its own mux dir, so the client's session list
+    // holds nothing but its own `main`.
+    let fleet = Scratch::new("human-start-fleet");
+    let _fleet = spawn_server(&fleet.main_sock(), &[]);
+    common::connect_with_retry(&fleet.main_sock());
     let scratch = Scratch::new("human-start-ceiling");
-    let _fleet = spawn_server(&scratch.0.join("fleet.sock"), &[]);
-    common::connect_with_retry(&scratch.0.join("fleet.sock"));
     let mut h = ClientHarness::spawn_with(&scratch, &[("FNO_PROCESS_ADMISSION_MAX", "1")]);
     h.wait_prompt(30);
     let raw = h.raw_output();
