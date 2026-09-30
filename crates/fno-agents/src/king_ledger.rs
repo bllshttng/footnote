@@ -790,10 +790,12 @@ pub struct Arm {
 }
 
 /// The production runner: the page render, cwd-bound (config, the graph and
-/// the default out path all resolve per cwd).
+/// the default out path all resolve per cwd). The argv is the spelling the
+/// Python leg answers; `org rundown` is the front door's lexical rewrite of
+/// it and fno-py itself serves no `org` group.
 fn run_ledger() -> Result<(), String> {
     let output = std::process::Command::new(crate::scrape::fno_py())
-        .args(["agents", "org", "rundown"])
+        .args(["agents", "king", "ledger"])
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("spawn: {e}"))?;
