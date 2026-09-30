@@ -40,18 +40,20 @@ jobs:
           trap 'bash scripts/ci/smoke-duration-report.sh memory-baseline-main-shard3 "$(( SECONDS - start ))" 12 || true; [ -f /tmp/shard-resources.log ] && cat /tmp/shard-resources.log && rm -f /tmp/shard-resources.log; kill "$SAMPLER" || true' EXIT
           : "$start"
           ( while :; do
-              printf '%s ' "$(date -u +%FT%TZ)"
-              free -m 2>/dev/null | awk '/Mem:/ {printf "mem_used_mb=%s mem_avail_mb=%s ", $3, $7}'
-              df -m /tmp / 2>/dev/null | awk 'NR>1 {printf "fs=%s avail_mb=%s ", $6, $4}'
-              printf '\n'
-              for p in $(ps -eo pid=,rss=,comm= | awk '$3 ~ /python/ {print $1 ":" $2}'); do
-                pid=${p%%:*}
-                rss=${p##*:}
-                t=$(cat "/tmp/pytest-current-$pid.txt" 2>/dev/null)
-                printf 'pid=%s rss_mb=%s test=%s\n' "$pid" "$rss" "${t:-none}"
-              done
+              {
+                printf '%s ' "$(date -u +%FT%TZ)"
+                free -m 2>/dev/null | awk '/Mem:/ {printf "mem_used_mb=%s mem_avail_mb=%s ", $3, $7}'
+                df -m /tmp / 2>/dev/null | awk 'NR>1 {printf "fs=%s avail_mb=%s ", $6, $4}'
+                printf '\n'
+                for p in $(ps -eo pid=,rss=,comm= | awk '$3 ~ /python/ {print $1 ":" $2}'); do
+                  pid=${p%%:*}
+                  rss=${p##*:}
+                  t=$(cat "/tmp/pytest-current-$pid.txt" 2>/dev/null)
+                  printf 'pid=%s rss_mb=%s test=%s\n' "$pid" "$rss" "${t:-none}"
+                done
+              } >> /tmp/shard-resources.log 2>/dev/null
               sleep 30
-            done ) >> /tmp/shard-resources.log 2>/dev/null &
+            done ) &
           SAMPLER=$!
           disown "$SAMPLER"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard 3/13
