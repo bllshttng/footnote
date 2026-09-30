@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fno.rust_binary import VerbUnavailable, verb_call
+from fno.rust_binary import VerbUnavailable
 
 
 class SpawnAxesUnavailable(VerbUnavailable):
@@ -15,6 +15,10 @@ class SpawnAxesUnavailable(VerbUnavailable):
 
 def spawn_axes_call(payload: dict[str, Any]) -> dict[str, Any]:
     """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
+    # Call-time import: a module-top capture can permanently hold a test's
+    # monkeypatched verb_call stub, leaking it into every later reader.
+    from fno.rust_binary import verb_call
+
     return verb_call("spawn-axes", payload, SpawnAxesUnavailable)
 
 
