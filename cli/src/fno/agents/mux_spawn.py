@@ -190,7 +190,6 @@ class MuxSpawnResult:
     # about the seed, and it was transporting doubt about the pane.
     # `painted` / `blank` / `unreadable`; None when no seed was requested.
     pane_observation: Optional[str] = None
-    fno_id: Optional[str] = None
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
 
@@ -4590,7 +4589,6 @@ def dispatch_spawn_pane(
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
                     node_reason=os.environ.pop("FNO_NODE_REASON", None),
-                    fno_id=stored_session_uuid or name,
                     route_provider_id=route_provider_id,
                     model_name=model_name,
                     account_record_id=account_record_id,
@@ -4959,7 +4957,6 @@ def dispatch_spawn_pane(
         seed=seed_state,
         seed_source=seed_source,
         pane_observation=seed_pane,
-        fno_id=session_uuid or name,
         launch_account=row_launch_account,
         launch_account_source=row_launch_source,
     )

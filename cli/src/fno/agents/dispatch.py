@@ -1169,7 +1169,7 @@ def _lane_b_thread_spawn(
             origin="spawn",
             # The keeper-hosted thread lane; the event below spells it
             # "thread" already.
-            substrate="thread", fno_id=session_id,
+            substrate="thread",
         )
         try:
             update_registry(lambda es: es + [new_entry])
@@ -1756,7 +1756,7 @@ def _claude_create_path(
         # dispatch_spawn (mux_spawn owns them) and headless returns above, so
         # every row born here ran the detached thread. The event this path
         # emits already says substrate="thread".
-        substrate="thread", fno_id=session_uuid or short_id,
+        substrate="thread",
         # the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM

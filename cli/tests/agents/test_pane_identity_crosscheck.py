@@ -135,21 +135,19 @@ def test_direction_1_flags_a_row_whose_pane_vanished() -> None:
     assert out["panes_compared"] == 0 and out["rows_with_mux_compared"] == 1
 
 
-def test_direction_1_flags_an_id_mismatch_and_an_idless_row() -> None:
-    uuid = "01a05fce-0000-7ccc-8000-000000000000"
+def test_direction_1_flags_an_idless_row() -> None:
+    # After the id split the pane fno_id is the row's own mint, never the
+    # harness session id the row records, so a value mismatch is healthy and
+    # only an id-less row (no resolved identity) is flagged.
     rows = [
-        _Row("stale", mux={"session": "main", "pane_id": 1}, harness_session_id=uuid),
         _Row("idless", mux={"session": "main", "pane_id": 2}, harness_session_id=None),
     ]
     panes = [
-        _pane(1, fno_id="119e3c52-a4b3-4f7e-8a1c-2d3e4f5a6b7c"),
         _pane(2),
     ]
     out = pane_identity_crosscheck(panes, rows, "main", argv_of=lambda pid: None)
     reasons = [m["reason"] for m in out["row_mismatches"]]
-    assert len(reasons) == 2
-    assert f"row expects {uuid}" in reasons[0]
-    assert "no session id" in reasons[1]
+    assert reasons == ["row carries a mux ref but no session id"]
 
 
 def test_direction_1_matching_row_is_clean() -> None:
