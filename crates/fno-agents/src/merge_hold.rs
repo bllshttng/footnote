@@ -295,7 +295,7 @@ fn pr_number(entry: &Value) -> Option<u64> {
 
 /// Best-effort `gh pr merge --disable-auto`: a queue armed before the hold
 /// would otherwise merge server-side with no re-check.
-fn disarm_automerge(pr: u64) -> String {
+pub(crate) fn disarm_automerge(pr: u64) -> String {
     match std::process::Command::new("gh")
         .args(["pr", "merge", &pr.to_string(), "--disable-auto"])
         .output()

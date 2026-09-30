@@ -2221,6 +2221,8 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
             supplied_dispatch_hold: None,
+            supplied_review_hold: None,
+            supplied_facts: None,
         },
     );
     match outcome {

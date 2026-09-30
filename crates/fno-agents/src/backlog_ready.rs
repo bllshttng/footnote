@@ -1193,7 +1193,7 @@ pub(crate) fn detect_project(entries: &[Value], repo_root: &str) -> Option<Strin
 /// `filter_by_project`'s narrowing rule, one row at a time against a project
 /// already resolved by detection or flag: an explicit project filters,
 /// --all shows everything, detection returning nothing shows everything.
-fn row_matches_project(e: &Value, project: Option<&str>) -> bool {
+pub(crate) fn row_matches_project(e: &Value, project: Option<&str>) -> bool {
     match project {
         Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
         None => true,
