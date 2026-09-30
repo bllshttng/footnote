@@ -479,10 +479,6 @@ fn a_portal_repointed_off_a_row_keeps_no_trace_of_the_old_row() {
 }
 
 /// The 60s guard: a pane typed into this minute holds the whole identity
-/// (no closes, no tombstone, the reply counts it), while a pane whose last
-/// typing instant is older than the window retires exactly as before.
-#[test]
-/// The 60s guard: a pane typed into this minute holds the whole identity
 /// (no closes, no tombstone, the reply counts it), while an identity whose
 /// last typing instant is older than the window retires exactly as before.
 /// Both arms seat a sibling member so the session never empties and the
@@ -560,7 +556,10 @@ fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
     let (mut core, pane, _s) = fresh("retire-guard-typed", "sess-guard-one", false);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-one".into(), reply_tx);
-    assert!(matches!(flow, Flow::Continue), "the sibling keeps the session alive");
+    assert!(
+        matches!(flow, Flow::Continue),
+        "the sibling keeps the session alive"
+    );
     let reply = reply_rx.try_recv().expect("the handler replied");
     let ServerMsg::SessionRetired {
         retired,
@@ -590,7 +589,10 @@ fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
     let (mut core, _pane, _s) = fresh("retire-guard-stale", "sess-guard-two", true);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-two".into(), reply_tx);
-    assert!(matches!(flow, Flow::Continue), "the sibling keeps the session alive");
+    assert!(
+        matches!(flow, Flow::Continue),
+        "the sibling keeps the session alive"
+    );
     let reply = reply_rx.try_recv().expect("the handler replied");
     let ServerMsg::SessionRetired {
         retired,
