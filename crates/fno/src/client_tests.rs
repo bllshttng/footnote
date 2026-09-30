@@ -6583,7 +6583,6 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
     // (the server applies it to the sender's viewed tab); a menu left open
     // across a view flip refuses by notice, never a send.
     v.layout.squads[0].active_tab = 0;
-    v.server_proto = Some(97);
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     match menu_command_for(&mut v, super::MenuAction::TabSplit(Dir::Left)).await {
         Command::SplitDir(Dir::Left) => {}
@@ -6611,7 +6610,6 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
             .is_some_and(|(s, _)| s.contains("split acts on the viewed tab")),
         "the refusal is named"
     );
-
 }
 
 /// One squad's `TabMeta` list, cloned out of the layout borrow.
@@ -12381,6 +12379,7 @@ fn density_button_glyph_sits_one_column_off_the_divider() {
 pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
     let mut v = two_pane_view();
     v.layout.agents = agents;
+    v.server_proto = Some(crate::proto::PROTO_VERSION);
     v
 }
 
