@@ -115,17 +115,6 @@ def _repo_slug(cwd: str) -> Optional[str]:
 
 
 def _default_branch(slug: str, cwd: str) -> Optional[str]:
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        row = verb_call(
-            "gh-cache",
-            {"op": "read", "kind": "repo-meta", "slug": slug, "ttl_s": 86400},
-        ).get("row")
-    except VerbUnavailable:
-        row = None
-    if isinstance(row, dict) and isinstance(row.get("default_branch"), str) and row["default_branch"]:
-        return row["default_branch"]
     res = _probe(["gh", "api", f"repos/{slug}"], cwd)
     if res is None or not res.ok:
         return None
@@ -133,14 +122,6 @@ def _default_branch(slug: str, cwd: str) -> Optional[str]:
         value = json.loads(res.stdout).get("default_branch")
     except (json.JSONDecodeError, AttributeError):
         return None
-    if isinstance(value, str) and value:
-        try:
-            verb_call(
-                "gh-cache",
-                {"op": "write", "kind": "repo-meta", "slug": slug, "row": {"default_branch": value}},
-            )
-        except VerbUnavailable:
-            pass
     return value if isinstance(value, str) and value else None
 
 

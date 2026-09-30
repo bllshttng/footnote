@@ -1345,39 +1345,25 @@ def query_pr_merge_state(
         )
     )
 
-    # Merged-PR facts never change after the merge: a MERGED read is cached
-    # permanently in the gh-cache store and every later reconcile serves it
-    # with zero gh calls. Injected readers (tests) bypass the cache both
-    # ways, so reads and writes are keyed on the DEFAULT readers only.
+    # Merged-PR facts never change: serve the permanent gh-cache row; injected readers bypass.
     cached = None
     if info_reader is None:
         from fno.rust_binary import VerbUnavailable, verb_call
-
         try:
-            cached = verb_call(
-                "gh-cache",
-                {"op": "read", "kind": "merged", "slug": repo, "pr": pr_number},
-            ).get("row")
+            ask = {"op": "read", "kind": "merged", "slug": repo, "pr": pr_number}
+            cached = verb_call("gh-cache", ask).get("row")
         except VerbUnavailable:
             pass
-    if isinstance(cached, dict) and isinstance(cached.get("info"), dict) and isinstance(
-        cached["info"].get("state"), str
-    ) and (
-        not include_files or isinstance(cached.get("files"), list)
-    ):
-        info = cached["info"]
-        try:
-            number = int(info.get("pr", pr_number))
-        except (TypeError, ValueError):
-            number = pr_number
+    row: dict = cached if isinstance(cached, dict) else {}
+    info = row.get("info") if isinstance(row.get("info"), dict) else None
+    files_ok = not include_files or isinstance(row.get("files"), list)
+    if info is not None and isinstance(info.get("state"), str) and files_ok:
+        number = info.get("pr") if isinstance(info.get("pr"), int) else pr_number
+        files = list(row.get("files") or []) if include_files else []
         return PrMergeState(
-            number=number,
-            state=info["state"],
-            url=info.get("url"),
-            merged_at=info.get("merged_at"),
-            merge_sha=info.get("merge_sha"),
-            changed_files=list(cached.get("files") or []) if include_files else [],
-            files_truncated=False,
+            number=number, state=info["state"], url=info.get("url"),
+            merged_at=info.get("merged_at"), merge_sha=info.get("merge_sha"),
+            changed_files=files, files_truncated=False,
         )
 
     try:
@@ -1445,18 +1431,10 @@ def query_pr_merge_state(
 
     if info_reader is None and state == "MERGED":
         from fno.rust_binary import VerbUnavailable, verb_call
-
         try:
-            verb_call(
-                "gh-cache",
-                {
-                    "op": "write",
-                    "kind": "merged",
-                    "slug": repo,
-                    "pr": pr_number,
-                    "row": {"info": info, **({"files": changed_files} if include_files else {})},
-                },
-            )
+            row = {"info": info, **({"files": changed_files} if include_files else {})}
+            ask = {"op": "write", "kind": "merged", "slug": repo, "pr": pr_number, "row": row}
+            verb_call("gh-cache", ask)
         except VerbUnavailable:
             pass
     return PrMergeState(
