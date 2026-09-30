@@ -7935,6 +7935,30 @@ fn peek_overlay_lines(
 // Attach + main loop
 // ---------------------------------------------------------------------------
 
+/// How long the attach waits in silence before it tells the user the server
+/// is busy. It never gives up: a human attach always gets in.
+pub(crate) const ATTACH_BUSY_NOTICE: Duration = Duration::from_secs(10);
+
+/// Await one handshake reply. The first time a read outlasts `notice_after`,
+/// `on_busy` runs and the SAME read continues (`read_msg` is not
+/// cancellation-safe, so it is never dropped and restarted).
+pub(crate) async fn await_attach_reply<F: std::future::Future>(
+    read: F,
+    notice_after: Duration,
+    busy_said: &mut bool,
+    on_busy: impl FnOnce(),
+) -> F::Output {
+    tokio::pin!(read);
+    if !*busy_said {
+        if let Ok(out) = tokio::time::timeout(notice_after, &mut read).await {
+            return out;
+        }
+        *busy_said = true;
+        on_busy();
+    }
+    read.await
+}
+
 async fn attach_and_run(
     stream: std::os::unix::net::UnixStream,
     socket: &Path,
@@ -8010,8 +8034,8 @@ async fn attach_and_run(
     }
     crate::keys::install(keymap);
     // Held, not stamped. The TTL is an absolute instant, and everything between
-    // here and the first paint - a handshake allowed ten seconds, then a
-    // catch-up fold - happens before anyone could read it. Stamped at the point
+    // here and the first paint - a handshake that may wait on a busy server,
+    // then a catch-up fold - happens before anyone could read it. Stamped at the point
     // the notice can first be SEEN, or a slow server turns "your config was
     // refused" back into the silence this notice exists to break.
     let key_notice = key_warnings
@@ -8037,16 +8061,20 @@ async fn attach_and_run(
     // The first Layout (or refusal) decides everything, BEFORE the terminal
     // is taken over, so a refusal prints as a plain one-liner (AC1-ERR,
     // version skew). ModeSync may precede it on the reliable channel - stash
-    // and apply once the TUI owns the terminal.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // and apply once the TUI owns the terminal. A slow server is still the
+    // user's server: past ATTACH_BUSY_NOTICE the client says so once and
+    // keeps waiting while the socket stays open. Ctrl-C still works here,
+    // since the terminal is not raw yet.
+    let mut busy_said = false;
     let mut stashed_modesync: Vec<u8> = Vec::new();
     loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| format!("server did not answer the attach; {log_hint}"))?;
-        let msg = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
-            .await
-            .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
+        let msg = await_attach_reply(
+            read_msg::<_, ServerMsg>(&mut sock_r),
+            ATTACH_BUSY_NOTICE,
+            &mut busy_said,
+            || eprintln!("fno: server is busy, still waiting (Ctrl-C to stop; {log_hint})"),
+        )
+        .await;
         match msg {
             Ok(ServerMsg::Layout {
                 squads,
