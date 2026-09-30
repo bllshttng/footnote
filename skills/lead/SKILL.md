@@ -168,7 +168,7 @@ A quiet window is not a halt. When the user asks you not to interrupt them, run 
 
 ## Abdicate
 
-At handoff or before `fno agents org done`, run `fno-agents intel --session <your full session id> --windows --write`. Then write `part3-failures.md` and `part4-reforms.md` from `part1-metrics.md` and `part2-timeline.md`, filing each reform as a node. The daemon writes parts 1 and 2 for a king whose reign ends without doing this. With `--once`, `fno agents org done` is the last act of pass step 5 or of the court's wave boundary.
+For Claude kings, at handoff or before `fno agents org done`, run `fno-agents intel --session <your full session id> --windows --write`. Then write `part3-failures.md` and `part4-reforms.md` from `part1-metrics.md` and `part2-timeline.md`, filing each reform as a node. The daemon writes parts 1 and 2 for a Claude king whose reign ends without doing this. Codex rollout windows are not supported by this command. With `--once`, `fno agents org done` is the last act of pass step 5 or of the court's wave boundary.
 
 The one-wave pass, the crown model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md).
 
