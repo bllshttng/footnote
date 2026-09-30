@@ -1614,10 +1614,6 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
-    /// Last `operator_typing` instant per pane: the 60s auto-close
-    /// guard's signal. Set in `witness_typing`; purged with the pane in
-    /// [`Core::reap_pane`], the `touch_last_emit` pattern.
-    last_operator_typing: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -12763,7 +12759,6 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
-        last_operator_typing: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
@@ -13386,12 +13381,9 @@ async fn serve(
         // the orphan path the readers gate on.
         core.publish_client_count();
     };
-    // One `server_stopped` journal row: a daemon restart that
-    // closes nothing is exactly the silent case the feed must name.
-    core.emit_server_stopped(match flow {
-        Flow::Shutdown => "shutdown",
-        _ => "ended",
-    });
+    // One `server_stopped` journal row: a daemon restart that closes
+    // nothing is exactly the silent case the feed must name.
+    core.emit_server_stopped(&flow);
     if flow == Flow::Shutdown {
         // Capture only from a safe restore state and current store generation.
         core.capture_topology_now();

@@ -521,7 +521,7 @@ fn retire_holds_a_pane_typed_into_this_minute() {
         .find(|(_, e)| e.name.as_deref() == Some("g-one"))
         .map(|(pid, _)| *pid)
         .expect("g-one holds a pane");
-    core.last_operator_typing.insert(one_pane, Instant::now());
+    core.touch_last_emit.insert(one_pane, Instant::now());
 
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-one".into(), reply_tx);
@@ -596,7 +596,7 @@ fn retire_closes_a_pane_whose_typing_is_stale() {
         .find(|(_, e)| e.name.as_deref() == Some("g-two"))
         .map(|(pid, _)| *pid)
         .expect("g-two holds a pane");
-    core.last_operator_typing.insert(
+    core.touch_last_emit.insert(
         one_pane,
         Instant::now() - std::time::Duration::from_secs(61),
     );

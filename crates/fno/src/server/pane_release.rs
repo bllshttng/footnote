@@ -30,7 +30,6 @@ impl Core {
     }
 
     fn drop_pane_entry(&mut self, pid: u64, kill: bool) {
-        self.last_operator_typing.remove(&pid);
         if let Some(entry) = self.panes.remove(&pid) {
             if let Ok(mut children) = self.pane_children.lock() {
                 if let Some(child_pid) = entry.pty.child_pid() {
