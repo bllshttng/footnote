@@ -191,17 +191,20 @@ fn fno_verb(target: &str) -> Option<(String, Option<String>)> {
     ))
 }
 
-fn events_for_session(home: &AgentsHome, session: &str) -> Vec<Value> {
-    crate::king_history::scan_scopes(&[home.events_jsonl()], None)
-        .ok()
-        .and_then(|report| report.get("events").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-        .into_iter()
+fn events_for_session(home: &AgentsHome, session: &str) -> Result<Vec<Value>, String> {
+    let report = crate::king_history::scan_scopes(&[home.events_jsonl()], None)?;
+    let events = report
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "reign check-in scan returned no event list".to_string())?;
+    Ok(events
+        .iter()
         .filter(|row| {
             row.get("type").and_then(Value::as_str) == Some(crate::king_history::REIGN_CHECKIN)
                 && row.pointer("/data/session_id").and_then(Value::as_str) == Some(session)
         })
-        .collect()
+        .cloned()
+        .collect())
 }
 
 fn bus_index() -> BusIndex {
@@ -376,36 +379,60 @@ fn fold_transcript(
     for window in &mut fold.windows {
         window.activity = std::mem::take(&mut window.activity_fold).finish();
     }
-    fold.subagents = fold_subagents(transcript, session);
+    fold.subagents = fold_subagents(transcript, session)?;
     Ok(fold)
 }
 
-fn fold_subagents(transcript: &Path, session: &str) -> Value {
-    let Some(parent) = transcript.parent() else {
-        return json!({"files": 0, "tool_calls": 0});
-    };
+fn fold_subagents(transcript: &Path, session: &str) -> Result<Value, String> {
+    let parent = transcript.parent().ok_or_else(|| {
+        format!(
+            "{}: transcript has no parent directory",
+            transcript.display()
+        )
+    })?;
     let dir = parent.join(session).join("subagents");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return json!({"files": 0, "tool_calls": 0});
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({"files": 0, "tool_calls": 0, "tokens":{"output":0,"cache_read":0}}));
+        }
+        Err(error) => {
+            return Err(format!(
+                "{}: subagent directory unreadable: {error}",
+                dir.display()
+            ))
+        }
     };
     let mut files = 0u64;
     let mut tool_calls = 0u64;
     let mut output_tokens = 0u64;
     let mut cache_read = 0u64;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("{}: subagent entry unreadable: {error}", dir.display()))?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(file) = std::fs::File::open(path) else {
-            continue;
-        };
+        let file = std::fs::File::open(&path).map_err(|error| {
+            format!(
+                "{}: unreadable subagent transcript: {error}",
+                path.display()
+            )
+        })?;
         files += 1;
         let mut activity = ActivityFold::default();
-        for line in BufReader::new(file).lines().flatten() {
-            let Ok(row) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
+        for (line_no, line) in BufReader::new(file).lines().enumerate() {
+            let line = line.map_err(|error| {
+                format!("{}:{}: read error: {error}", path.display(), line_no + 1)
+            })?;
+            let row = serde_json::from_str::<Value>(&line).map_err(|error| {
+                format!(
+                    "{}:{}: malformed transcript JSON: {error}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
             activity.row(&row);
             let mut parsed = Vec::new();
             crate::reign_hygiene::claude_row_entries(&row, &mut parsed);
@@ -418,7 +445,9 @@ fn fold_subagents(transcript: &Path, session: &str) -> Value {
         output_tokens += activity.tokens.output;
         cache_read += activity.tokens.cache_read;
     }
-    json!({"files": files, "tool_calls": tool_calls, "tokens":{"output":output_tokens,"cache_read":cache_read}})
+    Ok(
+        json!({"files": files, "tool_calls": tool_calls, "tokens":{"output":output_tokens,"cache_read":cache_read}}),
+    )
 }
 
 fn totals(windows: &[Window]) -> Value {
@@ -689,7 +718,13 @@ pub fn run(args: &[String]) -> i32 {
                 return 2;
             }
         };
-        let checkins = events_for_session(&home, &session);
+        let checkins = match events_for_session(&home, &session) {
+            Ok(checkins) => checkins,
+            Err(error) => {
+                eprintln!("fno-agents intel --windows: {error}");
+                return 3;
+            }
+        };
         let write_dir = parsed.write.as_ref().map(|write| {
             write
                 .clone()
