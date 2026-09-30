@@ -241,6 +241,78 @@ fn node_lists_children_blockers_and_live_sessions() {
     assert_eq!(view.sessions[0].agent.as_deref(), Some("w1"));
     assert_eq!(view.sessions[1].action, "none");
     assert!(view.card.blocked, "x-top has an open dependency");
+    let mut lead = row(Some("lead-session"));
+    lead.name = "finch".into();
+    lead.crown_scope = Some("territory".into());
+    lead.crown_level = Some(1);
+    inp.agents.push(lead);
+    let mut org = crate::org_model::OrgInputs {
+        backlog: inp,
+        fold: Ok(json!({"scope_nodes": {"territory": {
+            "status": "ok", "counts": {"ready": 2},
+            "nodes": [{"id": "x-top", "claim_state": "live", "worker": "s-live"},
+                {"id": "x-kid1", "claim_state": "no-record"}]
+        }}, "owned_scopes": {"x-top": "territory", "x-kid1": "territory"}})),
+        measured_at: 100,
+    };
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(tree.leads.len(), 1);
+    assert_eq!(tree.leads[0].nodes.len(), 2);
+    assert_eq!(tree.leads[0].nodes[0].current.len(), 1);
+    assert_eq!(tree.leads[0].nodes[0].former.len(), 2);
+    assert!(tree.leads[0].nodes[1].current.is_empty());
+    assert!(tree.unowned.is_empty());
+    let mut snapshot = crate::org_model::OrgSnapshot::default();
+    snapshot.apply(&org, 100);
+    org.fold = Err("court-fold exited 1".into());
+    snapshot.apply(&org, 160);
+    assert_eq!(snapshot.tree.as_ref().unwrap().measured_at, 100);
+    assert_eq!(snapshot.error.as_deref(), Some("court-fold exited 1"));
+    assert_eq!(snapshot.error_at, Some(160));
+    let mut first = crate::org_model::OrgSnapshot::default();
+    first.apply(&org, 160);
+    assert!(first.tree.is_none());
+    assert_eq!(first.error, snapshot.error);
+    org.fold = Ok(
+        json!({"scope_nodes": {"territory": {"status": "ok", "nodes": [
+        {"id": "x-top", "claim_state": "live"}, {"id": "x-kid1", "claim_state": "no-record"}
+    ]}}, "owned_scopes": {"x-top": "territory", "x-kid1": "territory", "x-left": "territory"}}),
+    );
+    org.backlog.rows.push(json!({"id": "x-left", "status": "done", "completed_at": "1970-01-01T00:01:00Z", "sessions": [
+        {"session_id": "old", "ended_at": "1970-01-01T00:00:55Z"}
+    ]}));
+    let mut dead = row(Some("s-dead"));
+    dead.exited = true;
+    org.backlog.agents.push(dead);
+    let mut a = row(Some("01234567-one"));
+    a.name = "collision-one".into();
+    let mut b = row(Some("01234567-two"));
+    b.name = "collision-two".into();
+    org.backlog.agents.extend([a, b]);
+    org.backlog.rows[0]["sessions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"session_id":"01234567"}));
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.leads[0].nodes[0].current.len(),
+        1,
+        "ambiguous prefixes and exited rows are former"
+    );
+    assert_eq!(tree.leads[0].nodes[0].former.len(), 3);
+    assert_eq!(tree.leads[0].left[0].view.card.id, "x-left");
+    assert_eq!(
+        tree.unowned.len(),
+        2,
+        "live workers without node bindings remain visible"
+    );
+    org.backlog.agents.pop();
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.leads[0].nodes[0].current.len(),
+        2,
+        "a unique short id joins"
+    );
 }
 
 #[test]
