@@ -495,23 +495,25 @@ def _run_hook(payload: object) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("command", "run_in_background"),
     [
-        "opencode run",
-        "with_timeout 30 opencode run",
+        ("yes > /dev/null &", False),
+        ("opencode run", True),
+        ("with_timeout 30 opencode run", True),
         (
             "bash -c 'source scripts/lib/with-timeout.sh; "
-            "with_timeout 30 opencode run; opencode run'"
+            "with_timeout 30 opencode run; opencode run'",
+            True,
         ),
     ],
 )
-def test_end_to_end_deny_envelope(command: str) -> None:
+def test_end_to_end_deny_envelope(command: str, run_in_background: bool) -> None:
     code, out = _run_hook(
         {
             "tool_name": "Bash",
             "tool_input": {
                 "command": command,
-                "run_in_background": True,
+                "run_in_background": run_in_background,
             },
         }
     )
@@ -519,7 +521,10 @@ def test_end_to_end_deny_envelope(command: str) -> None:
     assert out.strip(), "unbounded background commands must be refused"
     decision = json.loads(out)["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "with_timeout" in decision["permissionDecisionReason"]
+    if run_in_background:
+        assert "with_timeout" in decision["permissionDecisionReason"]
+    else:
+        assert "exec -a fno-" in decision["permissionDecisionReason"]
 
 
 @pytest.mark.parametrize(
