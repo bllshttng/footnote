@@ -400,7 +400,12 @@ fn scan_one(rel: &str, text: &str) -> (Vec<String>, usize) {
                     continue;
                 }
                 sites += 1;
-                if span.contains("..Default::default()") {
+                // Two offender shapes: a Default-based literal (it mints a row
+                // with a null session identity) and ANY literal that names the
+                // `fno_id` field - the id is minted at the registry write, so
+                // no constructor may supply one, not even `None` (the `::new`
+                // base already supplies it).
+                if span.contains("..Default::default()") || span.contains("fno_id") {
                     let snippet: String = text
                         .lines()
                         .nth(start_line - 1)
@@ -483,10 +488,16 @@ fn scan_real_tree() -> (Vec<String>, usize, usize) {
 
 #[test]
 fn scanner_detects_a_default_based_literal() {
-    let fixture = "\nfn f() {\n    let row = RegistryEntry {\n        name: \"x\".into(),\n        ..Default::default()\n    };\n}\n";
+    let fixture = "\nfn f() {\n    let row = RegistryEntry {\n        name: \"x\".into(),\n        ..Default::default()\n    };\n    let adopted = RegistryEntry {\n        name: \"y\".into(),\n        fno_id: Some(\"r\".into()),\n        ..RegistryEntry::new(None, crate::state::Lineage::captured((None, None, None)))\n    };\n}\n";
     let (offenders, sites) = scan(&[("lib.rs".into(), fixture.into())]);
-    assert_eq!(sites, 1);
-    assert_eq!(offenders, vec!["lib.rs:3: let row = RegistryEntry {"]);
+    assert_eq!(sites, 2);
+    assert_eq!(
+        offenders,
+        vec![
+            "lib.rs:3: let row = RegistryEntry {",
+            "lib.rs:7: let adopted = RegistryEntry {",
+        ]
+    );
 }
 
 #[test]
@@ -531,7 +542,7 @@ fn production_tree_has_no_default_based_mints() {
     );
     assert!(
         offenders.is_empty(),
-        "RegistryEntry literals minting from ..Default::default() outside test code:\n{}",
+        "RegistryEntry literals minting from ..Default::default() or naming fno_id outside test code:\n{}",
         offenders.join("\n")
     );
 }

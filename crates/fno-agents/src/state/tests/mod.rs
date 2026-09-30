@@ -513,13 +513,12 @@ fn succession_preserves_thread_id_and_branch_keeps_two_rows() {
     assert_eq!(predecessor.predecessor_session_ids, vec!["session-a"]);
     assert!(!predecessor.apply_succession("session-a", "session-c"));
 
-    let branch =
-        predecessor.fork_for_session("worker-branch", "session-c", "session-b", "thread-c");
+    let branch = predecessor.fork_for_session("worker-branch", "session-c", "session-b");
     assert_eq!(predecessor.harness_session_id.as_deref(), Some("session-b"));
     assert_eq!(branch.harness_session_id.as_deref(), Some("session-c"));
     assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-b"));
-    assert_eq!(branch.fno_id.as_deref(), Some("thread-c"));
-    assert_ne!(predecessor.fno_id, branch.fno_id);
+    // The branch carries no id of its own; the registry write mints it one.
+    assert_eq!(branch.fno_id, None);
     assert!(branch.crown_level.is_none());
     assert!(branch.crown_scope.is_none());
     assert!(branch.crown_grantor.is_none());
@@ -2519,38 +2518,67 @@ fn pty_state_collapses_inconsistent_legacy_shape() {
 mod row_count_tests;
 
 #[test]
-fn backfill_fno_id_adopts_the_session_id() {
-    // AC4-HP: a thread row that learned its session id also has a thread ref.
-    let row = r#"{"name":"bp-b7c1-stuck","harness":"claude","cwd":"/p","log_path":null,
-            "harness_session_id":"5bab90bc-1391-4b94-8e5a-bfb663268506",
-            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
-    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
-    e.backfill_fno_id();
+fn update_registry_mints_a_row_its_own_fno_id() {
+    // The row-birth fill: a new row leaves the write with a v4 fno_id that
+    // differs from its harness id, keeps it across a second write, keeps it
+    // when a closure replaces the row wholesale for the same session, and a
+    // legacy value on an existing row is never touched.
+    let dir = tmpdir("fno-id-birth");
+    let path = dir.join("registry.json");
+    let mut row = sample_entry("born");
+    let harness_id = "5bab90bc-1391-4b94-8e5a-bfb663268506";
+    row.harness_session_id = Some(harness_id.into());
+    update_registry(&path, |r| r.entries.push(row)).unwrap();
+    let minted = load_registry(&path).unwrap().entries[0]
+        .fno_id
+        .clone()
+        .expect("fno_id minted at the write");
+    assert_ne!(minted, harness_id, "never a copy of the harness id");
     assert_eq!(
-        e.fno_id.as_deref(),
-        Some("5bab90bc-1391-4b94-8e5a-bfb663268506")
+        minted.split('-').map(str::len).collect::<Vec<_>>(),
+        vec![8, 4, 4, 4, 12]
     );
-}
-
-#[test]
-fn backfill_fno_id_never_overwrites_a_thread_ref() {
-    // AC5-EDGE: a branch keeps its own ref and a succession keeps its stable one.
-    let row = r#"{"name":"branch-row","harness":"claude","cwd":"/p","log_path":null,
-            "harness_session_id":"sess-b","fno_id":"thread-a",
-            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
-    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
-    e.backfill_fno_id();
-    assert_eq!(e.fno_id.as_deref(), Some("thread-a"));
-}
-
-#[test]
-fn backfill_fno_id_needs_a_session_id() {
-    // AC5-EDGE: no session id to adopt leaves the thread ref absent.
-    let row = r#"{"name":"spawning-row","harness":"claude","cwd":"/p","log_path":null,
-            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
-    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
-    e.backfill_fno_id();
-    assert_eq!(e.fno_id, None);
+    assert_eq!(minted.as_bytes()[14], b'4', "v4 version nibble: {minted}");
+    // The next write keeps it.
+    update_registry(&path, |r| {
+        r.find_mut("born").unwrap().status = AgentStatus::Idle;
+    })
+    .unwrap();
+    assert_eq!(
+        load_registry(&path).unwrap().entries[0].fno_id.as_deref(),
+        Some(minted.as_str())
+    );
+    // A wholesale replace for the same harness session (the adopt-merge shape)
+    // keeps the row's id.
+    let mut replacement = sample_entry("born-renamed");
+    replacement.harness_session_id = Some(harness_id.into());
+    update_registry(&path, |r| {
+        r.entries.retain(|e| e.name != "born");
+        r.entries.push(replacement);
+    })
+    .unwrap();
+    assert_eq!(
+        load_registry(&path).unwrap().entries[0].fno_id.as_deref(),
+        Some(minted.as_str())
+    );
+    // A legacy row's value is never rewritten.
+    update_registry(&path, |r| {
+        r.entries.push(sample_entry("legacy"));
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        r.find_mut("legacy").unwrap().fno_id = Some("thread-a".into());
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        r.find_mut("legacy").unwrap().status = AgentStatus::Idle;
+    })
+    .unwrap();
+    assert_eq!(
+        load_registry(&path).unwrap().entries[1].fno_id.as_deref(),
+        Some("thread-a")
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

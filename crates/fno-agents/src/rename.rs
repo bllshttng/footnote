@@ -308,6 +308,8 @@ mod tests {
     fn spawned(session: &str, name: &str, ts_ms: i64, seq: i64) -> EventRow {
         EventRow {
             seq,
+            history_only: false,
+            recovery_batch: None,
             event_id: format!("e{seq}"),
             ts_ms,
             r#type: "agent_spawned".into(),
@@ -328,6 +330,8 @@ mod tests {
     fn renamed(session: &str, to: &str, ts_ms: i64, seq: i64) -> EventRow {
         EventRow {
             seq,
+            history_only: false,
+            recovery_batch: None,
             event_id: format!("e{seq}"),
             ts_ms,
             r#type: "agent_renamed".to_string(),

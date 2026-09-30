@@ -114,7 +114,6 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
             session_uuid=None,
             seed="unattempted",
             seed_source="delivered",
-            fno_id=kwargs["name"],
         ),
     )
 
@@ -126,7 +125,9 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
     receipt = json.loads(result.stdout.strip().splitlines()[-1])
     assert receipt["seed"] == "unattempted"
     assert receipt["seed_source"] == "delivered"
-    assert receipt["fno_id"] == "w1"
+    # The receipt no longer carries fno_id: the row's id is its own mint, read
+    # off `fno agents list --json` (thread_id) and `fno mux pane ls`.
+    assert "fno_id" not in receipt
 
 
 def _pane_receipt(monkeypatch, **fields):
@@ -145,7 +146,6 @@ def _pane_receipt(monkeypatch, **fields):
             pane_id=7,
             child_pid=42,
             session_uuid=None,
-            fno_id=kwargs["name"],
             **fields,
         ),
     )

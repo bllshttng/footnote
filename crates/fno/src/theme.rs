@@ -370,7 +370,7 @@ fn theme_footnote_paper() -> Theme {
         brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
         sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
-        dim: rgb(0x50, 0x50, 0x50),    // subtext0
+        dim: rgb(0x40, 0x40, 0x40),    // subtext0 (505050 read too light)
         chip: rgb(0x96, 0x53, 0x51),   // red accent
         stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
         base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
@@ -458,7 +458,10 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
         rgb(0xe8, 0xe8, 0xe8), // bright white (light_white)
     ];
     const LIGHT: [Color; 16] = [
-        rgb(0xbf, 0xbf, 0xbf), // black
+        // Slots 0 and 8 carry dim TEXT on the paper ground
+        // (claude tool-call grays, codex dim lines); bfbfbf read 1.7:1 on
+        // f7f7f7. 606060 clears 4.5:1 with room, 6e6e6e lands on it.
+        rgb(0x60, 0x60, 0x60), // black
         rgb(0x96, 0x53, 0x51), // red
         rgb(0x46, 0x77, 0x48), // green
         rgb(0x79, 0x68, 0x23), // yellow
@@ -466,7 +469,7 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
         rgb(0x8b, 0x53, 0x79), // magenta
         rgb(0x08, 0x79, 0x70), // cyan
         rgb(0x3c, 0x3c, 0x3c), // white
-        rgb(0xa8, 0xa8, 0xa8), // bright black (gray)
+        rgb(0x6e, 0x6e, 0x6e), // bright black (gray)
         rgb(0xae, 0x5a, 0x56), // bright red (light_red)
         rgb(0x46, 0x88, 0x4f), // bright green (light_green)
         rgb(0x89, 0x76, 0x15), // bright yellow (light_yellow)
@@ -501,6 +504,14 @@ pub fn color_hex(c: Color) -> Option<String> {
         return None;
     };
     Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// Whether the theme's ground is light: the same signal [`terminal16_slot`]
+/// tables were tuned against and the spawn path's `COLORFGBG` encodes. All
+/// three channels must clear the midpoint, so a saturated warm ground never
+/// reads light on its red channel alone.
+pub fn is_light(t: &Theme) -> bool {
+    matches!(t.base, Color::Rgb(r, g, b) if r > 127 && g > 127 && b > 127)
 }
 
 /// The OSC sequences that paint the terminal ground under a footnote theme:
@@ -603,17 +614,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_theme_falls_back_with_a_notice() {
+    fn from_name_ladder_warns_unknown_and_defaults_silently() {
         let (t, warn) = Theme::from_name("solarized-light");
         assert_eq!(t.name, "footnote-superscript");
         let w = warn.expect("unknown theme must warn");
         assert!(w.0.contains("solarized-light"), "{}, got {w:?}", w.0);
         assert!(w.0.contains("footnote-superscript"));
-    }
-
-    #[test]
-    fn empty_name_is_the_default_silently() {
-        // An unset config key reads as "" and means "no preference", not a typo.
+        // An unset config key reads as "" and means "no preference", not a
+        // typo: the default lands silently.
         let (t, warn) = Theme::from_name("");
         assert_eq!(t.name, "footnote-superscript");
         assert!(warn.is_none(), "no preference is not a warning");
@@ -940,7 +948,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_theme_files_generate_from_the_token_tables() {
+    fn committed_terminal_theme_files_match_the_token_tables() {
+        // The asset files are generated from the SAME DARK/LIGHT tables
+        // terminal16_slot reads; this pins them so the two can never drift.
+
         let (t, _) = Theme::from_name("footnote-superscript");
         let ghostty = terminal_theme_file(&t, "ghostty").expect("ghostty file");
         assert!(
@@ -957,12 +968,6 @@ mod tests {
         assert!(terminal_theme_file(&t, "alacritty").is_none());
         let (term, _) = Theme::from_name("terminal");
         assert!(terminal_theme_file(&term, "ghostty").is_none());
-    }
-
-    #[test]
-    fn committed_terminal_theme_files_match_the_token_tables() {
-        // The asset files are generated from the SAME DARK/LIGHT tables
-        // terminal16_slot reads; this pins them so the two can never drift.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/terminal");
         for name in ["footnote-superscript", "footnote-paper"] {
             let (t, _) = Theme::from_name(name);
@@ -979,5 +984,45 @@ mod tests {
                 assert_eq!(got, want, "drift in {}", path.display());
             }
         }
+    }
+
+    #[test]
+    fn paper_text_slots_clear_4_5_to_1_on_the_paper_ground() {
+        // Slots 0 and 8 carry dim text (claude grays, codex dim
+        // lines) on the f7f7f7 ground; bfbfbf/a8a8a8 read 1.7:1 and 2.2:1.
+        // Text slots clear WCAG 4.5:1 against the theme's own base.
+        let (t, _) = Theme::from_name("footnote-paper");
+        let Color::Rgb(br, bg_, bb) = t.base else {
+            panic!("paper has an rgb ground");
+        };
+        let lum = |(r, g, b): (u8, u8, u8)| {
+            let ch = |v: u8| {
+                let s = f64::from(v) / 255.0;
+                if s <= 0.03928 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        };
+        let lb = lum((br, bg_, bb));
+        let ratio = |c: Color| {
+            let Color::Rgb(r, g, b) = c else {
+                panic!("expected rgb");
+            };
+            let lf = lum((r, g, b));
+            let (hi, lo) = if lb > lf { (lb, lf) } else { (lf, lb) };
+            (hi + 0.05) / (lo + 0.05)
+        };
+        for slot in [0u8, 8] {
+            let c = terminal16_slot(slot, &t).expect("paper defines its 16");
+            assert!(
+                ratio(c) >= 4.5,
+                "slot {slot} is {:.2}:1 on the paper ground",
+                ratio(c)
+            );
+        }
+        assert!(ratio(t.dim) >= 4.5, "dim is {:.2}:1", ratio(t.dim));
     }
 }

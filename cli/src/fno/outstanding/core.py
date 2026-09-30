@@ -460,34 +460,10 @@ def read_open_questions(
 
 
 def read_answered_questions() -> "list[dict[str, Any]]":
-    """Every closed-with-answer question, oldest first, asker joined in: the
-    closed event names who closed, not who asked, so the fold joins against
-    the question's own event (a missing ask event leaves asker None). The
-    king wake phase reads this machine-wide index for its strongest trigger."""
+    """Read actionable answers through the native history-aware join."""
+    from fno.events.store_client import read_projection
 
-    asked: "dict[str, dict[str, Any]]" = {}
-    answered: "list[dict[str, Any]]" = []
-    for rec in _read_question_events(questions_path(), missing_hint=False):
-        data = rec.get("data")
-        if not isinstance(data, dict) or not str(data.get("question_id") or ""):
-            continue
-        qid = str(data["question_id"])
-        if rec.get("type") == QUESTION_EVENT:
-            asked[qid] = data
-        elif rec.get("type") == QUESTION_CLOSED_EVENT and data.get("answer"):
-            origin = asked.get(qid) or {}
-            answered.append(
-                {
-                    "id": qid,
-                    "asker": origin.get("asker") or None,
-                    "question": str(origin.get("question") or ""),
-                    "answer": str(data["answer"]),
-                    "closed_ts": str(rec.get("ts") or ""),
-                    "closed_by": str(data.get("closed_by") or ""),
-                }
-            )
-    answered.sort(key=lambda a: (a["closed_ts"], a["id"]))
-    return answered
+    return read_projection(questions_path(), "--answered-questions", {})
 
 
 def read_question_events() -> "list[dict[str, Any]]":
