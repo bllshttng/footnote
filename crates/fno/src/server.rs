@@ -13433,6 +13433,7 @@ async fn serve(
         // handle-tail publish alone would leave the count stale on exactly
         // the orphan path the readers gate on.
         core.publish_client_count();
+        ever_attached |= !core.clients.is_empty();
     };
     if flow == Flow::Shutdown {
         // Capture only from a safe restore state and current store generation.

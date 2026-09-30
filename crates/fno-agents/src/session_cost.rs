@@ -293,21 +293,13 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
         }
     }
     for row in table.iter().filter(|row| {
-        row.ppid == 1
-            && Path::new(row.command.split_whitespace().next().unwrap_or(""))
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some("fno")
-            && row
-                .command
-                .split_whitespace()
-                .any(|word| word == "--server")
+        row.ppid == 1 && crate::process_owner::mux_server_socket(&row.command).is_some()
     }) {
+        let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
+            continue;
+        };
         let crate::process_owner::OwnerRead::Owner(lease) =
-            crate::process_owner::owner_lease_for_server(
-                row.pid,
-                Path::new(row.command.split_whitespace().nth(2).unwrap_or("")),
-            )
+            crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket))
         else {
             continue;
         };

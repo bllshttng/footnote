@@ -36,6 +36,20 @@ pub fn owner_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("owner")
 }
 
+pub fn mux_server_socket(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    let executable = words.next()?;
+    if Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("fno")
+        || words.next()? != "--server"
+    {
+        return None;
+    }
+    words.next()
+}
+
 pub fn owner_lease_for_server(pid: u32, socket: &Path) -> OwnerRead {
     let path = owner_sidecar_path(socket);
     match std::fs::read(&path) {

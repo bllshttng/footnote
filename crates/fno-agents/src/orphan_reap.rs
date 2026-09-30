@@ -320,17 +320,8 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String, PathBuf)> {
             continue;
         };
         let command = fields[6..].join(" ");
-        let mut words = command.split_whitespace();
-        let executable = words.next().unwrap_or("");
-        if Path::new(executable)
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some("fno")
-            || words.next() != Some("--server")
-        {
-            continue;
-        }
-        let Some(socket) = words.next().map(str::to_string) else {
+        let Some(socket) = crate::process_owner::mux_server_socket(&command).map(str::to_string)
+        else {
             continue;
         };
         candidates.push((pid, elapsed_seconds, command, PathBuf::from(socket)));
@@ -634,6 +625,14 @@ mod tests {
             8001,
         )
         .is_none());
+        assert_eq!(
+            crate::process_owner::mux_server_socket("/usr/bin/fno --server /tmp/repro.sock"),
+            Some("/tmp/repro.sock")
+        );
+        assert_eq!(
+            crate::process_owner::mux_server_socket("/usr/bin/fno agents status"),
+            None
+        );
         let servers = owner_server_rows(
             "PID PPID S ELAPSED %CPU RSS COMMAND\n\
              501 1 S 00:11:00 2.0 4096 /usr/bin/fno --server /tmp/repro.sock\n\

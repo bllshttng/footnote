@@ -342,22 +342,22 @@ pub fn read(
 
 fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
     let mut sockets = std::collections::BTreeMap::<String, Vec<&crate::census::ProcRow>>::new();
+    let mut owner_sessions = std::collections::HashMap::<u32, Option<String>>::new();
     let mut issues = Vec::new();
     for row in procs {
-        let words: Vec<&str> = row.command.split_whitespace().collect();
-        if Path::new(words.first().copied().unwrap_or(""))
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some("fno")
-            || words.get(1) != Some(&"--server")
-        {
-            continue;
-        }
-        let Some(socket) = words.get(2).copied() else {
+        let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
             continue;
         };
         sockets.entry(socket.to_string()).or_default().push(row);
-        match crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket)) {
+        let owner = crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket));
+        owner_sessions.insert(
+            row.pid,
+            match &owner {
+                crate::process_owner::OwnerRead::Owner(lease) => Some(lease.session.clone()),
+                _ => None,
+            },
+        );
+        match owner {
             crate::process_owner::OwnerRead::Owner(lease) => {
                 match crate::process_owner::owner_status(&lease) {
                     crate::process_owner::OwnerStatus::Dead => issues.push(json!({
@@ -392,12 +392,7 @@ fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
             "socket": socket,
             "servers": servers.iter().map(|row| json!({
                 "pid": row.pid,
-                "owner_session": row.command.split_whitespace().nth(2).and_then(|socket| {
-                    match crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket)) {
-                        crate::process_owner::OwnerRead::Owner(lease) => Some(lease.session),
-                        _ => None,
-                    }
-                }),
+                "owner_session": owner_sessions.get(&row.pid).cloned().flatten(),
                 "command": row.command,
             })).collect::<Vec<_>>(),
         }));

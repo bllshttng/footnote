@@ -367,6 +367,44 @@ fn server_spine_echo_roundtrips_via_fake_client() {
         !owner_sidecar.exists(),
         "server teardown removes the owner lease"
     );
+
+    let mut idle_owner = Server(Command::new("sleep").arg("30").spawn().unwrap());
+    let idle_birth = fno::proto::pid_start_time(idle_owner.0.id()).unwrap();
+    let idle_env = [
+        ("FNO_OWNER_PID", &idle_owner.0.id().to_string()),
+        ("FNO_OWNER_BIRTH", &idle_birth.to_string()),
+        ("FNO_OWNER_SESSION", "idle-owner-session"),
+        ("FNO_IDLE_EXIT_GRACE_MS", "5000"),
+    ];
+    let mut idle_command = server_command(&scratch.sock(), "/bin/sh", &idle_env);
+    idle_command.env_remove("FNO_E2E");
+    let mut idle_server = Server(idle_command.spawn().unwrap());
+    let mut idle_stream = attach(&scratch.sock(), 24, 80);
+    wait_for_frame(&mut idle_stream, 10, |_| true);
+    send(
+        &mut idle_stream,
+        &ClientMsg::Input(b"while true; do echo idle-owner-output; sleep 0.1; done\r".to_vec()),
+    );
+    wait_for_frame(&mut idle_stream, 10, |text| {
+        common::screen_has_line(text, "idle-owner-output")
+    });
+    send(&mut idle_stream, &ClientMsg::Detach);
+    drop(idle_stream);
+    let idle_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if idle_server.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < idle_deadline,
+            "sandbox server used pane output to extend its empty-client lifetime"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        idle_owner.0.try_wait().unwrap().is_none(),
+        "idle exit was caused by the owner"
+    );
 }
 
 #[test]
