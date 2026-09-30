@@ -1091,4 +1091,3 @@ fn a_dead_owner_says_it_is_gone() {
         .unwrap();
     assert_eq!(owner, "epic x-29a8 the epic");
 }
-
