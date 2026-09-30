@@ -43,6 +43,7 @@ impl TerminalGuard {
     /// even a kill during the splash restores the user's colors.
     pub(super) fn enter_raw() -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
+        crate::process_admission::set_terminal_owned(true);
         unsafe {
             libc::signal(libc::SIGTERM, sigterm_restore as *const () as usize);
         }
@@ -102,6 +103,7 @@ impl Drop for TerminalGuard {
         let _ = out.write_all(MODE_RESET);
         let _ = crossterm::execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
         let _ = terminal::disable_raw_mode();
+        crate::process_admission::set_terminal_owned(false);
     }
 }
 
