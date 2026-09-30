@@ -133,7 +133,7 @@ impl View {
         // rows: every resolver that answers "which sideline row is this"
         // (hover, right-click menu, drag pickup, press-hold) must answer
         // none there, or a press on the board acts on a phantom row.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
             return None;
         }
         // The sideline owns row 0 in normal mode (the strip moved right of
@@ -190,8 +190,19 @@ impl View {
                                   // The backlog view: the board's own render inside THIS column, no
                                   // second border, the cursor row wearing the sideline band. The
                                   // divider paints as in the agents view, then the agent path stops.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
-            if let Some(b) = &self.backlog_board {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
+            if self.sideline_view == crate::view_store::SidelineView::Org {
+                if !self.board_full {
+                    org_board::paint(
+                        self,
+                        cells,
+                        rows,
+                        cols,
+                        text_w,
+                        rows.saturating_sub(self.bottom_row_is_chrome() as usize),
+                    );
+                }
+            } else if let Some(b) = &self.backlog_board {
                 if !self.board_full {
                     let chrome_rows = self.bottom_row_is_chrome() as usize;
                     backlog_board::backlog_panes::paint(

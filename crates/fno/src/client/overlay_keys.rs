@@ -154,6 +154,11 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
+    if view.org_board.is_some()
+        && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
+    {
+        return Some(org_board::route_keys(view, scanner, bytes, sock_w).await);
+    }
     if view.backlog_board.is_some()
         && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
     {
@@ -186,6 +191,12 @@ pub(super) async fn flush_released_chord(
             return super::agent_launcher::launcher_keys(view, chunk, sock_w)
                 .await
                 .map(|_| ());
+        }
+    } else if view.org_board.is_some()
+        && view.input_owner() == super::region_focus::RegionOwner::Board
+    {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return org_board::keys(view, chunk, sock_w).await.map(|_| ());
         }
     } else if view.backlog_board.is_some()
         && view.input_owner() == super::region_focus::RegionOwner::Board
