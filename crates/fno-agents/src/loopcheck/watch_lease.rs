@@ -59,17 +59,15 @@ fork) is its own background task; include its actual harness task id \
 pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
 instead of re-waking every tick.";
 
-/// Whether a session's harness + substrate can park-and-wake on a `<watching>`
-/// idle. Only a Claude session's harness-tracked background/Monitor
-/// tasks re-invoke the model when they exit, so only Claude may idle. A
-/// `fno-agents loop run` child exits on allow (FNO_DRIVER_LIB set), and
-/// codex/gemini have no self-wake on background-task exit - their waker is the
-/// fno-agents daemon consuming the watch event, shipped as a separate
-/// live-verified follow-up - so all of those keep today's block behavior rather
-/// than idling with nothing to wake them (a dead watch). This is the design's
-/// "unroutable harness -> status quo, never a dead watch" degradation.
+/// Whether a session's harness + substrate can park on a `<watching>` idle.
+/// The supported interactive harnesses can be resumed through the daemon's
+/// expiry arm. Loop-run children exit on allow, and unknown or unsupported
+/// harnesses stay on the blocking path rather than idling without a routed wake.
 pub(crate) fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
-    author_harness == Some("claude") && !is_loop_run_child
+    matches!(
+        author_harness,
+        Some("claude" | "codex" | "opencode" | "pi" | "agy" | "gemini")
+    ) && !is_loop_run_child
 }
 
 pub(crate) fn watching_harness_refusal(

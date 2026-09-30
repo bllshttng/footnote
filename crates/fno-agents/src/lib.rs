@@ -402,6 +402,7 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
 
@@ -1496,6 +1497,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // task through the pr-nudge store.
     "burn_watch_wake",
     "burn_watch_escalated",
+    "loop_check_watch_expiry_wake",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     //. The roots reach a spawn as an RPC param from the Python seam,

@@ -416,15 +416,20 @@ fn watch_idle_classifies_pending_ci() {
 }
 
 #[test]
-fn codex_watch_harness_gate_is_claude_only() {
-    // Only Claude self-wakes on a background-task exit, so only Claude idles.
+fn watch_expiry_gate_allows_daemon_routed_codex_idle() {
+    // Supported interactive harnesses share the daemon expiry arm.
     assert!(harness_can_idle(Some("claude"), false));
+    assert!(harness_can_idle(Some("codex"), false));
+    assert!(harness_can_idle(Some("opencode"), false));
+    assert!(harness_can_idle(Some("pi"), false));
+    assert!(harness_can_idle(Some("agy"), false));
+    assert!(harness_can_idle(Some("gemini"), false));
     // A loop-run child (FNO_DRIVER_LIB) exits on allow -> never idles.
     assert!(!harness_can_idle(Some("claude"), true));
-    // codex/gemini have no self-wake; their daemon-consumer waker ships
-    // separately, so until then they keep today's block behavior.
-    assert!(!harness_can_idle(Some("codex"), false));
-    assert!(!harness_can_idle(Some("gemini"), false));
+    assert!(!harness_can_idle(Some("codex"), true));
+    assert!(!harness_can_idle(Some("opencode"), true));
+    // Unknown/unroutable harnesses keep the conservative block behavior.
+    assert!(!harness_can_idle(Some("unknown"), false));
     // Unknown harness (bare shell / daemon): conservative block.
     assert!(!harness_can_idle(None, false));
 }
