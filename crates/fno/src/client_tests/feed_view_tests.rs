@@ -1092,36 +1092,3 @@ fn a_dead_owner_says_it_is_gone() {
     assert_eq!(owner, "epic x-29a8 the epic");
 }
 
-// TEMPORARY: renders the new modal through the real compose path so the
-// user can judge it before merge. Deleted before merge.
-#[tokio::test]
-async fn zz_render_dump_for_visual_gate() {
-    let mut v = view_with_rows(vec![]);
-    v.term = (44, 120);
-    let q = crate::feed_overlay::FeedItem {
-        ts: "2026-09-29T18:21:26Z".into(),
-        kind: "question_asked".into(),
-        node: Some("x-182e".into()),
-        session_id: Some("8f3c48be-0366-40fb-a3c1-303e22dcbc0e".into()),
-        harness: Some("claude".into()),
-        title:
-            "Does this Settings > Theme render look right for importing and applying user themes?"
-                .into(),
-        r#ref: Some("q-1".into()),
-        actor: None,
-        model: Some("glm-5.3-flash".into()),
-        effort: Some("high".into()),
-        phase: None,
-        detail: None,
-        reason: Some("a theme import needs a ruling on the live preview".into()),
-        crown: None,
-        owner: Some("king jolly-finch (king-4d9b)".into()),
-        parent: None,
-        url: None,
-        cwd: None,
-    };
-    v.feed_detail = Some(feed_detail::modal(&v, q));
-    let text = crate::vt::frame_text(&v.compose());
-    println!("==== PROVENANCE MODAL (node x-182e sample row) ====");
-    println!("{text}");
-}
