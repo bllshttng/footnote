@@ -4270,7 +4270,8 @@ mod tests {
         // the wire - every older server) reads `None`, the client's signal
         // that the announcer is absent and post-announcement commands are
         // refused client-side.
-        let old = r#"{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[24,80]}"#;
+        let old =
+            r#"{"Layout":{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[24,80]}}"#;
         match serde_json::from_str::<ServerMsg>(old).unwrap() {
             ServerMsg::Layout { proto, .. } => assert_eq!(proto, None),
             other => panic!("expected a Layout, got {other:?}"),

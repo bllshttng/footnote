@@ -6583,6 +6583,7 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
     // (the server applies it to the sender's viewed tab); a menu left open
     // across a view flip refuses by notice, never a send.
     v.layout.squads[0].active_tab = 0;
+    v.server_proto = Some(97);
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     match menu_command_for(&mut v, super::MenuAction::TabSplit(Dir::Left)).await {
         Command::SplitDir(Dir::Left) => {}
@@ -6614,6 +6615,7 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
     // Unannounced server (pre-v97 layout; the v95 build among them cannot
     // parse SplitDir and the unknown variant ended the client's session):
     // the cell refuses by notice and sends nothing.
+    v.layout.squads[0].active_tab = 0;
     v.server_proto = None;
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     let sel = v
@@ -6637,25 +6639,6 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
             .is_some_and(|(s, _)| s.contains("restart the mux server")),
         "the refusal names the fix"
     );
-
-    // An announced current server splits normally; the guard passes through.
-    v.server_proto = Some(97);
-    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
-    let sel = v
-        .row_menu
-        .as_ref()
-        .unwrap()
-        .actions
-        .iter()
-        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
-        .expect("the menu offers the split cell");
-    v.row_menu.as_mut().unwrap().popup.sel = sel;
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut std::io::Cursor::new(buf)).unwrap() {
-        ClientMsg::Command(Command::SplitDir(Dir::Left)) => {}
-        other => panic!("an announced server got the split, got {other:?}"),
-    }
 }
 
 #[test]
