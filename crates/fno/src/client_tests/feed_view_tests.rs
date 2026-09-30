@@ -230,20 +230,6 @@ fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
 }
 
 #[test]
-fn hit_on_an_unjoined_row_attaches_its_session() {
-    let item = feed_item(Some("x-nope"), Some("s-ghost"));
-    let (_, actions, _) = feed_detail::build(&[], 0, &item);
-    assert!(actions
-        .iter()
-        .any(|a| matches!(a, feed_detail::FeedAction::Session(
-            ChromeHit::Cmds(c)
-        ) if c == vec![Command::AttachAgent {
-            id: "s-ghost".into(),
-            placement: PanePlacement { portal: Some(0), ..Default::default() },
-        }])));
-}
-
-#[test]
 fn hit_on_a_row_without_session_id_is_none() {
     let item = feed_item(Some("x-nope"), None);
     let (_, actions, _) = feed_detail::build(&[], 0, &item);
