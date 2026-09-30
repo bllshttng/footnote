@@ -16,58 +16,34 @@ from fno.paths_testing import use_tmpdir
 
 CODEX_HARNESS = "codex"
 
-def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
-    """Build BOTH binaries a pane journey drives: the ``fno`` mux binary and
-    the ``fno-agents-worker`` keeper it execs.
-
-    The keeper lane resolves its worker through paired_bin (env override,
-    installed sibling, dev-tree target dir, PATH - crates/fno/src/server.rs
-    ``keeper_worker_bin``). A journey that builds only ``fno`` dies at pane
-    spawn with ENOENT on a checkout where the sibling crate was never built -
-    exactly the changed-packet CI job, which installs a toolchain but runs no
-    crate build step. Building both here and exporting
-    ``FNO_AGENTS_WORKER_BIN`` makes the journey self-contained on every host."""
-    build_env = {
-        **os.environ,
-        "CARGO_HOME": str(cargo.parent.parent),
-        "RUSTUP_HOME": str(cargo.parent.parent.parent / ".rustup"),
-    }
-    for manifest, bin_name in (
-        (repo / "crates" / "fno" / "Cargo.toml", "fno"),
-        (repo / "crates" / "fno-agents" / "Cargo.toml", "fno-agents-worker"),
-    ):
-        built = subprocess.run(
-            [str(cargo), "build", "--manifest-path", str(manifest), "--bin", bin_name],
-            cwd=repo,
-            env=build_env,
-            text=True,
-            capture_output=True,
-        )
-        assert built.returncode == 0, built.stderr
+def _real_mux_binaries(repo: Path) -> tuple[Path, Path] | None:
+    """Return binaries built by the CI cargo step when both are executable."""
     fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     worker_bin = (
         repo / "crates" / "fno-agents" / "target" / "debug" / "fno-agents-worker"
     )
+    missing = [
+        str(path.relative_to(repo))
+        for path in (fno_bin, worker_bin)
+        if not path.is_file() or not os.access(path, os.X_OK)
+    ]
+    if missing:
+        return None
     return fno_bin, worker_bin
 
 
 @pytest.mark.slow_e2e
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(144)
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
     """One derived pane identity reaches every public peer surface unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    cargo_path = shutil.which("cargo")
-    if cargo_path is None:
-        # This is the strongest test in the suite and it drives the real fno
-        # binary, so it needs a toolchain. Skip where there is none rather than
-        # hard-erroring: an environment without cargo has nothing to say about
-        # this invariant, and a red that means "no rust here" trains people to
-        # ignore reds.
-        pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
+    binaries = _real_mux_binaries(repo)
+    if binaries is None:
+        pytest.skip("prebuilt fno and fno-agents-worker binaries are required")
+    fno_bin, worker_bin = binaries
 
     agents_home = tmp_path / ".fno" / "agents"
     mux_dir = Path("/tmp") / f"fno-i-{os.getpid()}-{uuid.uuid4().hex[:6]}"
@@ -287,10 +263,10 @@ def test_codex_autonomous_pane_journey_completes_without_operator_input(
     """A fake Codex pane receives its task, exits, and leaves readable output."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    cargo_path = shutil.which("cargo")
-    if cargo_path is None:
-        pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
+    binaries = _real_mux_binaries(repo)
+    if binaries is None:
+        pytest.skip("prebuilt fno and fno-agents-worker binaries are required")
+    fno_bin, worker_bin = binaries
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

@@ -67,7 +67,7 @@ pub(crate) fn rebuild(connection: &Connection) -> Result<(), String> {
 /// Node ids matching the query, best first. Tokens are double-quoted so
 /// user text never reads as FTS5 syntax; adjacent tokens are an implicit AND.
 pub fn search(store: &Store, query: &str, limit: Option<i64>) -> Result<Vec<String>, ApiError> {
-    let connection = crate::backlog::open(&store.graph)?;
+    let connection = crate::backlog::read_connection(&store.graph)?;
     query_nodes(&connection, query, limit).map_err(ApiError::from)
 }
 
