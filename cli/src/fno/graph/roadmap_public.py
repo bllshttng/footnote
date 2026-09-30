@@ -20,6 +20,7 @@ from fno.graph.render import (
     _project_key,
     make_kanban_classifiers,
 )
+from fno.graph.statuses import derived_status
 
 # The statuses a PUBLIC backlog page shows. The local board shows every row.
 PUBLIC_BACKLOG_STATUSES = ("in_progress", "ready", "blocked", "idea")
@@ -138,7 +139,7 @@ def atomic_write_documents(documents: dict[Path, str]) -> None:
             except OSError:
                 pass
         raise
-from fno.graph.statuses import derived_status
+
 
 if TYPE_CHECKING:
     from fno.config import RenderTargetConfig
