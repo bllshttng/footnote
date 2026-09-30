@@ -1108,6 +1108,8 @@ struct PluginInstallArgs {
     crown: Option<String>,
     hooks_file: Option<String>,
     extension_src: Option<String>,
+    yes: bool,
+    dry_run: bool,
 }
 
 fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
@@ -1126,6 +1128,8 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
         crown: None,
         hooks_file: None,
         extension_src: None,
+        yes: false,
+        dry_run: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -1153,6 +1157,14 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             "--extension-src" => {
                 parsed.extension_src = args.get(i + 1).cloned();
                 i += 2;
+            }
+            "--yes" => {
+                parsed.yes = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                parsed.dry_run = true;
+                i += 1;
             }
             "--json" | "-J" => {
                 parsed.json = true;
@@ -1215,6 +1227,8 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         crown,
         hooks_file,
         extension_src,
+        yes,
+        dry_run,
     } = parse_plugin_install_args(args);
     if hooks || hooks_status {
         return run_agy_hooks(
@@ -1311,7 +1325,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         }
         Some(harness) => {
             if harness == "opencode" {
-                return run_opencode_arm(harness, json, uninstall, status, quick);
+                return run_opencode_arm(harness, json, uninstall, status, quick, yes, dry_run);
             }
             if harness == "grok" && status {
                 let receipt = grok_status_receipt();
@@ -1320,6 +1334,10 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             }
             if harness == "pi" {
                 return run_pi_arm(status, json, extension_src.as_deref());
+            }
+            if yes || dry_run {
+                eprintln!("plugin install: --yes/--dry-run apply to the opencode arm only");
+                return 2;
             }
             if uninstall || status || quick {
                 eprintln!(
@@ -1368,7 +1386,15 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
 /// `opencode_install`, plus the shared env exports and stale-copy sweep the
 /// other harness arms run. `--json` keeps stdout to the receipt alone (the
 /// Python door parses it), so the prose side lines move to stderr there.
-fn run_opencode_arm(_harness: &str, json: bool, uninstall: bool, status: bool, quick: bool) -> i32 {
+fn run_opencode_arm(
+    _harness: &str,
+    json: bool,
+    uninstall: bool,
+    status: bool,
+    quick: bool,
+    yes: bool,
+    dry_run: bool,
+) -> i32 {
     let say = |line: String| {
         if json {
             eprintln!("{line}");
@@ -1423,17 +1449,99 @@ fn run_opencode_arm(_harness: &str, json: bool, uninstall: bool, status: bool, q
         }
         return 0;
     }
-    match crate::opencode_install::install(&std::env::current_dir().unwrap_or_default()) {
+    // --dry-run: the audit prints, nothing is written - the file install
+    // is skipped with it, so the command is a pure preview.
+    if dry_run {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let findings = crate::opencode_config::audit(&cwd);
+        if findings.is_empty() {
+            say("plugin array: clean; nothing to disable".to_string());
+        }
+        for f in &findings {
+            say(f.summary());
+        }
+        for path in crate::opencode_config::omo_config_paths(&crate::opencode_install::config_dir())
+        {
+            say(format!(
+                "INFO opencode: {} keeps oh-my-openagent's settings; inert while no omo plugin loads, footnote never edits it",
+                path.display()
+            ));
+        }
+
+        if let Some(models) = crate::opencode_config::omo_agent_models() {
+            let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
+            if !block.is_empty() && block != "{}" {
+                say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
+                say(block);
+            }
+            if !not_carried.is_empty() {
+                say(format!(
+                    "not carried from oh-my-openagent (no footnote counterpart): {}",
+                    not_carried.join(", ")
+                ));
+            }
+        }
+        say("--dry-run: nothing written; re-run without --dry-run to apply".to_string());
+        return 0;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::opencode_install::install(&cwd) {
         Ok(receipt) => {
+            let findings = crate::opencode_config::audit(&cwd);
+            for path in
+                crate::opencode_config::omo_config_paths(&crate::opencode_install::config_dir())
+            {
+                say(format!(
+                    "INFO opencode: {} keeps oh-my-openagent's settings; inert while no omo plugin loads, footnote never edits it",
+                    path.display()
+                ));
+            }
+
+            if let Some(models) = crate::opencode_config::omo_agent_models() {
+                let (block, not_carried) = crate::opencode_config::suggested_agent_block(&models);
+                if !block.is_empty() && block != "{}" {
+                    say("suggested agent block (oh-my-openagent's model assignments, mapped onto footnote's agents; copy into opencode.json if you want them):".to_string());
+                    say(block);
+                }
+                if !not_carried.is_empty() {
+                    say(format!(
+                        "not carried from oh-my-openagent (no footnote counterpart): {}",
+                        not_carried.join(", ")
+                    ));
+                }
+            }
+            let (_action, undo, refusals) = decide_plugin_array(&findings, yes, json);
             if json {
-                println!("{}", serde_json::to_string(&receipt).unwrap_or_default());
+                let mut value = serde_json::to_value(&receipt).unwrap_or_else(|_| json!({}));
+                value["plugin_array"] = json!({
+                    "findings": findings.iter().map(|f| json!({
+                        "file": f.file.display().to_string(),
+                        "entry": f.entry,
+                        "kind": f.kind.label(),
+                        "project": f.project,
+                    })).collect::<Vec<_>>(),
+                    "action": "audit-only: --json never prompts and never edits",
+                });
+                println!("{}", value);
             } else {
                 println!(
                     "plugin install opencode: {} (footnote {} -> {})",
                     receipt.status, receipt.version, receipt.config_dir
                 );
+                for replaced in &receipt.replaced_legacy {
+                    println!(
+                        "replaced legacy bridge: {} (backup: {})",
+                        replaced.path, replaced.backup
+                    );
+                }
                 for rel in &receipt.kept {
                     println!("kept user file: {rel} (footnote did not overwrite it)");
+                }
+                for line in undo {
+                    println!("{line}");
+                }
+                for line in refusals {
+                    eprintln!("{line}");
                 }
             }
             for (line, is_error) in env_exports_lines() {
@@ -1467,63 +1575,76 @@ fn run_opencode_arm(_harness: &str, json: bool, uninstall: bool, status: bool, q
     }
 }
 
-fn print_status_prose(value: &serde_json::Value) {
-    let status = value["status"].as_str().unwrap_or("unknown");
-    match status {
-        "installed" => println!(
-            "opencode: installed (footnote {}): {} command(s), {} agent(s), {} skill(s)",
-            value["version"].as_str().unwrap_or("?"),
-            value["installed"]["commands"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0),
-            value["installed"]["agents"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0),
-            value["installed"]["skills"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or(0)
-        ),
-        "absent" => println!(
-            "opencode: not installed (bridge file {}); \
-             install with `fno config plugin install opencode`",
-            if value["bridge_present"].as_bool() == Some(true) {
-                "present, legacy"
-            } else {
-                "absent"
-            }
-        ),
-        _ => {
-            println!(
-                "opencode: PARTIAL: {} name(s) installed but not loaded: {}",
-                value["missing"].as_array().map(Vec::len).unwrap_or(0),
-                value["missing"]
-                    .as_array()
-                    .map(|names| names
-                        .iter()
-                        .filter_map(|n| n.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_default()
-            );
-            let stale = value["stale"].as_array().map(Vec::len).unwrap_or(0);
-            if stale > 0 {
-                println!(
-                    "opencode: {} loaded name(s) footnote's manifest does not know: {}",
-                    stale,
-                    value["stale"]
-                        .as_array()
-                        .map(|names| names
-                            .iter()
-                            .filter_map(|n| n.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "))
-                        .unwrap_or_default()
-                );
-            }
+/// Print the audit summary, take consent once (--yes, else the inherited
+/// TTY), and disable the approved findings. Returns (action, undo lines,
+/// refusal lines). A finding inside a project config is reported, never
+/// edited; with no TTY and no --yes nothing is edited and stdout names
+/// --yes. Under `json` stdout carries the receipt alone: findings and the
+/// kept-line move to stderr, and the prompt never fires.
+fn decide_plugin_array(
+    findings: &[crate::opencode_config::Finding],
+    yes: bool,
+    json: bool,
+) -> (String, Vec<String>, Vec<String>) {
+    use std::io::IsTerminal as _;
+    use std::io::Write as _;
+    if findings.is_empty() {
+        return ("none".into(), vec![], vec![]);
+    }
+    for f in findings {
+        if json {
+            eprintln!("{}", f.summary());
+        } else {
+            println!("{}", f.summary());
         }
+    }
+    let editable: Vec<crate::opencode_config::Finding> =
+        findings.iter().filter(|f| !f.project).cloned().collect();
+    if editable.is_empty() {
+        if json {
+            eprintln!("project config entries are reported, never edited");
+        } else {
+            println!("project config entries are reported, never edited");
+        }
+        return ("reported".into(), vec![], vec![]);
+    }
+    let approved = if json {
+        // --json never edits, whatever --yes says: the receipt's action text
+        // and the guide both promise audit-only under --json.
+        false
+    } else if yes {
+        true
+    } else if std::io::stdin().is_terminal() {
+        print!("\nDisable these plugin entries? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        !answer.trim().to_lowercase().starts_with('n')
+    } else {
+        false
+    };
+    if approved {
+        let refs: Vec<&crate::opencode_config::Finding> = editable.iter().collect();
+        let (undo, refusals) = crate::opencode_config::disable(&refs);
+        return ("disabled".into(), undo, refusals);
+    }
+    if json {
+        eprintln!("kept: --json never edits; re-run without --json to disable them");
+    } else {
+        println!("kept: re-run `fno config plugin install opencode --yes` to disable them");
+    }
+    ("kept".into(), vec![], vec![])
+}
+
+fn print_status_prose(value: &serde_json::Value) {
+    let Some(lines) = value["doctor_lines"].as_array() else {
+        println!("opencode: status unknown (the receipt carries no doctor lines)");
+        return;
+    };
+    for line in lines {
+        let level = line["level"].as_str().unwrap_or("INFO");
+        let text = line["text"].as_str().unwrap_or("");
+        println!("{level} {text}");
     }
 }
 

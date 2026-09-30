@@ -87,14 +87,14 @@ def test_open_tag_renders_ranks_after_their_side():
         fno_mail_open(
             from_="647b3a9c-6544-43fe-899e-704382f3d973",
             harness="claude",
-            from_rank="L2 epic-scope",
+            from_rank="Lead of epic-scope",
             to="278c9a89",
-            to_rank="L1 fno",
+            to_rank="Head of fno",
             id="msg-5a760f",
         )
         == '<fno_mail from="647b3a9c" '
-        'harness="claude-code" from_rank="L2 epic-scope" to="278c9a89" '
-        'to_rank="L1 fno" id="msg-5a760f">'
+        'harness="claude-code" from_rank="Lead of epic-scope" to="278c9a89" '
+        'to_rank="Head of fno" id="msg-5a760f">'
     )
 
 
@@ -184,8 +184,8 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
     )
     assert wrapped == (
         '<fno_mail from="647b3a9c" harness="claude-code" '
-        'from_rank="L2 epic-scope" from_name="folio" to="278c9a89" '
-        'to_name="quill" to_rank="L1 fno" id="msg-5a760f">'
+        'from_rank="Lead of epic-scope" from_name="folio" to="278c9a89" '
+        'to_name="quill" to_rank="Head of fno" id="msg-5a760f">'
         "hi"
         "</fno_mail>"
     )
@@ -212,7 +212,7 @@ def test_wrap_uses_the_short_handle_for_claude_and_reads_rank_by_session(
     )
     assert wrapped.startswith(
         '<fno_mail from="7c9e6679" harness="claude-code" '
-        'from_rank="L1 fno" from_name="king">'
+        'from_rank="Head of fno" from_name="king">'
     )
     # A handle that resolves to no live row stays bare: no session upgrade,
     # no rank, no name. A resolvable handle upgrades even without a session
@@ -269,8 +269,8 @@ def test_envelope_overhead_budget(monkeypatch, tmp_path):
         harness="claude",
         to_session="reader",
     )
-    assert 'from_rank="L2 epic-scope"' in wrapped
-    assert 'to_rank="L1 fno"' in wrapped
+    assert 'from_rank="Lead of epic-scope"' in wrapped
+    assert 'to_rank="Head of fno"' in wrapped
     # Crowned overhead, measured 178 once from= rendered the short claude
     # handle and from_name and to_name joined the header (176 at the
     # reshaping, 537 before the compaction).

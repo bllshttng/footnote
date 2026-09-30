@@ -502,7 +502,7 @@ fn provider_receipt_matches(
                     let Some(scope) = scope.filter(|scope| !scope.trim().is_empty()) else {
                         return false;
                     };
-                    format!("$fno:reign {}", scope.trim())
+                    format!("$fno:lead {}", scope.trim())
                 } else {
                     let Some(objective) = command
                         .trim()
@@ -516,13 +516,30 @@ fn provider_receipt_matches(
                 };
                 let expected_owner = if !scope.unwrap_or_default().trim().is_empty() {
                     format!("king:{}", scope.unwrap_or_default().trim())
-                } else if let Some(scope) = objective.strip_prefix("$fno:reign ") {
+                } else if let Some(scope) = objective
+                    .strip_prefix("$fno:lead ")
+                    .or_else(|| objective.strip_prefix("$fno:reign "))
+                {
                     format!("king:{}", scope.trim())
                 } else {
                     format!("target:{session_id}")
                 };
-                receipt.get("objective").and_then(serde_json::Value::as_str)
-                    == Some(objective.as_str())
+                // A live goal still carrying the pre-rename spelling
+                // verifies like the lead spelling; the seed writes the new
+                // words, the receipt may answer in either.
+                let objective_matches = if resume {
+                    let scope_txt = scope.unwrap_or_default().trim().to_string();
+                    let answered = receipt
+                        .get("objective")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    answered == format!("$fno:lead {scope_txt}")
+                        || answered == format!("$fno:reign {scope_txt}")
+                } else {
+                    receipt.get("objective").and_then(serde_json::Value::as_str)
+                        == Some(objective.as_str())
+                };
+                objective_matches
                     && owner == expected_owner
                     && (!resume
                         || receipt

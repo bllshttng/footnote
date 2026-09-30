@@ -404,6 +404,7 @@ pub(crate) fn read_pr<P: GhProbe>(
     }
 
     Ok(json!({
+        "number": pulls.get("number").cloned().unwrap_or(Value::Null),
         "state": map_pr_state(&pulls),
         "statusCheckRollup": rollup,
         "headRefOid": sha,
@@ -411,6 +412,11 @@ pub(crate) fn read_pr<P: GhProbe>(
         "mergeable": map_mergeable(pulls.get("mergeable").unwrap_or(&Value::Null)),
         "mergeStateStatus": pulls.get("mergeable_state").cloned().unwrap_or(Value::Null),
         "baseRefName": pulls.pointer("/base/ref").cloned().unwrap_or(Value::Null),
+        // The fields facts_from_pulls needs, so the walk parses facts from
+        // this projection instead of spawning `fno do pr info`.
+        "html_url": pulls.get("html_url").cloned().unwrap_or(Value::Null),
+        "body": pulls.get("body").cloned().unwrap_or(Value::Null),
+        "auto_merge": pulls.get("auto_merge").cloned().unwrap_or(Value::Null),
         // The raw listing rerun recovery and the workflow mapping share.
         "workflowRuns": scan.listing,
     }))
@@ -845,7 +851,7 @@ pub(crate) fn status_payload<P: GhProbe>(
         let coverage = reviews::read_review_coverage(cwd, pr, Some(&head_sha), lane, false);
         // The cache layer passes the probe it already ran for the key
         // material; a degraded path (no slug, no cache dir) probes here.
-        let hold_state = hold_probe.or_else(|| Some(seams::hold_verdict(cwd, pr)));
+        let hold_state = hold_probe.or_else(|| Some(seams::hold_verdict(cwd, pr, Some(&pr_json))));
         let hold = match hold_state.as_ref() {
             Some(seams::HoldVerdict::Held(reason)) => json!(reason),
             _ => Value::Null,
@@ -981,6 +987,36 @@ pub(crate) fn status_payload<P: GhProbe>(
     if let Some(seams::HoldVerdict::Clear | seams::HoldVerdict::Held(_)) = hold_state.as_ref() {
         receipt_ask["dispatch_hold_reason"] = hold.clone();
     }
+    // The read's own PR projection rides the ask: the walk parses facts from
+    // it instead of spawning `fno do pr info`. An old cache row without the
+    // new fields simply omits the key and the walk spawns as before.
+    let facts_ridable = pr_json
+        .get("html_url")
+        .and_then(Value::as_str)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+        && pr_json.get("body").map(Value::is_string).unwrap_or(false);
+    if facts_ridable {
+        receipt_ask["facts"] = pr_json.clone();
+    }
+    // The review-activity probe this read already ran answers the walk's
+    // review-hold question: same registry, same verdict words. A probed clear
+    // rides as null; the terminal not-asked shape stays absent, so the walk
+    // keeps its own probe there (it returns before holds anyway).
+    if !is_terminal {
+        let blocker = activity
+            .get("blocker")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let detail = activity.get("detail").and_then(Value::as_str).unwrap_or("");
+        receipt_ask["review_hold_reason"] = if blocker.is_empty() {
+            Value::Null
+        } else if detail.is_empty() {
+            json!(blocker)
+        } else {
+            json!(format!("{blocker}: {detail}"))
+        };
+    }
     let mut receipt = crate::authorized_merge::preview_receipt_payload(&receipt_ask);
     if !receipt
         .get("blockers")
@@ -1024,7 +1060,8 @@ pub(crate) fn status_payload<P: GhProbe>(
 /// env override at their own tempdir: cargo runs tests in parallel threads.
 #[cfg(test)]
 pub(crate) fn cache_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
     LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 

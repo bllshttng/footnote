@@ -476,4 +476,106 @@ mod tests {
             "names the searched dir: {err}"
         );
     }
+
+    /// The positive control on opencode 1.14.50's REAL `session` schema: the
+    /// reader must answer a store whose every NOT NULL column is present,
+    /// and its freshness window must exclude a 3-day-old session. The
+    /// columns mirror `sqlite3 .schema session` on 1.14.50.
+    fn real_schema_store(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fno-opencode-real-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE `session` (
+                `id` text PRIMARY KEY,
+                `project_id` text NOT NULL,
+                `parent_id` text,
+                `slug` text NOT NULL,
+                `directory` text NOT NULL,
+                `title` text NOT NULL,
+                `version` text NOT NULL,
+                `share_url` text,
+                `summary_additions` integer,
+                `summary_deletions` integer,
+                `summary_files` integer,
+                `summary_diffs` text,
+                `revert` text,
+                `permission` text,
+                `time_created` integer NOT NULL,
+                `time_updated` integer NOT NULL,
+                `time_compacting` integer,
+                `time_archived` integer,
+                `workspace_id` text,
+                `path` text,
+                `agent` text,
+                `model` text,
+                `cost` real DEFAULT 0 NOT NULL,
+                `tokens_input` integer DEFAULT 0 NOT NULL,
+                `tokens_output` integer DEFAULT 0 NOT NULL,
+                `tokens_reasoning` integer DEFAULT 0 NOT NULL,
+                `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+                `tokens_cache_write` integer DEFAULT 0 NOT NULL,
+                `metadata` text
+            );
+            CREATE TABLE `message` (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE `part` (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);",
+        )
+        .unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let old_ms = now_ms - 3 * 24 * 3600 * 1000;
+        for (id, slug, updated) in [
+            ("ses_fresh", "fresh-session", now_ms),
+            ("ses_stale", "stale-session", old_ms),
+        ] {
+            conn.execute(
+                "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) \
+                 VALUES (?1, 'proj', ?2, '/fixture/real', 't', '1.14.50', ?3, ?3)",
+                rusqlite::params![id, slug, updated],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_fresh', ?1, ?2)",
+            rusqlite::params![now_ms, user_msg()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('p1', 'm1', 'ses_fresh', ?1)",
+            rusqlite::params![r#"{"type":"text","text":"real-schema control"}"#],
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn real_schema_session_window_lists_fresh_and_drops_stale() {
+        let db = real_schema_store("window");
+        let src = OpencodeSource {
+            dbs: vec![db.clone()],
+            roots: None,
+        };
+        let ids: Vec<String> = src
+            .sessions(1)
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["ses_fresh".to_string()], "stale is out of window");
+        // The read path answers the fresh session's parts on the same store.
+        let file = &src.sessions(1)[0];
+        assert!(src.read(file).contains("real-schema control"));
+        // With the fresh session gone, sessions(1) lists nothing.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM session WHERE id = 'ses_fresh'", [])
+                .unwrap();
+        }
+        assert!(src.sessions(1).is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
 }

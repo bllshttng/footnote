@@ -3256,9 +3256,9 @@ fn title_claim_rows() {
     );
     core.reap_pane(seat);
 
-    // AC2-ERR: a title naming two rows drops the claim instead of guessing;
-    // the channel and the pane name keep the key a row answered, the drop
-    // is silent, and a later unambiguous title claims its row.
+    // AC2-ERR: a title naming two rows claims nothing instead of guessing;
+    // the border names the screen marked and no row wears the seat. A later
+    // unambiguous title claims its row.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, mut rx) = thread_core();
     core.agents = vec![
@@ -3277,28 +3277,23 @@ fn title_claim_rows() {
         "no row claims the seat"
     );
     assert_eq!(
-        core.portals[&0].row_key, "deadbee1",
-        "the channel only ever holds a key a row answered"
+        core.portals[&0].row_key, "twin?",
+        "the ambiguous title is stored marked, so no row answers it"
     );
     assert_eq!(
         core.panes[&seat].name.as_deref(),
-        Some("twin"),
-        "the pane name is unchanged: the reach named it, the drop renames nothing"
+        Some("twin?"),
+        "the border names the screen, marked unclaimed"
     );
-    assert_eq!(
-        core.agent_rows()
-            .iter()
-            .find(|r| r.portal == Some(0))
-            .map(|r| r.name.as_str()),
-        Some("twin"),
-        "the channel still names deadbee1's row, so it keeps the marker; \
-         only the ambiguous title was dropped"
+    assert!(
+        !core.agent_rows().iter().any(|r| r.portal == Some(0)),
+        "no row carries the marker: the screen names no one row"
     );
     assert!(
         drain_notices(&mut rx)
             .iter()
-            .all(|t| !t.contains("now shows")),
-        "a drop that renames nothing is silent"
+            .any(|t| t.contains("portal 0 now shows twin (unclaimed)")),
+        "the relabel says so"
     );
 
     core.follow_portal_viewer_titles();
@@ -3386,7 +3381,8 @@ fn title_claim_rows() {
 
     // AC2-EDGE: portal 1 already shows B; portal 0's viewer switches to B.
     // Portal 1 keeps its row, its mapping and its pane name; portal 0 drops
-    // its claim rather than minting a second viewer.
+    // its claim rather than minting a second viewer, and names the screen
+    // marked: the channel takes no row answer, so B keeps portal 1's mark.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, _rx) = thread_core();
     core.agents = vec![
@@ -3405,8 +3401,13 @@ fn title_claim_rows() {
     assert_eq!(core.attached.get("deadbee2"), Some(&seat1));
     assert_eq!(core.panes[&seat1].name.as_deref(), Some("target-b"));
     assert_eq!(
-        core.portals[&0].row_key, "deadbee1",
-        "portal 0 drops its claim and keeps the channel a row answered"
+        core.portals[&0].row_key, "target-b?",
+        "the held row is stored marked, so portal 1's claim stays unpoisoned"
+    );
+    assert_eq!(
+        core.panes[&seat0].name.as_deref(),
+        Some("target-b?"),
+        "portal 0's border names the screen, marked"
     );
     assert!(
         !core.attached.values().any(|p| *p == seat0),
@@ -3414,4 +3415,84 @@ fn title_claim_rows() {
     );
     core.reap_pane(seat0);
     core.reap_pane(seat1);
+
+    // x-8413: the viewer switches to a row that cannot be claimed (no
+    // attach id). The border still names the screen marked and the channel
+    // follows it, so the sideline marks vellum - never the stale finch.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("finch", "/tmp/seen", Some("deadbee1")),
+        bg_row("vellum", "/tmp/seen", None),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐ vellum");
+
+    core.follow_portal_viewer_titles();
+
+    assert!(
+        !core.attached.contains_key("deadbee1"),
+        "finch holds no mapping"
+    );
+    assert_eq!(
+        core.panes[&seat].name.as_deref(),
+        Some("vellum?"),
+        "the border names the screen, marked unclaimed"
+    );
+    assert_eq!(
+        core.portals[&0].row_key, "vellum",
+        "the channel follows the screen, so the sideline marks vellum"
+    );
+    let rows = core.agent_rows();
+    let v = rows
+        .iter()
+        .find(|r| r.name == "vellum")
+        .expect("row vellum");
+    assert_eq!(v.portal, Some(0), "vellum carries the marker");
+    let f = rows.iter().find(|r| r.name == "finch").expect("row finch");
+    assert_eq!(f.portal, None, "finch keeps no marker");
+    assert!(
+        drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("portal 0 now shows vellum (unclaimed)")),
+        "the relabel says so"
+    );
+
+    core.follow_portal_viewer_titles();
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "the second tick is silent"
+    );
+    core.reap_pane(seat);
+
+    // A row coincidentally named into the marked form never answers the
+    // marked key: the mark deepens until nothing answers it, so the
+    // uninvolved row wears no marker.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("vellum", "/tmp/seen", Some("deadbee1")),
+        bg_row("vellum", "/tmp/seen", Some("deadbee3")),
+        bg_row("vellum?", "/tmp/seen", None),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐ vellum");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(
+        core.portals[&0].row_key, "vellum??",
+        "the mark deepens past the row named vellum?"
+    );
+    assert!(
+        !core.agent_rows().iter().any(|r| r.portal == Some(0)),
+        "no row carries the marker, the row named vellum? least of all"
+    );
+    core.reap_pane(seat);
 }

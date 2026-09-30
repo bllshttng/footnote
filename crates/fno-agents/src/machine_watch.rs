@@ -1,5 +1,6 @@
 //! The daemon's 300-second machine sample arm.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,12 +12,24 @@ pub const MACHINE_HOT_SAMPLES: u32 = 2;
 pub const MACHINE_WATCH_INTERVAL_S: u64 = 300;
 pub const LOAD_PER_CORE_BAND: f64 = 10.0;
 
+/// The runaway brake: written when a runaway notice sends, honored by spawn
+/// admission for 30 minutes. Named for the notify-signals file pattern.
+pub const MACHINE_BRAKE_NAME: &str = "machine-brake.json";
+pub const MACHINE_BRAKE_HOLD_SECS: u64 = 1800;
+/// One-hour rolling baseline at the 300 s interval: 12 readings, armed at 4.
+const BASELINE_WINDOW_TICKS: usize = 12;
+const BASELINE_MIN_TICKS: usize = 4;
+const PROCESS_RUNAWAY_FACTOR: f64 = 2.0;
+const SWAP_RUNAWAY_FRACTION: f64 = 0.5;
+
 #[derive(Default)]
 pub struct MachineWatchState {
     pub(crate) hot_streak: u32,
     pub(crate) calm_streak: u32,
     pub(crate) last_notified: Option<Instant>,
     pub(crate) prev_ticks: Option<crate::machine_sample::HostTicks>,
+    /// Trailing process counts; the 1h baseline the runaway arm reads.
+    pub(crate) recent_processes: Vec<(Instant, u64)>,
 }
 
 pub struct Arm {
@@ -41,7 +54,36 @@ pub struct WatchOutcome {
     pub detail: String,
 }
 
-pub fn decide(sample: &MachineSample, busy_band: f64, load_band: f64) -> (String, String) {
+pub fn decide(
+    sample: &MachineSample,
+    busy_band: f64,
+    load_band: f64,
+    baseline: Option<u64>,
+) -> (String, String) {
+    let swap_runaway = sample
+        .swap_used_gb
+        .zip(sample.swap_total_gb)
+        .is_some_and(|(used, total)| total > 0.0 && used / total > SWAP_RUNAWAY_FRACTION);
+    let process_runaway = sample
+        .processes
+        .zip(baseline.filter(|base| *base > 0))
+        .is_some_and(|(processes, base)| processes as f64 > PROCESS_RUNAWAY_FACTOR * base as f64);
+    if swap_runaway || process_runaway {
+        let reason = if swap_runaway {
+            format!(
+                "machine runaway: swap {} of {} GB crosses the 50% band",
+                opt(sample.swap_used_gb),
+                opt(sample.swap_total_gb)
+            )
+        } else {
+            format!(
+                "machine runaway: {} processes cross 2x the 1h baseline {}",
+                sample.processes.unwrap_or_default(),
+                baseline.unwrap_or_default()
+            )
+        };
+        return ("runaway".into(), reason);
+    }
     let busy_hot = sample.busy_fraction.is_some_and(|value| value > busy_band);
     let load_hot = sample
         .load_15m
@@ -91,6 +133,7 @@ pub fn tick_machine_watch(
     reading: Result<&MachineSample, &str>,
     mut notify: impl FnMut(&str, &str) -> bool,
     now: Instant,
+    mut brake: impl FnMut(&MachineSample, &str),
 ) -> WatchOutcome {
     let sample = match reading {
         Ok(sample) => sample,
@@ -102,9 +145,20 @@ pub fn tick_machine_watch(
             }
         }
     };
+    // The current reading never sits on its own jury: baseline first, push after.
+    let baseline = process_baseline(&state.recent_processes, now);
+    if let Some(processes) = sample.processes {
+        state.recent_processes.push((now, processes));
+        if let Some(hour_ago) = now.checked_sub(Duration::from_secs(3600)) {
+            state.recent_processes.retain(|(t, _)| *t >= hour_ago);
+        }
+        while state.recent_processes.len() > BASELINE_WINDOW_TICKS {
+            state.recent_processes.remove(0);
+        }
+    }
     let busy_band = sample.busy_band.unwrap_or(0.9);
     let load_band = sample.load_band_per_core.unwrap_or(LOAD_PER_CORE_BAND);
-    let (verdict, reason) = decide(sample, busy_band, load_band);
+    let (verdict, reason) = decide(sample, busy_band, load_band, baseline);
     match verdict.as_str() {
         "calm" => {
             state.calm_streak = state.calm_streak.saturating_add(1);
@@ -114,6 +168,25 @@ pub fn tick_machine_watch(
                 skip_reason: Some("calm".into()),
                 detail: short(&reason),
             }
+        }
+        "runaway" => {
+            state.calm_streak = 0;
+            state.hot_streak = 0;
+            // A runaway skips the hot debounce: one 507 s sample against the
+            // 300 s interval made that debounce worth ~20 minutes of runway.
+            let outcome = emit_notice(
+                state,
+                sample,
+                &reason,
+                now,
+                "machine_watch: box runaway",
+                &mut notify,
+            );
+            // The brake refreshes on every runaway tick, notice sent or not:
+            // the 30m hold must outlive the notice throttle, or a sustained
+            // runaway reopens the gate mid-fire.
+            brake(sample, &reason);
+            outcome
         }
         "hot" => {
             state.hot_streak = state.hot_streak.saturating_add(1);
@@ -128,35 +201,14 @@ pub fn tick_machine_watch(
                     )),
                 };
             }
-            let throttle = Duration::from_secs(sample.throttle_minutes.saturating_mul(60));
-            if let Some(last) = state.last_notified {
-                if let Some(held) = now.checked_duration_since(last) {
-                    if held < throttle {
-                        return WatchOutcome {
-                            acted: 0,
-                            skip_reason: Some("throttled".into()),
-                            detail: short(&format!(
-                                "hot, notice held {}s more: {reason}",
-                                (throttle - held).as_secs()
-                            )),
-                        };
-                    }
-                }
-            }
-            if notify("machine_watch: box hot", &notice_body(&reason, sample)) {
-                state.last_notified = Some(now);
-                WatchOutcome {
-                    acted: 1,
-                    skip_reason: None,
-                    detail: short(&format!("notified: {reason}")),
-                }
-            } else {
-                WatchOutcome {
-                    acted: 0,
-                    skip_reason: Some("notify_failed".into()),
-                    detail: short(&reason),
-                }
-            }
+            emit_notice(
+                state,
+                sample,
+                &reason,
+                now,
+                "machine_watch: box hot",
+                &mut notify,
+            )
         }
         _ => WatchOutcome {
             acted: 0,
@@ -164,6 +216,99 @@ pub fn tick_machine_watch(
             detail: short(&reason),
         },
     }
+}
+
+/// The throttle-plus-notify half both hot and runaway verdicts share.
+fn emit_notice(
+    state: &mut MachineWatchState,
+    sample: &MachineSample,
+    reason: &str,
+    now: Instant,
+    title: &str,
+    notify: &mut impl FnMut(&str, &str) -> bool,
+) -> WatchOutcome {
+    let throttle = Duration::from_secs(sample.throttle_minutes.saturating_mul(60));
+    if let Some(last) = state.last_notified {
+        if let Some(held) = now.checked_duration_since(last) {
+            if held < throttle {
+                return WatchOutcome {
+                    acted: 0,
+                    skip_reason: Some("throttled".into()),
+                    detail: short(&format!(
+                        "hot, notice held {}s more: {reason}",
+                        (throttle - held).as_secs()
+                    )),
+                };
+            }
+        }
+    }
+    if notify(title, &notice_body(reason, sample)) {
+        state.last_notified = Some(now);
+        WatchOutcome {
+            acted: 1,
+            skip_reason: None,
+            detail: short(&format!("notified: {reason}")),
+        }
+    } else {
+        WatchOutcome {
+            acted: 0,
+            skip_reason: Some("notify_failed".into()),
+            detail: short(&reason),
+        }
+    }
+}
+
+/// Mean process count over the trailing hour, armed at 4 readings. `None`
+/// until then: a cold arm never fires the process runaway leg, and the swap
+/// leg covers the gap.
+pub fn process_baseline(window: &[(Instant, u64)], now: Instant) -> Option<u64> {
+    let hour_ago = now.checked_sub(Duration::from_secs(3600))?;
+    let fresh: Vec<u64> = window
+        .iter()
+        .filter(|(t, _)| *t >= hour_ago)
+        .map(|(_, p)| *p)
+        .collect();
+    if fresh.len() < BASELINE_MIN_TICKS {
+        return None;
+    }
+    Some((fresh.iter().sum::<u64>() / fresh.len() as u64).max(1))
+}
+
+/// Where admission looks for the brake. `FNO_MACHINE_BRAKE` overrides the
+/// full path; the default follows the notify-signals file pattern.
+pub(crate) fn brake_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_MACHINE_BRAKE").filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("."));
+    crate::state_layout::place(&PathBuf::from(home).join(".fno"), MACHINE_BRAKE_NAME)
+}
+
+/// The runaway brake: a self-expiring file the spawn admission honors.
+/// Best-effort - a failed write costs the refusal leg, never the notice.
+fn write_brake_file(sample: &MachineSample, reason: &str) {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() + MACHINE_BRAKE_HOLD_SECS)
+        .unwrap_or_default();
+    let group = sample
+        .top_names
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.first())
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let payload = serde_json::json!({
+        "until_epoch": until,
+        "reason": reason,
+        "group": group,
+        "processes": sample.processes,
+        "swap_used_gb": sample.swap_used_gb,
+    });
+    let _ = std::fs::write(
+        brake_path(),
+        serde_json::to_string(&payload).unwrap_or_default(),
+    );
 }
 
 fn notice_body(reason: &str, sample: &MachineSample) -> String {
@@ -186,6 +331,17 @@ fn notice_body(reason: &str, sample: &MachineSample) -> String {
             .zombies
             .map_or_else(|| "unmeasured".into(), |v| v.to_string())
     ));
+    if let Some(top) = sample
+        .top_names
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.first())
+    {
+        let name = top.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let count = top.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ppid = top.get("ppid").and_then(|v| v.as_u64()).unwrap_or(0);
+        body.push_str(&format!("; largest group {name} x{count} (ppid {ppid})"));
+    }
     body
 }
 
@@ -238,7 +394,30 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             }
             Err(error) => sample.sessions_error = Some(error),
         }
-        let (verdict, _) = decide(&sample, busy_band, LOAD_PER_CORE_BAND);
+        let baseline = {
+            let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            process_baseline(&guard.recent_processes, Instant::now())
+        };
+        if let Err(error) = crate::machine_sample::maybe_capture_process_snapshot(
+            &home,
+            sample.procs.len(),
+            baseline,
+            || {
+                let output = std::process::Command::new("ps")
+                    .args(["-Ao", "pid,ppid,rss,etime,command"])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "ps exited unsuccessfully",
+                    ));
+                }
+                Ok(output.stdout)
+            },
+        ) {
+            tracing::warn!(%error, "machine process snapshot failed");
+        }
+        let (verdict, _) = decide(&sample, busy_band, LOAD_PER_CORE_BAND, baseline);
         sample.verdict = Some(verdict.clone());
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
@@ -263,6 +442,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 Ok(&sample),
                 |title, body| crate::operator_notice::notify_operator(title, body, None),
                 Instant::now(),
+                |sample, reason| write_brake_file(sample, reason),
             )
         };
         crate::tick_ledger::emit_tick(
@@ -297,14 +477,14 @@ mod tests {
 
     #[test]
     fn load_can_make_machine_hot() {
-        let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0);
+        let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(reason.contains("30.2 per core crosses load band 10"));
     }
 
     #[test]
     fn unreadable_never_reads_calm() {
-        let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0);
+        let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "unreadable");
     }
 
@@ -321,7 +501,8 @@ mod tests {
                     calls += 1;
                     true
                 },
-                Instant::now()
+                Instant::now(),
+                |_, _| {}
             )
             .acted,
             0
@@ -334,11 +515,100 @@ mod tests {
                     calls += 1;
                     true
                 },
-                Instant::now()
+                Instant::now(),
+                |_, _| {}
             )
             .acted,
             1
         );
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn the_runaway_arms_fire_on_swap_and_on_an_armed_process_baseline() {
+        let mut s = sample(None, None);
+        s.swap_used_gb = Some(50.0);
+        s.swap_total_gb = Some(95.0);
+        let (verdict, reason) = decide(&s, 0.9, 10.0, None);
+        assert_eq!(verdict, "runaway", "swap needs no history");
+        assert!(reason.contains("swap"), "reason names the signal: {reason}");
+        let mut s = sample(None, None);
+        s.processes = Some(2500);
+        let (verdict, _) = decide(&s, 0.9, 10.0, None);
+        assert_eq!(verdict, "unreadable", "no baseline, no process arm");
+        let (verdict, reason) = decide(&s, 0.9, 10.0, Some(1200));
+        assert_eq!(verdict, "runaway");
+        assert!(reason.contains("baseline"), "{reason}");
+        let now = Instant::now();
+        let window: Vec<(Instant, u64)> = (0..3)
+            .map(|i| (now - Duration::from_secs(300 * (i as u64 + 1)), 1000 + i))
+            .collect();
+        assert_eq!(process_baseline(&window, now), None);
+        let window: Vec<(Instant, u64)> = (0..4)
+            .map(|i| (now - Duration::from_secs(300 * (i as u64 + 1)), 1000 + i))
+            .collect();
+        assert_eq!(process_baseline(&window, now), Some(1001));
+    }
+
+    #[test]
+    fn a_runaway_ticks_page_immediately_and_the_brake_names_its_group() {
+        let mut state = MachineWatchState::default();
+        let mut s = sample(None, None);
+        s.swap_used_gb = Some(50.0);
+        s.swap_total_gb = Some(95.0);
+        s.processes = Some(9000);
+        s.top_names = Some(serde_json::json!([
+            {"name": "git", "count": 8000, "ppid": 42}
+        ]));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brake.json");
+        std::env::set_var("FNO_MACHINE_BRAKE", &path);
+        let mut notify_calls = 0;
+        let mut brake_calls = 0;
+        let outcome = tick_machine_watch(
+            &mut state,
+            Ok(&s),
+            |_, _| {
+                notify_calls += 1;
+                true
+            },
+            Instant::now(),
+            |s, r| {
+                brake_calls += 1;
+                write_brake_file(s, r);
+            },
+        );
+        assert_eq!(outcome.acted, 1, "no debounce on a runaway");
+        assert_eq!(notify_calls, 1);
+        assert_eq!(brake_calls, 1, "the brake writes on the first tick");
+        assert!(outcome.detail.contains("runaway"), "{}", outcome.detail);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["group"]["name"], "git");
+        assert_eq!(stored["processes"], 9000);
+        assert!(
+            stored["until_epoch"].as_u64().unwrap()
+                > std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+        );
+        assert!(stored["reason"].as_str().unwrap().contains("runaway"));
+        // A throttled second tick still refreshes the brake: the hold must
+        // outlive the notice throttle on a sustained runaway.
+        let outcome = tick_machine_watch(
+            &mut state,
+            Ok(&s),
+            |_, _| {
+                notify_calls += 1;
+                true
+            },
+            Instant::now(),
+            |_, _| brake_calls += 1,
+        );
+        std::env::remove_var("FNO_MACHINE_BRAKE");
+        assert_eq!(outcome.acted, 0, "second notice is throttled");
+        assert_eq!(notify_calls, 1);
+        assert_eq!(brake_calls, 2);
     }
 }

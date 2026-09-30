@@ -1503,23 +1503,13 @@ pub(crate) struct Caller {
 /// Resolve the caller from process truth: the ancestry prover first, the
 /// attended terminal second, the fail-closed refusal last.
 pub(crate) fn resolve_caller() -> Result<Caller, String> {
-    let get = |name: &str| std::env::var(name).ok();
-    let ident = crate::spawn_context::resolve_self_identity(
-        &get,
-        None,
-        None,
-        &crate::paths::AgentsHome::from_env(),
-    );
-    if let (Some(session_id), Some(_harness)) = (&ident.session_id, &ident.harness) {
-        let handle = crate::identity::canonical_handle(session_id);
-        if !handle.is_empty() {
-            return Ok(Caller {
-                authority: "chat_attested".to_string(),
-                decided_by: handle,
-                attested_by: None,
-                relayed_by: None,
-            });
-        }
+    if let Some(handle) = crate::identity::ambient_agent_handle() {
+        return Ok(Caller {
+            authority: "chat_attested".to_string(),
+            decided_by: handle,
+            attested_by: None,
+            relayed_by: None,
+        });
     }
     if attended_terminal() {
         return Ok(Caller {
@@ -4028,7 +4018,8 @@ mod scope_tests {
     /// graph) + tmp FNO_REPO_ROOT (journal, evidence root) + a work map.
     /// The env is process-global, so the lock serializes every env-touching
     /// door test; the guard drops after the env restore.
-    static DOOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static DOOR_ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     // Field 2 is the env lock guard, held for its Drop and never read.
     #[allow(dead_code)]

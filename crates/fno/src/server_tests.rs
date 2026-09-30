@@ -54,61 +54,12 @@ mod pane_send_gate_tests;
 #[path = "server/tests/dead_row_resume_tests.rs"]
 mod dead_row_resume_tests;
 
-#[test]
-fn name_attached_pane_titles_an_attached_pane_from_its_registered_name() {
-    // x-ed59: an attached/driven pane reads its registered name from the live
-    // catalog (the sidepane's source) so its tab/pane title matches the row,
-    // not the `claude` command basename. Falls through unchanged for an ad-hoc
-    // attach with no matching worker.
-    let (mut core, _client, p1, _p2, _rx) = seen_test_core();
-    assert_eq!(
-        core.panes.get(&p1).unwrap().name,
-        None,
-        "shell pane starts unnamed"
-    );
-    core.agents = vec![bg_row("build", "/tmp", Some("deadbee2"))];
-    core.name_attached_pane(p1, "deadbee2", None);
-    assert_eq!(core.panes.get(&p1).unwrap().name.as_deref(), Some("build"));
-    // An ad-hoc attach (no matching worker) leaves the name unset.
-    let (mut core2, _, q1, _, _) = seen_test_core();
-    core2.name_attached_pane(q1, "no-such-worker", None);
-    assert_eq!(core2.panes.get(&q1).unwrap().name, None);
-}
-
-#[test]
-fn attach_argv_routes_isolated_account_to_its_daemon(/* codex P1 */) {
-    set_attach_program(&["claude", "attach"]); // pin the base (no leak)
-                                               // Default account: no env wrapper (byte-identical to the bare attach).
-    assert_eq!(
-        attach_argv("job1", None, None),
-        vec![
-            "claude".to_string(),
-            "attach".to_string(),
-            "job1".to_string()
-        ]
-    );
-    // Isolated account: wrapped so `claude attach` hits THAT daemon, with the
-    // birth account stamped for the re-attached pane's glyph.
-    let dir = std::path::Path::new("/home/u/.claude-alt");
-    assert_eq!(
-        attach_argv("job1", Some("readyrule"), Some(dir)),
-        vec![
-            "env".to_string(),
-            "CLAUDE_CONFIG_DIR=/home/u/.claude-alt".to_string(),
-            "FNO_ACCOUNT=readyrule".to_string(),
-            "claude".to_string(),
-            "attach".to_string(),
-            "job1".to_string(),
-        ]
-    );
-}
-
 /// AC14-HP, AC15-HP (x-6678, x-296f): the argv builder is keyed on the
 /// row's DECLARED attach form. A codex thread execs codex's own TUI after
 /// its daemon pre-exec; claude is byte-identical to what it was, account
 /// wrapper included.
 #[test]
-fn attach_argv_execs_each_harness_own_interface() {
+fn attach_argv_rows() {
     set_attach_program(&["claude", "attach"]);
     let dir = std::path::Path::new("/home/u/.claude-alt");
 
@@ -149,10 +100,32 @@ fn attach_argv_execs_each_harness_own_interface() {
         agents_view::resume_form("cursor-agent").is_some(),
         "the resume lane stays the honest re-entry"
     );
-}
 
-#[test]
-fn env_provenance_survives_the_account_scrub_prefix() {
+    set_attach_program(&["claude", "attach"]); // pin the base (no leak)
+                                               // Default account: no env wrapper (byte-identical to the bare attach).
+    assert_eq!(
+        attach_argv("job1", None, None),
+        vec![
+            "claude".to_string(),
+            "attach".to_string(),
+            "job1".to_string()
+        ]
+    );
+    // Isolated account: wrapped so `claude attach` hits THAT daemon, with the
+    // birth account stamped for the re-attached pane's glyph.
+    let dir = std::path::Path::new("/home/u/.claude-alt");
+    assert_eq!(
+        attach_argv("job1", Some("readyrule"), Some(dir)),
+        vec![
+            "env".to_string(),
+            "CLAUDE_CONFIG_DIR=/home/u/.claude-alt".to_string(),
+            "FNO_ACCOUNT=readyrule".to_string(),
+            "claude".to_string(),
+            "attach".to_string(),
+            "job1".to_string(),
+        ]
+    );
+
     // The REAL `_mesh_env_wrapper` output for an --account spawn: the auth-var
     // scrub (`-u VAR` pairs) leads the assignments. Both FNO_ACCOUNT AND
     // FNO_NODE must still parse past it (codex P1: a naive scan stopped on
@@ -177,29 +150,29 @@ fn env_provenance_survives_the_account_scrub_prefix() {
     assert_eq!(account_from_argv(&argv), Some("readyrule".to_string()));
     assert_eq!(agent_self_from_argv(&argv), Some("w".to_string()));
     assert_eq!(cmd_from_argv(&argv).as_deref(), Some("claude"));
-}
 
-#[test]
-fn pane_label_prefers_cmd_then_node_then_cwd_when_no_registered_name() {
-    // The navigator's pane label (v22, x-653d) when no registered name: cmd
-    // is the intra-tab discriminator, then node, then the cwd basename, else
-    // "shell". (x-0ba1: a registered name leads when present - see
-    // pane_label_prefers_the_registered_name.)
+    // x-0ba1: the registered name lives in the env(1) prefix like FNO_NODE
+    // and parses past the same -u scrub. argv[0] past the env run is the
+    // QoS wrapper (taskpolicy), not the provider - the title must not read it.
+    let to_argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let argv = to_argv(&[
+        "env",
+        "FNO_AGENT_SELF=build",
+        "FNO_NODE=x-2af5",
+        "/usr/sbin/taskpolicy",
+        "-c",
+        "utility",
+        "--",
+        "claude",
+    ]);
+    assert_eq!(agent_self_from_argv(&argv).as_deref(), Some("build"));
+    // Empty value falls through (env_token_from_argv filters empties).
     assert_eq!(
-        pane_label(None, Some("x-abcd"), "/home/u/proj", Some("claude")),
-        "claude"
+        agent_self_from_argv(&to_argv(&["env", "FNO_AGENT_SELF=", "claude"])),
+        None
     );
-    assert_eq!(
-        pane_label(None, Some("x-abcd"), "/home/u/proj", None),
-        "x-abcd"
-    );
-    assert_eq!(pane_label(None, None, "/home/u/proj", None), "proj");
-    assert_eq!(pane_label(None, None, "", None), "shell");
-    // A control-only candidate sanitizes to empty and falls through.
-    assert_eq!(
-        pane_label(None, None, "/home/u/proj", Some("\u{7}")),
-        "proj"
-    );
+    // An ad-hoc `pane run -- htop` carries no FNO_AGENT_SELF.
+    assert_eq!(agent_self_from_argv(&to_argv(&["htop"])), None);
 }
 
 #[test]
@@ -216,7 +189,7 @@ fn cmd_from_argv_takes_the_command_basename_past_the_env_wrapper() {
 }
 
 #[test]
-fn tab_label_resolves_the_locked_derivation_chain() {
+fn tab_label_rows() {
     // Explicit rename wins outright.
     assert_eq!(
         tab_label(
@@ -274,17 +247,11 @@ fn tab_label_resolves_the_locked_derivation_chain() {
         ),
         "3"
     );
-}
 
-#[test]
-fn tab_label_stale_focused_pane_falls_back_to_index() {
     // AC3-FR: tab.focus names a reaped pane (mid-reap race) - the chain
     // skips provenance/cwd/cmd and terminates at the index, no panic.
     assert_eq!(tab_label(None, None, "/w", 0), "1");
-}
 
-#[test]
-fn tab_label_sanitizes_derived_candidates_and_skips_empty_ones() {
     // codex peer review: derived sources (FNO_NODE, dir names, argv) admit
     // control bytes and land in chrome cells - sanitize like a rename.
     assert_eq!(
@@ -307,36 +274,7 @@ fn tab_label_sanitizes_derived_candidates_and_skips_empty_ones() {
         ),
         "htop"
     );
-}
 
-#[test]
-fn agent_self_from_argv_reads_the_registered_worker_name_past_qos_wrappers() {
-    // x-0ba1: the registered name lives in the env(1) prefix like FNO_NODE
-    // and parses past the same -u scrub. argv[0] past the env run is the
-    // QoS wrapper (taskpolicy), not the provider - the title must not read it.
-    let to_argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let argv = to_argv(&[
-        "env",
-        "FNO_AGENT_SELF=build",
-        "FNO_NODE=x-2af5",
-        "/usr/sbin/taskpolicy",
-        "-c",
-        "utility",
-        "--",
-        "claude",
-    ]);
-    assert_eq!(agent_self_from_argv(&argv).as_deref(), Some("build"));
-    // Empty value falls through (env_token_from_argv filters empties).
-    assert_eq!(
-        agent_self_from_argv(&to_argv(&["env", "FNO_AGENT_SELF=", "claude"])),
-        None
-    );
-    // An ad-hoc `pane run -- htop` carries no FNO_AGENT_SELF.
-    assert_eq!(agent_self_from_argv(&to_argv(&["htop"])), None);
-}
-
-#[test]
-fn tab_label_reads_the_registered_name_over_a_qos_wrapper() {
     // x-0ba1 decision b: a QoS-wrapped worker's argv[0] is taskpolicy/nice,
     // so titling from the process table collapses every worker to one label.
     // The registered name is the top derived source and wins over node/cwd/cmd.
@@ -375,10 +313,7 @@ fn tab_label_reads_the_registered_name_over_a_qos_wrapper() {
         ),
         "build"
     );
-}
 
-#[test]
-fn tab_label_distinguishes_two_registered_workers_in_one_session() {
     // x-0ba1 verify: registered names are unique per session, so a second
     // worker yields a different title. cwd basenames are not unique (two
     // workers share a worktree), so name - not cwd - distinguishes them.
@@ -388,13 +323,51 @@ fn tab_label_distinguishes_two_registered_workers_in_one_session() {
 }
 
 #[test]
-fn pane_label_prefers_the_registered_name() {
+fn pane_label_rows() {
     // x-0ba1: the navigator discriminator reads the registered name first,
     // so it no longer shows the QoS wrapper (taskpolicy) either.
     assert_eq!(
         pane_label(Some("build"), Some("x-1"), "/w", Some("taskpolicy")),
         "build"
     );
+
+    // The navigator's pane label (v22, x-653d) when no registered name: cmd
+    // is the intra-tab discriminator, then node, then the cwd basename, else
+    // "shell". (x-0ba1: a registered name leads when present - see
+    // pane_label_prefers_the_registered_name.)
+    assert_eq!(
+        pane_label(None, Some("x-abcd"), "/home/u/proj", Some("claude")),
+        "claude"
+    );
+    assert_eq!(
+        pane_label(None, Some("x-abcd"), "/home/u/proj", None),
+        "x-abcd"
+    );
+    assert_eq!(pane_label(None, None, "/home/u/proj", None), "proj");
+    assert_eq!(pane_label(None, None, "", None), "shell");
+    // A control-only candidate sanitizes to empty and falls through.
+    assert_eq!(
+        pane_label(None, None, "/home/u/proj", Some("\u{7}")),
+        "proj"
+    );
+
+    // x-ed59: an attached/driven pane reads its registered name from the live
+    // catalog (the sidepane's source) so its tab/pane title matches the row,
+    // not the `claude` command basename. Falls through unchanged for an ad-hoc
+    // attach with no matching worker.
+    let (mut core, _client, p1, _p2, _rx) = seen_test_core();
+    assert_eq!(
+        core.panes.get(&p1).unwrap().name,
+        None,
+        "shell pane starts unnamed"
+    );
+    core.agents = vec![bg_row("build", "/tmp", Some("deadbee2"))];
+    core.name_attached_pane(p1, "deadbee2", None);
+    assert_eq!(core.panes.get(&p1).unwrap().name.as_deref(), Some("build"));
+    // An ad-hoc attach (no matching worker) leaves the name unset.
+    let (mut core2, _, q1, _, _) = seen_test_core();
+    core2.name_attached_pane(q1, "no-such-worker", None);
+    assert_eq!(core2.panes.get(&q1).unwrap().name, None);
 }
 
 #[test]
@@ -447,7 +420,7 @@ fn mouse_mode() -> Modes {
 }
 
 #[test]
-fn route_mouse_passes_through_kinds_the_app_requested() {
+fn mouse_rows() {
     // AC3-HP: a click-mode app (?1000) gets wheel/press/release passthrough
     // and consumes nothing mux-side...
     for kind in [
@@ -473,10 +446,7 @@ fn route_mouse_passes_through_kinds_the_app_requested() {
         route_mouse(drag_mode, MouseKind::Drag(MouseButton::Left)),
         MouseAction::Passthrough
     );
-}
 
-#[test]
-fn route_mouse_interprets_when_pane_has_no_mouse_mode() {
     // US1/US2: a plain shell pane scrolls and selects mux-side.
     let plain = Modes::default();
     assert_eq!(
@@ -503,10 +473,7 @@ fn route_mouse_interprets_when_pane_has_no_mouse_mode() {
         route_mouse(plain, MouseKind::Press(MouseButton::Right)),
         MouseAction::Ignore
     );
-}
 
-#[test]
-fn route_mouse_non_sgr_mouse_app_falls_through_to_interpretation() {
     // A mouse-reporting app that never negotiated SGR is not sent garbage;
     // the mux interprets instead (Domain: SGR-only passthrough).
     let legacy = Modes {
@@ -518,10 +485,7 @@ fn route_mouse_non_sgr_mouse_app_falls_through_to_interpretation() {
         route_mouse(legacy, MouseKind::WheelUp),
         MouseAction::Scroll(MOUSE_WHEEL_LINES)
     );
-}
 
-#[test]
-fn sgr_mouse_bytes_encodes_button_coords_and_terminator() {
     // Left press at pane-local (row 4, col 9) -> SGR button 0, 1-based coords.
     let press = sgr_mouse_bytes(&MouseEvent {
         row: 4,
@@ -602,7 +566,7 @@ fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
 }
 
 #[test]
-fn tab_close_guard_requires_positive_dead_liveness() {
+fn tab_close_rows() {
     let mut alive = agent_in("main", 7, None, false);
     alive.session_id = Some("alive-worker".into());
     let mut unmeasured = agent_in("main", 8, None, true);
@@ -641,19 +605,13 @@ fn tab_close_guard_requires_positive_dead_liveness() {
             .any(|b| b.contains("pane 10") && b.contains("identity-less-worker")),
         "an identity-less live row still blocks destructive cleanup"
     );
-}
 
-#[test]
-fn tab_close_unreadable_registry_refuses_before_mutation() {
     let (mut core, pane) = template_core();
     let result = core.tab_close(&PaneTarget::SquadId(1), &TabSel::Id(5), false, None);
     assert!(matches!(result, Err((code, _)) if code == err_code::REGISTRY_UNAVAILABLE));
     assert!(core.panes.contains_key(&pane));
     assert!(core.session.find_tab(5).is_some());
-}
 
-#[test]
-fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
     let (mut core, pane) = template_core();
     let mut dead = agent_in("test", pane, None, true);
     dead.session_id = Some("dead-worker".into());
@@ -673,32 +631,7 @@ fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
 }
 
 #[test]
-fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
-    let (mut core, pane) = template_core();
-    core.session_name = "sess".into();
-    core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
-    let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
-    addressed.name = "addressed".into();
-    addressed.harness_session_id = Some("target-id".into());
-
-    match core.pane_send(
-        pane,
-        b"payload",
-        false,
-        Some("target-id"),
-        Ok(vec![addressed]),
-        false,
-    ) {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
-            assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
-        }
-        other => panic!("expected identity refusal before typing, got {other:?}"),
-    }
-}
-
-#[test]
-fn pane_send_deduplicates_equivalent_registry_occupants() {
+fn pane_send_rows() {
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
@@ -718,10 +651,7 @@ fn pane_send_deduplicates_equivalent_registry_occupants() {
         ),
         ServerMsg::Ok
     ));
-}
 
-#[test]
-fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
     // AC4-ERR (x-0b40), the guard seam: the registry carries a malformed
     // row for the target pane's session; the classified read refuses, and
     // the guarded send answers TARGET_NOT_IDLE with that reason instead of
@@ -741,10 +671,7 @@ fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
         }
         other => panic!("expected guard refusal, got {other:?}"),
     }
-}
 
-#[test]
-fn pane_send_identity_check_carries_the_registry_refusal_reason() {
     // The identity check consumes the same Result (x-0b40): its Err arm
     // reports the carried reason, not the old hardcoded "unreadable".
     let (mut core, pane) = template_core();
@@ -768,10 +695,7 @@ fn pane_send_identity_check_carries_the_registry_refusal_reason() {
         }
         other => panic!("expected identity refusal, got {other:?}"),
     }
-}
 
-#[test]
-fn pane_send_on_an_empty_registry_proceeds_like_a_shell() {
     // AC5-EDGE (x-0b40): a missing registry reads as Ok(empty) - no
     // daemon, no agents - and the guarded send proceeds exactly as today.
     // Empty stays permission; only an unreadable or unattributable read
@@ -785,126 +709,7 @@ fn pane_send_on_an_empty_registry_proceeds_like_a_shell() {
 }
 
 #[test]
-fn watch_only_bg_row_surfaces_while_foreign_pane_is_skipped() {
-    // An `fno agents spawn --substrate bg` worker writes a paneless
-    // (`mux: None`) registry row. It MUST surface as a watch-only AgentRow,
-    // even alongside a pane row hosted by another mux session. The
-    // session-id skip in `agent_rows()` only eats ANOTHER session's live
-    // pane; it must never drop a paneless bg/headless row. Guards a future
-    // membership-first rewrite of `agent_rows()` from re-dropping bg rows.
-    let mut core = empty_core();
-    core.session_name = "main".into();
-    core.agents = vec![
-        // A pane hosted by ANOTHER session -> that session's server renders
-        // it; correctly skipped here.
-        RegistryAgent {
-            name: "foreign-pane".into(),
-            cwd: "/other".into(),
-            mux: Some(("other".into(), 5)),
-            liveness: agents_view::Liveness::Alive,
-            ..Default::default()
-        },
-        // A bg worker: paneless, no squad match -> watch-only orphan, and
-        // it carries a claude jobId so the sideline can attach it.
-        RegistryAgent {
-            name: "bg-worker".into(),
-            cwd: "/bg".into(),
-            attach_id: Some("c19cd2c3".into()),
-            liveness: agents_view::Liveness::Alive,
-            ..Default::default()
-        },
-        // A live codex worker with a session identity but no pane or attach
-        // target must project the typed branch-four recovery reason.
-        RegistryAgent {
-            harness_session_id: Some("codex-live-id".into()),
-            name: "live-paneless".into(),
-            cwd: "/live".into(),
-            liveness: agents_view::Liveness::Alive,
-            harness: Some("codex".into()),
-            ..Default::default()
-        },
-    ];
-    let rows = core.agent_rows();
-    assert!(
-        !rows.iter().any(|r| r.name == "foreign-pane"),
-        "a pane hosted by another session must be skipped"
-    );
-    let bg = rows
-        .iter()
-        .find(|r| r.name == "bg-worker")
-        .expect("a paneless bg row must surface as a watch-only row");
-    assert_eq!(
-        bg.squad, None,
-        "an unmatched bg row is an orphan (squad None)"
-    );
-    assert_eq!(bg.pane_id, None, "a watch-only row has no pane");
-    assert!(!bg.exited);
-    assert_eq!(
-        bg.attach_id.as_deref(),
-        Some("c19cd2c3"),
-        "the claude jobId must carry through so the sideline can attach it"
-    );
-    assert_eq!(bg.no_pane_reason, None, "attachable rows carry no reason");
-    let live = rows
-        .iter()
-        .find(|r| r.name == "live-paneless")
-        .expect("the live paneless row must surface");
-    assert_eq!(
-        live.no_pane_reason,
-        Some(AgentNoPaneReason::LivePaneless),
-        "registry truth projects the typed live-paneless reason"
-    );
-}
-
-#[test]
-fn bare_pane_row_carries_its_own_activity_and_age() {
-    // (x-d401, x-9d03) A bare pane with no registry row can still be a
-    // full agent running a real workload - not-in-registry is not
-    // is-a-shell. The row must carry the pane's own OSC 133 reading and a
-    // real last_activity_age_s from the drain-path stamp, never the
-    // badge-None-means-idle fold that rendered four working panes and one
-    // idle shell as the same circle.
-    let mut core = empty_core();
-    core.session_name = "main".into();
-    core.shells = vec!["/bin/cat".into()];
-    let pid = core.spawn_pane(2, 4, "/w").expect("pane");
-    core.session.add_squad(
-        1,
-        vec!["/w".into()],
-        None,
-        Tab {
-            name: None,
-            id: 1,
-            root: Node::Leaf(pid),
-            focus: pid,
-        },
-    );
-    core.agents = vec![];
-    // Feed an open command block (OSC 133 A then C, no D): Running.
-    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
-    tx.try_send((
-        pid,
-        PaneChunk::Output(b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()),
-    ))
-    .unwrap();
-    drop(tx);
-    let mut first_out = HashSet::new();
-    drain_pty_output(&mut core, &mut rx, None, &mut first_out);
-    let rows = core.agent_rows();
-    let bare = rows.iter().find(|r| r.pane_id == Some(pid)).unwrap();
-    assert_eq!(
-        bare.pane_activity,
-        Some(vt::ShellActivity::Running),
-        "a bare pane running a command must report Running, not a blind idle"
-    );
-    assert!(
-        bare.last_activity_age_s.is_some(),
-        "a bare pane must report a real activity age from the drain stamp"
-    );
-}
-
-#[test]
-fn agent_rows_tombstoned_member_decorates_its_row_instead_of_minting_one() {
+fn tombstone_rows() {
     // AC3-HP: one registry row + one tombstoned member that
     // joins it -> exactly ONE row, the registry row, decorated dimmed +
     // dismissable under the member's squad. The old synthesized
@@ -953,10 +758,7 @@ fn agent_rows_tombstoned_member_decorates_its_row_instead_of_minting_one() {
         Some("c0ffee00"),
         "the dismiss affordance carries the attach target"
     );
-}
 
-#[test]
-fn agent_rows_never_renders_a_member_that_joins_no_row() {
     // AC3-EDGE: a tombstoned member joining NO registry row by
     // either key renders nothing. It is a stale member; the member-retirement
     // path removes it at restore. Never a synthesized ghost.
@@ -995,10 +797,7 @@ fn agent_rows_never_renders_a_member_that_joins_no_row() {
             .all(|r| r.name != "d15ea5e" && !r.name.starts_with("cc-")),
         "no row for an unjoined member: {rows:?}"
     );
-}
 
-#[test]
-fn agent_rows_never_dims_a_live_row_behind_a_stale_tombstone() {
     // The liveness kill criterion : a tombstoned member whose
     // registry row is LIVE must never dim that row. The stale tombstone
     // is invisible here (restore lifts it with a notice); the live row
@@ -1045,10 +844,7 @@ fn agent_rows_never_dims_a_live_row_behind_a_stale_tombstone() {
         "a live row is never dimmed behind a stale tombstone"
     );
     assert!(!live_row.exited, "the live row renders alive");
-}
 
-#[test]
-fn agent_rows_decorates_the_joined_generation_not_a_name_twin() {
     // Review round 1, P1: exited and live generations can share a display
     // name. The decoration must match the produced row by the same
     // session identity the join used, and must never dim the live twin.
@@ -1108,10 +904,7 @@ fn agent_rows_decorates_the_joined_generation_not_a_name_twin() {
         !live_row.tombstone,
         "the live name-twin is never dimmed behind the stale tombstone"
     );
-}
 
-#[test]
-fn agent_rows_match_pane_hosted_by_membership_and_watch_only_by_origins() {
     // Change #5. A pane-hosted agent's row renders under the squad its pane
     // lives in (membership), REGARDLESS of the pane's cwd (AC1-HP). A
     // watch-only row falls back to cwd, now against ANY origin exact-or-child
@@ -1166,10 +959,7 @@ fn agent_rows_match_pane_hosted_by_membership_and_watch_only_by_origins() {
         Some(2),
         "a watch-only row matches a squad via a child of origins[1]"
     );
-}
 
-#[test]
-fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
     // x-9de7: pane-exit fact beats any badge. `empty_core()` has no live
     // pane, so the matched row's pane is always confirmed gone
     // (`pane_dead`) here - itself positive corroboration of death, even
@@ -1201,10 +991,7 @@ fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
         "a confirmed-gone pane corroborates death outright, regardless of \
              the registry row's own Unmeasured liveness read"
     );
-}
 
-#[test]
-fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
     // x-9de7: the paneless join has no pane fact; `unmeasured` passes the registry read.
     let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
         name: name.into(),
@@ -1231,10 +1018,40 @@ fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
         !dead.unmeasured,
         "a corroborated-dead row keeps the confirmed exit glyph"
     );
-}
 
-#[test]
-fn external_synthesized_row_passes_the_attach_catalog_gate() {
+    // AC2-EDGE: an upgraded (roster-present, external) registry row whose
+    // mux ref points to a dead pane in THIS session renders exited - the
+    // pane fact stays senior over the merge's un-exit.
+    let mut core = empty_core();
+    core.session_name = "main".into();
+    core.session.add_squad(
+        1,
+        vec!["/w".into()],
+        None,
+        Tab {
+            name: None,
+            id: 1,
+            root: Node::Leaf(1),
+            focus: 1,
+        },
+    );
+    // merge_rows would have set exited=false + external=true on this row,
+    // but its mux pane (77) is absent from core.panes -> pane_dead.
+    core.agents = vec![RegistryAgent {
+        name: "upgraded".into(),
+        cwd: "/w".into(),
+        liveness: agents_view::Liveness::Alive,
+        mux: Some(("main".into(), 77)),
+        attach_id: Some("ab12cd34".into()),
+        external: true,
+        ..Default::default()
+    }];
+    let rows = core.agent_rows();
+    let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
+    assert!(row.exited, "a dead pane forces exited despite the upgrade");
+    assert!(row.external, "provenance still rides through");
+    assert_eq!(row.attach_id, None, "an exited row drops its attach target");
+
     // AC2-HP: a roster-synthesized foreign row (mux None, !exited, attach_id
     // set, external true) is attachable through the EXISTING catalog gate,
     // with no new spawn path. An exited or pane-hosted row is refused, like
@@ -1275,42 +1092,6 @@ fn external_synthesized_row_passes_the_attach_catalog_gate() {
 }
 
 #[test]
-fn dead_pane_beats_roster_liveness_upgrade() {
-    // AC2-EDGE: an upgraded (roster-present, external) registry row whose
-    // mux ref points to a dead pane in THIS session renders exited - the
-    // pane fact stays senior over the merge's un-exit.
-    let mut core = empty_core();
-    core.session_name = "main".into();
-    core.session.add_squad(
-        1,
-        vec!["/w".into()],
-        None,
-        Tab {
-            name: None,
-            id: 1,
-            root: Node::Leaf(1),
-            focus: 1,
-        },
-    );
-    // merge_rows would have set exited=false + external=true on this row,
-    // but its mux pane (77) is absent from core.panes -> pane_dead.
-    core.agents = vec![RegistryAgent {
-        name: "upgraded".into(),
-        cwd: "/w".into(),
-        liveness: agents_view::Liveness::Alive,
-        mux: Some(("main".into(), 77)),
-        attach_id: Some("ab12cd34".into()),
-        external: true,
-        ..Default::default()
-    }];
-    let rows = core.agent_rows();
-    let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
-    assert!(row.exited, "a dead pane forces exited despite the upgrade");
-    assert!(row.external, "provenance still rides through");
-    assert_eq!(row.attach_id, None, "an exited row drops its attach target");
-}
-
-#[test]
 fn new_squad_rejects_a_blank_name_and_creates_nothing() {
     // Change #2 / AC1-ERR: a whitespace-only name is refused fail-closed -
     // no squad, no pane. PTY-free: the reject returns before any spawn.
@@ -1340,7 +1121,7 @@ fn new_squad_rejects_a_blank_name_and_creates_nothing() {
 }
 
 #[test]
-fn rename_tab_round_trips_and_blank_clears() {
+fn rename_tab_rows() {
     let mut core = empty_core();
     core.session.add_squad(
         1,
@@ -1379,10 +1160,7 @@ fn rename_tab_round_trips_and_blank_clears() {
         },
     );
     assert_eq!(core.session.squads[0].tabs[0].name, None);
-}
 
-#[test]
-fn rename_tab_stale_id_is_refused_without_mutation() {
     // AC1-ERR: a RenameTab naming a closed tab mutates nothing.
     let mut core = empty_core();
     core.session.add_squad(
@@ -1410,10 +1188,7 @@ fn rename_tab_stale_id_is_refused_without_mutation() {
         Some("keep"),
         "a stale id must not touch any live tab"
     );
-}
 
-#[test]
-fn rename_tab_sanitizes_hostile_wire_names() {
     // AC2-ERR: control chars are stripped and the stored name is capped -
     // the wire is not the overlay, so the server owns the guarantee.
     let mut core = empty_core();
@@ -1454,57 +1229,7 @@ pub(super) fn leaf_tab(id: TabId, pane: u64) -> Tab {
 // -- x-3e38 pane placement (target resolution + atomic commit) ------
 
 #[test]
-fn resolve_placement_target_current_route_passes_through() {
-    // CurrentRoute yields the caller's default (a cwd/owner squad, or None
-    // when a squad must still be born) with no lookup.
-    let core = empty_core();
-    assert_eq!(
-        core.resolve_placement_target(&PaneTarget::CurrentRoute, Some(7))
-            .unwrap(),
-        Some(7)
-    );
-    assert_eq!(
-        core.resolve_placement_target(&PaneTarget::CurrentRoute, None)
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
-fn resolve_placement_target_explicit_hit_miss_and_id() {
-    // AC2-HP + AC4: an exact name/id resolves; a missing one fails closed.
-    let mut core = empty_core();
-    core.session
-        .add_squad(1, vec!["/a".into()], Some("review".into()), leaf_tab(5, 1));
-    core.session
-        .add_squad(2, vec!["/repos/default".into()], None, leaf_tab(6, 2));
-    assert_eq!(
-        core.resolve_placement_target(&PaneTarget::SquadName(" review ".into()), None)
-            .unwrap(),
-        Some(1),
-        "name is trimmed before match"
-    );
-    assert!(core
-        .resolve_placement_target(&PaneTarget::SquadName("ghost".into()), None)
-        .is_err());
-    assert_eq!(
-        core.resolve_placement_target(&PaneTarget::SquadName("default".into()), None)
-            .unwrap(),
-        Some(2),
-        "derived display names are targetable"
-    );
-    assert_eq!(
-        core.resolve_placement_target(&PaneTarget::SquadId(1), None)
-            .unwrap(),
-        Some(1)
-    );
-    assert!(core
-        .resolve_placement_target(&PaneTarget::SquadId(99), None)
-        .is_err());
-}
-
-#[test]
-fn place_spawned_pane_new_tab_then_directional_split() {
+fn place_rows() {
     // AC1-HP + AC2-HP: omitted split mints a new tab; a direction inserts
     // beside the destination's active-tab focus in that same tab.
     let mut core = empty_core();
@@ -1542,10 +1267,7 @@ fn place_spawned_pane_new_tab_then_directional_split() {
         "right places the new pane after the focused leaf"
     );
     assert_eq!(tab.focus, 3, "the new pane takes focus");
-}
 
-#[test]
-fn place_spawned_pane_current_route_miss_births_first_tab() {
     // AC6-EDGE: no squad yet + a split request -> the squad is born from the
     // route with the pane as its lone first tab (split collapses).
     let mut core = empty_core();
@@ -1557,10 +1279,7 @@ fn place_spawned_pane_current_route_miss_births_first_tab() {
     assert_eq!(sq.tabs[0].id, tid);
     assert_eq!(tree::leaves(&sq.tabs[0].root), vec![9]);
     assert_eq!(sq.origins, vec!["/fresh".to_string()]);
-}
 
-#[test]
-fn place_spawned_pane_min_size_refusal_falls_back_to_new_tab() {
     // AC3-FR (x-9f75): a split that would violate minimum size no longer reaps - the pane lands as a new
     // tab in the same squad, the crowded tab is untouched, and the caller is signaled to notice.
     let mut core = empty_core();
@@ -1585,6 +1304,50 @@ fn place_spawned_pane_min_size_refusal_falls_back_to_new_tab() {
         squad.tabs.iter().find(|t| t.id == tid).unwrap().root,
         Node::Leaf(3)
     );
+
+    // CurrentRoute yields the caller's default (a cwd/owner squad, or None
+    // when a squad must still be born) with no lookup.
+    let core = empty_core();
+    assert_eq!(
+        core.resolve_placement_target(&PaneTarget::CurrentRoute, Some(7))
+            .unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        core.resolve_placement_target(&PaneTarget::CurrentRoute, None)
+            .unwrap(),
+        None
+    );
+
+    // AC2-HP + AC4: an exact name/id resolves; a missing one fails closed.
+    let mut core = empty_core();
+    core.session
+        .add_squad(1, vec!["/a".into()], Some("review".into()), leaf_tab(5, 1));
+    core.session
+        .add_squad(2, vec!["/repos/default".into()], None, leaf_tab(6, 2));
+    assert_eq!(
+        core.resolve_placement_target(&PaneTarget::SquadName(" review ".into()), None)
+            .unwrap(),
+        Some(1),
+        "name is trimmed before match"
+    );
+    assert!(core
+        .resolve_placement_target(&PaneTarget::SquadName("ghost".into()), None)
+        .is_err());
+    assert_eq!(
+        core.resolve_placement_target(&PaneTarget::SquadName("default".into()), None)
+            .unwrap(),
+        Some(2),
+        "derived display names are targetable"
+    );
+    assert_eq!(
+        core.resolve_placement_target(&PaneTarget::SquadId(1), None)
+            .unwrap(),
+        Some(1)
+    );
+    assert!(core
+        .resolve_placement_target(&PaneTarget::SquadId(99), None)
+        .is_err());
 }
 
 // ---- v41 (x-d865) layout script API server ops ----------------------
@@ -1649,7 +1412,7 @@ fn shell_spec(t: TemplateName, k: usize) -> LayoutSpec {
 }
 
 #[test]
-fn apply_realizes_the_template_topology_over_shells() {
+fn template_rows() {
     // AC1/AC2 shape: main-left with 4 shell slots -> H[ leaf, V[leaf,leaf,leaf] ].
     let (mut core, _p) = template_core();
     let results = core
@@ -1690,10 +1453,7 @@ fn apply_realizes_the_template_topology_over_shells() {
         other => panic!("expected H[leaf, V[..]], got {other:?}"),
     }
     assert_eq!(tree::leaves(root).len(), 4, "four live panes");
-}
 
-#[test]
-fn reapply_same_spec_is_byte_identical_and_reuses_panes() {
     // AC3: re-applying the same spec spawns nothing, closes nothing, and the
     // tree comes back byte-identical (the FIFO spare-drain contract).
     let (mut core, _p) = template_core();
@@ -1725,10 +1485,7 @@ fn reapply_same_spec_is_byte_identical_and_reuses_panes() {
     assert_eq!(root1, root2, "re-apply is byte-identical");
     assert_eq!(core.panes.len(), panes1, "no pane spawned or reaped");
     assert!(results.iter().all(|r| r.outcome == SlotOutcome::Shell));
-}
 
-#[test]
-fn bound_fno_slot_reuses_its_live_pane_and_empties_its_source_tab() {
     // AC1 core: a live session S1 in its own tab; apply main-left binding
     // slot 0 to it -> S1's pane becomes the left main, its source tab empties
     // and is removed, and no pane is spawned for that slot.
@@ -1774,10 +1531,7 @@ fn bound_fno_slot_reuses_its_live_pane_and_empties_its_source_tab() {
         p1,
         "p1 is the main-left leaf"
     );
-}
 
-#[test]
-fn dead_binding_reconciles_to_a_shell_never_a_duplicate() {
     // AC4: slot 1 bound to S2; S2 exits; re-apply -> slot 1 Unbound (shell),
     // no second S2 pane, the surviving bound pane keeps running.
     let (mut core, p1) = template_core();
@@ -1812,10 +1566,7 @@ fn dead_binding_reconciles_to_a_shell_never_a_duplicate() {
         "the surviving bound pane keeps running"
     );
     assert_eq!(results[0].pane_id, Some(p1));
-}
 
-#[test]
-fn reshape_never_kills_the_live_bound_pane() {
     // AC5: a grid-2x2 with a bound slot 0; reshape to main-left keeps that
     // pane's id (its PTY untouched, only relocated).
     let (mut core, p1) = template_core();
@@ -1862,7 +1613,7 @@ fn reshape_never_kills_the_live_bound_pane() {
 }
 
 #[test]
-fn unfittable_template_is_refused_atomically() {
+fn template_refusal_rows() {
     // AC6: a tab too small to tile grid-2x2 -> TEMPLATE_UNFITTABLE, tab
     // unchanged (the pre-mutation atomic refuse).
     let (mut core, _p) = template_core();
@@ -1897,10 +1648,7 @@ fn unfittable_template_is_refused_atomically() {
         .root
         .clone();
     assert_eq!(before, after, "the tab is left completely unchanged");
-}
 
-#[test]
-fn arity_mismatch_is_refused_before_any_mutation() {
     // AC7: grid-2x2 with three slots -> TEMPLATE_ARITY, no mutation.
     let (mut core, _p) = template_core();
     let panes_before = core.panes.len();
@@ -1918,10 +1666,135 @@ fn arity_mismatch_is_refused_before_any_mutation() {
         panes_before,
         "arity refuse spawns nothing"
     );
+
+    // Codex P1 regression: the same fno id in two slots would commit a
+    // duplicate PaneId leaf. Refuse pre-mutation.
+    let (mut core, p1) = template_core();
+    core.agents = vec![bound_agent("S1", p1)];
+    let panes_before = core.panes.len();
+    let dup = LayoutSpec {
+        template: TemplateName::MainLeft,
+        slots: vec![
+            SlotBinding::Fno("S1".into()),
+            SlotBinding::Fno("S1".into()),
+            SlotBinding::Shell,
+            SlotBinding::Shell,
+        ],
+    };
+    let err = core.apply_spec(1, &TabSel::Id(5), &dup, false).unwrap_err();
+    assert_eq!(err.0, err_code::BAD_REQUEST);
+    assert_eq!(core.panes.len(), panes_before, "the refusal spawns nothing");
 }
 
 #[test]
-fn dropping_a_bound_slot_rehomes_the_live_pane_never_reaps_it() {
+fn template_lifecycle_rows() {
+    // x-cde1 AC1-HP: Command::RenameTab (the interactive overlay path, not
+    // the ControlVerb::TabRename wire API) must re-persist a template tab's
+    // spec so restore finds it under the NEW name. persist_squad alone
+    // preserves tab_specs byte-for-byte, keeping the stale old key.
+    let _s = StoreScratch::new("cde1-rename");
+    let (mut core, _p) = template_core();
+    core.clients.push(client(1, 5, (24, 80), false));
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
+    core.apply_spec(
+        1,
+        &TabSel::Id(5),
+        &shell_spec(TemplateName::MainLeft, 2),
+        false,
+    )
+    .unwrap();
+    let loaded = crate::squad_store::load();
+    let specs = &loaded
+        .squads
+        .iter()
+        .find(|s| s.name == "sq")
+        .unwrap()
+        .tab_specs;
+    assert_eq!(specs.len(), 1);
+    assert_eq!(
+        specs[0].tab_name, "grid",
+        "persisted under the original name"
+    );
+
+    // apply_spec's layout push reaps the test client (dropped receiver);
+    // re-register it so the rename command has a live sender to act on.
+    core.clients.push(client(1, 5, (24, 80), false));
+    core.command(
+        1,
+        Command::RenameTab {
+            tab: 5,
+            name: "reviews".into(),
+        },
+    );
+
+    let loaded = crate::squad_store::load();
+    let specs = &loaded
+        .squads
+        .iter()
+        .find(|s| s.name == "sq")
+        .unwrap()
+        .tab_specs;
+    assert_eq!(specs.len(), 1, "still exactly one template spec");
+    assert_eq!(specs[0].tab_name, "reviews", "re-keyed under the new name");
+    assert!(
+        !specs.iter().any(|s| s.tab_name == "grid"),
+        "no stale old key survives"
+    );
+
+    // x-cde1 AC2-HP: closing a template tab's last pane via close_pane removes
+    // the tab and must drop its stored spec, or restore resurrects the closed
+    // tab. A second tab keeps the session alive so the removal hits the
+    // tab-removed branch (not SessionEmpty/shutdown).
+    let _s = StoreScratch::new("cde1-close");
+    let (mut core, _p) = template_core();
+    core.clients.push(client(1, 5, (24, 80), false));
+    core.create_tab_in(1, None)
+        .expect("second tab keeps the session alive");
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
+    core.apply_spec(
+        1,
+        &TabSel::Id(5),
+        &shell_spec(TemplateName::MainLeft, 2),
+        false,
+    )
+    .unwrap();
+    let loaded = crate::squad_store::load();
+    let specs = &loaded
+        .squads
+        .iter()
+        .find(|s| s.name == "sq")
+        .unwrap()
+        .tab_specs;
+    assert_eq!(specs.len(), 1, "spec persisted before teardown");
+
+    // Close tab 5's panes one at a time; the last close removes the tab.
+    let leaves = tree::leaves(
+        &core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root,
+    );
+    for p in leaves {
+        core.close_pane(p);
+    }
+
+    let loaded = crate::squad_store::load();
+    let specs = &loaded
+        .squads
+        .iter()
+        .find(|s| s.name == "sq")
+        .unwrap()
+        .tab_specs;
+    assert!(
+        !specs.iter().any(|s| s.tab_name == "grid"),
+        "the closed template tab's spec is dropped from the store"
+    );
+
     // Codex P1 regression: when a re-apply's slots are all bound (no shell
     // slot to absorb it), a dropped bound session's pane must NOT be reaped -
     // it is broken into its own tab, still running (the never-kill invariant).
@@ -1975,10 +1848,7 @@ fn dropping_a_bound_slot_rehomes_the_live_pane_never_reaps_it() {
         .iter()
         .any(|t| tree::leaves(&t.root).contains(&p1));
     assert!(hosted, "S1's pane lives on in a rehomed tab");
-}
 
-#[test]
-fn recycle_never_absorbs_a_live_leftover_into_a_shell_slot() {
     // x-3f39: the reap path was guarded in b7cff6d0, but the recycle-as-shell
     // path was not. A re-apply whose new spec carries a Shell slot must NOT
     // hand a dropped live agent's pane to it (step 7); the live leftover
@@ -2039,10 +1909,7 @@ fn recycle_never_absorbs_a_live_leftover_into_a_shell_slot() {
             .any(|t| t.id != 5 && tree::leaves(&t.root).contains(&p));
         assert!(hosted, "live leftover {p} lives on in its own rehomed tab");
     }
-}
 
-#[test]
-fn idempotent_reapply_recycles_a_genuine_shell_not_a_new_pane() {
     // AC3-EDGE: the step-6 partition must not disturb genuine-shell
     // recycling. A real shell is not live-bound, so it stays in the recycle
     // pool and a re-apply of the same spec reuses it FIFO - no new spawn, no
@@ -2072,141 +1939,7 @@ fn idempotent_reapply_recycles_a_genuine_shell_not_a_new_pane() {
 }
 
 #[test]
-fn overlay_rename_repersists_template_spec_under_new_name() {
-    // x-cde1 AC1-HP: Command::RenameTab (the interactive overlay path, not
-    // the ControlVerb::TabRename wire API) must re-persist a template tab's
-    // spec so restore finds it under the NEW name. persist_squad alone
-    // preserves tab_specs byte-for-byte, keeping the stale old key.
-    let _s = StoreScratch::new("cde1-rename");
-    let (mut core, _p) = template_core();
-    core.clients.push(client(1, 5, (24, 80), false));
-    core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
-    core.apply_spec(
-        1,
-        &TabSel::Id(5),
-        &shell_spec(TemplateName::MainLeft, 2),
-        false,
-    )
-    .unwrap();
-    let loaded = crate::squad_store::load();
-    let specs = &loaded
-        .squads
-        .iter()
-        .find(|s| s.name == "sq")
-        .unwrap()
-        .tab_specs;
-    assert_eq!(specs.len(), 1);
-    assert_eq!(
-        specs[0].tab_name, "grid",
-        "persisted under the original name"
-    );
-
-    // apply_spec's layout push reaps the test client (dropped receiver);
-    // re-register it so the rename command has a live sender to act on.
-    core.clients.push(client(1, 5, (24, 80), false));
-    core.command(
-        1,
-        Command::RenameTab {
-            tab: 5,
-            name: "reviews".into(),
-        },
-    );
-
-    let loaded = crate::squad_store::load();
-    let specs = &loaded
-        .squads
-        .iter()
-        .find(|s| s.name == "sq")
-        .unwrap()
-        .tab_specs;
-    assert_eq!(specs.len(), 1, "still exactly one template spec");
-    assert_eq!(specs[0].tab_name, "reviews", "re-keyed under the new name");
-    assert!(
-        !specs.iter().any(|s| s.tab_name == "grid"),
-        "no stale old key survives"
-    );
-}
-
-#[test]
-fn implicit_tab_teardown_drops_template_spec() {
-    // x-cde1 AC2-HP: closing a template tab's last pane via close_pane removes
-    // the tab and must drop its stored spec, or restore resurrects the closed
-    // tab. A second tab keeps the session alive so the removal hits the
-    // tab-removed branch (not SessionEmpty/shutdown).
-    let _s = StoreScratch::new("cde1-close");
-    let (mut core, _p) = template_core();
-    core.clients.push(client(1, 5, (24, 80), false));
-    core.create_tab_in(1, None)
-        .expect("second tab keeps the session alive");
-    core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
-    core.apply_spec(
-        1,
-        &TabSel::Id(5),
-        &shell_spec(TemplateName::MainLeft, 2),
-        false,
-    )
-    .unwrap();
-    let loaded = crate::squad_store::load();
-    let specs = &loaded
-        .squads
-        .iter()
-        .find(|s| s.name == "sq")
-        .unwrap()
-        .tab_specs;
-    assert_eq!(specs.len(), 1, "spec persisted before teardown");
-
-    // Close tab 5's panes one at a time; the last close removes the tab.
-    let leaves = tree::leaves(
-        &core
-            .session
-            .squad(1)
-            .unwrap()
-            .tabs
-            .iter()
-            .find(|t| t.id == 5)
-            .unwrap()
-            .root,
-    );
-    for p in leaves {
-        core.close_pane(p);
-    }
-
-    let loaded = crate::squad_store::load();
-    let specs = &loaded
-        .squads
-        .iter()
-        .find(|s| s.name == "sq")
-        .unwrap()
-        .tab_specs;
-    assert!(
-        !specs.iter().any(|s| s.tab_name == "grid"),
-        "the closed template tab's spec is dropped from the store"
-    );
-}
-
-#[test]
-fn two_slots_binding_the_same_session_are_refused_atomically() {
-    // Codex P1 regression: the same fno id in two slots would commit a
-    // duplicate PaneId leaf. Refuse pre-mutation.
-    let (mut core, p1) = template_core();
-    core.agents = vec![bound_agent("S1", p1)];
-    let panes_before = core.panes.len();
-    let dup = LayoutSpec {
-        template: TemplateName::MainLeft,
-        slots: vec![
-            SlotBinding::Fno("S1".into()),
-            SlotBinding::Fno("S1".into()),
-            SlotBinding::Shell,
-            SlotBinding::Shell,
-        ],
-    };
-    let err = core.apply_spec(1, &TabSel::Id(5), &dup, false).unwrap_err();
-    assert_eq!(err.0, err_code::BAD_REQUEST);
-    assert_eq!(core.panes.len(), panes_before, "the refusal spawns nothing");
-}
-
-#[test]
-fn pane_break_moves_pane_to_new_tab_keeping_siblings() {
+fn break_join_rows() {
     let mut core = two_tab_core();
     let new_tid = core.pane_break(1, Some("solo".into())).unwrap();
     let sq = core.session.squad(1).unwrap();
@@ -2219,10 +1952,7 @@ fn pane_break_moves_pane_to_new_tab_keeping_siblings() {
     let nt = sq.tabs.iter().find(|t| t.id == new_tid).unwrap();
     assert_eq!(tree::leaves(&nt.root), vec![1], "1 broke into its own tab");
     assert_eq!(nt.name.as_deref(), Some("solo"));
-}
 
-#[test]
-fn pane_break_last_pane_removes_the_emptied_source_tab() {
     // AC1-EDGE: pane 3 is tab 20's only leaf.
     let mut core = two_tab_core();
     let new_tid = core.pane_break(3, None).unwrap();
@@ -2233,10 +1963,7 @@ fn pane_break_last_pane_removes_the_emptied_source_tab() {
     );
     let nt = sq.tabs.iter().find(|t| t.id == new_tid).unwrap();
     assert_eq!(tree::leaves(&nt.root), vec![3]);
-}
 
-#[test]
-fn tab_join_round_trips_a_break() {
     // AC4-HP (tree half): break 1 into its own tab, then join it back next
     // to sibling 2. The transient tab is gone; the pane set is preserved.
     let mut core = two_tab_core();
@@ -2249,10 +1976,7 @@ fn tab_join_round_trips_a_break() {
     ls.sort_unstable();
     assert_eq!(ls, vec![1, 2], "1 rejoined 2 in the original tab");
     crate::tree::check_invariants(a).unwrap();
-}
 
-#[test]
-fn tab_join_into_self_is_refused_bad_request() {
     // AC2-EDGE: anchor 1 lives in tab 10; joining tab 10 into itself refuses.
     let mut core = two_tab_core();
     let before = core.session.squad(1).unwrap().tabs.clone();
@@ -2263,10 +1987,7 @@ fn tab_join_into_self_is_refused_bad_request() {
         before,
         "a self-join mutates nothing"
     );
-}
 
-#[test]
-fn pane_where_distinguishes_found_absent_and_paneless() {
     // AC1-ERR: three DISTINCT outcomes. F is pane-hosted (mux -> pane 1),
     // G is a paneless bg row, Z is unknown.
     let mut core = two_tab_core();
@@ -2292,7 +2013,7 @@ fn pane_where_distinguishes_found_absent_and_paneless() {
 // -- x-1499 reverse location lookup -----------------------------------
 
 #[test]
-fn tab_location_resolves_all_forms_and_joins_occupants() {
+fn tab_location_rows() {
     // AC3-HP: the receipt names the workspace, both identifier forms,
     // every pane id, and every joined worker.
     let mut core = two_tab_core();
@@ -2370,10 +2091,7 @@ fn tab_location_resolves_all_forms_and_joins_occupants() {
             .1,
         "no tab with id 99"
     );
-}
 
-#[test]
-fn tab_location_refuses_workspace_and_bare_number_ambiguity() {
     let mut core = two_tab_core(); // squad 1: tabs 10, 20; squad 2: tabs 30, 2
     core.session
         .add_squad(2, vec!["/b".into()], None, leaf_tab(30, 7));
@@ -2420,10 +2138,7 @@ fn tab_location_refuses_workspace_and_bare_number_ambiguity() {
         core.tab_where("1", &PaneTarget::SquadId(1), &[]),
         Ok(ServerMsg::TabLocation { tab_id: 10, .. })
     ));
-}
 
-#[test]
-fn fno_id_for_pane_forward_join() {
     // AC3-HP reverse direction: pane -> fno_id via the registry join.
     let mut core = two_tab_core();
     core.session_name = "sess".into();
@@ -2449,10 +2164,7 @@ fn fno_id_for_pane_forward_join() {
         core.backlog_holders.get("x-identity").map(String::as_str),
         "mux identity and node claim holder must be the same peer"
     );
-}
 
-#[test]
-fn resolve_tab_index_by_id_name_and_ordinal() {
     let core = two_tab_core();
     assert_eq!(core.resolve_tab_index(1, &TabSel::Id(20)).unwrap(), 1);
     assert_eq!(
@@ -2475,6 +2187,31 @@ fn resolve_tab_index_by_id_name_and_ordinal() {
         core.resolve_tab_index(1, &TabSel::Index(9)).unwrap_err(),
         "no tab at ordinal 9"
     );
+
+    // codex P2: two identities share a prefix -> refuse; an exact id resolves.
+    let mut core = two_tab_core();
+    core.session_name = "sess".into();
+    let mut a = agent_in("sess", 1, None, false);
+    a.session_id = Some("abc111".into());
+    let mut b = agent_in("sess", 2, None, false);
+    b.session_id = Some("abc222".into());
+    core.agents = vec![a, b];
+    assert_eq!(core.pane_where("abc"), Err(err_code::NOT_FOUND));
+    match core.pane_where("abc111") {
+        Ok(ServerMsg::PaneLocation { panes, .. }) => assert_eq!(panes, vec![1]),
+        other => panic!("exact prefix should resolve: {other:?}"),
+    }
+
+    let mut core = two_tab_core();
+    core.session_name = "sess".into();
+    let mut a = agent_in("sess", 1, None, false);
+    a.harness_session_id = Some("019fb024-one".into());
+    let mut b = agent_in("sess", 2, None, false);
+    b.harness_session_id = Some("019fb024-two".into());
+    core.agents = vec![a, b];
+
+    assert_eq!(core.pane_where("019fb024"), Err(err_code::NOT_FOUND));
+    assert_eq!(core.resolve_local_pane("019fb024"), None);
 }
 
 #[test]
@@ -2543,7 +2280,7 @@ mod pane_run_receipt_tests;
 mod placement_fit_tests;
 
 #[test]
-fn exact_current_refuses_conflicting_tab_selector() {
+fn capacity_rows() {
     // AC1-EDGE: --at current pins pane 1 (tab 10); an explicit --tab id:20
     // names a tab the anchor is NOT in. Strict placement refuses rather than
     // redirecting, reaps the pre-spawned child, and changes no tree.
@@ -2577,10 +2314,7 @@ fn exact_current_refuses_conflicting_tab_selector() {
     let s = core.session.squad(1).unwrap();
     assert_eq!(s.tabs.len(), 2, "no new tab minted");
     assert!(tree::leaves(&s.tabs.iter().find(|t| t.id == 10).unwrap().root).contains(&1));
-}
 
-#[test]
-fn exact_current_refuses_when_the_anchor_tab_is_at_capacity() {
     let mut core = two_tab_core();
     core.shells = vec!["/bin/cat".into()];
     let viewport = core.tab_rect(10);
@@ -2645,10 +2379,7 @@ fn exact_current_refuses_when_the_anchor_tab_is_at_capacity() {
             .root,
     );
     assert_eq!(after, before, "capacity refusal changed the target tab");
-}
 
-#[test]
-fn selector_tab_refuses_when_the_target_tab_is_at_capacity() {
     // An explicit --tab (or a numeric anchor with a non-Refuse fallback)
     // resolves through the selector path, not the strict one; the cap the
     // caller set must bind there too, or the same flag that guards one
@@ -2718,10 +2449,7 @@ fn selector_tab_refuses_when_the_target_tab_is_at_capacity() {
             .root,
     );
     assert_eq!(after, before, "capacity refusal changed the target tab");
-}
 
-#[test]
-fn exact_current_accepts_the_last_slot_below_capacity() {
     let mut core = two_tab_core();
     core.shells = vec!["/bin/cat".into()];
     let viewport = core.tab_rect(10);
@@ -2767,7 +2495,7 @@ fn exact_current_accepts_the_last_slot_below_capacity() {
 }
 
 #[test]
-fn graft_materialization_rollback_preserves_tree_on_shell_failure() {
+fn graft_rows() {
     // AC4-EDGE-SHELL-ROLLBACK / AC2-FR: when a Shell slot cannot spawn, the
     // graft refuses - no shell, no tree mutation, no focus change survives,
     // and the anchor's tab is byte-unchanged. Forced by an empty
@@ -2831,18 +2559,11 @@ fn graft_materialization_rollback_preserves_tree_on_shell_failure() {
     let mut leaves = tree::leaves(&tab10_after.root);
     leaves.sort_unstable();
     assert_eq!(leaves, vec![1, 2]);
-}
 
-#[test]
-fn graft_re_resolves_anchor_tab_after_detaching_earlier_source_tab() {
     // P1 (codex review): an Fno binding whose pane lives in an EARLIER
     // single-pane tab than the anchor's. Detaching it removes that source
     // tab and shifts the anchor's tab index; the graft must re-resolve the
     // anchor's tab by stable id, or it grafts into the wrong tab / panics.
-    use crate::proto::{
-        AnchoredLayoutSpec, LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec, ServerMsg,
-    };
-    use crate::tree::Axis;
 
     let (mut core, p1) = template_core(); // p1 lives alone in tab 5
     core.agents = vec![bound_agent("S1", p1)];
@@ -2929,7 +2650,7 @@ fn live_client(id: u64, view_tab: TabId) -> (Client, mpsc::Receiver<ServerMsg>) 
 }
 
 #[test]
-fn pane_break_reanchors_a_client_on_the_emptied_source_tab() {
+fn reanchor_rows() {
     // codex P1: breaking a tab's last pane while a client views it must
     // re-anchor that client, never leave a dangling view push_layout skips.
     let mut core = two_tab_core();
@@ -2939,10 +2660,7 @@ fn pane_break_reanchors_a_client_on_the_emptied_source_tab() {
     let view = core.clients[0].view;
     assert!(core.viewed_tab(view).is_some(), "re-anchored to a live tab");
     assert_ne!(view.1, 20, "not stranded on the removed tab");
-}
 
-#[test]
-fn tab_join_reanchors_a_client_on_the_removed_source_tab() {
     // codex P1: the join removes the source tab; a viewer of it re-anchors.
     let mut core = two_tab_core();
     let brk = core.pane_break(1, None).unwrap(); // src tab `brk` holds [1]
@@ -2952,13 +2670,7 @@ fn tab_join_reanchors_a_client_on_the_removed_source_tab() {
     let view = core.clients[0].view;
     assert!(core.viewed_tab(view).is_some(), "re-anchored to a live tab");
     assert_ne!(view.1, brk, "not stranded on the removed source tab");
-}
 
-// ---- v43 (x-d6a8) US9 interactive drag Commands -------------------------
-// (drain_notice helper is defined once below, near the StopAgent tests.)
-
-#[test]
-fn break_pane_command_focuses_the_acting_client_on_the_new_tab() {
     // AC1-HP: the interactive break drops pane 1 (of tab 10's [1,2]) onto the
     // strip. The acting client's focus follows the gesture onto the new tab.
     let mut core = two_tab_core();
@@ -2977,10 +2689,7 @@ fn break_pane_command_focuses_the_acting_client_on_the_new_tab() {
     let src = core.session.squad(1).unwrap();
     let a = src.tabs.iter().find(|t| t.id == 10).unwrap();
     assert_eq!(tree::leaves(&a.root), vec![2], "sibling 2 stays in tab 10");
-}
 
-#[test]
-fn pane_break_script_path_leaves_the_viewer_focus_unchanged() {
     // AC1-HP (the "and": the script path does NOT move focus). The CoreMsg
     // path a scripted ControlVerb::PaneBreak takes is pane_break itself; it
     // never touches a view. A viewer of the (surviving) source tab stays put.
@@ -2993,10 +2702,7 @@ fn pane_break_script_path_leaves_the_viewer_focus_unchanged() {
         Some((1, 10)),
         "the script break leaves the viewer on tab 10, unmoved"
     );
-}
 
-#[test]
-fn pane_break_carries_a_name_only_when_it_empties_the_source_tab() {
     // Breaking out a pane that is ALONE in its tab rebuilds that tab around
     // the same pane, so dropping the operator's name is data loss. Breaking
     // one pane out of several is a genuinely new tab and stays unnamed.
@@ -3042,8 +2748,11 @@ fn pane_break_carries_a_name_only_when_it_empties_the_source_tab() {
     );
 }
 
+// ---- v43 (x-d6a8) US9 interactive drag Commands -------------------------
+// (drain_notice helper is defined once below, near the StopAgent tests.)
+
 #[test]
-fn move_pane_cross_tab_grafts_into_viewed_tab_and_empties_the_source() {
+fn move_join_rows() {
     // AC3-HP: a sideline-row drop names a mover (pane 3) living in tab 20,
     // not the viewed tab 10 where target pane 2 lives. The cross-tab branch
     // detaches 3 from 20 and grafts it beside 2; tab 20 empties and is
@@ -3075,10 +2784,7 @@ fn move_pane_cross_tab_grafts_into_viewed_tab_and_empties_the_source() {
     );
     assert_eq!(a.focus, 3, "the moved pane is focused in its new home");
     crate::tree::check_invariants(a).unwrap();
-}
 
-#[test]
-fn within_tab_move_pane_is_unchanged_by_the_cross_tab_branch() {
     // The cross-tab branch must not perturb the ordinary within-tab drag: a
     // move whose mover and target share the viewed tab still routes through
     // move_leaf.
@@ -3117,10 +2823,7 @@ fn within_tab_move_pane_is_unchanged_by_the_cross_tab_branch() {
             .any(|t| t.id == 20),
         "tab 20 is untouched by a within-tab move"
     );
-}
 
-#[test]
-fn join_tab_command_min_size_refusal_surfaces_a_named_notice_and_mutates_nothing() {
     // AC1-ERR: a join that would push a pane below min-size is refused with a
     // NAMED notice (not a bare "Error") and leaves BOTH trees exactly as they
     // were (all-or-nothing).
@@ -3149,10 +2852,7 @@ fn join_tab_command_min_size_refusal_surfaces_a_named_notice_and_mutates_nothing
         notice.contains("minimum") || notice.contains("smaller"),
         "the notice names the min-size reason, got: {notice:?}"
     );
-}
 
-#[test]
-fn join_tab_command_into_self_surfaces_a_named_notice() {
     // AC1-ERR (self-join half): joining a tab into its own anchor pane is
     // refused BAD_REQUEST server-side with a reason that names "itself".
     let mut core = two_tab_core();
@@ -3178,10 +2878,7 @@ fn join_tab_command_into_self_surfaces_a_named_notice() {
         notice.contains("itself"),
         "the notice names the self-join reason, got: {notice:?}"
     );
-}
 
-#[test]
-fn break_then_failed_join_keeps_the_broken_pane_where_the_break_left_it() {
     // AC2-FR: pane 1 breaks to its own tab; a following join of that tab that
     // fails min-size leaves the broken pane exactly where the break put it
     // (the pane id survives both ops - the tree-level "pid unchanged" claim).
@@ -3247,37 +2944,6 @@ fn tab_create_and_rename_sanitize_names() {
     .unwrap();
     let renamed = core.session.squad(1).unwrap().tabs[0].name.clone().unwrap();
     assert!(renamed.len() <= MAX_TAB_NAME, "oversized name capped");
-}
-
-#[test]
-fn pane_where_rejects_ambiguous_prefix_but_exact_wins() {
-    // codex P2: two identities share a prefix -> refuse; an exact id resolves.
-    let mut core = two_tab_core();
-    core.session_name = "sess".into();
-    let mut a = agent_in("sess", 1, None, false);
-    a.session_id = Some("abc111".into());
-    let mut b = agent_in("sess", 2, None, false);
-    b.session_id = Some("abc222".into());
-    core.agents = vec![a, b];
-    assert_eq!(core.pane_where("abc"), Err(err_code::NOT_FOUND));
-    match core.pane_where("abc111") {
-        Ok(ServerMsg::PaneLocation { panes, .. }) => assert_eq!(panes, vec![1]),
-        other => panic!("exact prefix should resolve: {other:?}"),
-    }
-}
-
-#[test]
-fn pane_where_rejects_ambiguous_harness_only_prefix() {
-    let mut core = two_tab_core();
-    core.session_name = "sess".into();
-    let mut a = agent_in("sess", 1, None, false);
-    a.harness_session_id = Some("019fb024-one".into());
-    let mut b = agent_in("sess", 2, None, false);
-    b.harness_session_id = Some("019fb024-two".into());
-    core.agents = vec![a, b];
-
-    assert_eq!(core.pane_where("019fb024"), Err(err_code::NOT_FOUND));
-    assert_eq!(core.resolve_local_pane("019fb024"), None);
 }
 
 #[test]
@@ -3359,7 +3025,7 @@ fn session_lineage_pane_ls_reports_thread_and_current_beside_each_other() {
 }
 
 #[test]
-fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
+fn squad_rename_rows() {
     // A blank rename clears an origin-backed squad to its derived label. An
     // origin-less squad has no derivable label, so the blank is refused.
     let mut core = empty_core();
@@ -3404,10 +3070,7 @@ fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
         Some("scratch"),
         "an origin-less squad refuses a blank (nothing to derive)"
     );
-}
 
-#[test]
-fn rename_squad_onto_a_taken_name_is_refused_with_a_notice() {
     // Reported as "renaming a workspace to a name another workspace
     // already carries fails silently". named_squad_taken already guards
     // this - the invariant this test pins is that the rename never
@@ -3441,10 +3104,7 @@ fn rename_squad_onto_a_taken_name_is_refused_with_a_notice() {
         Ok(ServerMsg::Notice { text }) => assert_eq!(text, "name taken"),
         other => panic!("expected a name-taken notice, got {other:?}"),
     }
-}
 
-#[test]
-fn rename_unnamed_to_named_mutates_the_row_instead_of_minting_a_second() {
     // AC12/AC13-HP (x-6b0b): an unnamed->named rename used to fall through
     // the plain persist: upsert wrote the new name AND the old key, and
     // `same_squad` matching named rows by name alone left the old key row
@@ -3501,10 +3161,16 @@ fn rename_unnamed_to_named_mutates_the_row_instead_of_minting_a_second() {
         crate::squad_store::origin_key(&["/repo".to_string()]),
         "AC13-HP: the key re-derives from origins"
     );
-}
 
-#[test]
-fn remove_squad_reanchors_then_last_ends_the_session() {
+    // AC2-ERR: a RemoveSquad naming a dead id touches nothing.
+    let mut core = empty_core();
+    core.session
+        .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+    core.clients.push(client(1, 5, (24, 80), false));
+    let flow = core.command(1, Command::RemoveSquad(999));
+    assert!(matches!(flow, Flow::Continue));
+    assert_eq!(core.session.squads.len(), 1, "no squad removed");
+
     // AC2-HP / AC2-EDGE (server half): removing a squad drops it and re-
     // anchors active_squad; removing the last squad ends the session.
     // Store half (de-persist contract): both rows leave the store too,
@@ -3557,7 +3223,7 @@ fn remove_squad_reanchors_then_last_ends_the_session() {
 }
 
 #[test]
-fn close_tab_depersists_a_memberless_workspace() {
+fn depersist_rows() {
     // The reported leak: a workspace of plain shell panes has no member
     // context, so CloseTab's reconcile loop did nothing and the row
     // survived in the store. Positives on both sides: the closed identity
@@ -3595,10 +3261,7 @@ fn close_tab_depersists_a_memberless_workspace() {
             .any(|s| (s.name.clone(), s.key.clone()) == ident2),
         "the sibling's row survives"
     );
-}
 
-#[test]
-fn closing_a_shell_tab_writes_its_tree_removal() {
     // x-9052 AC4-EDGE: a shell-only tab close used to persist NOTHING on
     // a surviving squad, so its stored tree replayed at every restart.
     // Positives both sides: the closed tree leaves tab_trees, the
@@ -3632,10 +3295,7 @@ fn closing_a_shell_tab_writes_its_tree_removal() {
         Some(1),
         "the closed tab's tree left the store"
     );
-}
 
-#[test]
-fn churn_writes_the_tree_removal_when_the_squad_survives() {
     // x-9052 AC4-HP: a churned worker's persist used to be members-only,
     // so its collapsed tab stayed in tab_trees forever.
     let _s = StoreScratch::new("x9052-churn");
@@ -3690,6 +3350,60 @@ fn churn_writes_the_tree_removal_when_the_squad_survives() {
         Some(1),
         "the churned member's tree left the store; the sibling's stays"
     );
+
+    // Same contract through close_pane (the mouse pane-close path), which
+    // de-persisted never before: it handled template specs and nothing
+    // else when remove_tab dropped the squad.
+    let _s = StoreScratch::new("x361b-closepane");
+    let mut core = empty_core();
+    core.session
+        .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+    core.session
+        .add_squad(2, vec!["/b".into()], Some("two".into()), leaf_tab(6, 2));
+    core.persist_squad(1);
+    core.persist_squad(2);
+    let ident1 = core.squad_identity(1).expect("identity before close");
+    let ident2 = core.squad_identity(2).expect("identity before close");
+
+    let flow = core.close_pane(1);
+    assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
+    let rows = crate::squad_store::load().squads;
+    assert!(
+        !rows
+            .iter()
+            .any(|s| (s.name.clone(), s.key.clone()) == ident1),
+        "closing the last pane cleared the workspace's row"
+    );
+    assert!(
+        rows.iter()
+            .any(|s| (s.name.clone(), s.key.clone()) == ident2),
+        "the sibling's row survives"
+    );
+
+    // The gate this drops: a squad the store holds but squad_members does
+    // not (restore's per-squad isolation can produce exactly that) took
+    // the false branch and its row survived the dismiss.
+    let _s = StoreScratch::new("x361b-remove-untracked");
+    let mut core = empty_core();
+    core.session
+        .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+    core.persist_squad(1);
+    let ident1 = core.squad_identity(1).expect("identity before removal");
+    assert!(
+        !core.squad_members.contains_key(&1),
+        "precondition: the squad is in the store but untracked"
+    );
+
+    core.clients.push(client(1, 5, (24, 80), false));
+    let flow = core.command(1, Command::RemoveSquad(1));
+    assert!(matches!(flow, Flow::Shutdown));
+    let rows = crate::squad_store::load().squads;
+    assert!(
+        !rows
+            .iter()
+            .any(|s| (s.name.clone(), s.key.clone()) == ident1),
+        "the untracked workspace's row left the store"
+    );
 }
 
 #[test]
@@ -3723,115 +3437,7 @@ fn prune_done_slots_collapses_and_skips() {
 }
 
 #[test]
-fn close_last_pane_depersists_its_workspace() {
-    // Same contract through close_pane (the mouse pane-close path), which
-    // de-persisted never before: it handled template specs and nothing
-    // else when remove_tab dropped the squad.
-    let _s = StoreScratch::new("x361b-closepane");
-    let mut core = empty_core();
-    core.session
-        .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
-    core.session
-        .add_squad(2, vec!["/b".into()], Some("two".into()), leaf_tab(6, 2));
-    core.persist_squad(1);
-    core.persist_squad(2);
-    let ident1 = core.squad_identity(1).expect("identity before close");
-    let ident2 = core.squad_identity(2).expect("identity before close");
-
-    let flow = core.close_pane(1);
-    assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
-    let rows = crate::squad_store::load().squads;
-    assert!(
-        !rows
-            .iter()
-            .any(|s| (s.name.clone(), s.key.clone()) == ident1),
-        "closing the last pane cleared the workspace's row"
-    );
-    assert!(
-        rows.iter()
-            .any(|s| (s.name.clone(), s.key.clone()) == ident2),
-        "the sibling's row survives"
-    );
-}
-
-#[test]
-fn remove_squad_depersists_an_untracked_workspace() {
-    // The gate this drops: a squad the store holds but squad_members does
-    // not (restore's per-squad isolation can produce exactly that) took
-    // the false branch and its row survived the dismiss.
-    let _s = StoreScratch::new("x361b-remove-untracked");
-    let mut core = empty_core();
-    core.session
-        .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
-    core.persist_squad(1);
-    let ident1 = core.squad_identity(1).expect("identity before removal");
-    assert!(
-        !core.squad_members.contains_key(&1),
-        "precondition: the squad is in the store but untracked"
-    );
-
-    core.clients.push(client(1, 5, (24, 80), false));
-    let flow = core.command(1, Command::RemoveSquad(1));
-    assert!(matches!(flow, Flow::Shutdown));
-    let rows = crate::squad_store::load().squads;
-    assert!(
-        !rows
-            .iter()
-            .any(|s| (s.name.clone(), s.key.clone()) == ident1),
-        "the untracked workspace's row left the store"
-    );
-}
-
-#[test]
-fn remove_squad_unknown_id_is_refused_without_mutation() {
-    // AC2-ERR: a RemoveSquad naming a dead id touches nothing.
-    let mut core = empty_core();
-    core.session
-        .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
-    core.clients.push(client(1, 5, (24, 80), false));
-    let flow = core.command(1, Command::RemoveSquad(999));
-    assert!(matches!(flow, Flow::Continue));
-    assert_eq!(core.session.squads.len(), 1, "no squad removed");
-}
-
-#[test]
-fn move_squad_reorders_and_edge_bump_is_silent_noop() {
-    // AC3-HP + Boundaries: reorder clamps to the list, and an at-edge move
-    // is a silent no-op (holding a reorder key at the top must not churn).
-    let mut core = empty_core();
-    for (sid, tid, pid) in [(1u64, 5u64, 1u64), (2, 6, 2), (3, 7, 3)] {
-        core.session
-            .add_squad(sid, vec![format!("/{sid}")], None, leaf_tab(tid, pid));
-    }
-    let order = |c: &Core| c.session.squads.iter().map(|s| s.id).collect::<Vec<_>>();
-
-    core.clients.push(client(1, 5, (24, 80), false));
-    core.command(
-        1,
-        Command::MoveSquad {
-            squad: 3,
-            delta: -1,
-        },
-    );
-    assert_eq!(order(&core), vec![1, 3, 2], "squad 3 moved up one");
-
-    core.clients.push(client(1, 5, (24, 80), false));
-    core.command(
-        1,
-        Command::MoveSquad {
-            squad: 1,
-            delta: -1,
-        },
-    );
-    assert_eq!(
-        order(&core),
-        vec![1, 3, 2],
-        "an at-edge bump changes nothing"
-    );
-}
-
-#[test]
-fn reorder_tab_moves_within_its_squad_and_keeps_the_same_tab_active() {
+fn reorder_rows() {
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
@@ -3841,8 +3447,8 @@ fn reorder_tab_moves_within_its_squad_and_keeps_the_same_tab_active() {
         .tabs
         .extend([leaf_tab(6, 2), leaf_tab(7, 3)]);
     core.session.squad_mut(1).unwrap().active_tab = 1;
-    let (client, mut rx) = client_with_rx(1);
-    core.clients.push(client);
+    let (conn, mut rx) = client_with_rx(1);
+    core.clients.push(conn);
 
     core.command(
         1,
@@ -3860,10 +3466,7 @@ fn reorder_tab_moves_within_its_squad_and_keeps_the_same_tab_active() {
     );
     assert_eq!(squad.tabs[squad.active_tab].id, 6);
     assert!(rx.try_recv().is_ok(), "a successful reorder pushes Layout");
-}
 
-#[test]
-fn tab_reorder_control_verb_lands_at_the_named_position() {
     // (x-cf97) The `fno mux tab move` door: `to` names a 1-based POSITION,
     // the server computes the delta, and the same trunk moves the tab
     // while holding the squad's active tab. The ordinal grammar is the
@@ -3913,16 +3516,13 @@ fn tab_reorder_control_verb_lands_at_the_named_position() {
         .is_err(),
         "past-the-end is refused"
     );
-}
 
-#[test]
-fn reorder_tab_at_an_edge_is_a_silent_noop() {
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
     core.session.squad_mut(1).unwrap().tabs.push(leaf_tab(6, 2));
-    let (client, mut rx) = client_with_rx(1);
-    core.clients.push(client);
+    let (conn, mut rx) = client_with_rx(1);
+    core.clients.push(conn);
 
     core.command(
         1,
@@ -3950,10 +3550,7 @@ fn reorder_tab_at_an_edge_is_a_silent_noop() {
         rx.try_recv().is_err(),
         "edge bumps push neither Layout nor Notice"
     );
-}
 
-#[test]
-fn reorder_tab_recovers_from_an_invalid_active_index() {
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
@@ -3977,15 +3574,12 @@ fn reorder_tab_recovers_from_an_invalid_active_index() {
         vec![6, 5]
     );
     assert_eq!(squad.active_tab, 1);
-}
 
-#[test]
-fn reorder_tab_refuses_a_stale_tab_id() {
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
-    let (client, mut rx) = client_with_rx(1);
-    core.clients.push(client);
+    let (conn, mut rx) = client_with_rx(1);
+    core.clients.push(conn);
 
     core.command(
         1,
@@ -3998,10 +3592,7 @@ fn reorder_tab_refuses_a_stale_tab_id() {
 
     assert_eq!(core.session.find_tab(5), Some((1, 0)));
     assert_eq!(drain_notice(&mut rx).as_deref(), Some("no such tab"));
-}
 
-#[test]
-fn reorder_tab_refuses_when_the_tab_moved_to_another_squad() {
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
@@ -4009,8 +3600,8 @@ fn reorder_tab_refuses_when_the_tab_moved_to_another_squad() {
     core.session
         .add_squad(2, vec!["/b".into()], None, leaf_tab(7, 3));
     core.session.squad_mut(2).unwrap().tabs.push(leaf_tab(8, 4));
-    let (client, mut rx) = client_with_rx(1);
-    core.clients.push(client);
+    let (conn, mut rx) = client_with_rx(1);
+    core.clients.push(conn);
 
     core.command(1, Command::MoveTab { tab: 6, squad: 2 });
     while rx.try_recv().is_ok() {}
@@ -4035,10 +3626,40 @@ fn reorder_tab_refuses_when_the_tab_moved_to_another_squad() {
         "a stale reorder must not mutate the destination squad"
     );
     assert!(drain_notice(&mut rx).unwrap().contains("moved"));
-}
 
-#[test]
-fn move_tab_follows_the_viewing_client_into_dst() {
+    // AC3-HP + Boundaries: reorder clamps to the list, and an at-edge move
+    // is a silent no-op (holding a reorder key at the top must not churn).
+    let mut core = empty_core();
+    for (sid, tid, pid) in [(1u64, 5u64, 1u64), (2, 6, 2), (3, 7, 3)] {
+        core.session
+            .add_squad(sid, vec![format!("/{sid}")], None, leaf_tab(tid, pid));
+    }
+    let order = |c: &Core| c.session.squads.iter().map(|s| s.id).collect::<Vec<_>>();
+
+    core.clients.push(client(1, 5, (24, 80), false));
+    core.command(
+        1,
+        Command::MoveSquad {
+            squad: 3,
+            delta: -1,
+        },
+    );
+    assert_eq!(order(&core), vec![1, 3, 2], "squad 3 moved up one");
+
+    core.clients.push(client(1, 5, (24, 80), false));
+    core.command(
+        1,
+        Command::MoveSquad {
+            squad: 1,
+            delta: -1,
+        },
+    );
+    assert_eq!(
+        order(&core),
+        vec![1, 3, 2],
+        "an at-edge bump changes nothing"
+    );
+
     // Invariant (view validity): a viewer of the moved tab follows it into
     // the destination squad - content continuity beats spatial position.
     let mut core = empty_core();
@@ -4171,7 +3792,7 @@ pub(super) fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent
 }
 
 #[test]
-fn run_pane_with_worker_records_a_resumable_member() {
+fn resume_rows() {
     // x-5f7f task 1, positive marker: a pane run carrying --worker records
     // a StoredMember joined to that registry NAME, in the store, for the
     // squad the pane landed in. This is the capture funnel the empty
@@ -4223,10 +3844,7 @@ fn run_pane_with_worker_records_a_resumable_member() {
         Some("01a03a85-1111-7222-8333-444455556666"),
         "the full resume key survives registry-row loss"
     );
-}
 
-#[test]
-fn run_pane_without_worker_records_no_member() {
     // x-5f7f task 1, the no-flag acceptance: a plain pane run stays
     // byte-identical - the squad persists, membership stays empty.
     let _s = StoreScratch::new("run-pane-plain");
@@ -4257,10 +3875,7 @@ fn run_pane_without_worker_records_no_member() {
         "a plain run records no member: {:?}",
         sq.members
     );
-}
 
-#[test]
-fn run_pane_refuses_a_hostile_worker_name_before_spawning() {
     // The server-side gate: the control socket is reachable by any client,
     // so the CLI's own --worker validation is not the authority. A hostile
     // name is refused with no pane spawned and no squad minted.
@@ -4285,10 +3900,7 @@ fn run_pane_refuses_a_hostile_worker_name_before_spawning() {
     assert_eq!(err.0, err_code::BAD_REQUEST);
     assert!(core.panes.is_empty(), "no pane spawned");
     assert!(core.session.squads.is_empty(), "no squad minted");
-}
 
-#[test]
-fn refused_placeholder_marker_roundtrips_through_argv() {
     // AC8-HP: the keeper re-adoption parse recovers the refused worker.
     let argv = vec![
         "env".to_string(),
@@ -4308,10 +3920,7 @@ fn refused_placeholder_marker_roundtrips_through_argv() {
         "/bin/sh".to_string(),
     ];
     assert_eq!(refused_worker_from_argv(&other), None);
-}
 
-#[test]
-fn refused_placeholder_mints_through_the_real_spawn_path() {
     // The mint goes through the argv path (not the bare shell spawn), so
     // the registered pane derives its own refusal marker from the env
     // wrapper token.
@@ -4322,33 +3931,39 @@ fn refused_placeholder_mints_through_the_real_spawn_path() {
         .expect("placeholder spawns");
     let entry = core.panes.get(&pid).expect("registered");
     assert_eq!(entry.refused_worker.as_deref(), Some("w"));
-}
 
-#[test]
-fn worker_restore_match_prefers_the_persisted_identity_pair_over_name() {
-    let member = crate::squad_store::StoredMember {
-        attach_id: String::new(),
-        tombstone: false,
-        tombstone_reason: None,
-        detached: false,
-        tab_name: None,
-        cwd: None,
-        worker: Some("reused-name".into()),
-        harness: Some("codex".into()),
-        harness_session_id: Some("old-session".into()),
-        pane_id: None,
-    };
-    let mut wrong = bg_row("reused-name", "/repo", None);
-    wrong.harness = Some("codex".into());
-    wrong.harness_session_id = Some("new-session".into());
-    let mut right = wrong.clone();
-    right.harness_session_id = Some("old-session".into());
-    assert!(!worker_registry_match(&member, &wrong, "reused-name"));
-    assert!(worker_registry_match(&member, &right, "reused-name"));
-}
+    let _scratch = StoreScratch::new("member-session-id");
+    let mut core = empty_core();
+    core.session.add_squad(
+        1,
+        vec!["/repo".into()],
+        Some("workers".into()),
+        leaf_tab(1, 1),
+    );
+    core.squad_members.insert(
+        1,
+        vec![crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("worker".into()),
+            harness: None,
+            harness_session_id: None,
+            pane_id: None,
+        }],
+    );
 
-#[test]
-fn member_resume_facts_survive_reaped_row_and_purged_receipt() {
+    core.record_worker_member(1, "worker", 1, "/repo", Some("session-new"));
+
+    let stored = crate::squad_store::load();
+    assert_eq!(
+        stored.squads[0].members[0].harness_session_id.as_deref(),
+        Some("session-new")
+    );
+
     let member = crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
@@ -4388,10 +4003,7 @@ fn member_resume_facts_survive_reaped_row_and_purged_receipt() {
     let mut no_id = member;
     no_id.harness_session_id = None;
     assert!(Core::member_resume_facts(&no_id, "t-worker").is_none());
-}
 
-#[test]
-fn spawn_receipt_removal_events_revoke_resume_facts() {
     let raw = concat!(
         r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
         "\n",
@@ -4409,90 +4021,30 @@ fn spawn_receipt_removal_events_revoke_resume_facts() {
         r#"{"type":"agent_row_reaped","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","resumable":true}}"#,
     );
     assert_eq!(parse_spawn_receipts(dormant).len(), 1);
+
+    let member = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("reused-name".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("old-session".into()),
+        pane_id: None,
+    };
+    let mut wrong = bg_row("reused-name", "/repo", None);
+    wrong.harness = Some("codex".into());
+    wrong.harness_session_id = Some("new-session".into());
+    let mut right = wrong.clone();
+    right.harness_session_id = Some("old-session".into());
+    assert!(!worker_registry_match(&member, &wrong, "reused-name"));
+    assert!(worker_registry_match(&member, &right, "reused-name"));
 }
 
 #[test]
-fn existing_worker_member_persists_a_new_session_identity() {
-    let _scratch = StoreScratch::new("member-session-id");
-    let mut core = empty_core();
-    core.session.add_squad(
-        1,
-        vec!["/repo".into()],
-        Some("workers".into()),
-        leaf_tab(1, 1),
-    );
-    core.squad_members.insert(
-        1,
-        vec![crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: Some("worker".into()),
-            harness: None,
-            harness_session_id: None,
-            pane_id: None,
-        }],
-    );
-
-    core.record_worker_member(1, "worker", 1, "/repo", Some("session-new"));
-
-    let stored = crate::squad_store::load();
-    assert_eq!(
-        stored.squads[0].members[0].harness_session_id.as_deref(),
-        Some("session-new")
-    );
-}
-
-#[test]
-fn focusing_a_held_pane_refuses_a_session_that_became_live() {
-    let mut core = empty_core();
-    core.shells = vec!["/bin/cat".into()];
-    let pid = core.spawn_pane(24, 80, "/tmp").unwrap();
-    core.session
-        .add_squad(1, vec!["/tmp".into()], None, leaf_tab(1, pid));
-    core.held_workers.insert(
-        pid,
-        HeldWorker {
-            name: "live-worker".into(),
-            harness: "codex".into(),
-            harness_session_id: "full-session".into(),
-            cwd: "/tmp".into(),
-        },
-    );
-    let mut live = bg_row("renamed-live-worker", "/tmp", None);
-    live.harness = Some("codex".into());
-    live.harness_session_id = Some("full-session".into());
-    core.agents = vec![live];
-    let (mut client, mut rx) = client_with_rx(1);
-    client.view = (1, 1);
-    core.clients.push(client);
-
-    core.command(1, Command::FocusPane(pid));
-
-    assert!(
-        core.panes.contains_key(&pid),
-        "the refusal keeps its named shell"
-    );
-    assert!(core.worker_pane.is_empty(), "no second writer is spawned");
-    assert!(
-        !core.held_workers.contains_key(&pid),
-        "the refusal is one-shot"
-    );
-    assert!(
-        core.panes[&pid].vt.text().contains("live elsewhere"),
-        "the pane itself carries the refusal"
-    );
-    assert!(
-        drain_notices(&mut rx).join("\n").contains("live elsewhere"),
-        "the client receives the same reason"
-    );
-}
-
-#[test]
-fn resume_agent_spawns_the_harness_form_and_records_the_member() {
+fn resume_agent_rows() {
     // x-5f7f: a dead paneless codex row resumes through codex's own form
     // in the recorded cwd. x-eb79: the argv now resolves off-loop (the
     // staged seam here), so the test stages what `fno-agents resume-argv`
@@ -4560,10 +4112,7 @@ fn resume_agent_spawns_the_harness_form_and_records_the_member() {
             .any(|m| m.worker.as_deref() == Some("t-codex-one")),
         "the resumed pane persists as a worker member: {members:?}"
     );
-}
 
-#[test]
-fn resume_agent_twice_focuses_the_existing_pane() {
     // The external-review P1: the resume argv carries no registry binding,
     // so before the worker_pane map a second Resume for the same row
     // launched a SECOND session on the same rollout. The map binds row to
@@ -4644,10 +4193,7 @@ fn resume_agent_twice_focuses_the_existing_pane() {
         row.pane_id, None,
         "the row returns to idle when the pane dies"
     );
-}
 
-#[test]
-fn resume_agent_refusals_name_the_reason() {
     // Fail-closed catalog gates, same posture as AttachAgent: an unknown
     // name, and a row whose pane is still live (focus, never a second
     // spawn), never reach an argv.
@@ -4695,10 +4241,7 @@ fn resume_agent_refusals_name_the_reason() {
         "a row with a live pane is refused, never double-spawned"
     );
     assert_eq!(core.panes.len(), 1, "nothing was spawned by either refusal");
-}
 
-#[test]
-fn row_resume_disposition_gates_on_harness_form_and_session_id() {
     // One table of registry facts owns both the dead-row resume decision
     // and the branch-four reason. A LIVE claude bg row with a jobId still
     // uses attach, but its disposition remains live-paneless.
@@ -4813,10 +4356,7 @@ fn row_resume_disposition_gates_on_harness_form_and_session_id() {
         Core::row_resume_disposition(&no_harness),
         RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
     );
-}
 
-#[test]
-fn resume_target_from_argv_parses_both_harness_forms_anchored() {
     // (x-d401) The row-to-pane join key: the session id a pane-run argv
     // resumes. Claude's flag form, codex's subcommand form, both behind
     // the env(1) wrapper; a command that merely mentions the token never
@@ -4901,10 +4441,52 @@ fn resume_target_from_argv_parses_both_harness_forms_anchored() {
         Some("oc-90ab".into()),
         "the env(1) wrapper is skipped for every declared form"
     );
+
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let pid = core.spawn_pane(24, 80, "/tmp").unwrap();
+    core.session
+        .add_squad(1, vec!["/tmp".into()], None, leaf_tab(1, pid));
+    core.held_workers.insert(
+        pid,
+        HeldWorker {
+            name: "live-worker".into(),
+            harness: "codex".into(),
+            harness_session_id: "full-session".into(),
+            cwd: "/tmp".into(),
+        },
+    );
+    let mut live = bg_row("renamed-live-worker", "/tmp", None);
+    live.harness = Some("codex".into());
+    live.harness_session_id = Some("full-session".into());
+    core.agents = vec![live];
+    let (mut conn, mut rx) = client_with_rx(1);
+    conn.view = (1, 1);
+    core.clients.push(conn);
+
+    core.command(1, Command::FocusPane(pid));
+
+    assert!(
+        core.panes.contains_key(&pid),
+        "the refusal keeps its named shell"
+    );
+    assert!(core.worker_pane.is_empty(), "no second writer is spawned");
+    assert!(
+        !core.held_workers.contains_key(&pid),
+        "the refusal is one-shot"
+    );
+    assert!(
+        core.panes[&pid].vt.text().contains("live elsewhere"),
+        "the pane itself carries the refusal"
+    );
+    assert!(
+        drain_notices(&mut rx).join("\n").contains("live elsewhere"),
+        "the client receives the same reason"
+    );
 }
 
 #[test]
-fn unbound_pane_running_a_session_keeps_its_row_live_paneless() {
+fn unbound_rows() {
     // (x-d401, AC2-HP) A pane in this session whose argv resumes the
     // row's session id is DIRECT OBSERVATION the backend is live. The
     // row must read LivePaneless (peek, do not resume - a resume opens a
@@ -4959,60 +4541,120 @@ fn unbound_pane_running_a_session_keeps_its_row_live_paneless() {
         core.row_resume_disposition_in_session(&row),
         RowResumeDisposition::Resumable
     );
-}
 
-#[test]
-fn mail_agent_unknown_name_refused() {
-    // AC1-ERR: MailAgent naming an absent row is refused fail-closed.
+    // An `fno agents spawn --substrate bg` worker writes a paneless
+    // (`mux: None`) registry row. It MUST surface as a watch-only AgentRow,
+    // even alongside a pane row hosted by another mux session. The
+    // session-id skip in `agent_rows()` only eats ANOTHER session's live
+    // pane; it must never drop a paneless bg/headless row. Guards a future
+    // membership-first rewrite of `agent_rows()` from re-dropping bg rows.
     let mut core = empty_core();
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::MailAgent {
-            name: "ghost".into(),
-            text: "hi".into(),
+    core.session_name = "main".into();
+    core.agents = vec![
+        // A pane hosted by ANOTHER session -> that session's server renders
+        // it; correctly skipped here.
+        RegistryAgent {
+            name: "foreign-pane".into(),
+            cwd: "/other".into(),
+            mux: Some(("other".into(), 5)),
+            liveness: agents_view::Liveness::Alive,
+            ..Default::default()
         },
-    );
-    assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
-}
-
-#[test]
-fn mail_agent_blank_text_refused_after_resolve() {
-    // AC3-ERR: a valid target but blank-after-sanitize text is refused (the
-    // resolve succeeds, so the refusal proves the sanitize gate, not the
-    // resolver, caught it - and no subprocess is reached in a plain #[test]).
-    let mut core = empty_core();
-    core.agents = vec![bg_row("worker", "/w", None)];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::MailAgent {
-            name: "worker".into(),
-            text: "   ".into(),
+        // A bg worker: paneless, no squad match -> watch-only orphan, and
+        // it carries a claude jobId so the sideline can attach it.
+        RegistryAgent {
+            name: "bg-worker".into(),
+            cwd: "/bg".into(),
+            attach_id: Some("c19cd2c3".into()),
+            liveness: agents_view::Liveness::Alive,
+            ..Default::default()
         },
+        // A live codex worker with a session identity but no pane or attach
+        // target must project the typed branch-four recovery reason.
+        RegistryAgent {
+            harness_session_id: Some("codex-live-id".into()),
+            name: "live-paneless".into(),
+            cwd: "/live".into(),
+            liveness: agents_view::Liveness::Alive,
+            harness: Some("codex".into()),
+            ..Default::default()
+        },
+    ];
+    let rows = core.agent_rows();
+    assert!(
+        !rows.iter().any(|r| r.name == "foreign-pane"),
+        "a pane hosted by another session must be skipped"
     );
-    assert!(drain_notice(&mut rx).unwrap().contains("empty"));
-}
-
-#[test]
-fn sanitize_mail_text_strips_trims_and_bounds() {
-    // Control chars stripped, trimmed; blank refused; over-cap refused (never
-    // truncated - Locked Decision 7).
-    assert_eq!(sanitize_mail_text("  hi \x07there \n").unwrap(), "hi there");
-    assert!(sanitize_mail_text("").is_err());
-    assert!(sanitize_mail_text("\x07\x08 \t").is_err());
-    let ok = "x".repeat(crate::proto::MAX_MAIL_TEXT);
+    let bg = rows
+        .iter()
+        .find(|r| r.name == "bg-worker")
+        .expect("a paneless bg row must surface as a watch-only row");
     assert_eq!(
-        sanitize_mail_text(&ok).unwrap().len(),
-        crate::proto::MAX_MAIL_TEXT
+        bg.squad, None,
+        "an unmatched bg row is an orphan (squad None)"
     );
-    assert!(sanitize_mail_text(&"x".repeat(crate::proto::MAX_MAIL_TEXT + 1)).is_err());
-}
+    assert_eq!(bg.pane_id, None, "a watch-only row has no pane");
+    assert!(!bg.exited);
+    assert_eq!(
+        bg.attach_id.as_deref(),
+        Some("c19cd2c3"),
+        "the claude jobId must carry through so the sideline can attach it"
+    );
+    assert_eq!(bg.no_pane_reason, None, "attachable rows carry no reason");
+    let live = rows
+        .iter()
+        .find(|r| r.name == "live-paneless")
+        .expect("the live paneless row must surface");
+    assert_eq!(
+        live.no_pane_reason,
+        Some(AgentNoPaneReason::LivePaneless),
+        "registry truth projects the typed live-paneless reason"
+    );
 
-#[test]
-fn derive_failure_leaves_workers_ungrouped() {
+    // (x-d401, x-9d03) A bare pane with no registry row can still be a
+    // full agent running a real workload - not-in-registry is not
+    // is-a-shell. The row must carry the pane's own OSC 133 reading and a
+    // real last_activity_age_s from the drain-path stamp, never the
+    // badge-None-means-idle fold that rendered four working panes and one
+    // idle shell as the same circle.
+    let mut core = empty_core();
+    core.session_name = "main".into();
+    core.shells = vec!["/bin/cat".into()];
+    let pid = core.spawn_pane(2, 4, "/w").expect("pane");
+    core.session.add_squad(
+        1,
+        vec!["/w".into()],
+        None,
+        Tab {
+            name: None,
+            id: 1,
+            root: Node::Leaf(pid),
+            focus: pid,
+        },
+    );
+    core.agents = vec![];
+    // Feed an open command block (OSC 133 A then C, no D): Running.
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    tx.try_send((
+        pid,
+        PaneChunk::Output(b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()),
+    ))
+    .unwrap();
+    drop(tx);
+    let mut first_out = HashSet::new();
+    drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+    let rows = core.agent_rows();
+    let bare = rows.iter().find(|r| r.pane_id == Some(pid)).unwrap();
+    assert_eq!(
+        bare.pane_activity,
+        Some(vt::ShellActivity::Running),
+        "a bare pane running a command must report Running, not a blind idle"
+    );
+    assert!(
+        bare.last_activity_age_s.is_some(),
+        "a bare pane must report a real activity age from the drain stamp"
+    );
+
     // A malformed/absent graph read leaves workers rendering via their
     // normal path: no squad matches, so the rows stay ungrouped.
     let mut core = empty_core();
@@ -5028,7 +4670,51 @@ fn derive_failure_leaves_workers_ungrouped() {
 }
 
 #[test]
-fn external_row_stop_and_remove_refused() {
+fn mail_rows() {
+    // AC1-ERR: MailAgent naming an absent row is refused fail-closed.
+    let mut core = empty_core();
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.command(
+        1,
+        Command::MailAgent {
+            name: "ghost".into(),
+            text: "hi".into(),
+        },
+    );
+    assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
+
+    // AC3-ERR: a valid target but blank-after-sanitize text is refused (the
+    // resolve succeeds, so the refusal proves the sanitize gate, not the
+    // resolver, caught it - and no subprocess is reached in a plain #[test]).
+    let mut core = empty_core();
+    core.agents = vec![bg_row("worker", "/w", None)];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.command(
+        1,
+        Command::MailAgent {
+            name: "worker".into(),
+            text: "   ".into(),
+        },
+    );
+    assert!(drain_notice(&mut rx).unwrap().contains("empty"));
+
+    // Control chars stripped, trimmed; blank refused; over-cap refused (never
+    // truncated - Locked Decision 7).
+    assert_eq!(sanitize_mail_text("  hi \x07there \n").unwrap(), "hi there");
+    assert!(sanitize_mail_text("").is_err());
+    assert!(sanitize_mail_text("\x07\x08 \t").is_err());
+    let ok = "x".repeat(crate::proto::MAX_MAIL_TEXT);
+    assert_eq!(
+        sanitize_mail_text(&ok).unwrap().len(),
+        crate::proto::MAX_MAIL_TEXT
+    );
+    assert!(sanitize_mail_text(&"x".repeat(crate::proto::MAX_MAIL_TEXT + 1)).is_err());
+}
+
+#[test]
+fn external_rows() {
     // US4: an external roster row belongs to the claude daemon, not the fno
     // registry, so BOTH verbs refuse with a notice rather than fire a doomed
     // `fno-agents` call. The external arm is checked before the live/exited
@@ -5078,25 +4764,7 @@ fn external_row_stop_and_remove_refused() {
         core.command(1, cmd);
         assert!(drain_notice(&mut rx).unwrap().contains("external"));
     }
-}
 
-fn ext_record(
-    id: &str,
-    state: crate::squad_store::ExternalState,
-) -> crate::squad_store::ExternalLifecycle {
-    crate::squad_store::ExternalLifecycle {
-        attach_id: id.into(),
-        name: format!("ext-{id}"),
-        cwd: "/tmp".into(),
-        state,
-        generation: 1,
-        updated_at: String::new(),
-        reason: None,
-    }
-}
-
-#[test]
-fn stop_external_stale_id_refused_without_spawn() {
     // AC1-ERR: a StopExternal whose attach id names neither a live external
     // row nor a retry-eligible tombstone is refused fail-closed - no
     // subprocess. A plain #[test] has no tokio runtime, so reaching the
@@ -5114,10 +4782,7 @@ fn stop_external_stale_id_refused_without_spawn() {
     assert!(drain_notice(&mut rx)
         .unwrap()
         .contains("no longer a live external row"));
-}
 
-#[test]
-fn external_lifecycle_invalid_id_refused_before_spawn() {
     // codex P2: a non-8-hex attach id from the client is rejected before it
     // is persisted or reaches a `claude` argv (a dash-prefixed id could be
     // read as a CLI option). Both verbs guard; the refusal precedes any
@@ -5140,10 +4805,7 @@ fn external_lifecycle_invalid_id_refused_before_spawn() {
             .unwrap()
             .contains("invalid external id"));
     }
-}
 
-#[test]
-fn remove_external_without_stopped_record_refused() {
     // AC2-ERR: rm is reachable only from a persisted `stopped` tombstone. An
     // absent record refuses; a `stopping` record refuses "stop it first".
     // Both stay off the spawn path (no tokio runtime in a #[test]).
@@ -5172,6 +4834,21 @@ fn remove_external_without_stopped_record_refused() {
         },
     );
     assert!(drain_notice(&mut rx).unwrap().contains("stop it first"));
+}
+
+fn ext_record(
+    id: &str,
+    state: crate::squad_store::ExternalState,
+) -> crate::squad_store::ExternalLifecycle {
+    crate::squad_store::ExternalLifecycle {
+        attach_id: id.into(),
+        name: format!("ext-{id}"),
+        cwd: "/tmp".into(),
+        state,
+        generation: 1,
+        updated_at: String::new(),
+        reason: None,
+    }
 }
 
 #[test]

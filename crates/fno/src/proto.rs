@@ -330,8 +330,9 @@ fn default_true() -> bool {
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
 /// v88: `AgentLaunchRequest.node` (serde default), the board's target key
 /// binds the launch to its node; floor stays 58.
-/// v89: `AgentRow.crown_name` (serde default), the crown's display name from
-/// the crown-name store file; floor stays 58.
+/// v89: `AgentRow.crown_title` (serde default), the crown's display name from
+/// the crown-name store file; floor stays 58. v94 renames the never-filled
+/// field to `crown_title` (the role's people title); floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
 /// v91: `AgentLaunchRequest.provider` + `extra_flags` (serde default),
@@ -1288,10 +1289,10 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
-    /// (v89) Legacy display name; newer sideline clients use the king's
-    /// registry label instead. Kept optional for wire compatibility.
+    /// (v94) The role's people title read from crown_names.json; None when
+    /// the store has none. Replaces the never-filled v89 `crown_title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_name: Option<String>,
+    pub crown_title: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
@@ -2281,6 +2282,11 @@ pub enum ServerMsg {
         closed_panes: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tabs_removed: Vec<String>,
+        /// Panes the 60s operator_typing guard skipped: the close
+        /// was refused, not lost. Default-skipped so an older reader is
+        /// unaffected.
+        #[serde(default)]
+        skipped_typing: usize,
     },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
@@ -4436,7 +4442,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
-                        crown_name: None,
+                        crown_title: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
@@ -4479,7 +4485,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
-                        crown_name: None,
+                        crown_title: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,

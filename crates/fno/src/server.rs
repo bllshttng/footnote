@@ -9375,14 +9375,11 @@ impl Core {
                 .and_then(|row| row.effective_identity())
                 .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            if (occupants.len() != 1 && viewer_row.is_none())
-                || registry_identity != expected
-                || occupants
-                    .first()
-                    .copied()
-                    .or(viewer_row)
-                    .is_some_and(|row| row.name != host)
-            {
+            // Identity is the session uuid, never the name: a rename (or a
+            // succession heir renamed after spawn) leaves the pane label
+            // stale while the uuid still names the same live session. The
+            // uuid comparison above is the whole check.
+            if (occupants.len() != 1 && viewer_row.is_none()) || registry_identity != expected {
                 let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
@@ -13386,7 +13383,7 @@ async fn serve(
     };
     if flow == Flow::Shutdown {
         // Capture only from a safe restore state and current store generation.
-        core.capture_topology_now();
+        core.record_exit();
         core.kill_all_panes();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as

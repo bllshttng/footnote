@@ -13,7 +13,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KING="$REPO_ROOT/hooks/king-postcompact-reinject.sh"
-BRIEF="$REPO_ROOT/skills/reign/references/postcompact-brief.md"
+BRIEF="$REPO_ROOT/skills/lead/references/postcompact-brief.md"
 # Keep the cap fixed: the brief must fit without changing the budget.
 BRIEF_MAX_BYTES=1800
 

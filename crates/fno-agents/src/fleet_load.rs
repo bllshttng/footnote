@@ -1275,7 +1275,8 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<&'static Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     /// Pins FNO_AGENTS_HOME for one AgentsHome::from_env() read.
     fn pinned_home(dir: &Path) -> AgentsHome {

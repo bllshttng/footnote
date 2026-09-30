@@ -277,7 +277,7 @@ fn read_config(cwd: &Path) -> Result<(i64, i64), String> {
             Some(_) => {
                 return Err(
                     "config king.compaction_ceiling must be a non-negative integer".to_string(),
-                )
+                );
             }
             None => {
                 return Err("config king.compaction_ceiling must be an integer".to_string());
@@ -286,6 +286,10 @@ fn read_config(cwd: &Path) -> Result<(i64, i64), String> {
         None => DEFAULT_COMPACTION_CEILING,
     };
     Ok((interval, ceiling))
+}
+
+pub(crate) fn compaction_ceiling(cwd: &Path) -> Result<i64, String> {
+    read_config(cwd).map(|(_, ceiling)| ceiling)
 }
 
 /// The one entry point. `now` is injectable so tests pin the window; `cwd`

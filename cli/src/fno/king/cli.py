@@ -222,7 +222,7 @@ def _warn_uncrowned_row(scope: str) -> None:
             "king: warning: manifest armed, but this session resolves to no "
             "registry row, so its crown cannot be checked. Run `/fno-me` to "
             "register, then have an attended shell run "
-            f"`fno agents crown <handle> --scope {scope}`.",
+            f"`fno agents org promote <handle> --scope {scope}`.",
             err=True,
         )
         return
@@ -243,7 +243,7 @@ def _warn_uncrowned_row(scope: str) -> None:
         typer.echo(
             f"king: warning: manifest armed for {scope!r}, but this row "
             f"carries NO crown, so {consequence} Ask an attended shell to run "
-            f"`fno agents crown {handle} --scope {scope}`.",
+            f"`fno agents org promote {handle} --scope {scope}`.",
             err=True,
         )
         return
@@ -253,7 +253,7 @@ def _warn_uncrowned_row(scope: str) -> None:
         f"an EXACT crown_scope, so a crown over wider territory does not "
         f"satisfy them any more than a crown over unrelated territory: "
         f"{consequence} Ask an attended shell to re-scope it with "
-        f"`fno agents crown {handle} --scope {scope}`.",
+        f"`fno agents org promote {handle} --scope {scope}`.",
         err=True,
     )
 
@@ -327,7 +327,7 @@ def done_cmd(
                         f"king: refusing to expire {scope!r}: it is one member of "
                         f"{row.name}'s crown over {row.crown_scope!r}. Expire the "
                         f"whole crown with --scope {row.crown_scope}, or narrow it "
-                        f"with fno agents crown {row.name} --scope <the remaining epics>.",
+                        f"with fno agents org promote {row.name} --scope <the remaining epics>.",
                         err=True,
                     )
                     raise typer.Exit(2)

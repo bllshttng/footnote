@@ -26,6 +26,14 @@ use std::path::{Path, PathBuf};
 // call the same home)
 // ---------------------------------------------------------------------------
 
+pub(crate) fn member_not_found(member: &str, entries: &[Value], absent: String) -> String {
+    if entries.is_empty() {
+        format!("the graph read returned 0 nodes, so {member:?} is unknown, not absent")
+    } else {
+        absent
+    }
+}
+
 /// Compile a canonical crown scope into the graph node ids it contains
 /// (board.compile_scope_ids).
 pub(crate) fn compile_scope_ids(
@@ -109,9 +117,13 @@ pub(crate) fn compile_territory(
             for m in &epic_members {
                 match entry_by_id(m) {
                     None => {
-                        return Err(format!(
-                            "{m:?} is neither a configured project nor a backlog node; \
-                             nothing to reign over (check for a typo)"
+                        return Err(member_not_found(
+                            m,
+                            entries,
+                            format!(
+                                "{m:?} is neither a configured project nor a backlog node; \
+                                 nothing to reign over (check for a typo)"
+                            ),
                         ))
                     }
                     Some(entry) => {
@@ -137,9 +149,13 @@ pub(crate) fn compile_territory(
         } else {
             match entry_by_id(raw) {
                 None => {
-                    return Err(format!(
-                        "{raw:?} is neither a configured project nor a backlog node; \
-                         nothing to reign over (check for a typo)"
+                    return Err(member_not_found(
+                        raw,
+                        entries,
+                        format!(
+                            "{raw:?} is neither a configured project nor a backlog node; \
+                             nothing to reign over (check for a typo)"
+                        ),
                     ))
                 }
                 Some(entry) => {
@@ -171,8 +187,10 @@ pub(crate) fn compile_territory(
         {
             match entry_by_id(root_id) {
                 None => {
-                    return Err(format!(
-                        "crown scope {root_id:?} is not an epic in the graph"
+                    return Err(member_not_found(
+                        root_id,
+                        entries,
+                        format!("crown scope {root_id:?} is not an epic in the graph"),
                     ))
                 }
                 Some(entry) if s_str(entry, "type") != Some("epic") => {
@@ -603,6 +621,10 @@ pub fn resolve_territories(
 ) -> Result<Vec<Territory>, TerritoryUnknown> {
     let crowns = live_crowns(registry_path)?;
     let entries = graph_entries(config_cwd)?;
+    Ok(territories_in(&crowns, &entries, config_cwd))
+}
+
+fn territories_in(crowns: &[Crown], entries: &[Value], config_cwd: &Path) -> Vec<Territory> {
     let paths = workspace_paths(config_cwd);
 
     let epic_project = |epic_id: &str| -> Option<String> {
@@ -616,7 +638,7 @@ pub fn resolve_territories(
 
     let mut territories: Vec<Territory> = Vec::new();
     let mut ruled_projects: HashSet<String> = HashSet::new();
-    for crown in &crowns {
+    for crown in crowns {
         let members: Vec<String> = crown
             .scope
             .split(',')
@@ -666,7 +688,7 @@ pub fn resolve_territories(
     // Python-order contract: crowned territories in scope order first, then
     // the kingless loose territories in project order (the readout renders
     // rows in exactly this order).
-    Ok(territories)
+    territories
 }
 
 /// `fno-agents territory-rows`: the AC7 projection as JSON on stdout.
@@ -755,25 +777,29 @@ pub(crate) fn live_held_in(node_ids: &HashSet<String>, held: &HashSet<String>) -
 /// projection.
 pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     let cap = territory_cap(config_cwd);
-    let territories = match resolve_territories(config_cwd, registry_path) {
-        Ok(t) => t,
+    let crowns = match live_crowns(registry_path) {
+        Ok(crowns) => crowns,
         Err(TerritoryUnknown(reason)) => {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
+    let entries = match graph_entries(config_cwd) {
+        Ok(entries) => entries,
+        Err(TerritoryUnknown(reason)) => {
+            return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
+        }
+    };
+    let territories = territories_in(&crowns, &entries, config_cwd);
     let live_node_claims = match live_node_claims() {
         Ok(claims) => claims,
         Err(TerritoryUnknown(reason)) => {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
-    // One registry parse feeds holders and the owner rule alike.
-    let crowns = live_crowns(registry_path).unwrap_or_default();
     let holders: HashMap<String, String> = crowns
         .iter()
         .map(|c| (c.scope.clone(), c.holder.clone()))
         .collect();
-    let entries = graph_entries(config_cwd).unwrap_or_default();
     // Exclusive membership: a node counts for the one live crown that owns
     // it - the deepest crown holding it, the same rule `node_owners` gives
     // the spawn gate and the court - so a worker can never cost two
@@ -793,9 +819,9 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     memberships
         .into_iter()
         .map(|(territory, compiled)| {
-            let (membership, ids) = match compiled {
-                Ok((_, ids)) => ("ok", ids),
-                Err(_) => ("unknown", HashSet::new()),
+            let (membership, ids, reason) = match compiled {
+                Ok((_, ids)) => ("ok", ids, None),
+                Err(reason) => ("unknown", HashSet::new(), Some(reason)),
             };
             let mut ids = ids;
             if membership == "ok" {
@@ -810,7 +836,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             } else {
                 None
             };
-            json!({
+            let mut row = json!({
                 "scope": territory.key,
                 "membership": membership,
                 "rung": territory.rung,
@@ -819,7 +845,11 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
                 "mission": if territory.rung == 2 { territory.members.first() } else { None },
                 "live": live_count,
                 "cap": cap,
-            })
+            });
+            if let Some(reason) = reason {
+                row["reason"] = json!(reason);
+            }
+            row
         })
         .collect()
 }
@@ -867,6 +897,16 @@ mod moved_scope_tests {
         let projects = Ok(HashMap::new());
         let err = compile_scope_ids("x-aaaa", &entries, &projects).unwrap_err();
         assert!(err.contains("not an epic"), "{err}");
+        let empty = compile_scope_ids("x-aaaa", &[], &projects).unwrap_err();
+        assert!(
+            empty.contains("returned 0 nodes") && empty.contains("unknown, not absent"),
+            "{empty}"
+        );
+        let missing = compile_scope_ids("x-ghost", &entries, &projects).unwrap_err();
+        assert!(
+            missing.contains("neither a configured project nor a backlog node"),
+            "{missing}"
+        );
     }
 
     #[test]
@@ -1079,6 +1119,17 @@ path = \"/repo/alpha\"
         std::fs::write(&db, b"not a database").unwrap();
         let err = resolve_territories(&tmp.path().to_path_buf(), &registry).unwrap_err();
         assert!(err.0.contains("graph unreadable"), "{err}");
+        crate::paths::pin_test_claims_root(tmp.path());
+        let rows = territory_rows(&tmp.path().to_path_buf(), &registry);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["membership"], "unknown");
+        assert!(
+            rows[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("graph unreadable"),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -1469,6 +1520,7 @@ path = "/repo/alpha"
         let bad = rows.iter().find(|r| r["scope"] == "e-loose").unwrap();
         let good = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
         assert_eq!(bad["membership"], "unknown");
+        assert!(bad["reason"].as_str().unwrap().contains("e-loose"), "{bad}");
         assert!(bad["live"].is_null());
         assert_eq!(good["membership"], "ok");
         assert_eq!(good["live"], 1, "{rows:?}");

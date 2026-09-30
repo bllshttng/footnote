@@ -678,97 +678,67 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
     assert!(reg.entries.iter().any(|e| e.name == "row-a"));
 }
 
-/// Locked Decision 1: every named node done but one carries an OPEN do row
-/// for this session -> the row keeps, the node is named, and the sweep never
-/// settles graph rows on a retirement.
+/// Locked Decision 1, one table, two rows: every named node done but one
+/// carrying an OPEN do row for this session keeps the row and names the
+/// node, and the same row with its do entry closed (absent from
+/// open_do, the seam model of a closed row) retires by name with
+/// kept_open_do_row empty. The exact (short_id, node) identity must
+/// land on each side; a count assertion alone would pass on an unrelated
+/// row. The sweep never settles graph rows on a retirement.
 #[test]
-fn an_open_do_row_on_a_done_node_holds_the_retirement() {
-    let home = tmp_home("gc-open-do");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let transcripts = tempfile::tempdir().unwrap();
-    let quiet = quiet_transcript(transcripts.path(), "d.jsonl", 2 * 3600);
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("row-d", None);
-        e.short_id = "rowd".into();
-        e.harness_session_id = Some("sess-d".into());
-        e.origin = Some("spawn".into());
-        r.entries.push(e);
-    })
-    .unwrap();
-    let graph = graph_read(&[("sess-d", "N1", "done")], &[("sess-d", "N1")]);
-    let summary = gc_sweep::run(
-        &home,
-        &emitter,
-        900,
-        false,
-        7,
-        &move |_| graph.clone(),
-        &move |_| Some(vec![quiet.clone()]),
-        &uniform_ages(2 * 3600),
-        &|_| true,
-        &|_| crate::daemon::CascadeOutcome::NotApplicable,
-        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
-        &no_agents,
-        &|_| (Some(true), Some(true)),
-        &|_| None,
-    );
-    assert!(summary.retired.is_empty());
-    assert_eq!(
-        summary.kept_open_do_row,
-        vec![("rowd".to_string(), "N1".to_string())]
-    );
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries.iter().any(|e| e.name == "row-d"));
-}
-
-/// Counterpart to the hold above, named rather than counted: the
-/// same row, but its `do` entry carries `ended_at` (so it is absent from
-/// `open_do` - the injected seam models an open row by its presence there,
-/// a closed one by its absence). The exact `(short_id, node)` identity must
-/// land in `retired` and nowhere in `kept_open_do_row`; a count assertion
-/// alone would pass on an unrelated row.
-#[test]
-fn a_done_node_with_a_closed_do_row_retires_by_name() {
-    let home = tmp_home("gc-closed-do");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let transcripts = tempfile::tempdir().unwrap();
-    let quiet = quiet_transcript(transcripts.path(), "d.jsonl", 2 * 3600);
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("row-d", None);
-        e.short_id = "rowd".into();
-        e.harness_session_id = Some("sess-d".into());
-        e.origin = Some("spawn".into());
-        r.entries.push(e);
-    })
-    .unwrap();
-    // `sess-d` carries no entry in open_do: its `do` row is closed.
-    let graph = graph_read(&[("sess-d", "N1", "done")], &[]);
-    let summary = gc_sweep::run(
-        &home,
-        &emitter,
-        900,
-        false,
-        7,
-        &move |_| graph.clone(),
-        &move |_| Some(vec![quiet.clone()]),
-        &uniform_ages(2 * 3600),
-        &|_| true,
-        &|_| crate::daemon::CascadeOutcome::NotApplicable,
-        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
-        &no_agents,
-        &|_| (Some(true), Some(true)),
-        &|_| None,
-    );
-    assert_eq!(
-        summary.retired,
-        vec![(
-            "rowd".to_string(),
-            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
-        )]
-    );
-    assert!(summary.kept_open_do_row.is_empty());
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(!reg.entries.iter().any(|e| e.name == "row-d"));
+fn an_open_do_row_on_a_done_node_holds_the_retirement_and_a_closed_one_retires_by_name() {
+    for (open_do, expect_retired) in [(&[("sess-d", "N1")][..], false), (&[][..], true)] {
+        let home = tmp_home("gc-open-do");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let transcripts = tempfile::tempdir().unwrap();
+        let quiet = quiet_transcript(transcripts.path(), "d.jsonl", 2 * 3600);
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("row-d", None);
+            e.short_id = "rowd".into();
+            e.harness_session_id = Some("sess-d".into());
+            e.origin = Some("spawn".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+        let graph = graph_read(&[("sess-d", "N1", "done")], open_do);
+        let summary = gc_sweep::run(
+            &home,
+            &emitter,
+            900,
+            false,
+            7,
+            &move |_| graph.clone(),
+            &move |_| Some(vec![quiet.clone()]),
+            &uniform_ages(2 * 3600),
+            &|_| true,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
+            &|_| (Some(true), Some(true)),
+            &|_| None,
+        );
+        if expect_retired {
+            assert_eq!(
+                summary.retired,
+                vec![(
+                    "rowd".to_string(),
+                    "every named node done: N1 (via sessions; merge_status: N1:unrecorded)"
+                        .to_string()
+                )]
+            );
+            assert!(summary.kept_open_do_row.is_empty());
+            let reg = state::load_registry(&home.registry_json()).unwrap();
+            assert!(!reg.entries.iter().any(|e| e.name == "row-d"));
+        } else {
+            assert!(summary.retired.is_empty());
+            assert_eq!(
+                summary.kept_open_do_row,
+                vec![("rowd".to_string(), "N1".to_string())]
+            );
+            let reg = state::load_registry(&home.registry_json()).unwrap();
+            assert!(reg.entries.iter().any(|e| e.name == "row-d"));
+        }
+    }
 }
 
 /// The origin and crown protections, and the tree buckets on a retired row.
@@ -4197,6 +4167,7 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     receipts.insert(entry.name.clone(), receipt);
     let order = gc_sweep::RetireOrder {
         via_release: false,
+        pr_settled_live: false,
         id: "latew".into(),
         basis: "test".into(),
         created_at: entry.created_at.clone(),
@@ -4306,6 +4277,7 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
             entry.name.clone(),
             gc_sweep::RetireOrder {
                 via_release: false,
+                pr_settled_live: false,
                 id: entry.short_id.clone(),
                 basis: "test".into(),
                 created_at: entry.created_at.clone(),
@@ -4998,3 +4970,8 @@ mod retire_removes_session;
 /// split by the file budget; the fixtures above are the shared seams.
 #[path = "gc_receipts/lineage_kind.rs"]
 mod lineage_kind;
+
+/// The open-PR reap guard families: keep + resume for the driver with no
+/// termination, alert for the reap that goes through on an open-PR node.
+#[path = "gc_receipts/open_pr_guard.rs"]
+mod open_pr_guard;

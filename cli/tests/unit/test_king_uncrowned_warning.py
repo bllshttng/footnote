@@ -57,7 +57,7 @@ def test_a_crown_over_this_scope_is_silent(monkeypatch, capsys):
 def test_no_crown_names_the_grant_command(monkeypatch, capsys):
     err = _warn(monkeypatch, capsys, _Row())
     assert "NO crown" in err
-    assert "fno agents crown a5cdfd52 --scope x-b76b" in err
+    assert "fno agents org promote a5cdfd52 --scope x-b76b" in err
     # The consequence must be stated truthfully: manifest-path raises
     # typer.Exit(1) and prints nothing, it does not answer empty at exit 0.
     assert "exit non-zero without printing a path" in err

@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import click
 import typer
 
 plugin_app = typer.Typer(help="Install the footnote plugin into a harness (from the filtered stage)")
@@ -33,18 +34,30 @@ def _binary() -> Path:
 
 
 
-@plugin_app.command("install")
+@plugin_app.command(
+    "install",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 def install(
-    harness: str = typer.Argument(..., help="claude | codex | opencode | agy"),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-F",
-        help="Refresh the install even when the harness already has this version.",
-    ),
+    ctx: click.Context,
+    harness: str = typer.Argument("", help="claude | codex | opencode | agy"),
 ) -> None:
     """Install the footnote plugin from the filtered stage (no build output)."""
     binary = _binary()
+    # With allow_extra_args the command-name token arrives bound to the
+    # first positional and ctx.args carries everything after it, so the
+    # harness word is rebuilt from both instead of trusted from one.
+    tail = list(ctx.args)
+    if harness and harness != "install":
+        tail = [harness, *tail]
+    if not tail:
+        typer.echo(
+            "usage: fno config plugin install <claude|codex|opencode|agy> [flags...]",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    harness, extra = tail[0], tail[1:]
+    force = "--force" in extra or "-F" in extra
     argv = ["plugin-install"]
     if harness == "codex":
         # The codex arm stays on the Python converge engine (ship-phase ruling).
@@ -71,9 +84,7 @@ def install(
         )
         argv = ["plugin-install", "--env-only"]
     else:
-        if force:
-            argv.append("--force")
-        argv.append(harness)
+        argv += [harness, *extra]
     proc = subprocess.run([str(binary), *argv], check=False)
     if proc.returncode != 0:
         raise typer.Exit(code=proc.returncode)

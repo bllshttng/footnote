@@ -4,7 +4,7 @@
 
 footnote is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin on any harness that accepts plugins and hooks (Claude Code, Codex, OpenCode, and agy are wired today), with a standalone CLI underneath.
 
-![The backlog board, running](docs/images/ux-shot-backlog-full-board.png)
+![The fno mux with four agent panes working fno tasks, a sideline roster, and a live status row](docs/images/ux-shot-live-fleet.png)
 
 - Point it at a feature description or a backlog node. It plans, builds with TDD, reviews its own diff, and ships the PR.
 - Completion is decided by the world, not by a model's mood. The PR exists, CI is green, review has had its rounds.
@@ -62,7 +62,7 @@ The finish line is a PR with CI green and review done under your configured poli
 - [Think and plan](docs/guides/think-and-plan.md): design exploration and planning
 - [PR lifecycle](docs/guides/pr-lifecycle.md): review, create, check, merged
 - [Agents quickstart](docs/guides/agents-quickstart.md): spawn and message peer agents
-- [Vocabulary](docs/architecture/vocabulary-user-and-operator.md): citizen, king, crown, and the rest of the mesh's words
+- [Vocabulary](docs/architecture/vocabulary-user-and-operator.md): citizen, crown, and the rest of the mesh's words
 - [Troubleshooting](docs/troubleshooting.md) and [best practices](docs/best-practices.md)
 - [Security posture](docs/security-posture.md)
 

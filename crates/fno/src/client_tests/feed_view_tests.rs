@@ -20,6 +20,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         ts: "2026-09-02T18:27:06Z".into(),
         kind: "pr_created".into(),
         node: node.map(str::to_string),
+        cwd: None,
         session_id: sid.map(str::to_string),
         harness: None,
         title: "PR 1395".into(),
@@ -41,6 +42,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         ts: "2026-09-06T10:00:00Z".into(),
         kind: "session_reaped".into(),
         node: None,
+        cwd: None,
         session_id: Some(sid.into()),
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
@@ -66,7 +68,6 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
         inflight: false,
         want: false,
         gen: 0,
-        focused: false,
         hpan: 0,
         last_fold: None,
     }
@@ -110,7 +111,7 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         tail: None,
         crown_level: None,
         crown_scope: None,
-        crown_name: None,
+        crown_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -134,7 +135,7 @@ fn lines_render_newest_first_with_marker() {
         c.ts = "2026-09-02T18:27:06Z".into();
         overlay(vec![a, b, c])
     };
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
     assert_eq!(lines.len(), ROWS);
@@ -170,7 +171,7 @@ fn offset_windows_the_items() {
     };
     // Slot offset 1 skips the group header, so the newest row (x-c) leads
     // the window now.
-    let lines = feed_panel_lines(&o, W, ROWS, 1);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 1);
     assert!(lines[1].contains("x-c"));
     assert!(lines[2].contains("x-b"));
     assert!(lines[3].contains("x-a"));
@@ -184,14 +185,14 @@ fn degraded_footer_renders_the_typed_reason() {
     // body carries the projection's stderr so the cause leads the line.
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Timeout);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("timed out after 10s")));
 
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Exit(
         "unreadable store: graph.json".into(),
     ));
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // At the panel's 40 columns pad_to truncates the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
@@ -226,17 +227,33 @@ fn hit_on_an_unjoined_row_attaches_its_session() {
     }]));
 }
 
-#[test]
-fn hit_on_a_row_without_session_id_is_none() {
+#[tokio::test]
+async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() {
     let v = view_with_rows(vec![]);
-    let item = feed_item(Some("x-nope"), None);
+    let mut item = feed_item(None, None);
+    item.kind = "node_created".into();
     assert!(feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).is_none());
+
+    let mut v = v;
+    v.feed_detail_of = Some(item);
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        v.launcher.is_none(),
+        "missing node id cannot prefill the composer"
+    );
+    assert!(
+        v.feed_detail_of.is_some(),
+        "an ineligible detail stays open"
+    );
 }
 
 #[test]
 fn empty_panel_renders_an_earned_empty_notice_and_footer() {
     let o = overlay(vec![]);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.last().unwrap().contains("0 events"));
 }
@@ -247,7 +264,7 @@ fn folding_first_open_claims_no_activity() {
     // a statement only a settled fold has earned.
     let mut o = overlay(vec![]);
     o.inflight = true;
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(!lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.iter().any(|l| l.contains("folding...")));
 }
@@ -304,7 +321,7 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
                                 // same row deep-links THAT event's session: painter and resolver must
                                 // name one event, never two.
     let f = v.feed.as_ref().unwrap();
-    let lines = feed_panel_lines(f, w as usize - 1, v.term.0 as usize, 0);
+    let lines = feed_panel_lines(f, false, w as usize - 1, v.term.0 as usize, 0);
     assert!(
         lines[2].contains("x-c"),
         "top ITEM row is the newest: {}",
@@ -462,7 +479,7 @@ fn a_double_width_glyph_claims_two_cells() {
 #[test]
 fn the_header_names_the_input_state_the_panel_is_in() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    let lines = feed_panel_lines(&unfocused, W, ROWS, 0);
+    let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
         lines[0].contains("E focus"),
         "unfocused header: {}",
@@ -474,9 +491,8 @@ fn the_header_names_the_input_state_the_panel_is_in() {
         lines[0]
     );
 
-    let mut focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    focused.focused = true;
-    let lines = feed_panel_lines(&focused, W, ROWS, 0);
+    let focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+    let lines = feed_panel_lines(&focused, true, W, ROWS, 0);
     assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
     assert!(lines[0].contains("esc release"));
 
@@ -500,10 +516,38 @@ fn the_header_names_the_input_state_the_panel_is_in() {
 fn esc_releases_the_keyboard_without_closing_the_panel() {
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
-    v.feed.as_mut().unwrap().focused = true;
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    // The cursor band rides keyboard ownership (AC3-HP/AC4-HP): the selected
+    // row wears the theme's band pair while the feed owns typing, and the
+    // band is gone the moment the keyboard returns to the pane.
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let feed_w = v.feed_panel_w() as usize;
+    assert!(feed_w > 0, "the panel is painted with a width");
+    let x0 = cols - feed_w;
+    let sel = v.feed.as_ref().unwrap().sel;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        crate::theme::band_style(&v.theme).1,
+        "the selected row wears the band while the feed owns the keyboard"
+    );
     assert!(crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some(), "the panel stays open");
-    assert!(!v.feed.as_ref().unwrap().focused);
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane,
+        "the release returns typing to the pane"
+    );
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let x0 = cols - v.feed_panel_w() as usize;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        Color::Default,
+        "the band is gone once typing returns to the pane"
+    );
     // Releasing twice is a no-op, never a close.
     assert!(!crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some());
@@ -562,7 +606,7 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
     );
     let lines = feed_detail::detail_lines(&item, &d, 60);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
-    assert!(feed_detail::detail_footer(&d).contains("resume line"));
+    assert!(feed_detail::detail_footer(&item, &d).contains("resume line"));
 
     let mut v = view_with_rows(vec![]);
     v.feed_detail_of = Some(item);
@@ -602,8 +646,8 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     };
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
-    assert_eq!(by("king"), "L1 e-0001");
-    assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
+    assert_eq!(by("lead"), "L1 e-0001");
+    assert!(feed_detail::detail_footer(&item, &d).contains("focus its pane"));
 
     // A row whose session id does not match is NOT this event's session,
     // however its name reads: parent and king stay unrecorded, and the pane
@@ -620,7 +664,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
             .unwrap()
     };
     assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
-    assert_eq!(by_other("king"), feed_detail::NOT_RECORDED);
+    assert_eq!(by_other("lead"), feed_detail::NOT_RECORDED);
     assert!(by_other("pane").contains("the node's current worker"));
 }
 
@@ -734,12 +778,20 @@ fn an_absent_field_names_its_own_kind_of_silence() {
 // on a real View and read the COMPOSED frame. A field that never reaches the
 // screen is the defect this view exists to prevent, so the assertion is on
 // painted text.
-#[test]
-fn the_composed_frame_paints_every_field_and_its_action() {
+#[tokio::test]
+async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer() {
     let mut v = view_with_rows(vec![]);
     v.term = (44, 120);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    v.feed_detail_of = Some(item.clone());
+    let ordinary_text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !ordinary_text.contains("b: blueprint"),
+        "non-created rows have no blueprint action"
+    );
+    item.kind = "node_created".into();
+    item.cwd = Some("/workspace/node-project".into());
     item.harness = Some("claude".into());
     item.model = Some("glm-5.3-flash".into());
     v.feed_detail_of = Some(item);
@@ -754,7 +806,7 @@ fn the_composed_frame_paints_every_field_and_its_action() {
         "session-id",
         "pane",
         "parent",
-        "king",
+        "lead",
     ] {
         assert!(text.contains(label), "the frame never painted {label}");
     }
@@ -765,6 +817,24 @@ fn the_composed_frame_paints_every_field_and_its_action() {
     assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
     // The action is named before it is pressed.
     assert!(text.contains("attach on portal 0"), "footer missing");
+    assert!(text.contains("b: blueprint"), "blueprint key missing");
+
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    let launch = v.launcher.as_ref().expect("blueprint key opens composer");
+    assert_eq!(launch.draft.message, "/fno:blueprint x-9223");
+    assert_eq!(launch.draft.node.as_deref(), Some("x-9223"));
+    assert_eq!(
+        launch
+            .draft
+            .projects
+            .get(launch.draft.project_idx)
+            .map(String::as_str),
+        Some("/workspace/node-project")
+    );
+    assert!(v.feed_detail_of.is_none(), "composer replaces feed detail");
 }
 
 // (x-9cbf) The parent field spends the derived NAME when the edge resolves
@@ -877,7 +947,7 @@ fn feed_panel_rows_style_the_actionable_kinds() {
     vacated.ts = "2026-09-28T16:45:58Z".into();
     vacated.title = "warden left".into();
     let o = overlay(vec![vacated]);
-    let rows = feed_view::feed_panel_rows(&o, W, ROWS, 0);
+    let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
     // Row 1 is the group header: every span bold.
     assert!(
         rows[1].iter().all(|s| s.bold),
@@ -897,7 +967,7 @@ fn feed_panel_rows_style_the_actionable_kinds() {
         "the node id is bold: {:?}",
         rows[2]
     );
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(
         lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
         "text is unchanged: {}",

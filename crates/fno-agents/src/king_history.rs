@@ -1033,7 +1033,7 @@ struct CrownLineage {
     from_session: Option<String>,
 }
 
-fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
     }
@@ -2254,7 +2254,7 @@ mod tests {
                     "content": [{"type": "text", "text": "crates/fno-agents/src/king_history.rs:40 owns the reading."}]
                 }
             }),
-            claude_tool("Bash", json!({"command":"fno agents court --json"})),
+            claude_tool("Bash", json!({"command":"fno agents org --json"})),
             claude_tool("Bash", json!({"command":"fno do pr watch status"})),
             claude_tool("Bash", json!({"command":"fno whoami context"})),
             claude_tool("Bash", json!({"command":"fno agents spawn worker"})),

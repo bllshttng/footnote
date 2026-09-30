@@ -748,7 +748,8 @@ pub(crate) mod tests {
     /// reader can catch the root mid-flip and sweep the REAL temp dir (the
     /// same ENV_LOCK shape king_board's HOME_LOCK uses). Shared with
     /// cargo_build_dirs' tests, which mutate the same vars.
-    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     fn temp_lane_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fno-reclaim-{tag}-{}", std::process::id()));

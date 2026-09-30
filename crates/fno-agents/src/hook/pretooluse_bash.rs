@@ -93,6 +93,12 @@ pub fn run(_args: &[String]) -> i32 {
     }
     refusals.extend(test.refusal);
 
+    if crate::agents_config::preset_runs(preset, "effect") {
+        let effect_refusal = crate::effect_gate::judge(&payload, &cwd);
+        super::emit_guard_decision(&cwd, "effect-guard", "Bash", effect_refusal.is_some());
+        refusals.extend(effect_refusal);
+    }
+
     if refusals.is_empty() {
         super::emit_allow()
     } else {

@@ -399,6 +399,18 @@ pub fn reign_objective(scope: &str) -> String {
     format!("$fno:reign {}", scope.trim())
 }
 
+/// The lead objective a machine seed writes. `$fno:reign` was the pre-rename
+/// spelling and stays verifiable for one release: live codex goals carry it.
+pub fn lead_objective(scope: &str) -> String {
+    format!("$fno:lead {}", scope.trim())
+}
+
+/// Whether `objective` is the lead objective for `scope` in either the
+/// current or the one-release-old spelling.
+pub fn is_lead_objective(objective: &str, scope: &str) -> bool {
+    objective == lead_objective(scope) || objective == reign_objective(scope)
+}
+
 pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {
     let value: Value = serde_json::from_str(raw)
         .map_err(|_| ThreadDriverError::Protocol("invalid thread/goal response".into()))?;
@@ -501,9 +513,9 @@ pub fn ensure_reign_goal(
     scope: &str,
     continuation_owner: &str,
 ) -> Result<GoalStatus, ThreadDriverError> {
-    let expected = reign_objective(scope);
+    let expected = lead_objective(scope);
     if let Some(goal) = current {
-        if goal.objective != expected {
+        if !is_lead_objective(&goal.objective, scope) {
             return Err(ThreadDriverError::Protocol(format!(
                 "refusing native goal {:?}; expected {:?}; continuation owner {}",
                 goal.objective, expected, continuation_owner
@@ -1632,9 +1644,23 @@ impl CodexThread {
     ) -> Result<NativeGoal, ThreadDriverError> {
         let current = self.goal_get_typed().await?;
         ensure_reign_goal(current.as_ref(), scope, continuation_owner)?;
-        let objective = reign_objective(scope);
+        let objective = lead_objective(scope);
         match current {
-            Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
+            // An Active goal already carrying the lead spelling is done. One
+            // still carrying the pre-rename spelling migrates in place, so
+            // every goal this ensure returns reads the new words.
+            Some(goal) if goal.status == GoalStatus::Active && goal.objective == objective => {
+                Ok(goal)
+            }
+            Some(goal) if goal.status == GoalStatus::Active => {
+                let migrated = self.goal_set_typed(&objective, GoalStatus::Active).await?;
+                if !migrated.usage.preserves(&goal.usage) {
+                    return Err(ThreadDriverError::Protocol(
+                        "thread/goal/set did not preserve goal usage".into(),
+                    ));
+                }
+                Ok(migrated)
+            }
             Some(goal) if goal.status == GoalStatus::Paused => {
                 let resumed = self.goal_set_typed(&objective, GoalStatus::Active).await?;
                 if !resumed.usage.preserves(&goal.usage) {

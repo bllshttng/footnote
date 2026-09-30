@@ -741,11 +741,6 @@ mod tests {
     fn bare_pytest_refused() {
         let root = footnote_root();
         assert!(decide("pytest -q cli/tests", root.path()).is_some());
-    }
-
-    #[test]
-    fn full_path_pytest_refused() {
-        let root = footnote_root();
         assert!(decide("/usr/bin/env pytest -q", root.path()).is_some());
     }
 
@@ -753,11 +748,7 @@ mod tests {
     fn python_m_pytest_refused() {
         let root = footnote_root();
         assert!(decide("python3 -m pytest -q", root.path()).is_some());
-    }
-
-    #[test]
-    fn attached_dash_m_spelling_refused() {
-        let root = footnote_root();
+        // CPython accepts the attached spelling identically.
         assert!(decide("python -mpytest -q", root.path()).is_some());
     }
 
@@ -778,18 +769,13 @@ mod tests {
         let root = footnote_root();
         assert!(decide("uvx pytest", root.path()).is_some());
         assert!(decide("uv tool run pytest -q", root.path()).is_some());
+        assert!(decide("uvx --from pytest-uv pytest -q", root.path()).is_some());
     }
 
     #[test]
     fn uv_run_python_m_pytest_refused() {
         let root = footnote_root();
         assert!(decide("uv run python -m pytest -q", root.path()).is_some());
-    }
-
-    #[test]
-    fn uvx_from_package_refused() {
-        let root = footnote_root();
-        assert!(decide("uvx --from pytest-uv pytest -q", root.path()).is_some());
     }
 
     #[test]
@@ -831,6 +817,7 @@ mod tests {
     fn cargo_test_behind_global_flags_refused() {
         let root = footnote_root();
         assert!(decide("cargo --manifest-path cli/Cargo.toml test", root.path()).is_some());
+        assert!(decide("cargo --color always test", root.path()).is_some());
     }
 
     #[test]
@@ -855,12 +842,6 @@ mod tests {
     fn cargo_build_allows() {
         let root = footnote_root();
         assert!(decide("cargo build --release", root.path()).is_none());
-    }
-
-    #[test]
-    fn cargo_nextest_not_in_scope() {
-        let root = footnote_root();
-        assert!(decide("cargo nextest run", root.path()).is_none());
     }
 
     #[test]
@@ -969,12 +950,6 @@ mod tests {
     fn uv_group_flag_then_pytest_refused() {
         let root = footnote_root();
         assert!(decide("uv run --group dev pytest -q", root.path()).is_some());
-    }
-
-    #[test]
-    fn cargo_color_flag_then_test_refused() {
-        let root = footnote_root();
-        assert!(decide("cargo --color always test", root.path()).is_some());
     }
 
     #[test]

@@ -56,10 +56,12 @@ def resolve_self_identity(
     contention. The id half must come from the STAMP or a witness, never from
     the ambient marker under test - that pair would assert exactly what the
     marker claims, and a leaked marker meeting its owner's live row would
-    read as self (round-1 P1). A name_only worker resolves when the attester
-    witnesses its marker from ancestry, or the rollout witness sees its id in
-    a live fd, and fails closed otherwise. The agreement check stays in the
-    registry; this layer computes the pair and hands it over.
+    read as self (round-1 P1). A name_only worker resolves when an
+    independent ground witnesses its marker: the attester's ancestry read,
+    the rollout fd, the spawn-minted name row (keyed by FNO_AGENT_SELF /
+    FNO_WORKER_NAME), or the cwd-keyed spawn record when that single row
+    holds the id - and fails closed otherwise. The agreement check stays in
+    the registry; this layer computes the pair and hands it over.
 
     ``witness(harness) -> frozenset[session_id]`` names the session ids a live
     rollout fd witnesses for this process (see
@@ -115,16 +117,25 @@ def resolve_self_identity(
     # CODEX_THREAD_ID in its own env, so the attester cannot complete the
     # pair. A marker value the rollout witness sees in a live fd IS this
     # process's id; the thread id wins (CODEX_SESSION_ID is the ROOT session).
+    # The witness keys on the STAMP family: a silent walk (a thread worker
+    # whose ancestry hides the harness process) must not blind the spawn-row
+    # ground, and a re-dispatched worker whose env lost the spawn-minted name
+    # still holds the cwd-keyed spawn record - the same non-circular ground
+    # _fill_spawn_record adopts - so a marker naming the worker's OWN fresh
+    # row proves self instead of reading as contention.
     witnessed_value: Optional[str] = None
     if (
         witness is not None
         and not canonical_proven
         and canonical.disposition == "name_only"
-        and true_harness
-        and canonical.harness == true_harness
+        and canonical.harness
+        and (true_harness is None or canonical.harness == true_harness)
     ):
         environ_w = os.environ if env is None else env
-        seen = {session_identity_key(s) for s in witness(true_harness)}
+        seen = {session_identity_key(s) for s in witness(canonical.harness)}
+        row = live_thread_row_for_cwd(_own_cwd())
+        if row and row[0] == canonical.harness:
+            seen.add(session_identity_key(row[1]))
         thread_value = (environ_w.get("CODEX_THREAD_ID") or "").strip()
         if thread_value and session_identity_key(thread_value) in seen:
             witnessed_value = thread_value
@@ -132,7 +143,7 @@ def resolve_self_identity(
             witnessed = [
                 value
                 for _marker, harness, value in present_harness_markers(environ_w)
-                if harness == true_harness and session_identity_key(value) in seen
+                if harness == canonical.harness and session_identity_key(value) in seen
             ]
             if len(witnessed) == 1:
                 witnessed_value = witnessed[0]
@@ -173,6 +184,15 @@ def resolve_self_identity(
     )
 
 
+def _own_cwd() -> str:
+    # A pruned worktree cannot read its own cwd; identity must degrade, not
+    # crash (an empty cwd makes the registry reader answer None).
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
 def _fill_spawn_record(owned):
     """Fill a session id the walk could not supply from the cwd-keyed spawn
     record.
@@ -183,7 +203,7 @@ def _fill_spawn_record(owned):
     """
     if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
         return owned
-    row = live_thread_row_for_cwd(os.getcwd())
+    row = live_thread_row_for_cwd(_own_cwd())
     if row is None:
         return owned
     harness, session_id = row

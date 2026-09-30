@@ -3011,6 +3011,23 @@ event_types:
         pr:
           type: [integer, "null"]
 
+  - name: worker_reap_refused
+    description: "The retirement sweep's commit refused to reap a driver row whose node still carries an open PR while the session never recorded a dispatch termination: the row is kept, a reap-keep fleet task files the resume order, and this event is the mechanical trail. Emitted only when the task filing is NEW, so one event per row per PR, not one per sweep pass. session_id is the row's harness session the resume command targets; caller names the sweep door that refused."
+    sources: [daemon]
+    data:
+      required: [name, node, pr, session_id, caller]
+      properties:
+        name:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+        session_id:
+          type: string
+        caller:
+          type: string
+
   - name: burn_watch_wake
     description: "The burn arm waked a worker whose spend or node age grew while its branch and node touched_at stayed flat. attempt counts from 1; delivered is receipt-confirmed landing; via names the leg that carried it (mail, resume, or a durable receipt held over a busy turn)."
     sources: [daemon]
@@ -3558,6 +3575,8 @@ event_types:
         sessions: { type: [array, "null"] }
         unresolved: { type: array }
         top_rss: { type: [array, "null"] }
+        top_names: { type: [array, "null"] }
+        top_parents: { type: [array, "null"] }
         sessions_error: { type: [string, "null"] }
     consumers: [operator]
 
@@ -4362,6 +4381,57 @@ event_types:
         fno_id:
           type: [string, "null"]
           description: "The bound row's own fno session id (the durable identity). Null when no row binds."
+    consumers: [operator]
+
+  - name: pane_closed
+    retention: durable
+    description: "A mux pane was removed by any close path: operator gesture, viewer death with a parked seat, session retire, tab cascade or child death. One row per removed pane with the CloseCause enum word, so a tab vanishing under the operator names why in the activity feed."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, squad, cause, reason]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belonged to."
+        pane:
+          type: integer
+          description: "The pane id that was removed."
+        squad:
+          type: integer
+          description: "The workspace (squad) id the pane lived in."
+        cause:
+          enum: [operator, viewer_died]
+          description: "The CloseCause enum word: operator is a deliberate gesture; viewer_died is the death path (child exit, retire, reap backstop)."
+        reason:
+          type: string
+          description: "The free-text close reason verbatim (closed by operator, session retired, child exited, ...)."
+        name:
+          type: [string, "null"]
+          description: "The pane's worker name when it carried one. Null for a shell."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id when the pane hosted a row. Null when no row binds."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis when the pane hosted a row. Null when no row binds."
+    consumers: [operator]
+
+  - name: server_stopped
+    retention: durable
+    description: "The mux server exited: shutdown or natural end, one row per serve lifetime. Names a daemon-restart bounce that closed nothing, the silent case the feed could not show before."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, cause, panes]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        cause:
+          enum: [shutdown]
+          description: "Every serve-loop break is Flow::Shutdown, so the row always reads shutdown."
+        panes:
+          type: integer
+          description: "How many panes the server held at exit."
     consumers: [operator]
 
   - name: mail_origin_classified

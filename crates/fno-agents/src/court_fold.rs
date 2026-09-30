@@ -152,8 +152,10 @@ pub(crate) fn compile_forced(
         for root_id in &members {
             match entry_by_id(root_id) {
                 None => {
-                    return Err(format!(
-                        "crown scope {root_id:?} is not an epic in the graph"
+                    return Err(crate::territory::member_not_found(
+                        root_id,
+                        entries,
+                        format!("crown scope {root_id:?} is not an epic in the graph"),
                     ))
                 }
                 Some(entry) if s_str(entry, "type") != Some("epic") => {
@@ -748,6 +750,11 @@ pub fn court_fold(
                 fold["name"] = names.get(scope).map(|n| json!(n)).unwrap_or(Value::Null);
             }
         }
+        if let Ok(titles) = crate::crown_names::live_titles(&store, registry_path) {
+            for (scope, fold) in folds.iter_mut() {
+                fold["title"] = titles.get(scope).map(|t| json!(t)).unwrap_or(Value::Null);
+            }
+        }
     }
     // The whole owner read, node id -> canonical owning scope, exposed once
     // so a dispatch reader (the blueprint starts list) drops another crown's
@@ -957,7 +964,26 @@ mod tests {
         );
         assert_eq!(fold["status"], "unresolved");
         assert!(fold["reason"].as_str().unwrap().contains("ghost"));
+        assert!(fold["reason"]
+            .as_str()
+            .unwrap()
+            .contains("is not an epic in the graph"));
         assert!(fold.get("nodes").is_none());
+        let empty = fold_one(
+            "ghost",
+            Some(2),
+            &[],
+            &no_projects(),
+            &workers,
+            true,
+            &no_owners(),
+            0,
+        );
+        let reason = empty["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("returned 0 nodes") && reason.contains("unknown, not absent"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -1358,6 +1384,20 @@ mod tests {
         let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1]["id"], "x-1");
+        let writer = crate::backlog::open(&graph).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = std::time::Instant::now();
+        let fold = court_fold(
+            &graph,
+            &cwd,
+            None,
+            &dir.path().join("registry.json"),
+            &crowns,
+        )
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(fold["scope_nodes"]["e-1"]["total"], 2);
+        writer.execute_batch("ROLLBACK;").unwrap();
     }
 
     /// An ok fold carries its scope's epic load and the configured cap;
@@ -1720,7 +1760,8 @@ mod tests {
     fn the_short_json_spelling_selects_the_json_format() {
         // The run path resolves the state root; point it at a tempdir for the
         // run and restore it after, under the process-wide env lock.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(crate::claims::test_env_lock);
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();

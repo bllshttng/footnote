@@ -319,7 +319,8 @@ mod tests {
     /// Serializes env-var-mutating tests: `std::env::set_var` is process-wide,
     /// so two of these racing in parallel `cargo test` threads would read
     /// each other's projects dir.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     #[test]
     fn the_three_command_fixture_matches_every_counted_share() {

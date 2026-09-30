@@ -145,6 +145,7 @@ pub mod disposition_gate;
 pub mod distress;
 pub mod drift;
 pub mod duration;
+pub mod effect_gate;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
@@ -165,11 +166,13 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
 pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
+pub mod gc_open_pr_guard;
 pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
@@ -203,6 +206,7 @@ pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_checkin_blueprint;
+pub mod king_checkin_machine;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
@@ -260,6 +264,7 @@ pub mod node_seed;
 pub mod nudge;
 pub mod occupancy_login;
 pub mod opencode_ask;
+pub mod opencode_config;
 pub mod opencode_install;
 pub mod opencode_serve;
 pub mod opencode_transcript;
@@ -311,12 +316,15 @@ pub mod receipt;
 pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
+pub mod refusal_trend;
 pub mod registry_guard;
 pub mod registry_json;
+pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
 pub mod removals;
 pub mod rename;
+pub mod repeated_asks;
 pub mod restart_run;
 pub mod resume_args;
 pub mod resume_gate;
@@ -1486,6 +1494,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_sent",
     "pr_nudge_escalated",
     "pr_nudge_paused",
+    // Open-PR reap guard (daemon-emitted): the retirement sweep refused to
+    // reap a driver row whose node PR is open with no recorded termination.
+    // Filed once per row, beside the reap-keep task it announces.
+    "worker_reap_refused",
     // Burn arm (daemon-emitted): a worker whose spend or node age grows on
     // a flat sample is woken; three unanswered wakes escalate as one fleet
     // task through the pr-nudge store.

@@ -671,7 +671,7 @@ class TestReignTyped:
 
         message, typed = _reign_typed_message("run the territory", 2, "epic-x", False)
         assert typed is True
-        assert message.splitlines()[0] == "/fno:reign epic-x"
+        assert message.splitlines()[0] == "/fno:lead epic-x"
         # The operator's brief follows the verb as the payload body.
         assert message.splitlines()[1] == "run the territory"
 

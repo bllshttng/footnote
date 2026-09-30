@@ -284,21 +284,27 @@ while IFS= read -r -d '' row; do
 done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
 
 # The tree tally is its own pass because it needs no HEAD blob: a deleted
-# module banks its lines here. --no-renames counts a module moved into or out
-# of the tree as the growth or shrink it is. NET decides the tally: a
-# net-negative change (a port that deletes more than it adds forward) passes,
-# and a change whose net is zero or positive faces the added-line ceiling, so
-# a branch cannot buy growth with its deletions.
+# module banks its lines here. Rename rows are parsed like the per-file loop
+# above, so an IN-TREE move counts as the content edit it is, never as a full
+# delete-plus-add; a module moved INTO the tree from outside still counts as
+# the growth it is, because the pathspec filters before rename pairing. NET
+# decides the tally: a net-negative change (a port that deletes more than it
+# adds forward) passes, and a change whose net is zero or positive faces the
+# added-line ceiling, so a branch cannot buy growth with its deletions.
 py_added=0
 py_deleted=0
 while IFS= read -r -d '' row; do
     added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
     deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
+    if [[ -z "$path" ]]; then
+        IFS= read -r -d '' base_path
+        IFS= read -r -d '' path
+    fi
     [[ "$added" == "-" ]] && continue
     is_test_path "$path" && continue
     py_added=$((py_added + added))
     py_deleted=$((py_deleted + deleted))
-done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
+done < <(git diff --numstat -z -M "$BASE"..HEAD -- 'cli/src/fno/*.py')
 py_net=$((py_added - py_deleted))
 
 exc_waived=0

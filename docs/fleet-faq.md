@@ -2,7 +2,7 @@
 
 Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
-This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/reign/references/cli-commands.md](../skills/reign/references/cli-commands.md).
+This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/lead/references/cli-commands.md](../skills/lead/references/cli-commands.md).
 
 ## Is this page for you?
 
@@ -32,7 +32,7 @@ Run the `/simple-english` skill over your entry before you send it. That is ASD-
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line replaces that entry with one Retired line, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning king's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/reign/SKILL.md](../skills/reign/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
+**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning king's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/lead/SKILL.md](../skills/lead/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
 
 Do not trust that backstop on its own. This file's own beat entry records a reign losing its check-in loop at a compact, with no reader that reported the loss. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
@@ -479,4 +479,4 @@ Closed gaps, newest first. Each line names the PR that closed it, so a reader ca
 - [troubleshooting.md](troubleshooting.md) for run-level failures
 - [architecture/coordination.md](architecture/coordination.md) for claims and the work-claim primitive
 - [architecture/fleet-watchdog.md](architecture/fleet-watchdog.md) for automated wake, reroute and reap
-- [../skills/reign/references/court-operations.md](../skills/reign/references/court-operations.md) for the court primitives
+- [../skills/lead/references/court-operations.md](../skills/lead/references/court-operations.md) for the court primitives
