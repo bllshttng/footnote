@@ -268,7 +268,9 @@ fn fold_transcript(
         if until_epoch.is_some_and(|until| ts_epoch.is_some_and(|at| at > until)) {
             break;
         }
-        if let Some(boundary_ts) = crate::compaction::boundary_ts(&row) {
+        if let Some(boundary_ts) =
+            crate::compaction::boundary_ts(&row).filter(|ts| timestamp_epoch(ts).is_some())
+        {
             let window_no = fold.windows.len() + 1;
             fold.windows
                 .push(Window::new(window_no, Some(boundary_ts.to_string())));
@@ -1319,6 +1321,7 @@ mod tests {
             json!({"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"fno backlog get x"}}]}}),
             json!({"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Usage: fno backlog get"}]}}),
             json!({"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"t1","content":"style-exception: missing condition"}]}}),
+            json!({"subtype":"compact_boundary","timestamp":"not-a-timestamp"}),
             json!({"subtype":"compact_boundary","timestamp":"2026-01-01T01:00:00Z"}),
             json!({"type":"assistant","timestamp":"2026-01-01T01:00:01Z","isCompactSummary":true,"message":{"role":"assistant","content":"compaction summary"}}),
             transcript_row("2026-01-01T01:10:00Z", "typed request"),
