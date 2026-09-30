@@ -1,4 +1,4 @@
-"""Kept cli-level coverage for `fno scoreboard --by-provider` (x-140c, x-59e1).
+"""Kept cli-level coverage for `fno scoreboard --by-provider` (x-140c).
 
 The fold and renderer live in crates/fno-agents/src/scoreboard_provider.rs
 now; their contracts moved to the Rust tests there. What stays here is what

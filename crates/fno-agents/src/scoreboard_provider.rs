@@ -1,6 +1,6 @@
 //! The by-provider fold and renderer, ported from
 //! `cli/src/fno/scoreboard/fold.py build_provider_scoreboard` and
-//! `cli.py _render_by_provider` (x-59e1). The group key is now
+//! `cli.py _render_by_provider`. The group key is now
 //! `(harness, provider, model)`; `provider_id` is not read. Deliveries come
 //! from the one classifier (`crate::scoreboard::classify`) in process, the
 //! same answer `classify_deliveries` gets in Python.

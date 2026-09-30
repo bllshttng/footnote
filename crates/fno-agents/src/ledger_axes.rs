@@ -1,5 +1,5 @@
 //! The ledger axis fill and the reconcile backstop writer, in one keeper
-//! method (x-59e1).
+//! method.
 //!
 //! Python's `upsert_ledger_pr` keeps its name and signature but becomes one
 //! keeper request; this module owns the logic. The fill joins every

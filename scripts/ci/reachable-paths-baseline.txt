@@ -233,7 +233,7 @@ A	this message runs {count} words. the cap is {cap} words.	py=cli/src/fno/style.
 A	this refusal does that with every word it names.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	torn final line (mid-write)	py=cli/src/fno/provenance/observed.py;rs=crates/fno-agents/src/backlog/session_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	truth-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
-A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
+A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno-agents/src/ledger_axes.rs|crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	warning: force flag set on advisory node {task_id} (reason: {reason}); no pr refs to check.	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	was superseded by {superseder}	py=cli/src/fno/graph/_contain.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
