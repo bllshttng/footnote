@@ -1304,6 +1304,12 @@ async fn run(args: Vec<String>) -> i32 {
         if let Some(code) = maybe_run_agy_ask(&home, &params, &agent_name) {
             return code;
         }
+        // zcode `ask` resumes by name over the headless lane: one -p --resume
+        // turn per ask, session id from the row's harness_session_id.
+        if let Some(code) = fno_agents::zcode_ask::maybe_run_zcode_ask(&home, &params, &agent_name)
+        {
+            return code;
+        }
         // Opencode `ask` is intercepted client-side: opencode is
         // pane-hosted only in v1, so a stateful resume is unsupported — this
         // surfaces a clear error directing the caller to drive the pane
@@ -2380,6 +2386,13 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 py_repr(provider)
             );
         };
+        // --model: zcode has no model flag (the model is the account's own
+        // default; the row's model_switch_strategy is unsupported), so a
+        // requested model would silently no-op.
+        if model.is_some() && provider == "zcode" {
+            unsupported("--model");
+            return Some(2);
+        }
         // --add-dir: claude/codex/agy map it; gemini has no verified equivalent.
         // (The codex thread lane carries it too: the client puts it ahead of
         // the state-root grant in params.state_dirs for the daemon.)
@@ -2708,6 +2721,22 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             permission_mode,
             timeout,
             &harness_args,
+        )),
+
+        // zcode headless: the one-shot `-p` lane with identity read-back. No
+        // model/effort axis (the row's model_switch_strategy is unsupported);
+        // the row's -m refusal fires upstream in the gate.
+        ("zcode", "headless") => emit!(fno_agents::zcode_ask::dispatch_zcode_once(
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            yolo,
+            permission_mode,
+            timeout,
+            &harness_args,
+            params.get("node").and_then(|v| v.as_str()),
         )),
 
         // Codex thread is supervisor-hosted by the daemon. Returning `None`

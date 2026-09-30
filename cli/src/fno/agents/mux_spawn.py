@@ -1021,16 +1021,25 @@ def build_pane_argv(
     a byte-identical argv."""
     message = normalize_command(message, provider) if is_verb_seed(message) else message
 
-    from fno.agents.harness_map import is_declared, render_session_argv
+    from fno.agents.harness_map import (
+        DispatchResolveError,
+        is_declared,
+        render_session_argv,
+    )
 
     # An undeclared harness has no resume contract to render an identity from,
     # and none is invented: the generic arm below is the bare binary. Any
     # session pinning is a per-vendor flag shape this lane refuses to guess.
-    identity = (
-        render_session_argv(provider, "interactive_create", session_uuid)
-        if is_declared(provider)
-        else [provider]
-    )
+    # A DECLARED harness whose interactive_create lane is unsupported (zcode:
+    # its TUI is unbuildable on the measured install) is in the same boat for
+    # pane purposes - no pane identity exists - and falls through every arm
+    # to the refusal below, matching the readable-but-argvless contract.
+    identity = [provider]
+    if is_declared(provider):
+        try:
+            identity = render_session_argv(provider, "interactive_create", session_uuid)
+        except DispatchResolveError:
+            pass
 
     # resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds

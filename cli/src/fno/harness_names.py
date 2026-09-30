@@ -36,10 +36,10 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "openclaw",
     "cursor-agent",
     "grok",
+    "zcode",
 )
 
-# Every harness with a BUILT thread-spawn arm: opencode through its launch
-# seam, and cursor-agent, pi, grok and agy through the keeper lane. A name
+# Every harness with a BUILT spawn-seam arm: opencode through its launch
 # joins on journey evidence, never on roster growth; the measurement behind
 # each row is in docs/architecture/thread-lanes.md. Membership answers "is
 # there a seam arm", the row answers "is the lane measured", which is why pi
@@ -53,6 +53,9 @@ SPAWN_HARNESSES: tuple[str, ...] = (
     "pi",
     "grok",
     "agy",
+    # zcode's arm is the headless one-shot seam (client.rs), not a thread
+    # keeper; its row carries state_root_grant.headless measured.
+    "zcode",
 )
 
 
