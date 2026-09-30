@@ -628,13 +628,17 @@ fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize)
     let chip = esc_segs();
     let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     let reserve = chip.iter().map(|(c, _)| char_cols(*c)).sum::<usize>();
-    for _ in used..inner_w.saturating_sub(reserve) {
+    // The chip right-aligns after the fill, at inner_w - reserve - and the
+    // hit must ride that rendered column. Stamping the pre-fill width put
+    // the clickable span on the fill dashes, up to a whole title width left
+    // of the visible chip on a wide frame.
+    let chip_start = inner_w.saturating_sub(reserve);
+    for _ in used..chip_start {
         inner.push(('─', Role::Border));
     }
-    let chip_col = used;
     inner.extend(chip);
     let mut row = edge_row(left, right, '─', inner, inner_w);
-    row.hits.push((ESC_CLOSE_HIT, chip_col + 2, 3));
+    row.hits.push((ESC_CLOSE_HIT, chip_start + 2, 3));
     row
 }
 

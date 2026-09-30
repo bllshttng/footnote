@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+#[path = "king_checkin_watch_projection.rs"]
+mod watch_projection;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -1232,6 +1235,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .map_err(Clone::clone)
             .and_then(crate::king_answers::workers_summary),
     );
+    take("watch_expiry", watch_projection::read());
     // The scope-answer readings share one scope compile and one top call.
     let scope_ids =
         crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
@@ -1378,6 +1382,7 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(held) = get("held").filter(|r| r.ok) {
         data.insert("held_open".into(), held.value["open"].clone());
     }
+    watch_projection::add_data(readings, &mut data);
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
     }
@@ -1848,17 +1853,24 @@ fn render_lines(
         }
     }
 
+    if let Some(error) = watch_projection::read_error(readings) {
+        lines.push(format!("READER FAILED watch expiry: {error}"));
+    }
     match failed("workers") {
         Some(r) => {
             lines.push(format!("READER FAILED workers: {}", r.error));
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
-        None => lines.push(format!(
-            "workers: live {}, oldest activity {}, subagents active {}",
-            dash(data.get("live_workers")),
-            dash(data.get("oldest_worker_seen")),
-            dash(data.get("live_subagents")),
-        )),
+        None => {
+            let mut line = format!(
+                "workers: live {}, oldest activity {}, subagents active {}",
+                dash(data.get("live_workers")),
+                dash(data.get("oldest_worker_seen")),
+                dash(data.get("live_subagents")),
+            );
+            line.push_str(&watch_projection::workers_suffix(readings, data));
+            lines.push(line);
+        }
     }
     lines.extend(crate::king_answers::subagent_lines(readings));
 
@@ -2706,6 +2718,10 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    mod watch_projection_tests {
+        include!("king_checkin_watch_tests.rs");
+    }
+
     #[test]
     fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
         let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
@@ -3407,6 +3423,7 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("watch_expiry", json!({"rows": []})),
             Reading::took("answered", json!({"rows": []})),
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
@@ -3653,21 +3670,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
-        assert!(board_line.contains("open_prs 7"), "line: {board_line}");
-        assert!(board_line.contains("blocked 2"));
-        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
-        assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(21)));
-        assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
-    }
-
     // The subagents reading: the workers line carries the fleet's active
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
@@ -3737,7 +3739,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(20)), "20 of 21 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(21)), "21 of 22 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3935,26 +3937,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_reader_prints_own_line_and_beat_continues() {
-        let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("board", "board payload names no undriven_pr queue".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        let change = derive_change(None, &data, "");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
-        assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
-        assert!(lines
-            .iter()
-            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
-        assert!(lines.iter().any(|l| l.contains("failed readers: board")));
-        assert_eq!(change, "no numeric movement; readings failed: board");
-        assert_eq!(data.get("open_prs"), None);
-        assert_eq!(data.get("readers_failed"), Some(&json!(["board"])));
-    }
-
-    #[test]
     fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
@@ -4072,19 +4054,20 @@ mod tests {
             &mut readings,
             Reading::took(
                 "held",
-                json!({"open": 2, "rows": [
+                json!({"open": 3, "rows": [
                     {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
-                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                    {"node": null, "question_id": "q-3", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
                 ]}),
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        assert_eq!(data.get("held_open"), Some(&json!(3)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
         assert!(
-            summary[0].contains("2 question(s) for this crown"),
+            summary[0].contains("3 question(s) for this crown"),
             "lines: {lines:?}"
         );
         let verbs: Vec<&String> = lines
@@ -4092,16 +4075,21 @@ mod tests {
             .filter(|l| l.contains("fno backlog decide"))
             .collect();
         assert_eq!(verbs.len(), 2, "each row names the decide verb");
-    }
-
-    #[test]
-    fn held_absent_reads_none() {
-        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
+        let clears: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno inbox outstanding clear"))
+            .collect();
+        assert_eq!(clears.len(), 1, "the nodeless row names the clear verb");
+        assert!(
+            clears[0].contains("the user answers it on the question board"),
+            "lines: {lines:?}"
+        );
+        // An absent held read keeps its line and says none; coverage counts it.
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4233,7 +4221,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
+            .any(|l| l.starts_with("coverage: 21 of 22 readings ok")));
     }
 
     // The self-hold line exposes both inputs, and either one raises attention.

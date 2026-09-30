@@ -23,7 +23,7 @@ runner = CliRunner()
 def _node(node_id: str, **over) -> dict:
     base = {
         "id": node_id,
-        "title": f"Node {node_id}",
+        "title": "seed node",
         "_status": "ready",
         "domain": "code",
         "project": "fno",

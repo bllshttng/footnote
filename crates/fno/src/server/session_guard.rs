@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-/// Unlink the socket AND both its sidecars (`.ver`, `.pid`) on
+/// Unlink the socket AND its sidecars (`.ver`, `.pid`, `.owner`) on
 /// every exit path out of `run` (a SIGKILL leaves them behind by design; the
 /// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
 /// is inert - `ls` only reads it for a LIVE server, and a dead one probes

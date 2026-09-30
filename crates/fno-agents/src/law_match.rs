@@ -1083,7 +1083,7 @@ fn is_pr_subject(s: &str) -> bool {
 /// `~/.fno/worktrees/<repo>/<name>`, attributed through the `<repo>` segment
 /// like the conductor layout, so a law recorded from a worktree session
 /// stamps the parent repo's project instead of refusing.
-fn resolve_project(
+pub(crate) fn resolve_project(
     cwd: Option<&std::path::Path>,
     sources: &[std::path::PathBuf],
 ) -> Result<String, String> {
@@ -1234,7 +1234,7 @@ fn expand_tilde(path: &str) -> String {
 /// `FNO_GLOBAL_SETTINGS_PATH`, like `config_read_candidates`). The
 /// `work.workspaces` map lives in the global file, so the global candidates
 /// are what make resolution work at all.
-fn settings_sources() -> Vec<std::path::PathBuf> {
+pub(crate) fn settings_sources() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         out.push(cwd.join(".fno/config.toml"));
@@ -1503,23 +1503,13 @@ pub(crate) struct Caller {
 /// Resolve the caller from process truth: the ancestry prover first, the
 /// attended terminal second, the fail-closed refusal last.
 pub(crate) fn resolve_caller() -> Result<Caller, String> {
-    let get = |name: &str| std::env::var(name).ok();
-    let ident = crate::spawn_context::resolve_self_identity(
-        &get,
-        None,
-        None,
-        &crate::paths::AgentsHome::from_env(),
-    );
-    if let (Some(session_id), Some(_harness)) = (&ident.session_id, &ident.harness) {
-        let handle = crate::identity::canonical_handle(session_id);
-        if !handle.is_empty() {
-            return Ok(Caller {
-                authority: "chat_attested".to_string(),
-                decided_by: handle,
-                attested_by: None,
-                relayed_by: None,
-            });
-        }
+    if let Some(handle) = crate::identity::ambient_agent_handle() {
+        return Ok(Caller {
+            authority: "chat_attested".to_string(),
+            decided_by: handle,
+            attested_by: None,
+            relayed_by: None,
+        });
     }
     if attended_terminal() {
         return Ok(Caller {

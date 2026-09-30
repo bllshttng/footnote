@@ -684,14 +684,6 @@ def emit_crown_vacated(
     )
 
 
-def build_heir_owner(harness, session_id, cwd) -> Optional[dict]:
-    # None when the heir has no session id: an unaddressable heir re-creates
-    # the orphan the reown exists to prevent.
-    if not session_id:
-        return None
-    return {"kind": "session", "harness": harness, "session_id": session_id, "cwd": cwd}
-
-
 def settle_spawn_crown(
     rows: list,
     *,
@@ -699,20 +691,23 @@ def settle_spawn_crown(
     plan: dict,
     exclude_name: Optional[str] = None,
     heir: Optional[str] = None,
-    heir_owner: Optional[dict] = None,
+    heir_harness: Optional[str] = None,
+    heir_session: Optional[str] = None,
+    heir_cwd: Optional[str] = None,
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
     ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
     launch. Rust checks its holder identities against the rows this write sees
-    and returns indexes to clear. If Rust is unavailable or its answer is
-    malformed, the spawn declines without changing any row. Returns
-    ``(rows, outcome, vacated)``: outcome is
-    ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
-    dropping the crown fields when declined), and ``vacated`` lists
-    ``(row, cause)`` to journal once the write commits - cause ``succession``
-    for a vacated holder, ``reowned`` for a court child whose
-    ``spawn_provenance.owner`` moved to ``heir_owner`` in this same write.
+    and returns indexes to clear; it also composes the heir's owner block from
+    ``heir_harness``/``heir_session``/``heir_cwd``, so one session-id rule
+    writes it. If Rust is unavailable or its answer is malformed, the spawn
+    declines without changing any row. Returns ``(rows, outcome, vacated)``:
+    outcome is ``granted`` | ``succeeded`` | ``declined`` (the caller stamps
+    its own row, dropping the crown fields when declined), and ``vacated``
+    lists ``(row, cause)`` to journal once the write commits - cause
+    ``succession`` for a vacated holder, ``reowned`` for a court child whose
+    ``spawn_provenance.owner`` moved to the heir in this same write.
     """
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
@@ -720,6 +715,9 @@ def settle_spawn_crown(
         answer = spawn_overlay_call({
             "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
             "plan": plan, "heir": heir, "rows": [asdict(row) for row in rows],
+            "heir_identity": {
+                "harness": heir_harness, "session_id": heir_session, "cwd": heir_cwd,
+            },
         })
         outcome = answer["outcome"]
         if outcome not in ("granted", "succeeded", "declined"):
@@ -729,6 +727,7 @@ def settle_spawn_crown(
         vacated = [(rows[i], cause) for i, cause in marks]
         reown_indexes = [int(i) for i in answer.get("reown_rows", [])]
         [rows[i] for i in reown_indexes]  # an out-of-range index declines, like the marks
+        heir_owner = answer.get("reown_owner")
     except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
         return rows, "declined", []
     for index, _ in marks:

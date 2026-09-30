@@ -123,6 +123,7 @@ fn run_rows(args: &[OsString]) -> i32 {
     let mut journal: Option<PathBuf> = None;
     let mut types: Vec<String> = Vec::new();
     let mut include_rejected = false;
+    let mut store_path_only = false;
     let mut legacy_fallback = false;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
@@ -138,6 +139,7 @@ fn run_rows(args: &[OsString]) -> i32 {
                 }
             }
             "--include-rejected" => include_rejected = true,
+            "--store-path-only" => store_path_only = true,
             // Pre-store journals have no store to query: answer the raw
             // bytes so the caller carries no legacy reader of its own.
             "--legacy-fallback" => legacy_fallback = true,
@@ -151,6 +153,13 @@ fn run_rows(args: &[OsString]) -> i32 {
             return 2;
         }
     };
+    if store_path_only {
+        println!(
+            "{}",
+            serde_json::json!({"store": crate::event_store::store_path(&journal)})
+        );
+        return 0;
+    }
     // A journal that was never written must not gain a store as a side
     // effect of being read: absence is a fact callers distinguish. A
     // non-regular journal (a directory standing in for the index) is a
