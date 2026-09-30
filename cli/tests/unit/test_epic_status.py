@@ -402,7 +402,12 @@ def test_verify_merges_resolves_a_flagged_row_to_merged_unstamped(
         returncode = 0
         stdout = json.dumps({"state": "MERGED", "mergedAt": "2026-08-25T00:00:00Z"})
 
-    monkeypatch.setattr(sp, "run", lambda *a, **k: _P())
+    real_run = sp.run
+
+    def run(argv, *args, **kwargs):
+        return _P() if argv[0] == "gh" else real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sp, "run", run)
 
     r = _invoke(["backlog", "epic", "status", "x-epic", "--verify-merges"])
     assert r.exit_code == 0, r.output
@@ -423,10 +428,14 @@ def test_a_failed_probe_leaves_the_row_flagged(graph_env, monkeypatch):
         _node("x-c1", parent="x-epic", status="done", pr_number=1178, cwd=str(tmp_path)),
     ])
 
-    def _boom(*a, **k):
-        raise OSError("gh: command not found")
+    real_run = sp.run
 
-    monkeypatch.setattr(sp, "run", _boom)
+    def run(argv, *args, **kwargs):
+        if argv[0] == "gh":
+            raise OSError("gh: command not found")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sp, "run", run)
 
     r = _invoke(["backlog", "epic", "status", "x-epic", "--verify-merges"])
     assert r.exit_code == 0, r.output

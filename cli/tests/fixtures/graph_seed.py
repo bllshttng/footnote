@@ -80,11 +80,12 @@ def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list
         read_graph_strict(path)
         return rows
     connection.close()
-    from fno.graph.store import _client_for, _commit_rows, _plan_rung_map, _read_snapshot
+    from fno.graph.store import _client_for, _commit_rows, _read_snapshot
 
     client = _client_for(path)
     version, current, digests = _read_snapshot(client)
-    _commit_rows(client, version, digests, current, rows, _plan_rung_map(rows), 1)
+    # Fixture status is setup data, not a plan-policy evaluation.
+    _commit_rows(client, version, digests, current, rows, None, 1)
     return rows
 
 
