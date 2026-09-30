@@ -81,6 +81,8 @@ def native_rows(
     try:
         bin_path = resolve_native_bin()
     except EventStoreUnavailable:
+        if projection:
+            raise
         return None
     cmd = [bin_path, "doctor", "event", "rows", "--events", str(events_path)]
     for ty in types or []:
@@ -94,9 +96,13 @@ def native_rows(
     try:
         proc = subprocess.run(cmd, input=json.dumps(query) if query is not None else None,
                               capture_output=True, text=True, timeout=timeout)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        if projection:
+            raise EventStoreUnavailable(f"native event projection unavailable: {exc}") from exc
         return None
     if proc.returncode != 0:
+        if projection:
+            raise EventStoreUnavailable((proc.stderr or f"native event read exited {proc.returncode}").strip())
         return None
     try:
         return json.loads(proc.stdout)

@@ -771,7 +771,7 @@ mod tests {
     fn ac2_edge_a_delivered_answer_never_reenters_the_ladder() {
         let _root = crate::paths::DeclaredRoot::declare("reply_delivered_skip");
         let items = vec![ready_item("q-done", None, Some("s1"))];
-        record_answer("q-done");
+        record_answer("q-history");
         let mut io = FakeIo {
             posture: "outstanding: q-done answered; mail to w1: delivered (hosted)".into(),
             clears: 0,
@@ -779,9 +779,9 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let runner = &|_argv: &[String]| (0, String::new(), String::new());
-        let path = crate::event_store::store_path(&crate::provider_cap::questions_path(
-            &crate::paths::AgentsHome::from_env(),
-        ));
+        let questions = crate::provider_cap::questions_path(&crate::paths::AgentsHome::from_env());
+        crate::event_store::sync(&questions).unwrap();
+        let path = crate::event_store::store_path(&questions);
         let db = rusqlite::Connection::open(path).unwrap();
         db.execute_batch("CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL); INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events WHERE type='attention_answer';").unwrap();
         drop(db);
