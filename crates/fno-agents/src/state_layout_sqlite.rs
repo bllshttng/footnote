@@ -129,13 +129,55 @@ fn table_counts(conn: &Connection) -> Result<BTreeMap<String, i64>, String> {
     Ok(out)
 }
 
-/// The verify record: per-table row counts at park time.
-fn write_verify_record(dir: &Path, counts: &BTreeMap<String, i64>) -> Result<(), String> {
+/// The verify record: per-table row counts plus the high-water `seq` where a
+/// table carries one. A stale writer's UPDATE-in-place bumps `seq` without
+/// changing row counts; the high-water catches it.
+fn write_verify_record(
+    dir: &Path,
+    counts: &BTreeMap<String, i64>,
+    seqs: &BTreeMap<String, i64>,
+) -> Result<(), String> {
     let mut text = String::new();
     for (name, n) in counts {
-        text.push_str(&format!("{name}\t{n}\n"));
+        let s = seqs
+            .get(name)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        text.push_str(&format!("{name}\t{n}\t{s}\n"));
     }
     std::fs::write(dir.join("verify.tsv"), text).map_err(|e| e.to_string())
+}
+
+/// The per-table high-water `seq` for every user table that carries the
+/// column. Absent where it does not.
+fn seq_high_water(
+    conn: &Connection,
+    counts: &BTreeMap<String, i64>,
+) -> Result<BTreeMap<String, i64>, String> {
+    let mut out = BTreeMap::new();
+    for name in counts.keys() {
+        let lit = name.replace('\'', "''");
+        let has_seq: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{lit}') WHERE name = 'seq'"),
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if has_seq == 0 {
+            continue;
+        }
+        let quoted = name.replace('"', "\"\"");
+        let m: Option<i64> = conn
+            .query_row(&format!("SELECT MAX(seq) FROM \"{quoted}\""), [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(m) = m {
+            out.insert(name.clone(), m);
+        }
+    }
+    Ok(out)
 }
 
 /// The 10s-later verify: the parked copy must still hold the row counts
@@ -156,15 +198,24 @@ fn verify_stamp(backup_root: &Path, stamp: &str) -> Option<Status> {
     if !age_ok {
         return None;
     }
-    let then: BTreeMap<String, i64> = record
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.split('\t');
-            let name = parts.next()?.to_string();
-            let n = parts.next()?.parse().ok()?;
-            Some((name, n))
-        })
-        .collect();
+    // Two-field lines predate the seq high-water; their counts still verify.
+    let mut then_counts: BTreeMap<String, i64> = BTreeMap::new();
+    let mut then_seqs: BTreeMap<String, i64> = BTreeMap::new();
+    for line in record.lines() {
+        let mut parts = line.split('\t');
+        let (Some(name), Some(count)) = (parts.next(), parts.next()) else {
+            return None;
+        };
+        let (Some(name), Ok(count)) = (Some(name.to_string()), count.parse::<i64>()) else {
+            return None;
+        };
+        then_counts.insert(name.clone(), count);
+        if let Some(seq) = parts.next() {
+            if let Ok(seq) = seq.parse::<i64>() {
+                then_seqs.insert(name, seq);
+            }
+        }
+    }
     let parked_db = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -180,9 +231,20 @@ fn verify_stamp(backup_root: &Path, stamp: &str) -> Option<Status> {
             }
         };
     match table_counts(&conn) {
-        Ok(now) if now == then => {
-            let _ = std::fs::remove_file(&record_path);
-            Some(Status::Moved)
+        Ok(now) if now == then_counts => {
+            let seqs_ok = match seq_high_water(&conn, &now) {
+                Ok(now_seqs) => then_seqs
+                    .iter()
+                    .all(|(name, seq)| now_seqs.get(name) == Some(seq)),
+                Err(_) => false,
+            };
+            if seqs_ok {
+                let _ = std::fs::remove_file(&record_path);
+                return Some(Status::Moved);
+            }
+            Some(Status::Refused(
+                "parked copy changed after publish".to_string(),
+            ))
         }
         Ok(_) | Err(_) => Some(Status::Refused(
             "parked copy changed after publish".to_string(),
@@ -480,7 +542,11 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
             return drain.fail(&guard, pid, format!("cannot park {name}"));
         }
     }
-    let _ = write_verify_record(&dir, &counts);
+    let seqs = match seq_high_water(&src, &counts) {
+        Ok(s) => s,
+        Err(e) => return drain.fail(&guard, pid, format!("cannot read the seq high-water: {e}")),
+    };
+    let _ = write_verify_record(&dir, &counts, &seqs);
     let _ = guard.execute_batch("ROLLBACK;");
     drop(src);
     drop(guard);
