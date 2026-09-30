@@ -28,8 +28,11 @@ jobs:
       - name: Record measured main sha
         run: git rev-parse HEAD
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+      - name: Provision the smoke runner
+        uses: ./.github/actions/smoke-setup
+
+      - name: Build the fno front for the Python emission path
+        run: cargo build --quiet --manifest-path crates/fno/Cargo.toml --bin fno
 
       - name: Shard 3 under the resource sampler
         run: |
