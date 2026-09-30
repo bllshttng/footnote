@@ -1342,6 +1342,16 @@ mod tests {
             wire.get("cwd").and_then(Value::as_str),
             Some("/workspace/node-project")
         );
+        let mut cwdless_entry = graph_fixture().remove(0);
+        cwdless_entry.as_object_mut().unwrap().remove("cwd");
+        let cwdless = project("", &[cwdless_entry], &[], "", "");
+        let cwdless_created = cwdless
+            .rows
+            .iter()
+            .find(|r| r.kind == "node_created")
+            .expect("cwd-less graph row still projects");
+        let cwdless_wire = serde_json::to_value(cwdless_created).unwrap();
+        assert!(cwdless_wire.get("cwd").is_none());
         let started = p.rows.iter().find(|r| r.kind == "node_started").unwrap();
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
