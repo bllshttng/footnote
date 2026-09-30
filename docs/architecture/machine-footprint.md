@@ -61,7 +61,9 @@ The lever is `fno-agents orphan-reap`, a binary-direct verb. Dry-run by default,
 
 ## Session costs
 
-The Rust `machine_watch` arm writes one `machine_sample` row every 300 seconds. It bands host busy from user, nice and system CPU ticks over the beat. It also records 15-minute load per core. Spawn admission never reads this machine load. The summed per-process CPU figure was dropped after the 2026-09-21 reading showed 48.7% while `top` showed 0.0% idle.
+The Rust `machine_watch` arm writes one `machine_sample` row every 300 seconds. It bands host busy from user, nice and system CPU ticks over the beat. It also records 15-minute load per core, the ten parent PIDs with the most children and each parent's command. Spawn admission never reads this machine load. The summed per-process CPU figure was dropped after the 2026-09-21 reading showed 48.7% while `top` showed 0.0% idle.
+
+At 2,000 processes or twice the measured one-hour baseline, the arm saves one `ps -Ao pid,ppid,rss,etime,command` snapshot per episode in the persistent agents state root. It retains the newest snapshot across daemon restarts. The file is capped at 1 MiB. A separate marker prevents repeats until the count falls below both thresholds.
 
 Each live session row holds its session id, harness, node, stage, process count, RSS and CPU. Separate `cargo` and `pytest` buckets are included. Top holders are executable basenames only. A refusal carries the newest sample id, age up to 300 seconds, verdict, busy, load and memory fields. `fno agents top` reads the same Rust walk. Codex threads without roots, Linux physical footprint and unreadable compressor sensors remain named gaps. Null means unmeasured, never zero.
 
