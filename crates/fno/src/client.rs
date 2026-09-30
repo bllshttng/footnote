@@ -84,6 +84,7 @@ use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
+#[cfg(test)]
 use sideline::sideline_column_rects;
 
 mod row_stamp;
@@ -4264,7 +4265,7 @@ impl View {
             return None;
         }
         let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = sideline_column_rects(text_w as u16);
+        let rects = self.worker_column_rects(text_w as u16);
         let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
         if hit(rects[0]) {
             Some(ChromeHit::SortColumn(AgentSortColumn::Status))
@@ -6224,22 +6225,6 @@ impl View {
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
         out.into_iter().unzip()
-    }
-
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
-        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
-        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
-        rows.insert(0, DisplayRow::TableHead);
-        depths.insert(0, 0);
-        if !has_agent {
-            rows.insert(1, DisplayRow::TableEmpty);
-            depths.insert(1, 0);
-        }
-        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -12442,6 +12427,7 @@ mod court_block;
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
 
+mod row_meter;
 #[path = "client/sideline.rs"]
 mod sideline;
 

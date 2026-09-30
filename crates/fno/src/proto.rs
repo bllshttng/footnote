@@ -356,7 +356,8 @@ fn default_true() -> bool {
 /// version on the first layout a fresh attach receives, so a newer client
 /// can refuse commands an older server cannot parse instead of tripping
 /// the unknown-variant read failure. Floor stays 58.
-pub const PROTO_VERSION: u32 = 97;
+/// v98: optional worker context, start time, unread mail and node; floor stays 58.
+pub const PROTO_VERSION: u32 = 98;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1108,7 +1109,7 @@ pub enum Reach {
 /// fact, beats everything) > `badge` (in-TTL inside-leg report) > liveness
 /// (both `None`/`false` - a plain row). `squad` is the squad the row renders
 /// under; `None` is the catch-all for rows whose cwd matches no squad.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRow {
     pub squad: Option<u64>,
     pub name: String,
@@ -1174,6 +1175,19 @@ pub struct AgentRow {
     /// only loses the "last probe" suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_measured_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_unread: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+
     /// (v67) The last title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), from the registry row. The render
     /// joins it into the subline when it differs from the label; `name` is
@@ -4082,8 +4096,6 @@ mod tests {
                         exited: false,
                         dnd: false,
                         unmeasured: false,
-                        liveness_measured_at: None,
-                        harness_title: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
                             options: vec![
@@ -4121,6 +4133,7 @@ mod tests {
                         no_pane_reason: None,
                         pane_activity: None,
                         pr_session_short: None,
+                        ..Default::default()
                     },
                     AgentRow {
                         spawned_by_name: None,
@@ -4141,8 +4154,6 @@ mod tests {
                         exited: true,
                         dnd: false,
                         unmeasured: false,
-                        liveness_measured_at: None,
-                        harness_title: None,
                         answerable: None,
                         attach_id: None,
                         external: false,
@@ -4164,6 +4175,7 @@ mod tests {
                         no_pane_reason: None,
                         pane_activity: None,
                         pr_session_short: None,
+                        ..Default::default()
                     },
                 ],
                 focus_node: Some("x-cccc".into()),
@@ -4304,11 +4316,30 @@ mod tests {
         let pre = r#"{"squad":null,"name":"old","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
         let row: AgentRow = serde_json::from_str(pre).unwrap();
+        assert_eq!(row.context_used_pct, None);
+        assert_eq!(row.context_tokens, None);
+        assert_eq!(row.context_measured_at, None);
+        assert_eq!(row.started_at, None);
+        assert_eq!(row.mail_unread, None);
+        assert_eq!(row.node, None);
         assert_eq!(row.harness, None);
         assert_eq!(row.model, None);
         assert_eq!(row.route, None);
         let encoded = serde_json::to_string(&row).unwrap();
         assert!(!encoded.contains("harness"), "None axes stay off the wire");
+        for field in [
+            "context_used_pct",
+            "context_tokens",
+            "context_measured_at",
+            "started_at",
+            "mail_unread",
+            "node",
+        ] {
+            assert!(
+                !encoded.contains(field),
+                "absent readings stay off wire: {field}"
+            );
+        }
         assert!(
             !encoded.contains("\"model\""),
             "None model stays off the wire"
@@ -4320,6 +4351,13 @@ mod tests {
         assert_eq!(filled.harness.as_deref(), Some("claude"));
         assert_eq!(filled.model.as_deref(), Some("glm-5.3-flash[1m]"));
         assert_eq!(filled.route.as_deref(), Some("zai"));
+        let mut filled = filled;
+        filled.context_used_pct = Some(26);
+        filled.context_tokens = Some((258687, 1000000));
+        filled.context_measured_at = Some(1700000000);
+        filled.started_at = Some(1699989200);
+        filled.mail_unread = Some(2);
+        filled.node = Some("x-abcd".into());
         let round: AgentRow =
             serde_json::from_str(&serde_json::to_string(&filled).unwrap()).unwrap();
         assert_eq!(round, filled);
@@ -4329,7 +4367,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 97);
+        assert_eq!(PROTO_VERSION, 98);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

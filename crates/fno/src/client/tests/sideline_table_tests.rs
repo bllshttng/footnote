@@ -28,6 +28,9 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
             w1
         },
     ];
+    let mut agents = agents;
+    agents[1].context_used_pct = Some(26);
+    agents[1].started_at = Some(crate::digest_overlay::now_secs() - 10800);
     let mut a = wide_view(agents.clone());
     set_density(&mut a, Density::Extended);
     let mut b = wide_view(agents);
@@ -36,6 +39,11 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     let fa = a.compose();
     let fb = b.compose();
     assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
+    let text = frame_text(&fa);
+    assert!(text.contains("26%▪▫▫"), "{text:?}");
+    assert!(text.contains("3h"), "{text:?}");
+    assert!(text.contains("ctx"), "{text:?}");
+    assert!(text.contains("up"), "{text:?}");
 }
 
 #[test]
@@ -199,7 +207,7 @@ fn status_sort_arrow_fits_inside_the_status_header_span() {
     set_density(&mut v, Density::Extended);
     v.agent_sort = AgentSort::Attention;
     let frame = v.compose();
-    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
     let status: String = frame.cells[rects[0].x as usize..(rects[0].x + rects[0].width) as usize]
         .iter()
         .map(|c| c.c)
@@ -220,7 +228,7 @@ fn extended_pr_cell_shows_number_or_neutral_value() {
     set_density(&mut v, Density::Extended);
     let frame = v.compose();
     let cols = frame.cols as usize;
-    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
     let cell_text = |row: usize| {
         frame.cells
             [row * cols + rects[3].x as usize..row * cols + (rects[3].x + rects[3].width) as usize]
@@ -294,7 +302,7 @@ fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
     set_density(&mut v, Density::Extended);
     let frame = v.compose();
     let cols = frame.cols as usize;
-    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
     // Rows: 0 TableHead, 1 squad band, 2 parent, 3 child.
     for (row, label) in [(2usize, "parent"), (3, "child")] {
         let status: String = frame.cells

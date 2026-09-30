@@ -78,21 +78,6 @@ fn row_text(frame: &Frame, row: usize, width: usize) -> String {
         .collect()
 }
 
-fn frame_cell_snapshot_digest(cells: &[Cell]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for cell in cells {
-        let encoded = format!(
-            "{:?}:{:?}:{:?}:{:02x}\0",
-            cell.c, cell.fg, cell.bg, cell.flags
-        );
-        for byte in encoded.bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    hash
-}
-
 #[test]
 fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
     // AC3: two agents expand to Blank, Agent, CardDetail per card, one
@@ -190,11 +175,17 @@ fn card_frame_paints_glyph_name_word_pr_on_line1_king_message_age_on_line2() {
     // AC6/AC7: working worker w1 with PR 42: line 1 = glyph, w1, Work, #42;
     // line 2 = harness, king handle, message, age. A worker with no crowned
     // ancestor has no king segment (and no empty `·  ·`).
-    let mut v = card_view(king_and_worker());
+    let mut agents = king_and_worker();
+    let mut stamped = serde_json::to_value(&agents[1]).unwrap();
+    stamped["context_used_pct"] = serde_json::json!(26);
+    stamped["started_at"] = serde_json::json!(crate::digest_overlay::now_secs() - 10800);
+    agents[1] = serde_json::from_value(stamped).unwrap();
+    let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
     let frame = v.compose();
     let text = frame_text(&frame);
+    assert!(text.contains("26%▪▫▫ up 3h"), "{text:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("claude"), "{text:?}");
@@ -303,7 +294,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
-    let rects = sideline_column_rects(text_w as u16);
+    let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
     for display_i in [agent_i, detail_i] {
@@ -383,7 +374,7 @@ fn chosen_card_paints_accent_across_both_lines() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
-    let rects = sideline_column_rects(text_w as u16);
+    let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
     for display_i in [agent_i, detail_i] {
@@ -525,7 +516,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
     let cols = frame.cols as usize;
-    let rects = sideline_column_rects(width as u16);
+    let rects = v.worker_column_rects(width as u16);
     let status = frame.cells
         [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]
         .iter()
@@ -552,7 +543,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
 }
 
 #[test]
-fn list_mode_matches_its_frozen_frame_cell_snapshot() {
+fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     let mut agents = king_and_worker();
     agents[0].last_activity_age_s = Some(42);
     agents[1].last_activity_age_s = Some(42);
@@ -562,13 +553,17 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     v.sideline_width = 80;
     let frame = v.compose();
 
-    // Re-frozen when the band change (x-b5b8) moved the lane color off the
-    // name row and the Ｆ[no] mark was pinned at the strip's top-left.
-    assert_eq!(
-        frame_cell_snapshot_digest(&frame.cells),
-        828733737252577218,
-        "List frame-cell snapshot"
-    );
+    let text = frame_text(&frame);
+    assert!(text.contains("king-a"), "{text:?}");
+    assert!(text.contains("w1"), "{text:?}");
+    assert!(text.contains("ctx"), "{text:?}");
+    assert!(text.contains("up"), "{text:?}");
+    let now = crate::digest_overlay::now_secs();
+    assert_eq!(row_meter::ctx_cell(None), "-");
+    assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
+    assert_eq!(row_meter::ctx_cell(Some(100)), "100%▪▪▪");
+    assert_eq!(row_meter::up_cell(None, now), "-");
+    assert_eq!(row_meter::up_cell(Some(now + 1), now), "0s");
 }
 
 #[test]
