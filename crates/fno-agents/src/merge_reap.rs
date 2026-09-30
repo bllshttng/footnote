@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_keeps_requests_until_a_tombstone_settles_them() {
+    fn fold_rows() {
         let home = temp_home("fold");
         write_events(
             &home,
@@ -1013,10 +1013,7 @@ mod tests {
         assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
         assert!(!merge_cleanup_requested(&home, "/repo"));
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn expired_tombstone_also_settles_a_request() {
         let home = temp_home("expired");
         write_events(
             &home,
@@ -1041,10 +1038,7 @@ mod tests {
             .unwrap();
         assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn pending_read_spans_one_rotation() {
         // AC2-HP: a request that rotated into the .1 generation stays pending,
         // and a tombstone in the active file still settles it.
         let home = temp_home("rotation-span");
@@ -1097,10 +1091,7 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["merge-cleanup-2".to_string()]);
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn pending_read_sees_store_committed_requests() {
         // AC3-HP: a request and its completion committed to the store only.
         let home = temp_home("store-committed");
         std::fs::create_dir_all(home.root()).unwrap();
@@ -1124,10 +1115,7 @@ mod tests {
             "the store-only tombstone settles the store-only request"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn duplicate_mints_fold_field_by_field() {
         // AC2-FOLD: the merge mint (worktree set, empty ids, earlier merged_at)
         // and the ritual mint (worktree null, ids named) share one request id;
         // the fold keeps the union, the first non-empty worktree and the
@@ -1174,10 +1162,7 @@ mod tests {
             crate::tick_ledger::parse_rfc3339_unix("2026-09-10T11:00:00Z").map(|v| v as i64)
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn requested_repos_span_the_rotated_generation() {
         // AC2-ROOTS: a repo whose only request rotated into .1 stays in the
         // reaper's roots (its worktree sweep keeps the apply gate).
         let home = temp_home("roots");
@@ -1206,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_merge_status_does_not_hold_a_done_node() {
+    fn hold_rows() {
         // AC3-HP: an unrecorded merge_status is not a contradiction; a done
         // node passes the doneness read and the request settles.
         let home = temp_home("null-merge-status");
@@ -1251,10 +1236,7 @@ mod tests {
             "the request must settle: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn recorded_non_merged_merge_status_holds_under_its_own_reason() {
         // AC3-ERR: a done node whose merge_status is recorded and not
         // `merged` holds naming merge-status:<value>:<id>, not node-open.
         let home = temp_home("merge-status-hold");
@@ -1294,10 +1276,7 @@ mod tests {
             "the hold must name the recorded merge_status: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn open_additional_pr_holds_the_cleanup_request() {
         // The doneness gate honors the same keep as the retire sweep: a
         // done+merged node whose additional_prs record one still open holds
         // the request under additional-pr-open:<node>; no row, no tree.
@@ -1338,10 +1317,7 @@ mod tests {
             "the hold must name the open additional PR: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn grace_anchors_on_merged_at_not_the_envelope_ts() {
         let home = temp_home("grace-anchor");
         // The request was WRITTEN a day ago, but merged_at is seconds old:
         // the clock that matters is the merge's.
@@ -1361,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn in_grace_pass_is_named_not_silent() {
+    fn expiry_rows() {
         let home = temp_home("in-grace");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         // merged_at = now: the whole pass is inside the window.
@@ -1387,13 +1363,7 @@ mod tests {
             "the tick row must name the grace hold: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    /// An expiry names the reason of its last hold, so a
-    /// benign expiry (a branch with no worktree) stops reading like one that
-    /// stranded a real tree.
-    #[test]
-    fn an_expiry_names_the_reason_of_its_last_hold() {
         let home = temp_home("expiry-hold");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_events(
@@ -1433,13 +1403,7 @@ mod tests {
             "the tombstone removed its stamp"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    /// The same expiry against a PRE-WIDENING stamp file (a bare timestamp,
-    /// no reason) reads `last_hold: "none"`: old stamp files still parse and
-    /// an unknown hold never masquerades as a named one.
-    #[test]
-    fn an_expiry_without_a_hold_reads_none() {
         let home = temp_home("expiry-none");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_events(
@@ -1468,10 +1432,7 @@ mod tests {
             .expect("the expiry was emitted");
         assert_eq!(expired["data"]["last_hold"], "none", "{expired}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn a_late_mint_with_an_old_merge_is_not_expired_at_first_sight() {
         let home = temp_home("late-mint");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let now = chrono::Utc::now().to_rfc3339();
@@ -1496,6 +1457,14 @@ mod tests {
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
+
+    /// An expiry names the reason of its last hold, so a
+    /// benign expiry (a branch with no worktree) stops reading like one that
+    /// stranded a real tree.
+
+    /// The same expiry against a PRE-WIDENING stamp file (a bare timestamp,
+    /// no reason) reads `last_hold: "none"`: old stamp files still parse and
+    /// an unknown hold never masquerades as a named one.
 
     /// A registry with one claude candidate row (plus, optionally, one
     /// crowned row the reaper must name and keep).
@@ -1552,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn order_is_stop_then_rm_then_tree_then_completed() {
+    fn order_rows() {
         // AC2-ORDER, with the tree subprocess behind a recording seam and the
         // row removal now real (the shared commit writes this fixture's own
         // registry): the events must read, in order, stop -> agent_row_reaped
@@ -1638,10 +1607,7 @@ mod tests {
             "stop, then the native surface removal, then the tree: {calls:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn crowned_row_is_named_and_kept() {
         // AC2-CROWN: an idle king reads state=done; exclusion is by name.
         let home = temp_home("crown");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -1690,10 +1656,7 @@ mod tests {
             "the crowned row must be named under kept_crowned: {kept:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn open_node_holds_and_names_itself() {
         // AC2-EDGE: a node that is not done+merged holds the request, names
         // the reason, and removes nothing.
         let home = temp_home("held");
@@ -1733,10 +1696,7 @@ mod tests {
             "a held request must not emit a receipt: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn a_done_merged_tree_ignores_unpushed_head() {
         // A done and merged node's tree is removable when no process owns its
         // cwd, regardless of whether its local branch reaches origin/main.
         let home = temp_home("tree-done-merge");
@@ -1776,10 +1736,7 @@ mod tests {
             "the done merge must settle and remove the tree: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn a_process_cwd_keeps_the_tree_pending() {
         let home = temp_home("process-cwd");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
@@ -1813,10 +1770,7 @@ mod tests {
         assert!(events.contains("tree-held:process-cwd"), "events: {events}");
         assert!(!events.contains("worktree_removed"), "events: {events}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn an_unreadable_process_cwd_probe_keeps_the_tree_pending() {
         let home = temp_home("process-cwd-unreadable");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
@@ -1855,7 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_retirement_leaves_a_resumable_receipt() {
+    fn retire_rows() {
         // The delegation's payoff: the merge path no longer shells out to
         // `fno agents rm`, so a merge-triggered removal stages the SAME
         // receipt the scheduled sweep does - the resume form plus the typed
@@ -1916,10 +1870,7 @@ mod tests {
             "the resumability evidence op must be present: {receipt:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn an_unconfirmed_native_removal_keeps_the_row() {
         // The applied gate, inherited from the sweep: a `kept` (unverified)
         // native outcome holds the row for the next pass instead of dropping
         // it. The old rm subprocess had no such reading - it either exited 0
@@ -1963,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_trigger_matches_every_worker_prefix() {
+    fn pass_rows() {
         // The operator's naming convention mints t-, bp-, king- and target-
         // rows; the join must read all four from the node hex. The cwd leg
         // stays out of the way: no row's cwd matches the request worktree.
@@ -1999,10 +1950,7 @@ mod tests {
             "another node's row is not a candidate: {names:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn merge_pass_drops_the_finished_row_and_only_that_row() {
         // The outcome test the node demands: the registry delta itself, with
         // the untouched row as the positive control in the SAME read.
         let home = temp_home("outcome");
@@ -2058,10 +2006,7 @@ mod tests {
             "the positive control is still present BY NAME"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn one_request_holding_does_not_block_another() {
         // The killed hypothesis, as a test: a request holding on an open
         // node never gates a sibling request's removal in the same pass.
         let home = temp_home("independence");
@@ -2126,10 +2071,7 @@ mod tests {
             "the clean request's row is gone"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn a_writing_worker_survives_the_merge_pass() {
         // Change 2's arm: a worker that wrote moments ago with no terminal
         // roster state stays, the stop is never attempted, and the request
         // holds instead of completing.
@@ -2183,10 +2125,7 @@ mod tests {
             "the stop is never attempted on a writing worker"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn an_already_gone_row_completes_with_none_present() {
         // Change 3's honest arm: a request whose join finds no row completes
         // with the positive marker, not an ambiguous empty list.
         let home = temp_home("none-present");
@@ -2223,7 +2162,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_candidates_select_the_registered_row() {
+    fn candidate_rows() {
         // AC4-HP: a request carrying candidate_row_names retires the
         // EXACT registered row - ab-bp- spelling included - via membership,
         // never prefix reconstruction.
@@ -2253,10 +2192,7 @@ mod tests {
         );
         assert_eq!(acted, 1, "the exact candidate row is selected: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn a_row_absent_from_candidates_is_never_removed() {
         // AC4-EDGE: the producer's candidate list is exact. A second
         // row of the same node, unproposed, stays; the name leg does not
         // fire either, because x-2 is not one of the closed nodes.
@@ -2286,10 +2222,7 @@ mod tests {
         );
         assert_eq!(acted, 0, "an absent row is never removed: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn legacy_events_without_candidates_still_select_by_name_route() {
         // An event minted before the candidate field exists: the name leg
         // still selects the row - the shared name_route vocabulary resolves
         // the legacy target-<node>- spelling to the closed node.
@@ -2319,10 +2252,7 @@ mod tests {
         );
         assert_eq!(acted, 1, "the legacy fallback still selects: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
-    }
 
-    #[test]
-    fn wrapped_row_joins_the_merge_cleanup_by_name() {
         // the widened name vocabulary joins wrapper-prefixed rows
         // too - a king-spawned row for a closed node is reaped, not left.
         let home = temp_home("wrapped-cleanup");
