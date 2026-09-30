@@ -1146,7 +1146,8 @@ fn assert_bash_pretooluse_dispatch_order() {
         vec![
             "bin-install-guard".to_string(),
             "pipe-guard".to_string(),
-            "test-run-guard".to_string()
+            "test-run-guard".to_string(),
+            "effect-guard".to_string()
         ],
         "native guards retain their registration order"
     );

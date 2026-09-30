@@ -569,7 +569,7 @@ pub fn authorized(cwd: &Path, principal: &str, effect_class: &str) -> bool {
 /// same request, and a boundary retry re-files (fail toward re-approval).
 /// ponytail: the 24h window is a constant; a config key waits for a second
 /// caller.
-fn hook_request(
+pub fn hook_request(
     session: &str,
     effect_id: &str,
     mapped: &MappedEffect,

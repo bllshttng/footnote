@@ -93,28 +93,6 @@ class EffectDisposition(str, Enum):
     DENY = "deny"
 
 
-#: Refused until a later explicit policy and adapter contract exist.
-DENIED_EFFECT_CLASSES: frozenset[str] = frozenset(
-    {
-        "financial.payment",
-        "financial.commitment",
-        "signature.contract",
-        "employment.action",
-        "infrastructure.destructive",
-    }
-)
-
-#: No external consequence, so no effect approval. Independent policy may still
-#: declare a consequential destination, which is why these are classes and not
-#: an escape hatch keyed on the caller.
-INERT_EFFECT_CLASSES: frozenset[str] = frozenset(
-    {
-        "internal.draft",
-        "internal.research",
-    }
-)
-
-
 def _unavailable_refusal(detail: str) -> NoReturn:
     raise RefusedError(
         Refusal(
