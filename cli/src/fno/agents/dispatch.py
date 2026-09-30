@@ -84,7 +84,6 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import (
-    build_heir_owner,
     calling_agent_row,
     crown_validation_error,
     journal_spawn_crown,
@@ -1817,8 +1816,9 @@ def _claude_create_path(
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None, heir=name,
-                heir_owner=build_heir_owner(
-                    new_entry.harness, new_entry.harness_session_id, new_entry.cwd),
+                heir_harness=new_entry.harness,
+                heir_session=new_entry.harness_session_id,
+                heir_cwd=new_entry.cwd,
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True

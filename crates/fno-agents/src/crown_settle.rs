@@ -495,11 +495,31 @@ fn apply_with_projects(
             .map(|(index, _)| index)
             .collect()
     };
+    // The owner block the applier stamps onto each reowned child, composed
+    // here from the heir's own identity so the one session-id rule (the
+    // payload's `heir_identity`, read like every other field) writes the
+    // block and Python only assigns it. Blank session id answers null: an
+    // unaddressable heir re-creates the orphan the reown exists to prevent.
+    let identity = payload.get("heir_identity");
+    let heir_session = identity
+        .and_then(|i| i.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let reown_owner = heir_session.map(|session_id| {
+        json!({
+            "kind": "session",
+            "harness": identity.and_then(|i| i.get("harness")).and_then(Value::as_str),
+            "session_id": session_id,
+            "cwd": identity.and_then(|i| i.get("cwd")).and_then(Value::as_str),
+        })
+    });
     Ok(json!({
         "outcome": outcome,
         "clear_terminal_rows": clear_terminal_rows,
         "vacate_rows": vacate_rows,
         "reown_rows": reown_rows,
+        "reown_owner": reown_owner,
     }))
 }
 
@@ -825,6 +845,7 @@ mod tests {
         // owned by another session stays put; a terminal row never moves.
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "epic-a",
+            "heir_identity": {"harness": "codex", "session_id": "sess-heir", "cwd": "/w"},
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "king-a", "harness_session_id": "sess-a"}],
@@ -851,6 +872,8 @@ mod tests {
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate_rows"], json!([0]));
         assert_eq!(out["reown_rows"], json!([1, 3]));
+        assert_eq!(out["reown_owner"]["session_id"], "sess-heir");
+        assert_eq!(out["reown_owner"]["kind"], "session");
     }
 
     #[test]

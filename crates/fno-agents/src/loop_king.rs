@@ -510,6 +510,14 @@ fn canonical_members(scope: &str, projects: &HashMap<String, String>) -> HashSet
         .collect()
 }
 
+/// `canonical_members` for sibling modules: `court-rivals` names the shared
+/// territory of a rival pair, sorted so the answer is deterministic.
+pub(crate) fn territory_members(scope: &str, projects: &HashMap<String, String>) -> Vec<String> {
+    let mut members: Vec<String> = canonical_members(scope, projects).into_iter().collect();
+    members.sort();
+    members
+}
+
 /// The rung a scope sits on, derived from its members the way resolve_crown
 /// derives it: 2+ projects is a portfolio (0), one project is 1, and epics
 /// are 2. `None` marks a mixed scope no legal writer produces; the caller
