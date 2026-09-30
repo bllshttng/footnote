@@ -108,14 +108,19 @@ fn run_locked(
     node_sessions: &[String],
     dry_run: bool,
 ) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(ledger)
-        .map_err(|e| format!("ledger {} unreadable: {e}", ledger.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| {
-        format!(
-            "ledger {} is corrupt ({e}); refusing to write - the Python recovery path owns ledger backups",
-            ledger.display()
-        )
-    })?;
+    let mut doc: Value = match std::fs::read_to_string(ledger) {
+        // A missing ledger reads as empty - the ported `_load_ledger_data`
+        // behavior; the write below creates it. Corrupt still refuses: the
+        // Python recovery path stays the only writer that backs a ledger up.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({"entries": []}),
+        Err(e) => return Err(format!("ledger {} unreadable: {e}", ledger.display())),
+        Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
+            format!(
+                "ledger {} is corrupt ({e}); refusing to write - the Python recovery path owns ledger backups",
+                ledger.display()
+            )
+        })?,
+    };
     if doc.get("entries").and_then(Value::as_array).is_none() {
         return Err(format!(
             "ledger {} carries no entries array; refusing to write",
@@ -887,5 +892,16 @@ mod tests {
         let r = &w.read_entries()[2];
         assert_eq!(r["sessions"], json!(["unresolved:no-harness-session"]));
         assert_eq!(r["completed"], Value::Null);
+
+        // A MISSING ledger reads as empty and the write creates it (the
+        // ported `_load_ledger_data` behavior).
+        std::fs::remove_file(w.ledger_path()).unwrap();
+        w.run(
+            &[],
+            json!({"node_id": "x-12", "pr_number": 4, "project": "p"}),
+        );
+        let rows = w.read_entries();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["graph_node_id"], "x-12");
     }
 }

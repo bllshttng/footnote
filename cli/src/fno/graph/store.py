@@ -621,6 +621,33 @@ class _ExecClient(_Keeper):
         pass  # one-shot: nothing resident to shut down
 
 
+class _SkewTolerant:
+    """Prefers the resident keeper; re-serves a request through the one-shot
+    exec when the resident keeper is an OLD binary that refuses the method.
+
+    A rebuild the resident keeper never picked up leaves a live socket
+    answering `unknown store method` for every new keeper method (measured
+    2026-09-30: reconcile's ledger_backstop through a stale resident). The
+    exec transport runs the CURRENT resolved worker, so one retry heals the
+    skew without touching the caller. Any other error propagates.
+    """
+
+    def __init__(self, keeper: _Keeper, path: Path) -> None:
+        self._keeper = keeper
+        self._path = Path(path)
+
+    def request(self, method: str, params: dict) -> Any:
+        try:
+            return self._keeper.request(method, params)
+        except RuntimeError as exc:
+            if "unknown store method" not in str(exc):
+                raise
+            return _ExecClient(self._path).request(method, params)
+
+    def shutdown(self) -> None:
+        self._keeper.shutdown()
+
+
 def shutdown_keeper(path: Path) -> None:
     """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
     try:
@@ -642,12 +669,13 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
-def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
+def _client_for(path: Path, *, spawn: bool = True) -> "_SkewTolerant | _ExecClient":
     """Connect to `path`'s keeper; when nothing is listening, serve by exec.
     A live keeper is still preferred (old binaries spawn them); the
     spawn-needed branch no longer mints one, because a resident keeper's
-    memory grows with requests served. An unreachable store still raises
-    StoreUnavailable - never an empty graph.
+    memory grows with requests served. A resident keeper older than this
+    tree is bypassed to the exec transport per request (_SkewTolerant). An
+    unreachable store still raises StoreUnavailable - never an empty graph.
     """
     path = Path(path)
     sock = store_socket_for(path)
@@ -655,7 +683,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
     try:
         probe = keeper._connect()
         probe.close()
-        return keeper
+        return _SkewTolerant(keeper, path)
     except StoreUnavailable as exc:
         if not spawn or exc.state not in (STATE_ABSENT, STATE_NO_LISTENER):
             raise
