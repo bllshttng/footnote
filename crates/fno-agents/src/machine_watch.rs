@@ -858,7 +858,7 @@ mod tests {
             Ok(&s),
             |_, _| {
                 notify_calls += 1;
-                actions.borrow_mut().push("stop+page");
+                actions.borrow_mut().push("notify");
                 true
             },
             Instant::now(),
@@ -871,7 +871,7 @@ mod tests {
         assert_eq!(outcome.acted, 1, "no debounce on a runaway");
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 1, "the brake writes on the first tick");
-        assert_eq!(*actions.borrow(), vec!["brake", "stop+page"]);
+        assert_eq!(*actions.borrow(), vec!["brake", "notify"]);
         assert!(outcome.detail.contains("runaway"), "{}", outcome.detail);
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
