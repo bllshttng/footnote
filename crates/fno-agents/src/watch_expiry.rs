@@ -143,6 +143,11 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
         .map(|(index, line)| {
             let value: Value = serde_json::from_str(line)
                 .map_err(|error| format!("watch expiry event row is invalid: {error}"))?;
+            // A row known only through the recovered store replay is copied
+            // history, not a live declaration; it must never arm a wake.
+            if value["_history_only"] == true {
+                return Ok(None);
+            }
             let data = value.get("data").cloned().unwrap_or(Value::Null);
             let kind = value
                 .get("type")
@@ -158,18 +163,18 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
             if ts_ms > now_ms {
                 return Err("watch expiry event has a future timestamp".to_string());
             }
-            Ok(Evidence {
+            Ok(Some(Evidence {
                 event_id: event_id(line),
                 seq: index as i64,
                 ts_ms,
                 kind,
                 session_id,
                 data,
-            })
+            }))
         })
         .filter_map(|row| match row {
-            Ok(row) if row.ts_ms >= now_ms.saturating_sub(WINDOW_MS) => Some(Ok(row)),
-            Ok(_) => None,
+            Ok(Some(row)) if row.ts_ms >= now_ms.saturating_sub(WINDOW_MS) => Some(Ok(row)),
+            Ok(Some(_)) | Ok(None) => None,
             Err(error) => Some(Err(error)),
         })
         .collect()
