@@ -502,6 +502,18 @@ fn translate(
                     );
                 }
             }
+        } else {
+            // The shell hook this handler replaced finalized every terminal;
+            // the DoneDelivery-only branch silenced the DonePRGreen plan
+            // stamp, the postmortem, the corrections log and the auto-merge
+            // arm fleet-wide. finalize is idempotent on a re-fire
+            // (session_finalized early return), so no new guard is needed.
+            // A failure here is a note, never a block: the terminal is real,
+            // only its bookkeeping failed.
+            let rc = crate::finalize::run_finalize(&fargs);
+            if rc != 0 {
+                eprintln!("target stop-hook: finalize note (non-blocking): exit {rc}");
+            }
         }
     }
 
@@ -1826,5 +1838,74 @@ mod tests {
                 "the turn end left {left}s on the clock, at most one grace"
             );
         });
+    }
+
+    /// A non-delivery terminal still reaches finalize: the shell hook this
+    /// handler replaced finalized every terminal, and the DoneDelivery-only
+    /// branch silenced the DonePRGreen plan stamp, the postmortem and the
+    /// auto-merge arm fleet-wide. The journal must hold the finalize event,
+    /// and a finalize failure on this path stays non-blocking (exit 0).
+    #[test]
+    fn a_non_delivery_terminal_reaches_finalize_and_allows() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _events = EventsPathRestore::clear();
+        let home = std::env::temp_dir().join(format!("stop-fin-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".fno")).unwrap();
+        let saved_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _root = crate::paths::DeclaredRoot::declare("stop-finalize-terminal");
+        let repo = _root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let manifest = repo.join("target-state.md");
+        std::fs::write(
+            &manifest,
+            "---\nsession_id: fin-stop-sess\nharness_session_id: fin-stop-sess\ncreated_at: 2026-09-30T00:00:00Z\n---\n",
+        )
+        .unwrap();
+        let transcript = repo.join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}\n",
+        )
+        .unwrap();
+
+        let fire = collect_fire(
+            "fin-stop-sess",
+            &transcript.display().to_string(),
+            None,
+            String::new(),
+            None,
+        );
+        let decision = r#"{"decision":"allow","termination_reason":"DonePRGreen","message":""}"#;
+        let manifest_body = std::fs::read_to_string(&manifest).unwrap();
+        let rc = translate(
+            &repo,
+            decision,
+            "target",
+            &manifest,
+            &repo,
+            &fire,
+            &manifest_body,
+        );
+        assert_eq!(
+            rc, 0,
+            "a finalize failure on a non-delivery terminal is non-blocking"
+        );
+
+        let events_file = crate::paths::events_path(&repo);
+        let text = crate::event_store::journal_text(&events_file, &[]);
+        let saw = text.lines().any(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                .is_some_and(|t| t == "session_finalized" || t == "session_finalize_failed")
+        });
+        assert!(saw, "journal must hold a finalize event; journal: {text}");
+        match saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
