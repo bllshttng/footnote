@@ -4410,6 +4410,7 @@ event_types:
           description: "The pane's worker name when it carried one. Null for a shell."
         harness_session:
           type: [string, "null"]
+          description: "The bound row's harness_session_id when the pane hosted a row. Null when no row binds."
         harness:
           type: [string, "null"]
           description: "The bound row's harness axis when the pane hosted a row. Null when no row binds."
@@ -4426,8 +4427,8 @@ event_types:
           type: string
           description: "The mux server's session name."
         cause:
-          enum: [shutdown, ended]
-          description: "Flow::Shutdown is shutdown; the loop ended without the shutdown arm is ended."
+          enum: [shutdown]
+          description: "Every serve-loop break is Flow::Shutdown, so the row always reads shutdown."
         panes:
           type: integer
           description: "How many panes the server held at exit."

@@ -508,7 +508,8 @@ pub fn project(
 
     // Spawn rows: `agent_spawned` (agents journal, already window-bounded by
     // the caller). A birth carries the substrate it landed on, the model it
-    // was asked for, and the session that spawned it.    for line in spawns_raw.lines() {
+    // was asked for, and the session that spawned it.
+    for line in spawns_raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
@@ -984,11 +985,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     }
     let spawns_raw = agents_journal(home, &["agent_spawned"], args.since_epoch);
     let crown_raw = crown_journals(home);
-    let closes_raw = agents_journal(
-        home,
-        &["pane_closed", "server_stopped"],
-        args.since_epoch,
-    );
+    let closes_raw = agents_journal(home, &["pane_closed", "server_stopped"], args.since_epoch);
 
     let Projection {
         rows,
@@ -1359,7 +1356,14 @@ mod tests {
             .expect("one reaped row");
         assert_eq!(row.model.as_deref(), Some("glm-5.3-flash[1m]"));
         // A receipt without the field stays silent rather than inventing one.
-        let p = project("", &[], std::slice::from_ref(&removal_fixture()), "", "", "");
+        let p = project(
+            "",
+            &[],
+            std::slice::from_ref(&removal_fixture()),
+            "",
+            "",
+            "",
+        );
         let bare = p
             .rows
             .iter()
@@ -1603,12 +1607,11 @@ mod tests {
             "{not json",
         );
         let p = project("", &[], &[], "", "", closes);
-        assert_eq!(p.skipped_lines, 0, "unrelated malformed lines do not count here");
-        let closed: Vec<_> = p
-            .rows
-            .iter()
-            .filter(|r| r.kind == "pane_closed")
-            .collect();
+        assert_eq!(
+            p.skipped_lines, 0,
+            "unrelated malformed lines do not count here"
+        );
+        let closed: Vec<_> = p.rows.iter().filter(|r| r.kind == "pane_closed").collect();
         assert_eq!(closed.len(), 2);
         assert_eq!(closed[0].ts, "2026-09-30T10:00:02Z", "ts ordering");
         assert_eq!(
