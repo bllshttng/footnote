@@ -1302,28 +1302,13 @@ def render_view_projections(
     _archived = entries_with_archive(entries)
     if is_canonical:
         try:
-            from fno.graph.roadmap_public import canonical_target, render_one_target
+            from fno.graph.roadmap_public import render_local_targets
 
-            _canonical_row = canonical_target()
-            if _canonical_row is not None:
-                render_one_target(_canonical_row, _archived)
+            failed = render_local_targets()
+            if failed:
+                _fail(f"local board render: {failed} target(s) failed")
         except Exception as e:
-            _fail(f"canonical board render failed: {e}")
-        try:
-            from fno.graph.roadmap_public import render_configured_targets
-
-            render_configured_targets(_archived, skip_canonical=True)
-        except Exception as e:
-            _fail(f"configured render targets failed: {e}")
-    else:
-        # Test and temporary graphs retain a sibling HTML artifact without
-        # ever touching the operator's configured targets.
-        try:
-            from fno.graph.render_html import render_graph_html
-
-            render_graph_html(_archived, path.with_name("graph.html"))
-        except OSError as e:
-            _fail(f"graph.html render failed: {e}")
+            _fail(f"local board render failed: {e}")
     return entries
 
 

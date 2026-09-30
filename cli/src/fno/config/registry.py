@@ -115,6 +115,7 @@ FIELD_META: dict[str, Meta] = {
     "blueprint.max_prs_per_epic": Meta("advanced", "Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it."),
     "blueprint.python_repair_added_lines": Meta("advanced", "Added lines a cli/src/fno Python change that does not shrink the tree may add under law d-a9cddc93 (default 30). The push-time tally in check-file-budget.sh passes a change whose Python tree net is negative (a port that deletes more than it adds); this budget binds a change whose net is zero or positive. Also read by the plan gate in validate-plan.sh."),
     # --- config.backlog.* ---
+    "backlog.page_reload_s": Meta("advanced", "Seconds an open local board, fleet.html or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off)."),
     "backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
     "backlog.maintain.validity_days": Meta("advanced", "Age (days) before a stale idea enters the validity sweep."),
@@ -138,7 +139,6 @@ FIELD_META: dict[str, Meta] = {
         "mutation re-renders each {path, scope, projection=local|backlog|roadmap} "
         "target; public targets use the leak gate and local is full-detail.",
     ),
-    "backlog.page_reload_s": Meta("advanced", "Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off)."),
     # --- config.batch.* ---
     "batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
     "batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),

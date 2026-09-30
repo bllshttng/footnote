@@ -59,6 +59,22 @@ def _quiet_gh_budget(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_board_render(monkeypatch):
+    """Keep every test off the real board render.
+
+    The post-publish render shells the installed front binary (`fno
+    board-render`), so an unstubbed graph write would fork a subprocess per
+    write and a lagging install would print its stderr into CliRunner's
+    mixed output, breaking --json parses far from any test about rendering.
+    The render's own tests re-stub `render_local_targets` from import-time
+    captures.
+    """
+    import fno.graph.roadmap_public as rp
+
+    monkeypatch.setattr(rp, "render_local_targets", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
 def _sandbox_decision_index(tmp_path, monkeypatch):
     """Keep the machine-wide decision index out of the developer's ~/.fno.
 

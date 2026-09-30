@@ -310,9 +310,9 @@ def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, cap
     )
     monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
 
-    from fno.graph.roadmap_public import render_configured_targets
+    from fno.graph.roadmap_public import render_local_targets
 
-    render_configured_targets([])
+    assert render_local_targets() == 0
     err = capsys.readouterr().err
     assert "project-local row(s) ignored" in err
     assert not _isolate["target"].exists()
