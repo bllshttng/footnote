@@ -194,8 +194,8 @@ fn fno_verb(target: &str) -> Option<(String, Option<String>)> {
 
 fn bus_index() -> BusIndex {
     let home = AgentsHome::from_env();
-    let fno_dir = home
-        .events_jsonl()
+    let events_path = home.events_jsonl();
+    let fno_dir = events_path
         .parent()
         .and_then(Path::parent)
         .unwrap_or(Path::new(".fno"));
