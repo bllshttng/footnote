@@ -186,6 +186,9 @@ fn card_frame_paints_glyph_name_word_pr_on_line1_king_message_age_on_line2() {
     let frame = v.compose();
     let text = frame_text(&frame);
     assert!(text.contains("26%▪▫▫ up 3h"), "{text:?}");
+    v.layout.agents[1].context_used_pct = Some(129);
+    let over_window = frame_text(&v.compose());
+    assert!(over_window.contains("129%▪▪▪ up 3h"), "{over_window:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("claude"), "{text:?}");
@@ -562,6 +565,7 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     assert_eq!(row_meter::ctx_cell(None), "-");
     assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
     assert_eq!(row_meter::ctx_cell(Some(100)), "100%▪▪▪");
+    assert_eq!(row_meter::ctx_cell(Some(129)), "129%▪▪▪");
     assert_eq!(row_meter::up_cell(None, now), "-");
     assert_eq!(row_meter::up_cell(Some(now + 1), now), "0s");
 }

@@ -4,8 +4,7 @@ use super::*;
 
 pub(super) fn ctx_cell(pct: Option<u8>) -> String {
     let Some(pct) = pct else { return "-".into() };
-    let pct = pct.min(100);
-    let filled = (u16::from(pct) * 3).div_ceil(100) as usize;
+    let filled = (u16::from(pct.min(100)) * 3).div_ceil(100) as usize;
     format!("{pct}%{}{}", "▪".repeat(filled), "▫".repeat(3 - filled))
 }
 

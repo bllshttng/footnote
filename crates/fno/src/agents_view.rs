@@ -2243,8 +2243,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             context_used_pct: row
                 .get("context_used_pct")
                 .and_then(|v| v.as_u64())
-                .and_then(|n| u8::try_from(n).ok())
-                .filter(|n| *n <= 100),
+                .and_then(|n| u8::try_from(n).ok()),
             context_tokens: row
                 .get("context_used_tokens")
                 .and_then(|v| v.as_u64())
@@ -3719,7 +3718,8 @@ unheard_of_field = true
                 "last_message_at":"2027-01-15T07:00:00Z",
                 "context_used_pct":26, "created_at":"2027-01-15T05:00:00Z",
                 "inside_leg":{"state":"working","seq":1,"received_at":"2027-01-15T07:59:30Z","ttl_ms":120000}},
-               {"name":"bare","cwd":"/w","status":"live","provider":"claude"}"#,
+               {"name":"bare","cwd":"/w","status":"live","provider":"claude"},
+               {"name":"over-window","cwd":"/w","status":"live","provider":"claude","context_used_pct":129}"#,
         );
         let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
         let rows = derive_rows(&raw, now).unwrap();
@@ -3733,6 +3733,7 @@ unheard_of_field = true
         assert_eq!(get("stamped").context_used_pct, Some(26));
         assert_eq!(get("stamped").started_at, Some(now - 10800));
         assert_eq!(get("bare").context_used_pct, None);
+        assert_eq!(get("over-window").context_used_pct, Some(129));
     }
 
     #[test]

@@ -4357,7 +4357,7 @@ mod tests {
         filled.context_measured_at = Some(1700000000);
         filled.started_at = Some(1699989200);
         filled.mail_unread = Some(2);
-        filled.node = Some("x-abcd".into());
+        filled.node = Some("serialization-node".into());
         let round: AgentRow =
             serde_json::from_str(&serde_json::to_string(&filled).unwrap()).unwrap();
         assert_eq!(round, filled);

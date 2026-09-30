@@ -3,7 +3,6 @@
 //! shrink-only ratchet, plus the quiet-window flush that releases a lone
 //! ESC carry to the overlay on top.
 
-use super::backlog_board;
 use super::keys_modal::keys_modal_keys;
 use super::{
     answer_keys, attach_place_keys, confirm_keys, connections_keys, create_keys, is_sideline_verb,
@@ -11,6 +10,7 @@ use super::{
     row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow, View,
 };
 use super::{aux_keys, questions, sideline};
+use super::{backlog_board, org_board};
 
 /// Route one stdin chunk to the overlay that owns the keyboard, in
 /// precedence order. `None` when no overlay owns it: the caller falls

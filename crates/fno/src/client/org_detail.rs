@@ -160,17 +160,17 @@ fn open(view: &mut View, row: AgentRow) {
 async fn read_roster(row: &AgentRow) -> Result<Value, String> {
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        tokio::process::Command::new("fno")
-            .args(["agents", "list", "--json"])
+        tokio::process::Command::new("fno-agents")
+            .args(["list", "--json"])
             .kill_on_drop(true)
             .output(),
     )
     .await
-    .map_err(|_| "workers not read: fno timed out after 30s".to_string())?
-    .map_err(|e| format!("workers not read: fno spawn: {e}"))?;
+    .map_err(|_| "workers not read: fno-agents timed out after 30s".to_string())?
+    .map_err(|e| format!("workers not read: fno-agents spawn: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "workers not read: fno exited {}: {}",
+            "workers not read: fno-agents exited {}: {}",
             output
                 .status
                 .code()
@@ -364,7 +364,7 @@ impl WorkerDetail {
                 ));
                 body.push(format!(
                     "Last activity: {} ({})",
-                    text(row, "last_activity_at"),
+                    text(row, "last_event_at"),
                     text(row, "last_activity_basis")
                 ));
                 if row.get("progress").and_then(Value::as_str) == Some("awaiting-operator") {
