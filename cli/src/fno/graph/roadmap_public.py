@@ -572,7 +572,10 @@ def render_local_targets() -> int:
     local, retired = [], []
     for target in targets:
         if target.projection == "local":
-            local.append({"path": target.path, "scope": _target_scope(target)[0]})
+            local.append({
+                "path": os.path.expanduser(target.path),
+                "scope": _target_scope(target)[0],
+            })
         else:
             retired.append(target)
     for target in retired:

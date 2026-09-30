@@ -363,7 +363,8 @@ mod tests {
         let page = "<html><body><script>var p;</script></body></html>";
         let payload = json!({"nodes": {"x-1": {"title": "</script><script>alert(1)</script>"}}});
         let out = snapshot_page(page, &payload).unwrap();
-        let start = out.find("id=\"fno-snapshot\">").unwrap() + 19;
+        let marker = "id=\"fno-snapshot\">";
+        let start = out.find(marker).unwrap() + marker.len();
         let end = out[start..].find("</script>").unwrap() + start;
         let back: Value = serde_json::from_str(&out[start..end]).unwrap();
         assert_eq!(back, payload);
