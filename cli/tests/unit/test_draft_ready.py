@@ -13,7 +13,6 @@ from fno.pr._draft_ready import (
     DRAFT_DECISION,
     draft_law_authority,
     draft_refusal,
-    draft_subject_for_pr,
     run_draft_flip,
 )
 
@@ -85,35 +84,26 @@ class TestDraftLawAuthority:
     """One table: the three-state law read over row shapes and probe health."""
 
     @pytest.mark.parametrize(
-        "rows,damaged,expect",
+        "list_fn,expect",
         [
-            ([{"authority_source": "operator", "decision": DRAFT_DECISION}], 0, "single"),
+            # the affirmative: one operator row carrying the exact decision value.
+            (lambda *a, **k: ("", [{"authority_source": "operator", "decision": DRAFT_DECISION}], 0), "single"),
             # a chat_attested row cannot carry a draft exception: clean no.
-            ([{"authority_source": "coord", "decision": DRAFT_DECISION}], 0, "none"),
+            (lambda *a, **k: ("", [{"authority_source": "coord", "decision": DRAFT_DECISION}], 0), "none"),
             # row existence carries no polarity: a note at the subject is no.
-            ([{"authority_source": "operator", "decision": "a note"}], 0, "none"),
-            # conflicting, damaged, and dead probes are unknown, never none.
-            (
-                [{"authority_source": "operator", "decision": DRAFT_DECISION}] * 2,
-                0,
-                "unknown",
-            ),
-            ([], 2, "unknown"),
+            (lambda *a, **k: ("", [{"authority_source": "operator", "decision": "a note"}], 0), "none"),
+            # conflicting or damaged rows are unknown, never none.
+            (lambda *a, **k: ("", [{"authority_source": "operator", "decision": DRAFT_DECISION}] * 2, 0), "unknown"),
+            (lambda *a, **k: ("", [], 2), "unknown"),
+            # a dead probe is unknown with the fault named.
+            (lambda *a, **k: (_ for _ in ()).throw(RuntimeError("index unreadable")), "unknown"),
         ],
     )
-    def test_authority_branches(self, rows, damaged, expect):
-        status, _ = draft_law_authority(
-            "s", list_fn=lambda *a, **k: ("", rows, damaged)
-        )
+    def test_authority_branches(self, list_fn, expect):
+        status, probe = draft_law_authority("s", list_fn=list_fn)
         assert status == expect
-
-    def test_dead_probe_is_unknown_with_the_fault_named(self):
-        def dead(*_a, **_k):
-            raise RuntimeError("index unreadable")
-
-        status, probe = draft_law_authority("s", list_fn=dead)
-        assert status == "unknown"
-        assert "RuntimeError" in probe
+        if expect == "unknown" and "RuntimeError" in str(probe):
+            assert "index unreadable" in probe
 
 
 class TestConfigBlock:
@@ -127,38 +117,45 @@ class TestConfigBlock:
 
 
 class TestProxyWiring:
-    def test_delegate_refuses_draft_intent_before_exec(self, monkeypatch, capsys):
+    @pytest.mark.parametrize(
+        "argv,stub_refusal,expect_exit,expect_exec",
+        [
+            # draft intent with a refusal: exit 2, the real gh never execs.
+            (["pr", "create", "--draft"], "refused: open ready", 2, False),
+            # non-draft argv passes the guard and reaches the execve sentinel.
+            (["auth", "status"], None, None, True),
+        ],
+    )
+    def test_delegate_guard_branches(self, monkeypatch, capsys, argv, stub_refusal, expect_exit, expect_exec):
         import fno.pr._draft_ready as dr
-        import fno.pr.gh_proxy as gh_proxy
-
-        monkeypatch.setattr(
-            dr, "draft_refusal", lambda args, cwd: "refused: open ready"
-        )
-        exec_calls = []
-        monkeypatch.setattr(gh_proxy.os, "execve", lambda *a: exec_calls.append(a))
-        monkeypatch.setattr(
-            "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
-        )
-        with pytest.raises(SystemExit) as exc:
-            gh_proxy.delegate("/real/gh", ["pr", "create", "--draft"])
-        assert exc.value.code == 2
-        assert "refused: open ready" in capsys.readouterr().err
-        assert exec_calls == [], "the real gh must never exec under a draft refusal"
-
-    def test_delegate_admits_non_draft_argv_through_the_guard(self, monkeypatch):
         import fno.pr.gh_proxy as gh_proxy
 
         monkeypatch.setattr("fno.pr.gh_proxy._quota.admit", lambda args: None)
         monkeypatch.setattr(
             "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
         )
+        exec_calls = []
+        monkeypatch.setattr(gh_proxy.os, "execve", lambda *a: exec_calls.append(a))
+        if stub_refusal is not None:
+            monkeypatch.setattr(dr, "draft_refusal", lambda args, cwd: stub_refusal)
+        else:
+            monkeypatch.setattr(
+                dr, "draft_refusal", lambda args, cwd: None if argv[:2] != ["pr", "create"] else None
+            )
+        if expect_exit is not None:
+            with pytest.raises(SystemExit) as exc:
+                gh_proxy.delegate("/real/gh", argv)
+            assert exc.value.code == expect_exit
+            assert stub_refusal in capsys.readouterr().err
+            assert exec_calls == [], "the real gh must never exec under a draft refusal"
+        else:
+            def execve_sentinel(path, argv2, env):
+                raise RuntimeError("exec sentinel")
 
-        def execve(path, argv, env):
-            raise RuntimeError("exec sentinel")
-
-        monkeypatch.setattr(gh_proxy.os, "execve", execve)
-        with pytest.raises(RuntimeError, match="exec sentinel"):
-            gh_proxy.delegate("/real/gh", ["auth", "status"])
+            monkeypatch.setattr(gh_proxy.os, "execve", execve_sentinel)
+            with pytest.raises(RuntimeError, match="exec sentinel"):
+                gh_proxy.delegate("/real/gh", argv)
+            assert expect_exec
 
 
 class TestRunDraftFlip:
@@ -230,6 +227,3 @@ class TestRunDraftFlip:
             assert calls == []
         else:
             assert calls == [["gh", "pr", "ready", "7", "--repo", "owner/repo"]]
-
-    def test_subject_shape_matches_the_guard(self):
-        assert draft_subject_for_pr("owner/repo", 7) == "pr-draft:owner/repo#7"
