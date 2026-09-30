@@ -470,15 +470,21 @@ pub fn project(
     }
 
     // Close rows: every pane close and server stop the mux
-    // recorded. The reason rides verbatim; cause is the enum's word, so the
-    // row tells the operator WHO closed it (operator vs the death path) and
-    // WHY in one line.
+    // recorded, plus the composer's bang-mode shell rows (one run or
+    // refusal each). The reason rides verbatim; cause is the enum's word,
+    // so the row tells the operator WHO closed it (operator vs the death
+    // path) and WHY in one line.
     for line in closes_raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         let kind = match v.get("type").and_then(Value::as_str) {
-            Some(k @ ("pane_closed" | "server_stopped")) => k,
+            Some(
+                k @ ("pane_closed"
+                | "server_stopped"
+                | "composer_shell_ran"
+                | "composer_shell_refused"),
+            ) => k,
             _ => continue,
         };
         let Some(data) = v.get("data") else { continue };
@@ -516,6 +522,29 @@ pub fn project(
             reason: Some(reason),
             ..FeedRow::default()
         });
+        if kind == "composer_shell_ran" {
+            let cwd = s_field(data, "cwd").unwrap_or_default();
+            let line = s_field(data, "line").unwrap_or_default();
+            let pane = data.get("pane").and_then(Value::as_u64).unwrap_or(0);
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_ran".into(),
+                title: format!("shell in {cwd}: {line} (pane {pane})"),
+                ..FeedRow::default()
+            });
+            continue;
+        }
+        if kind == "composer_shell_refused" {
+            let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_refused".into(),
+                title: format!("shell refused: {reason}"),
+                reason: Some(reason),
+                ..FeedRow::default()
+            });
+            continue;
+        }
     }
 
     // Spawn rows: `agent_spawned` (agents journal, already window-bounded by
@@ -1020,7 +1049,16 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         args.since_epoch,
     );
     let crown_raw = crown_journals(home);
-    let closes_raw = agents_journal(home, &["pane_closed", "server_stopped"], args.since_epoch);
+    let closes_raw = agents_journal(
+        home,
+        &[
+            "pane_closed",
+            "server_stopped",
+            "composer_shell_ran",
+            "composer_shell_refused",
+        ],
+        args.since_epoch,
+    );
 
     let Projection {
         rows,
@@ -1617,6 +1655,10 @@ mod tests {
             "\n",
             r#"{"ts":"2026-09-30T10:00:09Z","type":"server_stopped","source":"daemon","data":{"mux_session":"main","cause":"shutdown","panes":0}}"#,
             "\n",
+            r#"{"ts":"2026-09-30T10:00:07Z","type":"composer_shell_ran","source":"cli","data":{"mux_session":"main","cwd":"/tmp/p","shell":"/bin/zsh","line":"git status","pane":3}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:00:08Z","type":"composer_shell_refused","source":"cli","data":{"mux_session":"main","cwd":"","line":"git status","reason":"no project chosen; pick one on the Project chip","outcome":"refused"}}"#,
+            "\n",
             "{not json",
         );
         let p = project("", &[], &[], "", "", closes);
@@ -1644,5 +1686,24 @@ mod tests {
             .find(|r| r.kind == "server_stopped")
             .expect("the stop row renders");
         assert_eq!(stopped.title, "mux server stopped: shutdown");
+        let ran = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_ran")
+            .expect("the composer ran row renders");
+        assert_eq!(ran.title, "shell in /tmp/p: git status (pane 3)");
+        let refused = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_refused")
+            .expect("the composer refused row renders");
+        assert_eq!(
+            refused.title,
+            "shell refused: no project chosen; pick one on the Project chip"
+        );
+        assert_eq!(
+            refused.reason.as_deref(),
+            Some("no project chosen; pick one on the Project chip")
+        );
     }
 }
