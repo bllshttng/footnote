@@ -10,6 +10,10 @@
 #                       `if !`/`||`/`&&` and not under `set -e` at file scope
 #   gate-lane-journal:  a hand-built <root>/.fno/events.jsonl under
 #                       cli/src/fno/pr/ or cli/src/fno/review/
+#   events-file-pin:    a hook script pinning EVENTS_FILE to a .fno/events.jsonl
+#                       literal (the $PWD guess that bypassed the store resolver)
+#   event-fn-raw-append: an event-named Rust function opening a raw append
+#                       (the variable-path shape rule 5 cannot see)
 #
 # Exit codes:
 #   0  clean
@@ -177,6 +181,49 @@ done < <(
         cli/src crates hooks scripts skills 2>/dev/null \
         | grep -v '/tests/' \
         | grep -v 'scripts/lint/events-discipline.sh' \
+        | grep -v 'events-discipline:allow' \
+        || true
+)
+
+# Rule 7: events-file-pin
+# The x-b3bf guard legs bypassed the store resolver by pinning
+# EVENTS_FILE="$PWD/.fno/events.jsonl" when the cwd looked like a project
+# root. Only scripts/lib/events.sh (the transport itself) may assign the
+# variable, and only from a resolver.
+while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    echo "events file pin at $hit: a hook guessed the journal path instead of resolving it" >&2
+    remediation "let scripts/lib/events.sh resolve via fno-agents state path events, or pin FNO_EVENTS_PATH to the exact journal"
+    violations=$((violations + 1))
+done < <(
+    grep -rEn '^[[:space:]]*_?EVENTS_FILE="(\$PWD|[^"]*\.fno)/events\.jsonl"' \
+        --include='*.sh' \
+        hooks/ scripts/ 2>/dev/null \
+        | grep -v 'scripts/lib/events.sh' \
+        || true
+)
+
+# Rule 8: event-fn-raw-append
+# Rule 5 only sees a literal events.jsonl in the open() call; every x-b3bf
+# leg hid the path behind a variable. An event-named function that opens a
+# raw append is that shape, whatever the indirection, unless the line
+# carries an explicit events-discipline:allow marker.
+while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    file="${hit%%:*}"
+    lineno="${hit#*:}"
+    lineno="${lineno%%:*}"
+    window_end=$((lineno + 8))
+    if sed -n "${lineno},${window_end}p" "$file" 2>/dev/null | grep -q 'OpenOptions::new()'; then
+        echo "event fn raw append at $file:$lineno: an event-named function must commit through the store" >&2
+        remediation "use crate::event_store::append_envelope (or EventEmitter); mark events-discipline:allow only for a test fixture writer"
+        violations=$((violations + 1))
+    fi
+done < <(
+    grep -rnE 'fn [a-z_]*event[a-z_]*\(' \
+        --include='*.rs' \
+        crates/ 2>/dev/null \
+        | grep -v '/tests/' \
         | grep -v 'events-discipline:allow' \
         || true
 )
