@@ -178,7 +178,7 @@ impl super::Core {
     /// Whether an attached client FOCUSES this pane: the client loopback
     /// forwards a focused pane's real terminal replies into its stdin, so
     /// the server must not double-answer; an unfocused pane's probe would
-    /// otherwise die in the mux emulator (the x-8f59 dark-on-light bug).
+    /// otherwise die in the mux emulator (the dark-on-light bug).
     fn pane_is_focused_somewhere(&self, pid: u64) -> bool {
         self.clients
             .iter()
@@ -200,6 +200,11 @@ impl super::Core {
     /// the client loopback, an unhosted pane has no ground to answer from,
     /// and output without a query demands nothing.
     pub(super) fn osc_reply_for(&self, pid: u64, bytes: &[u8]) -> Option<Vec<u8>> {
+        // The byte scan is free; the theme load is config IO on the drain
+        // path, so no query means no IO.
+        if queries(bytes).is_empty() {
+            return None;
+        }
         if self.pane_is_focused_somewhere(pid) {
             return None;
         }

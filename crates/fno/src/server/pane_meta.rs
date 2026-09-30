@@ -182,9 +182,10 @@ mod tests {
         assert_eq!((m.node, m.branch, m.ctx), (None, None, None));
     }
 
-    // x-8f59: a rename rewrites the registry row; the pane's FNO_AGENT_SELF
-    // env is frozen at spawn. The chrome reads the row (live row first), and
-    // an unhosted pane falls back to the spawn-captured name.
+    // A rename rewrites the registry row; the pane's FNO_AGENT_SELF
+    // env is frozen at spawn. The chrome reads the row (live row first);
+    // the layout layer falls back to the spawn-captured name when this
+    // returns None.
     #[test]
     fn registry_name_beats_the_spawn_captured_self() {
         let agents = vec![
@@ -196,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn unhosted_pane_falls_back_to_the_spawn_captured_name() {
+    fn pane_registry_name_is_none_for_an_unhosted_pane() {
         let agents = vec![agent("other", Some(("mux0", 9)), false)];
         assert_eq!(pane_registry_name(&agents, "mux0", 7), None);
     }

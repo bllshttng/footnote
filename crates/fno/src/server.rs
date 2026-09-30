@@ -12700,9 +12700,9 @@ fn drain_pty_output(
                             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         touched.insert(pid);
                     }
-                    // x-8f59: a pane nobody focuses gets no terminal to
-                    // answer its palette probes; the mux does, from the
-                    // active theme. Focused panes ride the client loopback.
+                    // A pane nobody focuses has no terminal to answer its
+                    // palette probes; the mux does, from the pane's own
+                    // ground. Focused panes ride the client loopback.
                     core.answer_color_queries(pid, &bytes);
                 }
                 PaneChunk::Resized(rows, cols) => {

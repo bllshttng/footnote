@@ -370,7 +370,7 @@ fn theme_footnote_paper() -> Theme {
         brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
         sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
-        dim: rgb(0x40, 0x40, 0x40),    // subtext0 (x-8f59: 505050 read too light)
+        dim: rgb(0x40, 0x40, 0x40),    // subtext0 (505050 read too light)
         chip: rgb(0x96, 0x53, 0x51),   // red accent
         stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
         base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
@@ -458,7 +458,7 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
         rgb(0xe8, 0xe8, 0xe8), // bright white (light_white)
     ];
     const LIGHT: [Color; 16] = [
-        // x-8f59: slot 0 and slot 8 carry dim TEXT on the paper ground
+        // Slots 0 and 8 carry dim TEXT on the paper ground
         // (claude tool-call grays, codex dim lines); bfbfbf read 1.7:1 on
         // f7f7f7. 606060 clears 4.5:1 with room, 6e6e6e lands on it.
         rgb(0x60, 0x60, 0x60), // black
@@ -992,7 +992,7 @@ mod tests {
 
     #[test]
     fn paper_text_slots_clear_4_5_to_1_on_the_paper_ground() {
-        // x-8f59: slots 0 and 8 carry dim text (claude grays, codex dim
+        // Slots 0 and 8 carry dim text (claude grays, codex dim
         // lines) on the f7f7f7 ground; bfbfbf/a8a8a8 read 1.7:1 and 2.2:1.
         // Text slots clear WCAG 4.5:1 against the theme's own base.
         let (t, _) = Theme::from_name("footnote-paper");

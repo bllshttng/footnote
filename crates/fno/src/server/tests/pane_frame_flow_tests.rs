@@ -285,7 +285,7 @@ fn reaping_a_pane_drops_its_counter_row() {
 
 #[test]
 fn an_unfocused_pane_s_osc_query_resolves_its_own_ground() {
-    // x-8f59: the query scan answers with the theme the PANE's directory
+    // The query scan answers with the theme the PANE's directory
     // resolves (the server's own cwd names no project), and an unhosted
     // pane answers nothing. The write into the pane's stdin is the one
     // line after this seam; delivery is the pty writer's own contract.
