@@ -1,0 +1,36 @@
+# Run 1 lanes. setup-imac.sh appends this to a copy of ~/.fno/config.toml and the
+# runner reads that copy as FNO_CONFIG, so the machine's own config stays untouched.
+
+[agents.provider_limits.zai]
+lanes = 16
+subagents = 1
+
+[[routing.models]]
+name = "harness-fit-claude"
+harness = "claude"
+model = "glm-5.3-flash"
+route = "zai/glm-5.3-flash"
+effort = "high"
+account = "zai"
+band = "medium"
+
+[[routing.models]]
+name = "harness-fit-opencode"
+harness = "opencode"
+model = "zai-coding-plan/glm-5.3-flash"
+effort = "high"
+band = "medium"
+
+[[routing.models]]
+name = "harness-fit-pi"
+harness = "pi"
+model = "zai-glm/glm-5.3-flash"
+effort = "high"
+band = "medium"
+
+[[routing.models]]
+name = "harness-fit-zcode"
+harness = "zcode"
+model = "GLM-5.3-Flash"
+effort = "high"
+band = "medium"
