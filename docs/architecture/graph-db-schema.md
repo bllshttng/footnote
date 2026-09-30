@@ -84,6 +84,8 @@ Writers emit only the new names. Readers accept the old ones for one release thr
 6. It drops the `_v3` tables, creates the triggers, and rebuilds the search index.
 7. It runs `PRAGMA foreign_key_check`. A violation rolls everything back, and the error names the row and the snapshot. Otherwise it stamps `schema_version = 4`, writes the counts to `graph_meta.schema_v4_report`, and commits.
 
+The normal open path separately stamps `open_setup_version = 1` after migrations, table ensures, and imports succeed. This marker tracks one-time setup, independently of the table schema version.
+
 ## Rollback
 
 The migration is one-way in place. The snapshot is the rollback. Stop the keeper. Copy `backups/graph-pre-v4.db.<stamp>` over `graph.db` and delete `graph.db-wal` and `graph.db-shm`. Then install the previous release. Writes made after the migration are lost, so roll back at once or not at all.
