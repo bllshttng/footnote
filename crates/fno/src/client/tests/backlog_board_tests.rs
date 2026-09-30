@@ -316,11 +316,34 @@ fn sideline_toggle_rows() {
     rt.block_on(async {
         cycle_sideline_view(&mut v);
     });
+    assert_eq!(
+        serde_json::to_value(v.sideline_view).unwrap(),
+        serde_json::json!("org")
+    );
+    rt.block_on(async {
+        cycle_sideline_view(&mut v);
+    });
     assert!(matches!(
         v.sideline_view,
         crate::view_store::SidelineView::Agents
     ));
     assert!(v.backlog_board.is_none(), "agents view closes the board");
+    crate::client::org_board::check_fixture(&mut v);
+    let mut sock: Vec<u8> = Vec::new();
+    rt.block_on(async {
+        crate::client::org_board::keys(&mut v, b"\t\t\tF", &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(v.board_full);
+    assert_eq!(
+        v.org_board.as_ref().unwrap().mode,
+        crate::view_store::OrgMode::Tree
+    );
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Board
+    );
 
     let mut v = key_view(board_with(board_inputs()));
     let mut sock: Vec<u8> = Vec::new();
