@@ -36,11 +36,6 @@ def cmd_note(
         help="Write it, mail nobody: the acknowledgment when the verb would refuse.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the state receipt as JSON."),
-    replace: bool = typer.Option(
-        False,
-        "--replace",
-        help="Overwrite even when the current state was written by another session. Without it that replace refuses (exit 3) and names the append recipe.",
-    ),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Record progress on a node by REPLACING its current state.
@@ -62,6 +57,10 @@ def cmd_note(
     from fno.text_or_file import read_text_arg
 
     extra = list(ctx.args)
+    # --replace (the cross-session door) rides the passthrough: the Python
+    # flag surface is shrink-only, so the flag is read out of extra rather
+    # than declared as an option parameter.
+    replace = "--replace" in extra
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:
         from fno.rust_binary import resolve_binary
@@ -77,8 +76,6 @@ def cmd_note(
             argv += ["--body-file", str(body_file)]
         argv += [a for a in (task_id, text) if a]
         argv += extra
-        if replace:
-            argv.append("--replace")
         proc = subprocess.run(argv, check=False)
         raise typer.Exit(code=proc.returncode)
 
