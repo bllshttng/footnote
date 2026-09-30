@@ -2725,6 +2725,34 @@ pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// Set `var` for the rest of the scope and restore the prior value on drop,
+/// unwind-safe: a panicking test must not leak process env into its siblings.
+/// Pair with [`test_env_lock`], acquired before the first mutation or read.
+#[cfg(test)]
+pub struct EnvVarGuard {
+    var: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl EnvVarGuard {
+    pub fn set(var: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(var);
+        unsafe { std::env::set_var(var, value) };
+        Self { var, prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => unsafe { std::env::set_var(self.var, v) },
+            None => unsafe { std::env::remove_var(self.var) },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

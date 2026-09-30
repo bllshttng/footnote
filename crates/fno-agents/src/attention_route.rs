@@ -328,6 +328,7 @@ mod tests {
 
     fn item(blocks: Vec<String>, node: Option<&str>, project: &str) -> AttentionItem {
         AttentionItem {
+            recovery_batch: None,
             id: "q-test".into(),
             kind: "question".into(),
             title: "t".into(),

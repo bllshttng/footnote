@@ -1121,6 +1121,8 @@ pub struct EventRow {
     pub retention_class: String,
     pub reject_reason: Option<String>,
     pub line: String,
+    pub history_only: bool,
+    pub recovery_batch: Option<String>,
 }
 
 /// Typed filters for [`query_events`]; every field is ANDed, absent fields
@@ -1159,7 +1161,7 @@ impl EventQuery {
         }
     }
 
-    fn build_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    fn build_sql(&self, recovery: bool) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut where_clauses: Vec<String> = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         // The IN list is built before the push closure exists, so the two
@@ -1215,7 +1217,17 @@ impl EventQuery {
             .limit
             .map(|n| format!(" LIMIT {n}"))
             .unwrap_or_default();
-        (format!("SELECT seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line FROM events{where_sql} ORDER BY seq{limit_sql}"), args)
+        let history = if recovery {
+            "EXISTS(SELECT 1 FROM recovery_history h WHERE h.event_id = events.event_id)"
+        } else {
+            "0"
+        };
+        let batch = if recovery {
+            "(SELECT batch FROM recovery_history h WHERE h.event_id = events.event_id)"
+        } else {
+            "NULL"
+        };
+        (format!("SELECT seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch} FROM events{where_sql} ORDER BY seq{limit_sql}"), args)
     }
 }
 
@@ -1223,7 +1235,7 @@ impl EventQuery {
 /// no file-scan fallback.
 pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, String> {
     let conn = open_read(&store_path(journal))?;
-    let (sql, args) = q.build_sql();
+    let (sql, args) = q.build_sql(has_recovery_history(&conn)?);
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("{}: {e}", sql))?;
     let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
@@ -1238,11 +1250,78 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
                 retention_class: r.get(6)?,
                 reject_reason: r.get(7)?,
                 line: r.get(8)?,
+                history_only: r.get(9)?,
+                recovery_batch: r.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+fn has_recovery_history(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='recovery_history')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Recovery provenance is read metadata. The canonical envelope stays unchanged.
+pub fn recovery_envelope(row: &EventRow) -> serde_json::Value {
+    let mut value = serde_json::from_str::<serde_json::Value>(&row.line)
+        .unwrap_or_else(|_| serde_json::json!({"_corrupt": row.line}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("_store_seq".into(), row.seq.into());
+        object.insert("_history_only".into(), row.history_only.into());
+        if let Some(batch) = &row.recovery_batch {
+            object.insert("_recovery_batch".into(), batch.clone().into());
+        }
+    }
+    value
+}
+
+/// Keep recovered history for folds, but never let it restart activity. A
+/// recovered ask also suppresses the old answer it newly makes addressable.
+pub fn activity_text(text: &str) -> String {
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let asks: std::collections::HashMap<String, i64> = rows
+        .iter()
+        .filter(|v| v["type"] == "operator_question" && v["_history_only"] == true)
+        .filter_map(|v| {
+            Some((
+                v["data"]["question_id"].as_str()?.to_owned(),
+                v["_store_seq"].as_i64()?,
+            ))
+        })
+        .collect();
+    rows.into_iter()
+        .filter(|v| {
+            if v["type"] == "attention_delivery" {
+                return true;
+            }
+            if v["_history_only"] == true {
+                return false;
+            }
+            let id = v["data"]["question_id"]
+                .as_str()
+                .or_else(|| v["data"]["item_id"].as_str());
+            if matches!(
+                v["type"].as_str(),
+                Some("attention_answer" | "operator_question_closed")
+            ) {
+                if let Some(boundary) = id.and_then(|id| asks.get(id)) {
+                    return v["_store_seq"].as_i64().unwrap_or(i64::MAX) > *boundary;
+                }
+            }
+            true
+        })
+        .map(|v| format!("{v}\n"))
+        .collect()
 }
 
 /// How far back a count over this store is proven, for the asked types. The
@@ -1413,13 +1492,31 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         };
     }
     let conn = open_read(&store)?;
-    let (sql, args) = q.build_sql();
+    let recovery = has_recovery_history(&conn)?;
+    let (sql, args) = q.build_sql(recovery);
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
-        .query_map(refs.as_slice(), |r| r.get::<_, String>(8))
+        .query_map(refs.as_slice(), |r| {
+            let line: String = r.get(8)?;
+            if !recovery {
+                return Ok(line);
+            }
+            let mut value: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => return Ok(line),
+            };
+            if let Some(object) = value.as_object_mut() {
+                object.insert("_store_seq".into(), r.get::<_, i64>(0)?.into());
+                object.insert("_history_only".into(), r.get::<_, bool>(9)?.into());
+                if let Some(batch) = r.get::<_, Option<String>>(10)? {
+                    object.insert("_recovery_batch".into(), batch.into());
+                }
+            }
+            Ok(value.to_string())
+        })
         .map_err(|e| format!("{}: {e}", store.display()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{}: {e}", store.display()))?;

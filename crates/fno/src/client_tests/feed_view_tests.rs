@@ -135,7 +135,7 @@ fn view_with_rows(rows: Vec<AgentRow>) -> View {
 }
 
 #[test]
-fn lines_render_newest_first_with_marker() {
+fn render_rows() {
     let o = {
         let mut a = feed_item(Some("x-a"), Some("s-1"));
         a.ts = "2026-09-02T16:27:06Z".into();
@@ -166,10 +166,7 @@ fn lines_render_newest_first_with_marker() {
     assert!(lines[4].contains("x-a"));
     assert!(lines[5].trim().is_empty(), "below the last item: blank");
     assert!(lines.last().unwrap().contains("3 events"));
-}
 
-#[test]
-fn offset_windows_the_items() {
     let o = {
         let mut a = feed_item(Some("x-a"), Some("s-1"));
         a.ts = "2026-09-02T16:27:06Z".into();
@@ -186,10 +183,7 @@ fn offset_windows_the_items() {
     assert!(lines[2].contains("x-b"));
     assert!(lines[3].contains("x-a"));
     assert!(lines[4].trim().is_empty());
-}
 
-#[test]
-fn degraded_footer_renders_the_typed_reason() {
     // x-d15a: the failure line names the cause, never the old generic
     // "feed unavailable" sentence. Timeout names its budget; a malformed
     // body carries the projection's stderr so the cause leads the line.
@@ -209,7 +203,7 @@ fn degraded_footer_renders_the_typed_reason() {
 }
 
 #[test]
-fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
+fn hit_rows() {
     // The cwd basename is the node id: the join the sideline itself uses.
     // The modal's session row carries the action, resolved once at open.
     let row = joined_row("worker-01", Some("x-9223"), Some(7));
@@ -226,10 +220,7 @@ fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
         (Some(ChromeHit::Cmds(a)), ChromeHit::Cmds(b)) => assert_eq!(a, b),
         _ => panic!("both hits must be Cmds"),
     }
-}
 
-#[test]
-fn hit_on_a_row_without_session_id_is_none() {
     let item = feed_item(Some("x-nope"), None);
     let (_, actions, _) = feed_detail::build(&[], 0, &item);
     assert!(
@@ -267,15 +258,12 @@ async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() 
 }
 
 #[test]
-fn empty_panel_renders_an_earned_empty_notice_and_footer() {
+fn empty_rows() {
     let o = overlay(vec![]);
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.last().unwrap().contains("0 events"));
-}
 
-#[test]
-fn folding_first_open_claims_no_activity() {
     // While the fold is in flight the body claims nothing: "no activity" is
     // a statement only a settled fold has earned.
     let mut o = overlay(vec![]);
@@ -286,7 +274,7 @@ fn folding_first_open_claims_no_activity() {
 }
 
 #[test]
-fn click_resolver_inverts_the_painter() {
+fn click_rows() {
     // Row 0 is the panel header, the last row is the footer; painted row 1 is
     // the group HEADER (no detail), row 2 the first item. The resolver reads
     // the same slot list the painter drew.
@@ -320,10 +308,7 @@ fn click_resolver_inverts_the_painter() {
         Some(0),
         "offset applies"
     );
-}
 
-#[test]
-fn a_click_on_a_feed_row_opens_that_rows_provenance() {
     // The full client path: feed open, click in the panel's item rows at the
     // geometry the painter draws, hit = that row's provenance view. The deep
     // link moved to that view's own action; a click inspects, never attaches.
@@ -374,7 +359,7 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
 }
 
 #[test]
-fn panel_width_is_transient_clamped_and_yields() {
+fn width_rows() {
     let mut v = two_pane_view(); // 30x100, Regular sideline at its canonical width
                                  // Closed: no panel, no columns.
     assert_eq!(v.feed_panel_w(), 0);
@@ -392,10 +377,7 @@ fn panel_width_is_transient_clamped_and_yields() {
     assert_eq!(v.panel_w(), 0);
     assert_eq!(v.feed_panel_w(), 10);
     assert_eq!(v.content_dims().1, 40);
-}
 
-#[test]
-fn drag_updates_width_and_release_persists() {
     let mut v = two_pane_view();
     v.feed = Some(overlay(vec![]));
     v.term = (30, 100);
@@ -415,10 +397,7 @@ fn drag_updates_width_and_release_persists() {
     assert!(v.revert_feed_drag());
     assert_eq!(v.feed_width, 40);
     assert!(!v.revert_feed_drag(), "no drag left to revert");
-}
 
-#[test]
-fn wheel_scrolls_within_the_item_count() {
     let mut v = two_pane_view();
     v.feed = Some(overlay(vec![
         feed_item(Some("x-a"), Some("s-1")),
@@ -445,10 +424,7 @@ fn wheel_scrolls_within_the_item_count() {
     assert_eq!(v.feed_offset, 11, "the clamp counts the group header");
     v.scroll_feed(false);
     assert_eq!(v.feed_offset, 10);
-}
 
-#[test]
-fn terminal_growth_reclamps_the_window() {
     let mut v = two_pane_view(); // 30 rows
     let mut items = overlay(vec![]).items;
     for i in 0..20 {
@@ -472,10 +448,7 @@ fn terminal_growth_reclamps_the_window() {
         cells.iter().any(|c| c.c == 'x'),
         "the panel paints items, not blanks"
     );
-}
 
-#[test]
-fn a_double_width_glyph_claims_two_cells() {
     let mut v = two_pane_view();
     let mut it = feed_item(Some("x-cjk"), Some("s-cjk"));
     it.title = "世界".into(); // two CJK glyphs, each display width 2
@@ -504,7 +477,7 @@ fn a_double_width_glyph_claims_two_cells() {
 // keys, so the header says how to focus and the marker does not move; a
 // focused panel takes the arrows and says so.
 #[test]
-fn the_header_names_the_input_state_the_panel_is_in() {
+fn header_rows() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
     let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
@@ -538,12 +511,7 @@ fn the_header_names_the_input_state_the_panel_is_in() {
             "header overflows at width {w}"
         );
     }
-}
 
-// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
-// next byte reaches the pane again.
-#[test]
-fn esc_releases_the_keyboard_without_closing_the_panel() {
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     v.region_owner = crate::client::region_focus::RegionOwner::Feed;
@@ -581,13 +549,7 @@ fn esc_releases_the_keyboard_without_closing_the_panel() {
     // Releasing twice is a no-op, never a close.
     assert!(!crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some());
-}
 
-// The pan moves the TITLE only, in display columns, and never splits a wide
-// glyph: the stamp, kind and node stay anchored so a panned row is still the
-// row that was selected.
-#[test]
-fn a_pan_moves_the_title_by_display_columns() {
     assert_eq!(feed_view::pan_by("abcdef", 0), "abcdef");
     assert_eq!(feed_view::pan_by("abcdef", 2), "cdef");
     // A two-column glyph straddling the cut is dropped whole, never halved.
@@ -597,7 +559,34 @@ fn a_pan_moves_the_title_by_display_columns() {
         feed_view::widest_title(&[feed_item(None, None), reaped_item("s", "r")]),
         "t-d145 removed by reap".len()
     );
+
+    use crate::client::feed_view::{header_line, FeedOrder};
+    for w in 0..=80usize {
+        let unfocused = header_line(false, FeedOrder::Grouped, w);
+        assert!(
+            unfocused.starts_with(" E focus")
+                || unicode_width::UnicodeWidthStr::width(unfocused.as_str()) <= w,
+            "w={w} picked {unfocused:?}"
+        );
+        let focused = header_line(true, FeedOrder::Grouped, w);
+        assert!(
+            focused.starts_with(" esc release")
+                || unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w,
+            "w={w} picked {focused:?}"
+        );
+    }
+    // Below every prose spelling, the fallback leads with the key, so an
+    // 8-column clip still reads "E focus" rather than a truncated label.
+    assert_eq!(header_line(false, FeedOrder::Grouped, 8), " E focus");
+    assert!(header_line(true, FeedOrder::Grouped, 8).starts_with(" esc"));
 }
+
+// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
+// next byte reaches the pane again.
+
+// The pan moves the TITLE only, in display columns, and never splits a wide
+// glyph: the stamp, kind and node stay anchored so a panned row is still the
+// row that was selected.
 
 // (AC5-HP) A removal reads as a normal outcome carrying its recovery line,
 // never as a bare attach the server refuses. (x-1b90) Its pane field is a
@@ -605,8 +594,7 @@ fn a_pan_moves_the_title_by_display_columns() {
 // that the removal did not measure the pane - whatever the recovery line
 // says, since no removal record carries the measurement on a field yet.
 #[test]
-fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
-    use crate::client::feed_detail;
+fn detail_field_rows() {
     let item = reaped_item(
         "00847995-e0db-47c2-ab5b-24468ba1a4f5",
         "resume: claude --resume x",
@@ -635,53 +623,7 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
         .expect("the resume row exists");
     assert_eq!(values[i], "resume: claude --resume x");
     assert!(labels.iter().any(|l| l == "resume"), "{labels:?}");
-}
 
-/// The popup's rendered body lines, for label-level assertions. The wide
-/// viewport keeps long values whole: the real modal clips them, `y` copies
-/// whole, and these tests read the field content, not the clip.
-fn popup_lines(popup: &crate::popup::Popup) -> Vec<String> {
-    popup
-        .render((80, 200))
-        .lines
-        .iter()
-        .map(|l| l.text.clone())
-        .collect()
-}
-
-/// The popup's rendered (label, value) field pairs: Entry rows key on the
-/// glyph column, Info rows carry label and value. Framed lines lead with
-/// the border cell, so the border strips before the label splits off.
-fn popup_rows(popup: &crate::popup::Popup) -> Vec<(Option<String>, String)> {
-    let mut rows = Vec::new();
-    for line in popup.render((80, 200)).lines {
-        let framed = line.text.trim();
-        let mut body = framed
-            .strip_prefix('\u{2502}')
-            .or_else(|| framed.strip_prefix('\u{250c}'))
-            .or_else(|| framed.strip_prefix('\u{2570}'))
-            .unwrap_or(framed)
-            .to_string();
-        if let Some(stripped) = body.strip_suffix('\u{2502}') {
-            body = stripped.to_string();
-        }
-        let body = body.trim();
-        if body.is_empty() {
-            continue;
-        }
-        let mut parts = body.splitn(2, char::is_whitespace);
-        let head = parts.next().unwrap_or("").to_string();
-        let tail = parts.next().unwrap_or("").trim().to_string();
-        rows.push((Some(head), tail));
-    }
-    rows
-}
-
-// (AC5-EDGE) Pane ids allocate from zero, so pane 0 is a real seat. The join
-// is on the exact session id, never the row name a later worker can reuse.
-#[test]
-fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
-    use crate::client::feed_detail;
     let mut row = joined_row("some-other-name", None, Some(0));
     row.harness_session_id = Some("s-9".into());
     row.portal = Some(0);
@@ -729,37 +671,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
             .any(|l| l.contains("NOT RECORDED")),
         "absent fields print nothing"
     );
-}
 
-// The panel drags narrower than any prose fits, and the caller clips from the
-// end. The key must survive that clip: it is the only place it is advertised.
-#[test]
-fn the_header_keeps_its_key_at_every_draggable_width() {
-    use crate::client::feed_view::{header_line, FeedOrder};
-    for w in 0..=80usize {
-        let unfocused = header_line(false, FeedOrder::Grouped, w);
-        assert!(
-            unfocused.starts_with(" E focus")
-                || unicode_width::UnicodeWidthStr::width(unfocused.as_str()) <= w,
-            "w={w} picked {unfocused:?}"
-        );
-        let focused = header_line(true, FeedOrder::Grouped, w);
-        assert!(
-            focused.starts_with(" esc release")
-                || unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w,
-            "w={w} picked {focused:?}"
-        );
-    }
-    // Below every prose spelling, the fallback leads with the key, so an
-    // 8-column clip still reads "E focus" rather than a truncated label.
-    assert_eq!(header_line(false, FeedOrder::Grouped, 8), " E focus");
-    assert!(header_line(true, FeedOrder::Grouped, 8).starts_with(" esc"));
-}
-
-// A node_created modal hides what the source lacks and prints what the
-// birth stamped: no NOT RECORDED filler anywhere, ever.
-#[test]
-fn a_node_created_modal_hides_its_unrecorded_fields() {
     let mut bare = feed_item(Some("x-a"), Some("s-1"));
     bare.kind = "node_created".into();
     let (popup, _, _) = feed_detail::build(&[], 0, &bare);
@@ -796,7 +708,261 @@ fn a_node_created_modal_hides_its_unrecorded_fields() {
     assert_eq!(by("effort"), "high");
     assert_eq!(by("parent"), "s-parent");
     assert_eq!(by("crown"), "L2 e-0001");
+
+    let item = feed_item(Some("x-a"), Some("s-1"));
+    let mut child = joined_row("jn-t-x-1", None, None);
+    child.harness_session_id = Some("s-1".into());
+    child.spawned_by_session = Some("s-lead".into());
+    let parent_name = "t-x-lead";
+    let by_parent = |row: &AgentRow| -> String {
+        let (popup, _, _) = feed_detail::build(&[row.clone()], 0, &item);
+        popup_rows(&popup)
+            .into_iter()
+            .find(|(l, _)| l.as_deref() == Some("parent"))
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    };
+
+    // Child edge resolving to a row: "<name> (<session>)".
+    child.spawned_by_name = Some(parent_name.into());
+    child.lineage_kind = Some("child".into());
+    assert_eq!(by_parent(&child), "t-x-lead (s-lead)");
+
+    // Peer edge: the same answer, plus the handoff word.
+    child.lineage_kind = Some("peer".into());
+    assert_eq!(by_parent(&child), "t-x-lead (s-lead) (handoff)");
+
+    // Edge present, name absent (a session no row holds): the bare id, and
+    // never a fabricated or borrowed name.
+    child.spawned_by_name = None;
+    child.lineage_kind = Some("child".into());
+    assert_eq!(by_parent(&child), "s-lead");
+    child.lineage_kind = Some("peer".into());
+    assert_eq!(by_parent(&child), "s-lead (handoff)");
+
+    // No edge: the birth's reason stands in for the parent it could not name.
+    // The popup caps its width and ellipsizes, so a long reason may clip in
+    // the render; the head of the real string must show.
+    child.spawned_by_session = None;
+    child.lineage_kind = None;
+    child.lineage_reason = Some("daemon mint: spawn request carried no parent edge".into());
+    let shown = by_parent(&child);
+    assert!(
+        shown.starts_with("daemon mint: spawn request carried no parent"),
+        "the birth's reason stands in: {shown}"
+    );
+
+    // No edge and no reason: the field hides (item.parent rides in its
+    // place when the birth stamped one).
+    child.lineage_reason = None;
+    let (popup, _, _) = feed_detail::build(&[child], 0, &item);
+    let labels: Vec<String> = popup_rows(&popup)
+        .into_iter()
+        .filter_map(|(l, _)| l)
+        .collect();
+    assert!(!labels.iter().any(|l| l == "parent"), "{labels:?}");
+
+    let mut crown = feed_item(None, None);
+    crown.kind = "crown_vacated".into();
+    crown.ts = "2026-09-28T16:45:58Z".into();
+    crown.title = "warden left L2 e: succession".into();
+    let mut owned_a = feed_item(Some("x-a"), None);
+    owned_a.owner = Some("epic x-29a8 the epic".into());
+    owned_a.ts = "2026-09-28T17:00:00Z".into();
+    let mut owned_b = feed_item(Some("x-b"), None);
+    owned_b.owner = Some("epic x-29a8 the epic".into());
+    owned_b.ts = "2026-09-28T17:30:00Z".into();
+    let mut loose = feed_item(Some("x-c"), None);
+    loose.ts = "2026-09-28T18:00:00Z".into();
+    let items = vec![loose, owned_a, owned_b, crown];
+    let slots = feed_view::display_slots(&items, feed_view::FeedOrder::Grouped);
+    // Slot shapes: crowns header + the crown row, the owner header with
+    // its rows newest first, then the other header with the loose row.
+    let shape: Vec<String> = slots
+        .iter()
+        .map(|s| match s {
+            feed_view::Slot::Header(h) => format!("H:{h}"),
+            feed_view::Slot::Item(i) => format!("I:{}", items[*i].node.as_deref().unwrap_or("?")),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "H:crowns",
+            "I:?",
+            "H:epic x-29a8 the epic",
+            "I:x-b",
+            "I:x-a",
+            "H:other",
+            "I:x-c",
+        ],
+        "{shape:?}"
+    );
+    // A header row never resolves to a detail.
+    let g = feed_view::FeedOrder::Grouped;
+    assert_eq!(feed_row_item(&items, 1, ROWS, 0, g), None, "crowns header");
+    // The first item row IS the crown row.
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), Some(3));
+
+    let mut vacated = feed_item(Some("x-a"), None);
+    vacated.kind = "crown_vacated".into();
+    vacated.ts = "2026-09-28T16:45:58Z".into();
+    vacated.title = "warden left".into();
+    let o = overlay(vec![vacated]);
+    let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
+    // Row 1 is the group header: every span bold.
+    assert!(
+        rows[1].iter().all(|s| s.bold),
+        "headers render bold: {:?}",
+        rows[1]
+    );
+    // Row 2 is the vacated row: its kind span is bold AND brand.
+    assert!(
+        rows[2]
+            .iter()
+            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
+        "the actionable kind is bold brand: {:?}",
+        rows[2]
+    );
+    assert!(
+        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
+        "the node id is bold: {:?}",
+        rows[2]
+    );
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(
+        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
+        "text is unchanged: {}",
+        lines[2]
+    );
+
+    let mut item = feed_item(Some("x-a"), None);
+    item.owner = Some("king jolly-finch (king-4d9b)".into());
+    // Live holder: the line stands.
+    let (popup, _, _) = feed_detail::build(&[joined_row("king-4d9b", None, Some(1))], 0, &item);
+    let owner = popup_rows(&popup)
+        .into_iter()
+        .find(|(l, _)| l.as_deref() == Some("owner"))
+        .map(|(_, v)| v)
+        .unwrap();
+    assert_eq!(owner, "king jolly-finch (king-4d9b)");
+    // Dead holder: the modal says so instead of naming a current king that
+    // is not there.
+    let (popup, _, _) = feed_detail::build(&[], 0, &item);
+    let owner = popup_rows(&popup)
+        .into_iter()
+        .find(|(l, _)| l.as_deref() == Some("owner"))
+        .map(|(_, v)| v)
+        .unwrap();
+    assert_eq!(owner, "king jolly-finch (king-4d9b) · gone");
+    // No holder to resolve: untouched.
+    let mut plain = feed_item(Some("x-a"), None);
+    plain.owner = Some("epic x-29a8 the epic".into());
+    let (popup, _, _) = feed_detail::build(&[], 0, &plain);
+    let owner = popup_rows(&popup)
+        .into_iter()
+        .find(|(l, _)| l.as_deref() == Some("owner"))
+        .map(|(_, v)| v)
+        .unwrap();
+    assert_eq!(owner, "epic x-29a8 the epic");
+
+    let tz = chrono::FixedOffset::east_opt(-7 * 3600).unwrap();
+    assert_eq!(feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz), "09:48");
+    assert_eq!(
+        feed_view::short_ts_in("not-a-time", &tz),
+        "not-a-time",
+        "unparseable stamps show raw"
+    );
+
+    let mut a = feed_item(Some("x-a"), None);
+    a.ts = "2026-09-28T17:00:00Z".into();
+    let mut b = feed_item(Some("x-b"), None);
+    b.ts = "2026-09-28T18:00:00Z".into();
+    let items = vec![a, b];
+    // Grouped: the unowned rows sit under the `other` header.
+    let grouped = feed_view::display_slots(&items, feed_view::FeedOrder::Grouped);
+    assert!(matches!(grouped.first(), Some(feed_view::Slot::Header(_))));
+    // Recent: no headers at all, newest first.
+    let recent = feed_view::display_slots(&items, feed_view::FeedOrder::Recent);
+    assert!(recent.iter().all(|s| matches!(s, feed_view::Slot::Item(_))));
+    let first = match &recent[0] {
+        feed_view::Slot::Item(i) => items[*i].node.clone().unwrap(),
+        _ => unreachable!(),
+    };
+    assert_eq!(first, "x-b", "newest first");
+    // The resolver answers the same item the painter drew, in Recent too.
+    // Painted row 1 is the first item row (row 0 is the panel header).
+    assert_eq!(
+        feed_row_item(&items, 1, ROWS, 0, feed_view::FeedOrder::Recent),
+        Some(1),
+        "painted row 1 is storage 1 (the newest)"
+    );
+
+    let mut v = view_with_rows(vec![]);
+    let mut q = feed_item(None, None);
+    q.kind = "question_asked".into();
+    q.r#ref = Some("q-1".into());
+    q.ts = "2026-09-28T19:00:00Z".into();
+    let mut older = feed_item(Some("x-a"), Some("s-1"));
+    older.ts = "2026-09-28T18:00:00Z".into();
+    v.feed = Some(overlay(vec![q, older]));
+    let w = v.feed_panel_w() as u16;
+    let col = v.term.1 - w + 2;
+    let hit = v.chrome_hit(2, col).expect("the question row deep-links");
+    assert!(
+        matches!(&hit, ChromeHit::OpenQuestionDetail(id) if id == "q-1"),
+        "the question row opens the question, not the provenance: {hit:?}"
+    );
 }
+
+/// The popup's rendered body lines, for label-level assertions. The wide
+/// viewport keeps long values whole: the real modal clips them, `y` copies
+/// whole, and these tests read the field content, not the clip.
+fn popup_lines(popup: &crate::popup::Popup) -> Vec<String> {
+    popup
+        .render((80, 200))
+        .lines
+        .iter()
+        .map(|l| l.text.clone())
+        .collect()
+}
+
+/// The popup's rendered (label, value) field pairs: Entry rows key on the
+/// glyph column, Info rows carry label and value. Framed lines lead with
+/// the border cell, so the border strips before the label splits off.
+fn popup_rows(popup: &crate::popup::Popup) -> Vec<(Option<String>, String)> {
+    let mut rows = Vec::new();
+    for line in popup.render((80, 200)).lines {
+        let framed = line.text.trim();
+        let mut body = framed
+            .strip_prefix('\u{2502}')
+            .or_else(|| framed.strip_prefix('\u{250c}'))
+            .or_else(|| framed.strip_prefix('\u{2570}'))
+            .unwrap_or(framed)
+            .to_string();
+        if let Some(stripped) = body.strip_suffix('\u{2502}') {
+            body = stripped.to_string();
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let mut parts = body.splitn(2, char::is_whitespace);
+        let head = parts.next().unwrap_or("").to_string();
+        let tail = parts.next().unwrap_or("").trim().to_string();
+        rows.push((Some(head), tail));
+    }
+    rows
+}
+
+// (AC5-EDGE) Pane ids allocate from zero, so pane 0 is a real seat. The join
+// is on the exact session id, never the row name a later worker can reuse.
+
+// The panel drags narrower than any prose fits, and the caller clips from the
+// end. The key must survive that clip: it is the only place it is advertised.
+
+// A node_created modal hides what the source lacks and prints what the
+// birth stamped: no NOT RECORDED filler anywhere, ever.
 
 // The whole render path, not just the line builder: open the provenance view
 // on a real View and read the COMPOSED frame. A field that never reaches the
@@ -866,157 +1032,14 @@ async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer(
 // to a row in the set, keeps the handoff word on a PEER edge, shows the bare
 // session id when the edge names no row, and falls back to the birth's own
 // reason (or the honest silence) when the row has no edge at all.
-#[test]
-fn the_parent_field_names_the_parent_row_when_the_edge_resolves() {
-    let item = feed_item(Some("x-a"), Some("s-1"));
-    let mut child = joined_row("jn-t-x-1", None, None);
-    child.harness_session_id = Some("s-1".into());
-    child.spawned_by_session = Some("s-lead".into());
-    let parent_name = "t-x-lead";
-    let by_parent = |row: &AgentRow| -> String {
-        let (popup, _, _) = feed_detail::build(&[row.clone()], 0, &item);
-        popup_rows(&popup)
-            .into_iter()
-            .find(|(l, _)| l.as_deref() == Some("parent"))
-            .map(|(_, v)| v)
-            .unwrap_or_default()
-    };
-
-    // Child edge resolving to a row: "<name> (<session>)".
-    child.spawned_by_name = Some(parent_name.into());
-    child.lineage_kind = Some("child".into());
-    assert_eq!(by_parent(&child), "t-x-lead (s-lead)");
-
-    // Peer edge: the same answer, plus the handoff word.
-    child.lineage_kind = Some("peer".into());
-    assert_eq!(by_parent(&child), "t-x-lead (s-lead) (handoff)");
-
-    // Edge present, name absent (a session no row holds): the bare id, and
-    // never a fabricated or borrowed name.
-    child.spawned_by_name = None;
-    child.lineage_kind = Some("child".into());
-    assert_eq!(by_parent(&child), "s-lead");
-    child.lineage_kind = Some("peer".into());
-    assert_eq!(by_parent(&child), "s-lead (handoff)");
-
-    // No edge: the birth's reason stands in for the parent it could not name.
-    // The popup caps its width and ellipsizes, so a long reason may clip in
-    // the render; the head of the real string must show.
-    child.spawned_by_session = None;
-    child.lineage_kind = None;
-    child.lineage_reason = Some("daemon mint: spawn request carried no parent edge".into());
-    let shown = by_parent(&child);
-    assert!(
-        shown.starts_with("daemon mint: spawn request carried no parent"),
-        "the birth's reason stands in: {shown}"
-    );
-
-    // No edge and no reason: the field hides (item.parent rides in its
-    // place when the birth stamped one).
-    child.lineage_reason = None;
-    let (popup, _, _) = feed_detail::build(&[child], 0, &item);
-    let labels: Vec<String> = popup_rows(&popup)
-        .into_iter()
-        .filter_map(|(l, _)| l)
-        .collect();
-    assert!(!labels.iter().any(|l| l == "parent"), "{labels:?}");
-}
 
 // (AC7-HP) The crowns band leads, then one header per owner ordered by
 // its newest row, then `other`; a header click resolves to no detail.
-#[test]
-fn display_slots_group_the_rows() {
-    let mut crown = feed_item(None, None);
-    crown.kind = "crown_vacated".into();
-    crown.ts = "2026-09-28T16:45:58Z".into();
-    crown.title = "warden left L2 e: succession".into();
-    let mut owned_a = feed_item(Some("x-a"), None);
-    owned_a.owner = Some("epic x-29a8 the epic".into());
-    owned_a.ts = "2026-09-28T17:00:00Z".into();
-    let mut owned_b = feed_item(Some("x-b"), None);
-    owned_b.owner = Some("epic x-29a8 the epic".into());
-    owned_b.ts = "2026-09-28T17:30:00Z".into();
-    let mut loose = feed_item(Some("x-c"), None);
-    loose.ts = "2026-09-28T18:00:00Z".into();
-    let items = vec![loose, owned_a, owned_b, crown];
-    let slots = feed_view::display_slots(&items, feed_view::FeedOrder::Grouped);
-    // Slot shapes: crowns header + the crown row, the owner header with
-    // its rows newest first, then the other header with the loose row.
-    let shape: Vec<String> = slots
-        .iter()
-        .map(|s| match s {
-            feed_view::Slot::Header(h) => format!("H:{h}"),
-            feed_view::Slot::Item(i) => format!("I:{}", items[*i].node.as_deref().unwrap_or("?")),
-        })
-        .collect();
-    assert_eq!(
-        shape,
-        [
-            "H:crowns",
-            "I:?",
-            "H:epic x-29a8 the epic",
-            "I:x-b",
-            "I:x-a",
-            "H:other",
-            "I:x-c",
-        ],
-        "{shape:?}"
-    );
-    // A header row never resolves to a detail.
-    let g = feed_view::FeedOrder::Grouped;
-    assert_eq!(feed_row_item(&items, 1, ROWS, 0, g), None, "crowns header");
-    // The first item row IS the crown row.
-    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), Some(3));
-}
 
 // (AC8-HP) The kind span goes bold in the brand colour for kinds that
 // need action; the flattened text is what the panel always drew.
-#[test]
-fn feed_panel_rows_style_the_actionable_kinds() {
-    let mut vacated = feed_item(Some("x-a"), None);
-    vacated.kind = "crown_vacated".into();
-    vacated.ts = "2026-09-28T16:45:58Z".into();
-    vacated.title = "warden left".into();
-    let o = overlay(vec![vacated]);
-    let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
-    // Row 1 is the group header: every span bold.
-    assert!(
-        rows[1].iter().all(|s| s.bold),
-        "headers render bold: {:?}",
-        rows[1]
-    );
-    // Row 2 is the vacated row: its kind span is bold AND brand.
-    assert!(
-        rows[2]
-            .iter()
-            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
-        "the actionable kind is bold brand: {:?}",
-        rows[2]
-    );
-    assert!(
-        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
-        "the node id is bold: {:?}",
-        rows[2]
-    );
-    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
-    assert!(
-        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
-        "text is unchanged: {}",
-        lines[2]
-    );
-}
 
 // (AC9-HP) Local time: a UTC stamp renders in the zone the test pins.
-#[test]
-fn short_ts_renders_local_time() {
-    let tz = chrono::FixedOffset::east_opt(-7 * 3600).unwrap();
-    assert_eq!(feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz), "09:48");
-    assert_eq!(
-        feed_view::short_ts_in("not-a-time", &tz),
-        "not-a-time",
-        "unparseable stamps show raw"
-    );
-}
 
 // (AC10-EDGE) A settled fold goes stale and refolds on its own; the
 // operator's selected row survives the refresh.
@@ -1050,86 +1073,10 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
 // (x-182e) The order toggle: `Recent` is one flat newest-first list with no
 // headers; `Grouped` stays the shipped shape. The click resolver inverts the
 // painter in BOTH orders, so a row and its detail can never disagree.
-#[test]
-fn the_recent_order_flattens_the_group_headers() {
-    let mut a = feed_item(Some("x-a"), None);
-    a.ts = "2026-09-28T17:00:00Z".into();
-    let mut b = feed_item(Some("x-b"), None);
-    b.ts = "2026-09-28T18:00:00Z".into();
-    let items = vec![a, b];
-    // Grouped: the unowned rows sit under the `other` header.
-    let grouped = feed_view::display_slots(&items, feed_view::FeedOrder::Grouped);
-    assert!(matches!(grouped.first(), Some(feed_view::Slot::Header(_))));
-    // Recent: no headers at all, newest first.
-    let recent = feed_view::display_slots(&items, feed_view::FeedOrder::Recent);
-    assert!(recent.iter().all(|s| matches!(s, feed_view::Slot::Item(_))));
-    let first = match &recent[0] {
-        feed_view::Slot::Item(i) => items[*i].node.clone().unwrap(),
-        _ => unreachable!(),
-    };
-    assert_eq!(first, "x-b", "newest first");
-    // The resolver answers the same item the painter drew, in Recent too.
-    // Painted row 1 is the first item row (row 0 is the panel header).
-    assert_eq!(
-        feed_row_item(&items, 1, ROWS, 0, feed_view::FeedOrder::Recent),
-        Some(1),
-        "painted row 1 is storage 1 (the newest)"
-    );
-}
 
 // (x-182e) A question row answers from the feed: the click opens the whole
 // question on the questions view's own path, never a provenance detour.
-#[test]
-fn a_question_row_answers_from_the_feed() {
-    let mut v = view_with_rows(vec![]);
-    let mut q = feed_item(None, None);
-    q.kind = "question_asked".into();
-    q.r#ref = Some("q-1".into());
-    q.ts = "2026-09-28T19:00:00Z".into();
-    let mut older = feed_item(Some("x-a"), Some("s-1"));
-    older.ts = "2026-09-28T18:00:00Z".into();
-    v.feed = Some(overlay(vec![q, older]));
-    let w = v.feed_panel_w() as u16;
-    let col = v.term.1 - w + 2;
-    let hit = v.chrome_hit(2, col).expect("the question row deep-links");
-    assert!(
-        matches!(&hit, ChromeHit::OpenQuestionDetail(id) if id == "q-1"),
-        "the question row opens the question, not the provenance: {hit:?}"
-    );
-}
 
 // (x-182e) The owner line resolves its holder against the live roster: a
 // dead crown's handle says it is gone, a live one keeps the line, and a
 // line with no parenthesized holder passes through untouched.
-#[test]
-fn a_dead_owner_says_it_is_gone() {
-    let mut item = feed_item(Some("x-a"), None);
-    item.owner = Some("king jolly-finch (king-4d9b)".into());
-    // Live holder: the line stands.
-    let (popup, _, _) = feed_detail::build(&[joined_row("king-4d9b", None, Some(1))], 0, &item);
-    let owner = popup_rows(&popup)
-        .into_iter()
-        .find(|(l, _)| l.as_deref() == Some("owner"))
-        .map(|(_, v)| v)
-        .unwrap();
-    assert_eq!(owner, "king jolly-finch (king-4d9b)");
-    // Dead holder: the modal says so instead of naming a current king that
-    // is not there.
-    let (popup, _, _) = feed_detail::build(&[], 0, &item);
-    let owner = popup_rows(&popup)
-        .into_iter()
-        .find(|(l, _)| l.as_deref() == Some("owner"))
-        .map(|(_, v)| v)
-        .unwrap();
-    assert_eq!(owner, "king jolly-finch (king-4d9b) · gone");
-    // No holder to resolve: untouched.
-    let mut plain = feed_item(Some("x-a"), None);
-    plain.owner = Some("epic x-29a8 the epic".into());
-    let (popup, _, _) = feed_detail::build(&[], 0, &plain);
-    let owner = popup_rows(&popup)
-        .into_iter()
-        .find(|(l, _)| l.as_deref() == Some("owner"))
-        .map(|(_, v)| v)
-        .unwrap();
-    assert_eq!(owner, "epic x-29a8 the epic");
-}

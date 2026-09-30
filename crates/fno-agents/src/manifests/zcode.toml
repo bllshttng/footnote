@@ -1,0 +1,11 @@
+# zcode readiness manifest - deliberately rule-free.
+#
+# The validator requires every capability-row harness to bundle a manifest
+# this file satisfies; the ROW carries `ready_marker = "unsupported"` because
+# no pane lane exists: the measured 3.14.3 CLI bundle resolves no
+# `@zcode/tui`, so a TUI launch exits 1 before painting (captured twice,
+# 2026-09-29), and there is no terminal grid to match rules against. Pin
+# rules here only from a live zcode TUI capture, the way grok.toml was
+# pinned, when a runnable TUI exists.
+#
+# State vocabulary + arbitration: see codex.toml.

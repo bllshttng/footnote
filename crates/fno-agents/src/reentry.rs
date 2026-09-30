@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn reentry_plan_resolves_a_complete_routed_glm_row() {
+    fn route_rows() {
         let dir = std::env::temp_dir().join("reentry-test-route-a.json");
         write_route(&dir, false);
         let mut e = row("glm");
@@ -1168,10 +1168,7 @@ mod tests {
         // the plan only NAMES.
         let json = serde_json::to_string(&plan).unwrap();
         assert!(!json.contains(SECRET));
-    }
 
-    #[test]
-    fn reentry_plan_refuses_an_unknown_account_on_a_routed_row() {
         let (_tmp, home) = staged_home(&[]);
         let dir = std::env::temp_dir().join("reentry-test-route-b.json");
         write_route(&dir, false);
@@ -1191,10 +1188,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no launch account"), "{err}");
-    }
 
-    #[test]
-    fn attach_resolves_past_a_routed_row_with_no_launch_account() {
         // The same row the test above refuses on RESUME. An attach starts no
         // process, so the namespace it would have guessed is never applied.
         let (_tmp, home) = staged_home(&[]);
@@ -1221,10 +1215,7 @@ mod tests {
             "{:?}",
             plan.env
         );
-    }
 
-    #[test]
-    fn reentry_plan_refuses_a_missing_route_file() {
         let (_tmp, home) = staged_home(&[]);
         let mut e = row("glm");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
@@ -1244,10 +1235,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unreadable"), "{err}");
-    }
 
-    #[test]
-    fn reentry_plan_refuses_a_floor_only_route_file() {
         let (_tmp, home) = staged_home(&[]);
         let dir = std::env::temp_dir().join("reentry-test-floor.json");
         write_route(&dir, true);
@@ -1271,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn reentry_plan_refuses_an_unreachable_cwd() {
+    fn refusal_rows() {
         let (_tmp, home) = staged_home(&[]);
         let mut e = row("dead");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
@@ -1289,10 +1277,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unreachable"), "{err}");
-    }
 
-    #[test]
-    fn reentry_plan_refuses_a_row_with_no_session_identity() {
         let (_tmp, home) = staged_home(&[]);
         let mut e = row("blank");
         e.launch_account = Some("default".into());
@@ -1307,10 +1292,173 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no harness session id"), "{err}");
+
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("orphan");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("removed-acct".into());
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "orphan",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("removed-acct") && err.contains("no longer resolves"),
+            "{err}"
+        );
+
+        // the operator's blocked portal press. The row's pinned
+        // account no longer resolves, but the job is running and the attach
+        // reaches it by transport id. The plan carries no namespace and keeps
+        // the recorded id as billing provenance.
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("king-119e-reaper");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("removed-acct".into());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "king-119e-reaper",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "attach");
+        assert_eq!(plan.launch_account, "removed-acct");
+        assert!(
+            !plan.env.contains_key("CLAUDE_CONFIG_DIR"),
+            "{:?}",
+            plan.env
+        );
+
+        // The positive control for the two tests above: scoping the REFUSAL
+        // must not delete the BINDING. A resolvable account still names its
+        // namespace on attach, so a job under a non-default root is reachable.
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("pinned");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("makers".into());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "pinned",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/acct/makers/cfg")
+        );
+
+        let (_tmp, home) = staged_home(&[]);
+        // The binding resolves the id but carries no config dir: an api-key
+        // lane whose credential the secret-free plan never carries. Launching
+        // bare would silently drop the account's key - refuse instead.
+        let api_key_lane = |id: &str| -> Result<Option<String>, String> {
+            if id == "keyacct" {
+                Ok(None)
+            } else {
+                Err(format!("account {id:?} is not registered"))
+            }
+        };
+        let mut e = row("keyed");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("keyacct".into());
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "keyed",
+            ReentryTransition::Resume,
+            None,
+            &api_key_lane,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("api-key lane") && err.contains("keyacct"),
+            "{err}"
+        );
+
+        let (_tmp, home) = staged_home(&["aaaaaaaa"]);
+        // --cwd re-homes a row whose recorded worktree is gone: the operator's
+        // live replacement outranks the recorded dir for the check and the plan.
+        let mut e = row("moved");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("default".into());
+        e.cwd = "/no/such/dir/anywhere".into();
+        let live = std::env::temp_dir().to_string_lossy().to_string();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "moved",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            Some(&live),
+        )
+        .unwrap();
+        assert_eq!(plan.cwd, live);
+
+        let (_tmp, home) = staged_home(&[]);
+        let e1 = row("dup");
+        let e2 = row("dup");
+        let err = resolve_reentry_with(
+            &reg(vec![e1, e2]),
+            "dup",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+
+        let err = resolve_reentry_with(
+            &reg(vec![row("other")]),
+            "ghost",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("no registry row"), "{err}");
+
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("cx");
+        e.harness = Some("codex".into());
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "cx",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("claude-only"), "{err}");
     }
 
     #[test]
-    fn reentry_plan_keeps_a_proven_default_row_bare() {
+    fn default_rows() {
         let (_tmp, home) = staged_home(&[]);
         let mut e = row("plain");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
@@ -1330,10 +1478,7 @@ mod tests {
         assert_eq!(plan.mechanism, "attach");
         assert!(plan.env.is_empty());
         assert_eq!(plan.launch_account, "default");
-    }
 
-    #[test]
-    fn reentry_plan_keeps_a_legacy_default_row_on_its_historical_behavior() {
         let (_tmp, home) = staged_home(&[]);
         let mut e = row("legacy");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
@@ -1353,10 +1498,7 @@ mod tests {
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
         assert_eq!(plan.mechanism, "attach");
         assert!(plan.env.is_empty());
-    }
 
-    #[test]
-    fn reentry_plan_pins_the_reap_receipts_model_axes_on_a_bare_row() {
         // A re-created bare row (no model, no route, no live transcript)
         // cannot pin its model, so the revival would land on the account
         // default. The receipt the reaper wrote carries the axes the
@@ -1410,272 +1552,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reentry_plan_names_both_ids_and_requires_selection_to_launch() {
-        let (_tmp, home) = staged_home(&["aaaaaaaa", "11111111"]);
-        let mut e = row("forked");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("default".into());
-        let r = &reg(vec![e]);
-
-        let err = resolve_reentry_with(
-            r,
-            "forked",
-            ReentryTransition::Recover,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("two valid session ids"), "{err}");
-
-        // An unrecorded id is refused naming BOTH recorded ids.
-        let err = resolve_reentry_with(
-            r,
-            "forked",
-            ReentryTransition::Recover,
-            Some("99999999-9999-9999-9999-999999999999"),
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("aaaaaaaa-bbbb"), "{err}");
-        assert!(err.contains("11111111-2222"), "{err}");
-
-        // Either recorded id resolves; neither replaces the other on the row.
-        for id in [
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "11111111-2222-3333-4444-555555555555",
-        ] {
-            let plan = resolve_reentry_with(
-                r,
-                "forked",
-                ReentryTransition::Recover,
-                Some(id),
-                &binding_ok,
-                &home,
-                None,
-            )
-            .unwrap();
-            assert_eq!(plan.session_id, id);
-        }
-
-        // Attach needs no selection: it targets the row's own transport key.
-        let plan = resolve_reentry_with(
-            r,
-            "forked",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-
-        // A smart resume also needs no selection: it continues the primary
-        // (the canonical address delivery follows) and never demands one.
-        let plan = resolve_reentry_with(
-            r,
-            "forked",
-            ReentryTransition::Resume,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-    }
-
-    #[test]
-    fn reentry_plan_refuses_a_dead_account() {
-        let (_tmp, home) = staged_home(&[]);
-        let mut e = row("orphan");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("removed-acct".into());
-        let err = resolve_reentry_with(
-            &reg(vec![e]),
-            "orphan",
-            ReentryTransition::Resume,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("removed-acct") && err.contains("no longer resolves"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn attach_resolves_past_a_dead_account() {
-        // the operator's blocked portal press. The row's pinned
-        // account no longer resolves, but the job is running and the attach
-        // reaches it by transport id. The plan carries no namespace and keeps
-        // the recorded id as billing provenance.
-        let (_tmp, home) = staged_home(&[]);
-        let mut e = row("king-119e-reaper");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("removed-acct".into());
-        let plan = resolve_reentry_with(
-            &reg(vec![e]),
-            "king-119e-reaper",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(plan.mechanism, "attach");
-        assert_eq!(plan.launch_account, "removed-acct");
-        assert!(
-            !plan.env.contains_key("CLAUDE_CONFIG_DIR"),
-            "{:?}",
-            plan.env
-        );
-    }
-
-    #[test]
-    fn attach_still_carries_a_resolvable_config_dir() {
-        // The positive control for the two tests above: scoping the REFUSAL
-        // must not delete the BINDING. A resolvable account still names its
-        // namespace on attach, so a job under a non-default root is reachable.
-        let (_tmp, home) = staged_home(&[]);
-        let mut e = row("pinned");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("makers".into());
-        let plan = resolve_reentry_with(
-            &reg(vec![e]),
-            "pinned",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-            Some("/acct/makers/cfg")
-        );
-    }
-
-    #[test]
-    fn reentry_plan_refuses_an_api_key_lane_account_it_cannot_restore() {
-        let (_tmp, home) = staged_home(&[]);
-        // The binding resolves the id but carries no config dir: an api-key
-        // lane whose credential the secret-free plan never carries. Launching
-        // bare would silently drop the account's key - refuse instead.
-        let api_key_lane = |id: &str| -> Result<Option<String>, String> {
-            if id == "keyacct" {
-                Ok(None)
-            } else {
-                Err(format!("account {id:?} is not registered"))
-            }
-        };
-        let mut e = row("keyed");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("keyacct".into());
-        let err = resolve_reentry_with(
-            &reg(vec![e]),
-            "keyed",
-            ReentryTransition::Resume,
-            None,
-            &api_key_lane,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("api-key lane") && err.contains("keyacct"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn reentry_plan_honors_a_replacement_cwd_over_an_unreachable_recorded_one() {
-        let (_tmp, home) = staged_home(&["aaaaaaaa"]);
-        // --cwd re-homes a row whose recorded worktree is gone: the operator's
-        // live replacement outranks the recorded dir for the check and the plan.
-        let mut e = row("moved");
-        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
-        e.short_id = "aaaaaaaa".into();
-        e.launch_account = Some("default".into());
-        e.cwd = "/no/such/dir/anywhere".into();
-        let live = std::env::temp_dir().to_string_lossy().to_string();
-        let plan = resolve_reentry_with(
-            &reg(vec![e]),
-            "moved",
-            ReentryTransition::Resume,
-            None,
-            &binding_ok,
-            &home,
-            Some(&live),
-        )
-        .unwrap();
-        assert_eq!(plan.cwd, live);
-    }
-
-    #[test]
-    fn reentry_plan_refuses_an_ambiguous_or_missing_row() {
-        let (_tmp, home) = staged_home(&[]);
-        let e1 = row("dup");
-        let e2 = row("dup");
-        let err = resolve_reentry_with(
-            &reg(vec![e1, e2]),
-            "dup",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("ambiguous"), "{err}");
-
-        let err = resolve_reentry_with(
-            &reg(vec![row("other")]),
-            "ghost",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("no registry row"), "{err}");
-    }
-
-    #[test]
-    fn reentry_plan_refuses_a_non_claude_row() {
-        let (_tmp, home) = staged_home(&[]);
-        let mut e = row("cx");
-        e.harness = Some("codex".into());
-        let err = resolve_reentry_with(
-            &reg(vec![e]),
-            "cx",
-            ReentryTransition::Attach,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("claude-only"), "{err}");
-    }
-
     /// The shared helper snapshots git's path; hand-rolling it resolved by name.
     fn _git(repo: &Path, args: &[&str]) {
         let out = crate::git_test_helpers::git_run(args, repo).unwrap();
@@ -1683,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+    fn cwd_rows() {
         // Shells git: a sibling test blanks PATH, so this is the PATH-dependent
         // work PATH_TEST_MUTEX covers.
         let _p = crate::path_test_guard();
@@ -1726,10 +1602,7 @@ mod tests {
             resolved, wt,
             "resolved to the transcript's worktree, not the recorded cwd"
         );
-    }
 
-    #[test]
-    fn resolve_resume_cwd_falls_back_to_recorded_when_no_transcript_exists() {
         // No transcript under any candidate: fall back to the recorded cwd and
         // say so on stderr. An absent number beats a guessed one.
         let tmp = tempfile::tempdir().unwrap();
@@ -1743,10 +1616,7 @@ mod tests {
             "deadbeef-0000-0000-0000-000000000000",
         );
         assert_eq!(resolved, recorded);
-    }
 
-    #[test]
-    fn resolve_resume_cwd_confirms_recorded_when_its_slug_holds_the_transcript() {
         // The transcript under the recorded cwd's own slug confirms it; no
         // worktree enumeration needed.
         let tmp = tempfile::tempdir().unwrap();
@@ -1762,10 +1632,46 @@ mod tests {
 
         let resolved = resolve_resume_cwd(&ClaudeHome::at(home), recorded.to_str().unwrap(), uuid);
         assert_eq!(resolved, recorded);
+
+        // The recorded cwd is gone and no git worktree knows the session. The
+        // transcript itself names the live directory; the plan must use it.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = ClaudeHome::at(tmp.path()).with_listing(ClaudeAgentsSnapshot::known(vec![]));
+        let live = tmp.path().join("live-dir");
+        std::fs::create_dir_all(&live).unwrap();
+        let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";
+        // Transcript under the slug of the MISSING recorded dir: the first
+        // probe must not win just because the slug matches.
+        let recorded = tmp.path().join("gone-dir");
+        let slug = crate::claude_ask::claude_cwd_slug(&recorded);
+        let project = ClaudeHome::at(tmp.path()).projects_dir().join(slug);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{uuid}.jsonl")),
+            format!("{{\"cwd\":\"{}\"}}\n", live.display()),
+        )
+        .unwrap();
+
+        let mut e = row("moved");
+        e.harness_session_id = Some(uuid.into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        e.cwd = recorded.to_string_lossy().to_string();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "moved",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.cwd, live.to_string_lossy().to_string());
     }
 
     #[test]
-    fn reentry_plan_bg_resumes_a_dead_bg_row_under_its_own_id() {
+    fn bg_rows() {
         // Job state gone, no mux ref: the plan is the same-id bg resume the
         // probe measured, not a refusal.
         let mut e = row("gone");
@@ -1793,10 +1699,7 @@ mod tests {
                 "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
             ]
         );
-    }
 
-    #[test]
-    fn reentry_plan_bg_resume_rides_the_recorded_route_and_namespace() {
         // A routed bg row on a config-dir account: the bg resume starts a NEW
         // process from the ambient namespace, so both the route file and the
         // config dir must ride the plan.
@@ -1887,24 +1790,18 @@ mod tests {
     }
 
     #[test]
-    fn a_revive_refuses_when_the_listing_cannot_be_read() {
+    fn revive_rows() {
         // A bg resume of a session that is in fact live starts a copy the
         // pane never stops, so an unread listing refuses instead.
         let err = revive_with(ClaudeAgentsSnapshot::unknown("timed out")).unwrap_err();
         assert!(err.contains("could not be read"), "{err}");
-    }
 
-    #[test]
-    fn a_revive_attaches_a_running_job() {
         for running in ["working", "blocked", "idle"] {
             let plan = revive_plan(Some(running));
             assert_eq!(plan.transition, "attach", "{running}");
             assert_eq!(plan.argv, vec!["claude", "attach", "9a1b2c3d"], "{running}");
         }
-    }
 
-    #[test]
-    fn a_revive_respawns_a_listed_dead_job_then_attaches() {
         for dead in ["stopped", "failed", "done"] {
             let plan = revive_plan(Some(dead));
             assert_eq!(plan.transition, "revive", "{dead}");
@@ -1923,10 +1820,7 @@ mod tests {
                 "{dead}"
             );
         }
-    }
 
-    #[test]
-    fn a_revive_bg_resumes_an_unlisted_job_then_attaches() {
         let plan = revive_plan(None);
         assert_eq!(plan.mechanism, "bg-resume");
         assert_eq!(
@@ -1945,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn reentry_plan_never_resumes_a_mux_row_as_a_foreground_pane() {
+    fn pane_rows() {
         // A pane row the listing does not know comes back as a background
         // job under its own id, never a foreground `claude --resume`.
         let plan = paned_plan(&[]);
@@ -1959,10 +1853,7 @@ mod tests {
                 "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
             ]
         );
-    }
 
-    #[test]
-    fn reentry_plan_respawns_a_listed_job_whatever_its_files_say() {
         // `claude agents --json --all` lists the job, so it respawns. No
         // file under jobs/ was staged: the listing alone decides.
         let plan = paned_plan(&["9a1b2c3d"]);
@@ -1978,46 +1869,7 @@ mod tests {
     }
 
     #[test]
-    fn reentry_plan_resolves_a_lost_cwd_from_the_transcripts_own_record() {
-        // The recorded cwd is gone and no git worktree knows the session. The
-        // transcript itself names the live directory; the plan must use it.
-        let tmp = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(tmp.path()).with_listing(ClaudeAgentsSnapshot::known(vec![]));
-        let live = tmp.path().join("live-dir");
-        std::fs::create_dir_all(&live).unwrap();
-        let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";
-        // Transcript under the slug of the MISSING recorded dir: the first
-        // probe must not win just because the slug matches.
-        let recorded = tmp.path().join("gone-dir");
-        let slug = crate::claude_ask::claude_cwd_slug(&recorded);
-        let project = ClaudeHome::at(tmp.path()).projects_dir().join(slug);
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(
-            project.join(format!("{uuid}.jsonl")),
-            format!("{{\"cwd\":\"{}\"}}\n", live.display()),
-        )
-        .unwrap();
-
-        let mut e = row("moved");
-        e.harness_session_id = Some(uuid.into());
-        e.short_id = "9a1b2c3d".into();
-        e.launch_account = Some("default".into());
-        e.cwd = recorded.to_string_lossy().to_string();
-        let plan = resolve_reentry_with(
-            &reg(vec![e]),
-            "moved",
-            ReentryTransition::Resume,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(plan.cwd, live.to_string_lossy().to_string());
-    }
-
-    #[test]
-    fn reentry_plan_derives_the_selected_id_short_id() {
+    fn derive_rows() {
         // A two-id row: `recover --session <related>` must resolve the
         // RELATED transport key (the jobId IS sessionId[:8]), not the
         // primary's cached short_id - a respawn on the wrong key revives the
@@ -2063,10 +1915,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.short_id, "aaaaaaaa");
         assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-    }
 
-    #[test]
-    fn reentry_plan_carries_the_backlog_node_not_the_thread_ref() {
         // The row a resume relaunch stamps FNO_NODE from must be the backlog
         // node id (entry.node), never fno_id (the thread/session identity) --
         // the two are unrelated axes and mesh_identity_assignments folds
@@ -2089,6 +1938,85 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.node.as_deref(), Some("x-aaaa"));
+
+        let (_tmp, home) = staged_home(&["aaaaaaaa", "11111111"]);
+        let mut e = row("forked");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("default".into());
+        let r = &reg(vec![e]);
+
+        let err = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Recover,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("two valid session ids"), "{err}");
+
+        // An unrecorded id is refused naming BOTH recorded ids.
+        let err = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Recover,
+            Some("99999999-9999-9999-9999-999999999999"),
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("aaaaaaaa-bbbb"), "{err}");
+        assert!(err.contains("11111111-2222"), "{err}");
+
+        // Either recorded id resolves; neither replaces the other on the row.
+        for id in [
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "11111111-2222-3333-4444-555555555555",
+        ] {
+            let plan = resolve_reentry_with(
+                r,
+                "forked",
+                ReentryTransition::Recover,
+                Some(id),
+                &binding_ok,
+                &home,
+                None,
+            )
+            .unwrap();
+            assert_eq!(plan.session_id, id);
+        }
+
+        // Attach needs no selection: it targets the row's own transport key.
+        let plan = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+        // A smart resume also needs no selection: it continues the primary
+        // (the canonical address delivery follows) and never demands one.
+        let plan = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 
     /// An empty route dir, under the env lock: the resume-pin lookup misses,
@@ -2601,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn ac4_hp_carry_pins_copies_the_plan_pin_onto_the_door_argv() {
+    fn pin_rows() {
         let mut argv = vec![
             "claude".to_string(),
             "--resume".to_string(),
@@ -2618,10 +2546,7 @@ mod tests {
         assert_eq!(argv.iter().filter(|t| *t == "--effort").count(), 1);
         assert!(argv.contains(&"claude-opus-5".to_string()));
         assert!(argv.contains(&"high".to_string()));
-    }
 
-    #[test]
-    fn ac4_edge_carry_pins_never_duplicates_an_explicit_flag() {
         // An argv that already names --model keeps it; a plan with no pin
         // (attach, or a routed plan) leaves the argv unchanged.
         let mut argv = vec!["claude".to_string(), "--model".to_string(), "m".to_string()];

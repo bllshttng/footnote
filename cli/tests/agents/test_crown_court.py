@@ -312,7 +312,7 @@ def test_terminal_rows_are_excluded_from_the_court(
 
 
 def test_two_live_rows_holding_the_same_territory_is_a_conflict(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     from fno.agents.court import gather_court
 
@@ -348,7 +348,7 @@ def test_two_live_rows_holding_the_same_territory_is_a_conflict(
 
 
 def test_aliases_and_ordered_scopes_share_one_conflict_group(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     from fno.agents.court import gather_court
 
@@ -368,7 +368,7 @@ def test_aliases_and_ordered_scopes_share_one_conflict_group(
 
 
 def test_a_set_holder_conflicts_with_a_holder_over_one_member(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """A rung-2 set-holder rules each member, so a live row over 'e-1,e-2'
     beside a live row over 'e-1' is a double rule. Keying conflicts on exact
@@ -403,7 +403,7 @@ def test_a_set_holder_conflicts_with_a_holder_over_one_member(
 
 
 def test_rivalry_is_reported_per_pair_never_per_merged_group(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """A rivals B over e-1, B rivals C over e-2, A and C share nothing. A
     merged group would claim three rows hold e-1,e-2; the truth is two
@@ -428,7 +428,7 @@ def test_rivalry_is_reported_per_pair_never_per_merged_group(
 
 
 def test_a_portfolio_and_its_project_king_are_a_court_not_a_conflict(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """The ladder's documented shape: a portfolio king's court IS project
     kings. Overlap-keyed conflicts would cry double-rule on every legitimate
@@ -892,7 +892,7 @@ def test_a_scope_with_no_level_is_surfaced_not_silently_dropped(
 
 
 def test_a_half_crown_still_counts_as_a_claim_on_its_territory(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """The two halves of one read must agree. gather_court surfaces a
     scope-without-level row as a disagreement, so _conflicts must not skip it:

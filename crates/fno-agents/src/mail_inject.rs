@@ -2331,13 +2331,16 @@ mod tests {
     /// mail path applies after the stdin read never consult it.
     #[tokio::test]
     async fn seed_mode_delivers_a_multi_line_body_over_the_mail_cap() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::path_test_guard();
         let daemon = crate::codex_fake_daemon::FakeDaemon::start(
             crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(serde_json::json!({
                 "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t14-own"]
             })),
         );
-        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-c");
+        let _add_dirs = crate::claims::EnvVarGuard::set("FNO_WORKER_ADD_DIRS", "/tmp/fno-t14-c");
         let args = parse_args(&argv(&[
             "--session",
             "thread-t",
@@ -2349,7 +2352,6 @@ mod tests {
         .unwrap();
         let seed = format!("line one\n\n<block>\n{}\n</block>\n", "x".repeat(6000));
         assert_eq!(run_seed_mode(&args, &seed, "/tmp/w").await, 0);
-        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         let turn = daemon.first_params("turn/start").expect("seed ran");
         let delivered_text = turn["input"][0]["text"].as_str().unwrap();
         assert!(delivered_text.starts_with("line one"));

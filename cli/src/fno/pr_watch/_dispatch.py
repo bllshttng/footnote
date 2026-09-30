@@ -969,6 +969,19 @@ def _run_tick(
                 merge_scan_scanned += 1
                 SCAN_PROGRESS["sweep"] = _scan_note()
                 failed.discard(key)
+
+                # open_ready's sweep leg: an observed draft goes back to ready
+                # via the fno-agents door (pr_draft_ready.rs), which journals the flip.
+                if obs.state == "OPEN" and obs.is_draft:
+                    try:
+                        from fno.paths import state_dir
+                        from fno.rust_binary import verb_call
+                        verb_call("graph-get", {"pr_draft_ready": {"flip": {
+                            "pr": cand.pr_number, "repo": cand.repo_slug, "node": cand.node_id,
+                            "cwd": str(cand.repo_dir) if cand.repo_dir else None,
+                            "journal": str(state_dir() / "events.jsonl")}}}, timeout=60)
+                    except Exception as exc:  # noqa: BLE001 - one bad flip never aborts the tick
+                        log.warning("pr-watch: draft flip failed for PR #%d: %s", pr, exc)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
                 failed.add(key)

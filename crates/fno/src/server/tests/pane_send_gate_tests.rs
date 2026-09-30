@@ -79,6 +79,60 @@ fn pane_send_labelled_pane_identity_resolution() {
 }
 
 #[test]
+fn pane_send_addresses_either_id_of_a_split_row() {
+    // After the id split the row carries two ids: its own minted fno_id and
+    // its harness session id. A send naming EITHER lands; a third id refuses.
+    let (mut core, pane) = template_core();
+    core.session_name = "sess".into();
+    core.panes.get_mut(&pane).unwrap().name = Some("split".into());
+    let own_id = "0f6a4b2e-1111-4222-8333-444444444444";
+    let harness_id = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
+    let mut row = agent_in("sess", pane, None, false);
+    row.name = "bob".into();
+    row.session_id = Some(own_id.into());
+    row.harness_session_id = Some(harness_id.into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(own_id),
+        Ok(vec![row.clone()]),
+        false,
+    ) {
+        ServerMsg::Ok => {}
+        other => panic!("a send naming the row's own fno_id must land, got {other:?}"),
+    }
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(harness_id),
+        Ok(vec![row]),
+        false,
+    ) {
+        ServerMsg::Ok => {}
+        other => panic!("a send naming the harness session id must land, got {other:?}"),
+    }
+    let mut third = agent_in("sess", pane, None, false);
+    third.name = "bob".into();
+    third.session_id = Some(own_id.into());
+    third.harness_session_id = Some(harness_id.into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("d4c0ffee-0000-4000-8000-000000000000"),
+        Ok(vec![third]),
+        false,
+    ) {
+        ServerMsg::Err { code, .. } => {
+            assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+        }
+        other => panic!("a send naming a third id must refuse, got {other:?}"),
+    }
+}
+
+#[test]
 fn pane_send_dnd_refuses_plain_and_accepts_hold_pass() {
     // AC17-EDGE: a held pane refuses a plain PaneSend with TARGET_DND and
     // accepts the same send when the caller carries the hold gate's pass.

@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn node_from_argv_reads_the_wrapper_token() {
+fn wrapper_anchored_scans_stop_at_the_command() {
     // env(1) wrapper prefix: `env FNO_AGENT_SELF=... FNO_NODE=x-66e8 ... claude`.
     let argv: Vec<String> = [
         "env",
@@ -18,10 +18,6 @@ fn node_from_argv_reads_the_wrapper_token() {
     .map(|s| s.to_string())
     .collect();
     assert_eq!(node_from_argv(&argv), Some("x-66e8".to_string()));
-}
-
-#[test]
-fn node_from_argv_is_none_for_ad_hoc_pane() {
     let ad_hoc = |a: &[&str]| node_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     // A plain `pane run htop` (no wrapper) has no provenance.
     assert_eq!(ad_hoc(&["htop"]), None);
@@ -35,6 +31,26 @@ fn node_from_argv_is_none_for_ad_hoc_pane() {
     );
     // No `env` wrapper at all -> never scanned, even with a bare token.
     assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    // The same anchoring governs argv_runs_claude: bare and env-wrapped
+    // claude match; a QoS wrapper re-anchors the command after its `--`.
+    let runs = |a: &[&str]| argv_runs_claude(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert!(runs(&["claude"]));
+    assert!(runs(&["env", "FNO_AGENT_SELF=w", "claude"]));
+    assert!(runs(&[
+        "env",
+        "FNO_AGENT_SELF=w",
+        "/usr/sbin/taskpolicy",
+        "-c",
+        "utility",
+        "--",
+        "claude"
+    ]));
+    // An argument naming claude is never the command.
+    assert!(!runs(&["man", "claude"]));
+    assert!(!runs(&["bash", "-c", "claude --print"]));
+    assert!(!runs(&["env", "A=b", "taskpolicy", "--", "codex"]));
+    // No command at all.
+    assert!(!runs(&["env", "A=b"]));
 }
 
 #[test]

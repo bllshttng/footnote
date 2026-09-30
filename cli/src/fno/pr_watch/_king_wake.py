@@ -158,20 +158,13 @@ def _escalation_answer_trigger(
     full_id = parse_manifest(target.manifest).get("harness_session_id") or ""
     if full_id:
         addresses.update({full_id, canonical_handle(full_id)})
-    prompt: Optional[str] = None
-    matched_ts = ""
-    for record in records:
-        closed_ts = str(record.get("closed_ts") or "")
-        if not closed_ts or closed_ts <= cursor:
-            continue
-        if record.get("asker") in addresses:
-            prompt = (
-                f"Answer to your question {record['id']} "
-                f'"{record["question"]}": {record["answer"]}.'
-            )
-            matched_ts = closed_ts
-            break
-    return prompt, matched_ts
+    from fno.events.store_client import read_projection
+    from fno.outstanding.core import questions_path
+
+    result = read_projection(questions_path(), "--next-answer", {
+        "addresses": sorted(addresses), "records": records, "cursor": cursor,
+    })
+    return result["prompt"], result["cursor"]
 
 
 def _raise_marker_question(target: CrownTarget, marker: str, question: str, ask: str) -> str:
