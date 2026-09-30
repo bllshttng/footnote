@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_expiry_uses_resume_fallback_and_suppresses_newer_activity() {
+    fn watch_expiry_wakes_and_projects_current_watch() {
         let mut calls: Vec<Vec<String>> = Vec::new();
         let mut runner: Runner = &mut |argv: &[String], _cwd: &str| {
             calls.push(argv.to_vec());
@@ -999,6 +999,11 @@ mod tests {
             ),
         )
         .unwrap();
+
+        let overdue = crate::watch_expiry::overdue(&home).unwrap();
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].session_id, "s-legacy");
+        assert!(overdue[0].overdue_ms > 0);
 
         std::fs::remove_file(home.registry_json()).unwrap();
         std::fs::create_dir(home.registry_json()).unwrap();
