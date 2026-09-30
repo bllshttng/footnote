@@ -1387,6 +1387,36 @@ enum Flow {
     Shutdown,
 }
 
+#[derive(Clone)]
+struct OwnerLease {
+    pid: u32,
+    birth: u64,
+    session: String,
+}
+
+impl OwnerLease {
+    fn from_env() -> Option<Self> {
+        let pid = std::env::var("FNO_OWNER_PID").ok()?.parse::<u32>().ok()?;
+        let birth = std::env::var("FNO_OWNER_BIRTH")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|birth| *birth > 0)?;
+        let session = std::env::var("FNO_OWNER_SESSION")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        (pid > 1).then_some(Self {
+            pid,
+            birth,
+            session,
+        })
+    }
+
+    fn alive(&self) -> bool {
+        crate::proto::pid_start_time(self.pid) == Some(self.birth)
+    }
+}
+
 /// Run the server on `socket`. Returns the process exit code.
 ///
 /// The session NAME is the socket's file stem (`work.sock` -> `work`): every
@@ -1394,6 +1424,7 @@ enum Flow {
 /// needs no extra flag on the internal `--server` surface. It feeds the
 /// `Info` answer and every pane's `FNO_SESSION`.
 pub fn run(socket: PathBuf) -> i32 {
+    let owner = OwnerLease::from_env();
     if let Some(parent) = socket.parent() {
         // The socket accepts keystrokes into your shell: never group/world.
         // Born-0700 (atomic) rather than create-then-tighten (gemini
@@ -1482,6 +1513,7 @@ pub fn run(socket: PathBuf) -> i32 {
         pane_children,
         signal_rx,
         shutdown_complete,
+        owner,
     ))
 }
 
@@ -12697,6 +12729,7 @@ async fn serve(
     pane_children: PaneChildRoster,
     mut signal_rx: mpsc::Receiver<CoreMsg>,
     shutdown_complete: Arc<AtomicBool>,
+    owner: Option<OwnerLease>,
 ) -> i32 {
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("fno mux: listener setup failed: {e}");
@@ -13131,18 +13164,12 @@ async fn serve(
     // early attach's restore sees adopted panes as already-live members.
     core.keeper_readopt();
 
-    // FNO_E2E idle-exit reaper (Fix 2): the ONLY reaper that survives
-    // all four leak paths — panic=abort, SIGKILL of the test binary, a
-    // cargo-test timeout, and the untracked client-autospawned setsid server —
-    // because it consults neither the parent (ppid==1 by design in prod) nor a
-    // Drop guard (never runs on SIGKILL/abort). Armed always, runtime no-op
-    // without the marker: a production mux MUST persist across client detach
-    // (Locked Decision 2, AC2-EDGE). The deadline re-arms on activity — a
-    // client-count change (covers the 0->1 attach edge) OR any pane output —
-    // so a working client-less script session (`pane run`, script_api_e2e with
-    // `sleep 30` panes) survives; only a truly silent, viewer-less orphan
-    // reaches the grace and reaps.
+    // Shared ownerless servers persist across client detach. E2E servers and
+    // owner-bound sandbox servers use the same graceful idle shutdown path;
+    // sandbox pane output cannot extend the deadline after the last client
+    // leaves, while a script-style E2E session can still re-arm on output.
     let idle_exit_e2e = std::env::var_os("FNO_E2E").is_some();
+    let idle_exit_enabled = idle_exit_e2e || owner.is_some();
     let idle_grace = Duration::from_millis(
         std::env::var("FNO_IDLE_EXIT_GRACE_MS")
             .ok()
@@ -13151,8 +13178,11 @@ async fn serve(
     );
     let mut idle_count_rx = client_count_rx.clone();
     let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
+    let mut ever_attached = false;
     let mut pane_reap_tick = tokio::time::interval(Duration::from_secs(1));
     pane_reap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut owner_check_tick = tokio::time::interval(Duration::from_secs(1));
+    owner_check_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // `interval`'s first tick is immediate; consume it so the first scan lands
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
@@ -13185,7 +13215,9 @@ async fn serve(
                 );
                 // Pane output is a liveness signal: re-arm the idle
                 // reaper so a working client-less script session never reaps.
-                if idle_exit_e2e {
+                if idle_exit_enabled
+                    && (idle_exit_e2e || !ever_attached || *idle_count_rx.borrow() > 0)
+                {
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
             }
@@ -13196,7 +13228,8 @@ async fn serve(
                 // chunk. Drain that channel before removing the pane so final
                 // bytes cannot lose a select race between separate receivers.
                 if drain_pty_output(&mut core, &mut out_rx, None, &mut e2e_first_out)
-                    && idle_exit_e2e
+                    && idle_exit_enabled
+                    && (idle_exit_e2e || !ever_attached || *idle_count_rx.borrow() > 0)
                 {
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
@@ -13221,7 +13254,8 @@ async fn serve(
                 let dead = core.dead_children_ready_to_reap();
                 if !dead.is_empty()
                     && drain_pty_output(&mut core, &mut out_rx, None, &mut e2e_first_out)
-                    && idle_exit_e2e
+                    && idle_exit_enabled
+                    && (idle_exit_e2e || !ever_attached || *idle_count_rx.borrow() > 0)
                 {
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
@@ -13349,26 +13383,31 @@ async fn serve(
                     break Flow::Shutdown;
                 }
             }
-            // A client-count change is activity (covers the 0->1 attach edge):
-            // re-arm the grace window. Disabled in prod (the reaper arm below
-            // is off without the marker), so no watch-channel wakeups there
-            // (gemini review).
-            res = idle_count_rx.changed(), if idle_exit_e2e => {
+            // Attach and final-detach edges both start a bounded owner-sandbox
+            // idle window. Shared ownerless servers leave this branch disabled.
+            res = idle_count_rx.changed(), if idle_exit_enabled => {
                 if res.is_ok() {
+                    ever_attached |= *idle_count_rx.borrow() > 0;
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
             }
-            // The reaper: enabled only under FNO_E2E. On grace with no
-            // activity, reap iff no client is attached — a still-attached
-            // session is in use, so re-arm and keep serving. Replicate the
+            _ = owner_check_tick.tick(), if owner.is_some() => {
+                if owner.as_ref().is_some_and(|lease| !lease.alive()) {
+                    let session = owner.as_ref().map(|lease| lease.session.as_str()).unwrap_or("unknown");
+                    eprintln!("fno mux: sandbox owner {session} is gone; shutting down");
+                    break Flow::Shutdown;
+                }
+            }
+            // On grace with no client, shut down owner-bound sandboxes and
+            // explicit test servers through Flow::Shutdown. Replicate the
             // CoreMsg::Kill teardown (kill every pane PTY + Flow::Shutdown so
             // SocketGuard unlinks); NEVER std::process::exit, which would
             // orphan the pane shells and leak the socket file.
-            _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
+            _ = tokio::time::sleep_until(idle_deadline), if idle_exit_enabled => {
                 if *idle_count_rx.borrow() == 0
                     && conns_alive.load(std::sync::atomic::Ordering::Acquire) == 0
                 {
-                    eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
+                    eprintln!("fno mux: idle-exit: no client for grace window");
                     break Flow::Shutdown;
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;

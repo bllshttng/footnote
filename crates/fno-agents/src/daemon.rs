@@ -1617,7 +1617,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // `ab_shutdown` winds the task down on daemon shutdown.
     let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sandbox = ctx.home.is_sandbox();
+    let sandbox = ctx.home.is_sandbox() || crate::test_run::sandbox_owner_from_env().is_some();
     let _ = ctx.emitter.emit(
         "daemon_fleet_scope",
         &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
@@ -5086,6 +5086,24 @@ pub(crate) async fn stop_worker_confirmed_for_home(
 /// Probe whether the worker is still serving on its socket. PID-reuse-immune:
 /// the worker is identified by the socket it owns (per `short_id`), so a
 /// recycled unrelated pid never answers here (Codex P1).
+pub(crate) async fn stop_session_for_home(
+    home: &AgentsHome,
+    session_id: &str,
+) -> Option<(String, bool)> {
+    let registry = load_registry_offloaded(home.registry_json()).await.ok()?;
+    let mut matches = registry.entries.iter().filter(|entry| {
+        entry.harness_session_id.as_deref() == Some(session_id)
+            || entry.session_id.as_deref() == Some(session_id)
+    });
+    let entry = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let name = entry.name.clone();
+    let stopped = stop_worker_confirmed_for_home(home, entry).await;
+    Some((name, stopped))
+}
+
 async fn worker_socket_reachable(sock: &std::path::Path) -> bool {
     UnixStream::connect(sock).await.is_ok()
 }

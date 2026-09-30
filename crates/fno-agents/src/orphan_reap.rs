@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 pub const ORPHAN_MIN_ZOMBIES: usize = 20;
 pub const ENV_MIN_ELAPSED: &str = "FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS";
+pub const OWNER_SERVER_MIN_AGE_SECS: u64 = 600;
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct OrphanedTestBinary {
@@ -31,12 +32,14 @@ pub struct OrphanedTestBinary {
     pub elapsed_seconds: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReapRow {
     pub pid: u32,
     pub elapsed_seconds: u64,
     pub zombies: usize,
     pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_session: Option<String>,
     pub reaped: bool,
     pub reason: String,
 }
@@ -163,6 +166,7 @@ pub fn reap_rows(ps_output: &str, apply: bool, min_elapsed: u64) -> Vec<ReapRow>
             elapsed_seconds: orphan.elapsed_seconds,
             zombies: orphan.zombies,
             command: orphan.command.clone(),
+            owner_session: None,
             reaped: false,
             reason: String::new(),
         };
@@ -218,9 +222,45 @@ pub fn maybe_sweep(last_sweep: &mut Instant, in_flight: &Arc<AtomicBool>, events
         let _gate = crate::daemon::SweepGate(flag);
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let min_elapsed = min_elapsed_secs(&cwd);
+        let home = crate::paths::AgentsHome::from_env();
+        let journal = crate::loop_runtime::Journal::new_raw(
+            home.events_jsonl(),
+            crate::daemon::global_events_path(&home),
+        );
         let emitter = EventEmitter::new(events, "daemon");
-        for row in reap_sweep_once(true, min_elapsed) {
-            let _ = emitter.emit("orphan_test_binary_reaped", &row);
+        match read_ps() {
+            Some(ps) => {
+                let rows = reap_snapshot(&ps, true, min_elapsed);
+                for row in &rows {
+                    let event = if row.owner_session.is_some() {
+                        "orphan_owner_server_reaped"
+                    } else {
+                        "orphan_test_binary_reaped"
+                    };
+                    let _ = emitter.emit(event, row);
+                }
+                crate::tick_ledger::emit_tick(
+                    &journal,
+                    "orphan_reap",
+                    crate::tick_ledger::SCHED_DAEMON,
+                    rows.len() as u64,
+                    None,
+                    Some(&format!(
+                        "process table read; {} confirmed orphan(s) reaped",
+                        rows.len()
+                    )),
+                    ORPHAN_SWEEP_SECS.as_secs(),
+                );
+            }
+            None => crate::tick_ledger::emit_tick(
+                &journal,
+                "orphan_reap",
+                crate::tick_ledger::SCHED_DAEMON,
+                0,
+                Some("process_table_unreadable"),
+                Some("ps process table read failed"),
+                ORPHAN_SWEEP_SECS.as_secs(),
+            ),
         }
     });
 }
@@ -247,10 +287,196 @@ pub fn reap_sweep_once(apply: bool, min_elapsed: u64) -> Vec<ReapRow> {
     let Some(ps) = read_ps() else {
         return Vec::new();
     };
-    reap_rows(&ps, apply, min_elapsed)
+    reap_snapshot(&ps, apply, min_elapsed)
+}
+
+fn reap_snapshot(ps: &str, apply: bool, min_elapsed: u64) -> Vec<ReapRow> {
+    let mut rows: Vec<ReapRow> = reap_rows(&ps, apply, min_elapsed)
         .into_iter()
         .filter(|row| row.reaped)
-        .collect()
+        .collect();
+    rows.extend(
+        reap_owner_server_rows(ps, apply)
+            .into_iter()
+            .filter(|row| row.reaped),
+    );
+    rows
+}
+
+fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String)> {
+    let mut candidates = Vec::new();
+    for line in ps_output.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else {
+            continue;
+        };
+        if ppid != 1 {
+            continue;
+        }
+        let Some(elapsed_seconds) = elapsed_seconds(fields[3]) else {
+            continue;
+        };
+        let command = fields[6..].join(" ");
+        let mut words = command.split_whitespace();
+        let executable = words.next().unwrap_or("");
+        if Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("fno")
+            || words.next() != Some("--server")
+        {
+            continue;
+        }
+        candidates.push((pid, elapsed_seconds, command));
+    }
+    candidates
+}
+
+/// Find owner-tagged detached mux servers in the same machine snapshot as the
+/// cargo orphan sweep. Ownerless fleet servers are excluded. A missing or
+/// partial lease is visible as a hold, never as kill authority.
+fn reap_owner_server_rows(ps_output: &str, apply: bool) -> Vec<ReapRow> {
+    let mut rows = Vec::new();
+    for (pid, elapsed, command) in owner_server_rows(ps_output) {
+        if elapsed < OWNER_SERVER_MIN_AGE_SECS {
+            continue;
+        }
+        let server_birth = crate::daemon::process_start_time(pid);
+        let environment = crate::process_owner::process_environment(pid);
+        let owner_marked = environment
+            .as_deref()
+            .is_some_and(|bytes| bytes.windows(10).any(|window| window == b"FNO_OWNER_"));
+        if !owner_marked {
+            if environment.is_none() {
+                rows.push(owner_reap_row(
+                    pid,
+                    elapsed,
+                    command,
+                    None,
+                    false,
+                    "held: owner lease unreadable",
+                ));
+            }
+            continue;
+        }
+        let Some(lease) = environment
+            .as_deref()
+            .and_then(crate::process_owner::lease_from_environment)
+        else {
+            rows.push(owner_reap_row(
+                pid,
+                elapsed,
+                command,
+                None,
+                false,
+                "held: owner lease incomplete or malformed",
+            ));
+            continue;
+        };
+        let owner_start = crate::daemon::process_start_time(lease.pid);
+        let owner_is_alive = owner_start == Some(lease.birth);
+        if owner_is_alive {
+            continue;
+        }
+        if owner_start.is_none() && pid_exists(lease.pid) {
+            rows.push(owner_reap_row(
+                pid,
+                elapsed,
+                command,
+                Some(lease.session),
+                false,
+                "held: owner identity unreadable",
+            ));
+            continue;
+        }
+        let Some(server_birth) = server_birth else {
+            rows.push(owner_reap_row(
+                pid,
+                elapsed,
+                command,
+                Some(lease.session),
+                false,
+                "held: server identity unreadable",
+            ));
+            continue;
+        };
+        if !apply {
+            rows.push(owner_reap_row(
+                pid,
+                elapsed,
+                command,
+                Some(lease.session),
+                false,
+                "dry-run: owner dead; pass --apply to kill",
+            ));
+            continue;
+        }
+        if crate::daemon::process_start_time(pid) != Some(server_birth)
+            || process_parent(pid) != Some(1)
+        {
+            rows.push(owner_reap_row(
+                pid,
+                elapsed,
+                command,
+                Some(lease.session),
+                false,
+                "held: server changed during reap check",
+            ));
+            continue;
+        }
+        let killed = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0;
+        rows.push(owner_reap_row(
+            pid,
+            elapsed,
+            command,
+            Some(lease.session),
+            killed,
+            if killed {
+                "SIGKILL sent"
+            } else {
+                "kill failed"
+            },
+        ));
+    }
+    rows
+}
+
+fn owner_reap_row(
+    pid: u32,
+    elapsed_seconds: u64,
+    command: String,
+    owner_session: Option<String>,
+    reaped: bool,
+    reason: &str,
+) -> ReapRow {
+    ReapRow {
+        pid,
+        elapsed_seconds,
+        zombies: 0,
+        command,
+        owner_session,
+        reaped,
+        reason: reason.to_string(),
+    }
+}
+
+fn pid_exists(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn process_parent(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Binary-direct verb: `fno-agents orphan-reap [--apply] [--json]`. Dry-run by
@@ -264,30 +490,50 @@ pub fn run_orphan_reap(args: &[String]) -> i32 {
         eprintln!("fno-agents orphan-reap: ps unavailable");
         return 4;
     };
-    let rows = reap_rows(&ps, apply, min_elapsed);
+    let test_rows = reap_rows(&ps, apply, min_elapsed);
+    let owner_rows = reap_owner_server_rows(&ps, apply);
+    let mut rows = test_rows.clone();
+    rows.extend(owner_rows.iter().cloned());
     if json {
         println!(
             "{}",
-            serde_json::json!({ "orphan_test_binaries": rows, "exit_code": 0 })
+            serde_json::json!({
+                "orphan_test_binaries": test_rows,
+                "orphan_mux_servers": owner_rows,
+                "exit_code": 0
+            })
         );
         return 0;
     }
     if rows.is_empty() {
-        println!("no orphaned cargo test binaries");
+        println!("no confirmed orphan processes");
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
-        let _ = writeln!(
-            out,
-            "orphaned test binary: pid {}, elapsed {}:{:02}:{:02}, zombies {}: {}",
-            row.pid,
-            row.elapsed_seconds / 3600,
-            (row.elapsed_seconds % 3600) / 60,
-            row.elapsed_seconds % 60,
-            row.zombies,
-            row.command
-        );
+        if let Some(session) = &row.owner_session {
+            let _ = writeln!(
+                out,
+                "owner-tagged mux server: pid {}, owner session {}, elapsed {}:{:02}:{:02}: {}",
+                row.pid,
+                session,
+                row.elapsed_seconds / 3600,
+                (row.elapsed_seconds % 3600) / 60,
+                row.elapsed_seconds % 60,
+                row.command
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "orphaned test binary: pid {}, elapsed {}:{:02}:{:02}, zombies {}: {}",
+                row.pid,
+                row.elapsed_seconds / 3600,
+                (row.elapsed_seconds % 3600) / 60,
+                row.elapsed_seconds % 60,
+                row.zombies,
+                row.command
+            );
+        }
         let _ = writeln!(out, "  {}", row.reason);
     }
     0
@@ -373,6 +619,21 @@ mod tests {
             Some(2 * 86400 + 3 * 3600 + 420)
         );
         assert_eq!(elapsed_seconds("nope"), None);
+        let lease = crate::process_owner::lease_from_environment(
+            b"FNO_OWNER_PID=42\0FNO_OWNER_BIRTH=9001\0FNO_OWNER_SESSION=session-a\0",
+        )
+        .unwrap();
+        assert_eq!(lease.pid, 42);
+        assert_eq!(lease.birth, 9001);
+        assert_eq!(lease.session, "session-a");
+        assert!(crate::process_owner::lease_from_environment(b"FNO_OWNER_PID=42\0").is_none());
+        let servers = owner_server_rows(
+            "PID PPID S ELAPSED %CPU RSS COMMAND\n\
+             501 1 S 00:11:00 2.0 4096 /usr/bin/fno --server /tmp/repro.sock\n\
+             502 20 S 00:11:00 2.0 4096 /usr/bin/fno --server /tmp/live.sock",
+        );
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, 501);
     }
 
     #[test]

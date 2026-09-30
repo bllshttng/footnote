@@ -199,6 +199,9 @@ pub struct MachineSample {
     pub verdict: Option<String>,
     pub busy_band: Option<f64>,
     pub load_band_per_core: Option<f64>,
+    pub runaway_load_band_per_core: Option<f64>,
+    pub runaway_load_hold_seconds: Option<u64>,
+    pub hot_escalation_seconds: Option<u64>,
     pub took_ms: Option<u64>,
     pub sessions: Option<Value>,
     pub unresolved: Option<Value>,
@@ -206,6 +209,7 @@ pub struct MachineSample {
     pub top_names: Option<Value>,
     pub top_parents: Option<Value>,
     pub sessions_error: Option<String>,
+    pub mux_issues: Option<Value>,
     #[serde(skip)]
     pub(crate) procs: Vec<crate::census::ProcRow>,
     #[serde(skip)]
@@ -228,6 +232,7 @@ pub fn read(
     let (load_1m, load_5m, load_15m) = load_average()
         .map(|(a, b, c)| (Some(a), Some(b), Some(c)))
         .unwrap_or((None, None, None));
+    let mux_issues = mux_server_issues(&procs);
     let mut sample = MachineSample {
         sample_id: Some(sample_id()),
         load_1m,
@@ -272,6 +277,9 @@ pub fn read(
         verdict: None,
         busy_band: None,
         load_band_per_core: None,
+        runaway_load_band_per_core: None,
+        runaway_load_hold_seconds: None,
+        hot_escalation_seconds: None,
         took_ms: None,
         sessions: None,
         unresolved: None,
@@ -279,6 +287,7 @@ pub fn read(
         top_names: None,
         top_parents: None,
         sessions_error: None,
+        mux_issues: Some(mux_issues),
         procs,
         top_cpu: Vec::new(),
         throttle_minutes: 60,
@@ -329,6 +338,57 @@ pub fn read(
     }
     sample.took_ms = Some(started.elapsed().as_millis() as u64);
     (sample, current)
+}
+
+fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
+    let mut sockets = std::collections::BTreeMap::<String, Vec<&crate::census::ProcRow>>::new();
+    let mut issues = Vec::new();
+    for row in procs {
+        let words: Vec<&str> = row.command.split_whitespace().collect();
+        if Path::new(words.first().copied().unwrap_or(""))
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("fno")
+            || words.get(1) != Some(&"--server")
+        {
+            continue;
+        }
+        let Some(socket) = words.get(2).copied() else {
+            continue;
+        };
+        sockets.entry(socket.to_string()).or_default().push(row);
+        if let Some(lease) = crate::process_owner::owner_lease(row.pid) {
+            match crate::process_owner::owner_status(&lease) {
+                crate::process_owner::OwnerStatus::Dead => issues.push(json!({
+                    "kind": "dead_owner",
+                    "socket": socket,
+                    "pid": row.pid,
+                    "owner_session": lease.session,
+                    "command": row.command,
+                })),
+                crate::process_owner::OwnerStatus::Unknown => issues.push(json!({
+                    "kind": "owner_unknown",
+                    "socket": socket,
+                    "pid": row.pid,
+                    "owner_session": lease.session,
+                    "command": row.command,
+                })),
+                crate::process_owner::OwnerStatus::Alive => {}
+            }
+        }
+    }
+    for (socket, servers) in sockets.into_iter().filter(|(_, servers)| servers.len() > 1) {
+        issues.push(json!({
+            "kind": "duplicate_socket_servers",
+            "socket": socket,
+            "servers": servers.iter().map(|row| json!({
+                "pid": row.pid,
+                "owner_session": crate::process_owner::owner_lease(row.pid).map(|lease| lease.session),
+                "command": row.command,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    Value::Array(issues)
 }
 
 impl MachineSample {

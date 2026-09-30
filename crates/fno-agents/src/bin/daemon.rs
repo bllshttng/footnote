@@ -82,20 +82,23 @@ fn main() {
         }
     }
 
-    if let Some((owner_pid, owner_birth)) = fno_agents::test_run::declared_owner_from_env() {
+    if let Some((owner_pid, owner_birth, owner_session)) =
+        fno_agents::test_run::daemon_owner_from_env()
+    {
         if !fno_agents::test_run::owner_alive(owner_pid, owner_birth) {
             eprintln!(
-                "fno-agents-daemon: test owner pid={owner_pid} birth={owner_birth} is not alive; refusing to start (unset FNO_TEST_OWNER_PID outside a test run)"
+                "fno-agents-daemon: declared owner pid={owner_pid} birth={owner_birth} is not alive; refusing to start"
             );
             std::process::exit(3);
         }
         let armed = fno_agents::test_run::spawn_owner_watchdog(
             owner_pid,
             owner_birth,
-            "fno-daemon-test-owner",
+            "fno-daemon-owner",
             move || {
                 eprintln!(
-                    "fno-agents-daemon: test_owner_reaped owner_pid={owner_pid} owner_birth={owner_birth}"
+                    "fno-agents-daemon: owner_reaped owner_pid={owner_pid} owner_birth={owner_birth} owner_session={}",
+                    owner_session.as_deref().unwrap_or("test")
                 );
                 // SAFETY: SIGTERM to self enters the existing graceful shutdown arm.
                 unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
@@ -105,6 +108,12 @@ fn main() {
             eprintln!("fno-agents-daemon: refusing to start without an owner watchdog");
             std::process::exit(3);
         }
+    } else if ["FNO_OWNER_PID", "FNO_OWNER_BIRTH", "FNO_OWNER_SESSION"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        eprintln!("fno-agents-daemon: refusing incomplete FNO_OWNER_* lease");
+        std::process::exit(3);
     }
 
     let mut home = AgentsHome::from_env();

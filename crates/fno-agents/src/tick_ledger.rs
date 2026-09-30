@@ -176,6 +176,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "orphan_reap",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
@@ -1576,7 +1584,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 21);
+        assert_eq!(KNOWN_ARMS.len(), 22);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")

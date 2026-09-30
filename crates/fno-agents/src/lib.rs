@@ -292,6 +292,7 @@ pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
+pub mod process_owner;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;

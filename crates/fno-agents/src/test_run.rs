@@ -416,6 +416,40 @@ pub fn declared_owner_from_env() -> Option<(u32, u64)> {
     Some((pid, birth))
 }
 
+/// Owner watched by a long-lived daemon. Sandbox leases use the generic
+/// `FNO_OWNER_*` vocabulary; cargo admission remains isolated on the
+/// `FNO_TEST_OWNER_*` pair and is never inferred from a sandbox lease.
+pub fn daemon_owner_from_env() -> Option<(u32, u64, Option<String>)> {
+    if sandbox_owner_from_env().is_some() {
+        let owner = sandbox_owner_from_env()?;
+        return Some((owner.0, owner.1, Some(owner.2)));
+    }
+    if ["FNO_OWNER_PID", "FNO_OWNER_BIRTH", "FNO_OWNER_SESSION"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        return None;
+    }
+    declared_owner_from_env().map(|(pid, birth)| (pid, birth, None))
+}
+
+pub fn sandbox_owner_from_env() -> Option<(u32, u64, String)> {
+    let pid = std::env::var("FNO_OWNER_PID")
+        .ok()?
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 1)?;
+    let birth = std::env::var("FNO_OWNER_BIRTH")
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .filter(|birth| *birth > 0)?;
+    let session = std::env::var("FNO_OWNER_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty())?;
+    Some((pid, birth, session))
+}
+
 /// The declared test-run owner, verified against the LIVE process (never
 /// trusted on the name alone). Nested test runs use this form so a stale token
 /// re-acquires the suite claim instead of inheriting ownership.
