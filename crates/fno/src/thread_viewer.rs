@@ -31,9 +31,7 @@ pub(crate) fn row_for_pane<'a>(
     let mut matches = agents.iter().filter(|row| {
         row.mux.is_none()
             && !row.exited
-            && (row.name == key
-                || row.effective_identity() == Some(key)
-                || row.attach_id.as_deref() == Some(key))
+            && (row.name == key || row.answers_to(key) || row.attach_id.as_deref() == Some(key))
     });
     let row = matches.next()?;
     matches.next().is_none().then_some(row)
