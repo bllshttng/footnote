@@ -501,61 +501,6 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Spawn `fno --server <socket>` detached: its own session (setsid) so the
-/// server never receives the terminal's SIGHUP, stderr to a per-session log.
-/// Two clients racing here both spawn; the bind is the lock, the losing
-/// server exits 0, and both clients attach to the winner (AC4-EDGE).
-fn spawn_server(path: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path(path))
-        .map_err(|e| format!("cannot open server log: {e}"))?;
-    let mut cmd = crate::process_admission::std_command(exe);
-    cmd.arg("--server")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(log);
-    owner_lease::stamp_sandbox_owner(&mut cmd);
-    // Config->env bridge for the interactive path. The pure-Rust mux
-    // server reads no config.toml, so `config.mux.shell_integration: off` was
-    // a silent no-op here (the Python spawn front-half already bridges
-    // dispatched panes). Latch it at server birth: an explicit env
-    // export wins (inherited naturally, never overwritten); otherwise a single
-    // bounded `fno config get` decides. Only `off` needs materializing - the
-    // server reads absent/anything-else as on (the default).
-    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
-        cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
-    }
-    // Same bridge, same reason, for the backlog board's project scope.
-    // Resolving it needs `fno config get`, and the SERVER must not shell out on
-    // its startup path: doing so delayed shutdown past the SIGTERM grace and
-    // perturbed multiclient frame ordering. The client already pays a bounded
-    // config read here, so the resolution happens once, in this process, and
-    // rides in on the env. An explicit export wins, inherited untouched.
-    if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
-        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
-        cmd.env(
-            "FNO_BOARD_SCOPE",
-            crate::backlog_view::board_scope_wire(&scope),
-        );
-    }
-    // Safety: setsid only detaches the child from our session/terminal; it is
-    // async-signal-safe and touches no shared state.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    crate::process_admission::std_spawn(&mut cmd)
-        .map(|_| ())
-        .map_err(|e| format!("cannot spawn the mux server: {e}"))
-}
-
 /// Whether the interactive path must disable OSC 133 injection. Bounded +
 /// fail-open through [`crate::server::config_get`]: any spawn/read error, a
 /// non-`off` value, or a read that overruns the budget all leave injection on
@@ -13562,8 +13507,9 @@ fn exit_with_notice(notice: String) -> i32 {
 #[path = "client/compositor.rs"]
 mod compositor;
 
-#[path = "client/owner_lease.rs"]
-mod owner_lease;
+#[path = "client/server_spawn.rs"]
+mod server_spawn;
+use self::server_spawn::spawn_server;
 
 use compositor::Compositor;
 

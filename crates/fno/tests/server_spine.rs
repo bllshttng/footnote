@@ -370,9 +370,11 @@ fn server_spine_echo_roundtrips_via_fake_client() {
 
     let mut idle_owner = Server(Command::new("sleep").arg("30").spawn().unwrap());
     let idle_birth = fno::proto::pid_start_time(idle_owner.0.id()).unwrap();
+    let idle_pid = idle_owner.0.id().to_string();
+    let idle_birth = idle_birth.to_string();
     let idle_env = [
-        ("FNO_OWNER_PID", &idle_owner.0.id().to_string()),
-        ("FNO_OWNER_BIRTH", &idle_birth.to_string()),
+        ("FNO_OWNER_PID", idle_pid.as_str()),
+        ("FNO_OWNER_BIRTH", idle_birth.as_str()),
         ("FNO_OWNER_SESSION", "idle-owner-session"),
         ("FNO_IDLE_EXIT_GRACE_MS", "5000"),
     ];

@@ -1624,10 +1624,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         "daemon_fleet_scope",
         &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
     );
-    // A sandbox home starts no supervisor and builds no fleet arms: their
-    // targets resolve from the real cwd and real graph, so they would work
-    // the operator's board from a tempdir (and pin ab_live true forever,
-    // so the daemon never idle-exits).
+    // Sandbox homes skip fleet work that could target real state from a tempdir
+    // and keep the daemon open forever.
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {
