@@ -20,6 +20,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         ts: "2026-09-02T18:27:06Z".into(),
         kind: "pr_created".into(),
         node: node.map(str::to_string),
+        cwd: None,
         session_id: sid.map(str::to_string),
         harness: None,
         title: "PR 1395".into(),
@@ -41,6 +42,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         ts: "2026-09-06T10:00:00Z".into(),
         kind: "session_reaped".into(),
         node: None,
+        cwd: None,
         session_id: Some(sid.into()),
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
@@ -763,6 +765,7 @@ async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer(
         "non-created rows have no blueprint action"
     );
     item.kind = "node_created".into();
+    item.cwd = Some("/workspace/node-project".into());
     item.harness = Some("claude".into());
     item.model = Some("glm-5.3-flash".into());
     v.feed_detail_of = Some(item);
@@ -797,6 +800,14 @@ async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer(
     let launch = v.launcher.as_ref().expect("blueprint key opens composer");
     assert_eq!(launch.draft.message, "/fno:blueprint x-9223");
     assert_eq!(launch.draft.node.as_deref(), Some("x-9223"));
+    assert_eq!(
+        launch
+            .draft
+            .projects
+            .get(launch.draft.project_idx)
+            .map(String::as_str),
+        Some("/workspace/node-project")
+    );
     assert!(v.feed_detail_of.is_none(), "composer replaces feed detail");
 }
 

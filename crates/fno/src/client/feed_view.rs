@@ -935,18 +935,16 @@ pub(crate) async fn feed_keys(
                     view.feed_detail_of = None;
                 }
                 ModalKey::Byte(b'b') => {
-                    let node = view
-                        .feed_detail_of
-                        .as_ref()
-                        .and_then(feed_detail::plan_node)
-                        .map(str::to_owned);
-                    if let Some(node) = node {
+                    let launch = view.feed_detail_of.as_ref().and_then(|item| {
+                        feed_detail::plan_node(item).map(|node| (node.to_owned(), item.cwd.clone()))
+                    });
+                    if let Some((node, cwd)) = launch {
                         if super::sideline::show_composer(view, sock_w).await? {
                             view.feed_detail_of = None;
                             if let Err(err) = super::agent_launcher::open_with(
                                 view,
                                 format!("/fno:blueprint {node}"),
-                                None,
+                                cwd.as_deref(),
                                 node,
                             ) {
                                 view.set_notice(err);
