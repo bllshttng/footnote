@@ -308,6 +308,19 @@ fn read_projection(
         });
         return Ok(serde_json::json!([rows, skipped]));
     }
+    if mode == "answered" && !store.exists() && journal.exists() {
+        let raw = std::fs::read_to_string(journal).map_err(|e| e.to_string())?;
+        return Ok(answer_records(
+            raw.lines()
+                .enumerate()
+                .filter_map(|(i, line)| {
+                    serde_json::from_str(line)
+                        .ok()
+                        .map(|v| (i as i64 + 1, false, v))
+                })
+                .collect(),
+        ));
+    }
     if !store.exists() {
         return Ok(if mode == "status" {
             serde_json::json!([[], 0])
@@ -335,52 +348,17 @@ fn read_projection(
     };
     let rows = query_events(journal, &query)?;
     if mode == "answered" {
-        let asks: std::collections::HashMap<String, &crate::event_store::EventRow> = rows
-            .iter()
-            .filter(|r| r.r#type == "operator_question")
-            .filter_map(|r| {
-                Some((
-                    serde_json::from_str::<serde_json::Value>(&r.line)
-                        .ok()?
-                        .get("data")?
-                        .get("question_id")?
-                        .as_str()?
-                        .to_owned(),
-                    r,
-                ))
-            })
-            .collect();
-        let mut answers = Vec::new();
-        for row in &rows {
-            if row.r#type != "operator_question_closed" || row.history_only {
-                continue;
-            }
-            let value: serde_json::Value = match serde_json::from_str(&row.line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let data = &value["data"];
-            let Some(id) = data["question_id"].as_str().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let Some(answer) = data["answer"].as_str().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let ask = asks.get(id);
-            if ask.is_some_and(|a| a.history_only && row.seq < a.seq) {
-                continue;
-            }
-            let origin = ask
-                .and_then(|a| serde_json::from_str::<serde_json::Value>(&a.line).ok())
-                .unwrap_or_default();
-            answers.push(serde_json::json!({"id":id,"asker":origin["data"]["asker"],"question":origin["data"]["question"].as_str().unwrap_or(""),"answer":answer,"closed_ts":value["ts"].as_str().unwrap_or(""),"closed_by":data["closed_by"].as_str().unwrap_or("")}));
-        }
-        answers.sort_by(|a, b| {
-            (a["closed_ts"].as_str(), a["id"].as_str())
-                .cmp(&(b["closed_ts"].as_str(), b["id"].as_str()))
-        });
-        return Ok(serde_json::json!(answers));
+        return Ok(answer_records(
+            rows.iter()
+                .filter_map(|r| {
+                    serde_json::from_str(&r.line)
+                        .ok()
+                        .map(|v| (r.seq, r.history_only, v))
+                })
+                .collect(),
+        ));
     }
+
     let values: Vec<_> = rows
         .iter()
         .filter(|r| mode != "status" || !r.history_only)
@@ -415,6 +393,38 @@ fn read_projection(
     } else {
         Ok(serde_json::json!(values))
     }
+}
+
+fn answer_records(rows: Vec<(i64, bool, serde_json::Value)>) -> serde_json::Value {
+    let asks: std::collections::HashMap<String, &(i64, bool, serde_json::Value)> = rows
+        .iter()
+        .filter(|(_, _, v)| v["type"] == "operator_question")
+        .filter_map(|row| Some((row.2["data"]["question_id"].as_str()?.to_owned(), row)))
+        .collect();
+    let mut answers = Vec::new();
+    for (seq, history, value) in &rows {
+        if value["type"] != "operator_question_closed" || *history {
+            continue;
+        }
+        let data = &value["data"];
+        let Some(id) = data["question_id"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(answer) = data["answer"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let ask = asks.get(id);
+        if ask.is_some_and(|a| a.1 && *seq < a.0) {
+            continue;
+        }
+        let origin = ask.map(|a| a.2["data"].clone()).unwrap_or_default();
+        answers.push(serde_json::json!({"id":id,"asker":origin["asker"],"question":origin["question"].as_str().unwrap_or(""),"answer":answer,"closed_ts":value["ts"].as_str().unwrap_or(""),"closed_by":data["closed_by"].as_str().unwrap_or("")}));
+    }
+    answers.sort_by(|a, b| {
+        (a["closed_ts"].as_str(), a["id"].as_str())
+            .cmp(&(b["closed_ts"].as_str(), b["id"].as_str()))
+    });
+    serde_json::json!(answers)
 }
 
 /// Ingest every uncommitted generation of the journal into the store, the
@@ -1179,6 +1189,14 @@ mod tests {
         std::fs::create_dir_all(root.join("db")).unwrap();
         let stamp = root.join("backups/state-root-migration/first");
         std::fs::create_dir_all(&stamp).unwrap();
+        let raw_question = root.join("legacy-questions.jsonl");
+        std::fs::write(&raw_question,"{\"type\":\"operator_question\",\"data\":{\"question_id\":\"q-legacy\",\"asker\":\"alice\",\"question\":\"ask?\"}}\n{\"ts\":\"2026-09-30T01:00:00Z\",\"type\":\"operator_question_closed\",\"data\":{\"question_id\":\"q-legacy\",\"answer\":\"yes\",\"closed_by\":\"operator\"}}\n").unwrap();
+        let legacy = read_projection(&raw_question, "answered", &serde_json::json!({})).unwrap();
+        assert_eq!(legacy[0]["asker"], "alice");
+        assert!(
+            !crate::event_store::store_path(&raw_question).exists(),
+            "legacy reads create no store"
+        );
         for family in ["questions", "decisions", "events"] {
             let path = root.join("db").join(format!("{family}.db"));
             let mut c = rusqlite::Connection::open(&path).unwrap();

@@ -680,6 +680,7 @@ mod tests {
 
     fn item() -> AttentionItem {
         AttentionItem {
+            recovery_batch: None,
             id: "q-e5e5520b".into(),
             kind: "question".into(),
             title: "Rule on the Python-tree law: which reading?".into(),

@@ -143,43 +143,22 @@ def query_rows(
     envelopes. A store that does not exist yet is an empty history; a locked
     or corrupt store raises EventStoreUnavailable - unavailable is never
     folded into an empty result."""
-    db = store_db_path(events_path)
-    if not db.exists():
-        return []
-    where: list[str] = []
-    args: list[Any] = []
-    if types:
-        where.append("type IN (%s)" % ",".join("?" * len(types)))
-        args.extend(types)
-    if session_id is not None:
-        where.append("session_id = ?")
-        args.append(session_id)
-    if since_ms is not None:
-        where.append("ts_ms >= ?")
-        args.append(since_ms)
-    if not include_rejected:
-        where.append("reject_reason IS NULL")
-    sql = "SELECT line FROM events"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY seq"
-    if limit is not None:
-        sql += f" LIMIT {int(limit)}"
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    return read_projection(events_path, "--query-json", {
+        "types": types, "session_id": session_id, "since_ms": since_ms,
+        "limit": limit, "include_rejected": include_rejected,
+    })
+
+
+def read_projection(events_path: Path, mode: str, query: dict[str, Any]) -> Any:
+    """Transport for native read folds. A failed read never becomes empty."""
     try:
-        _refuse_newer_schema(conn, db)
-        rows = conn.execute(sql, args).fetchall()
-    except sqlite3.Error as exc:
-        raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
-    finally:
-        conn.close()
-    out: list[dict[str, Any]] = []
-    for (line,) in rows:
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            out.append({"_corrupt": line})
-    return out
+        proc = subprocess.run(
+            [resolve_native_bin(), "doctor", "event", "rows", "--events", str(events_path), mode],
+            input=json.dumps(query), capture_output=True, text=True, timeout=30, check=True,
+        )
+        return json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise EventStoreUnavailable(f"event projection unavailable for {events_path}: {exc}") from exc
 
 
 def gc_ephemeral(
