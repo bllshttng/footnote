@@ -3169,7 +3169,7 @@ mod tests {
     /// no unit test can host. The exec argv is pinned separately, in both
     /// crates, by `the_attach_argv_is_identical_in_both_crates`.
     #[test]
-    fn only_a_paneless_interactive_codex_row_is_a_thread() {
+    fn thread_rows() {
         let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
         let thread = json!({
             "name": "cx", "harness": "codex", "cwd": "/w",
@@ -3204,6 +3204,22 @@ mod tests {
         let mut nulled = thread.clone();
         nulled["mux"] = Value::Null;
         assert!(is_codex_thread_row(&nulled));
+
+        for t in [
+            "a1b2c3d4",
+            "A1B2C3D4",
+            "ses_7f3a9b2c1d0e",
+            CLAUDE_UUID_FIXTURE,
+            // A canonical OpenCode tail may be eight alphabetic characters,
+            // so a same-shaped registry name must join the store namespace.
+            "reviewer",
+        ] {
+            assert!(is_session_shaped(t), "{t} should be probeable");
+        }
+        // Short tokens of the wrong width remain outside the store seam.
+        for t in ["a1b2c3", "a1b2c3d45", "", "ses_", "SES_7f3a9b2c1d0e"] {
+            assert!(!is_session_shaped(t), "{t} should not be probeable");
+        }
     }
 
     // --- find_agent_entry: parity with Python resolve_agent ----------
@@ -3220,7 +3236,7 @@ mod tests {
     const RESOLVE_UUID: &str = "7c5dcf5d-c078-4b53-a8c9-7199b831eae4";
 
     #[test]
-    fn find_agent_entry_resolves_all_three_forms() {
+    fn find_rows() {
         // AC1-HP: name, full uuid (case-insensitive), and 8-hex short all hit one row.
         let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
         for tok in [
@@ -3243,10 +3259,7 @@ mod tests {
         );
         split_row["fno_id"] = json!(Value::Null);
         assert!(find_agent_entry(std::slice::from_ref(&split_row), &fno_id).is_err());
-    }
 
-    #[test]
-    fn session_lineage_predecessor_full_id_resolves_the_current_row() {
         // AC6-HP (Rust half): delivery naming a succeeded session's
         // full uuid follows the row that now answers as its successor.
         let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
@@ -3259,10 +3272,7 @@ mod tests {
             e["harness_session_id"],
             "08054b1d-2222-3333-4444-555555555555"
         );
-    }
 
-    #[test]
-    fn session_lineage_predecessor_short_form_stays_retired() {
         // a predecessor's 8-hex short retired with it and never
         // re-enters the successor's short-address namespace.
         let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
@@ -3273,10 +3283,7 @@ mod tests {
             find_agent_entry(&rows, "e6f78b98"),
             Err(ResolveError::NotFound(_))
         ));
-    }
 
-    #[test]
-    fn find_agent_entry_daemon_and_canonical_handle_both_resolve() {
         // AC2-HP: a codex row resolves by its name-derived daemon short AND by
         // the canonical random tail of its thread id.
         let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
@@ -3293,10 +3300,7 @@ mod tests {
             find_agent_entry(&rows, "55556666").unwrap()["name"],
             "reviewer"
         );
-    }
 
-    #[test]
-    fn canonical_handle_and_legacy_prefix_are_ambiguous() {
         let canonical = claude_row(
             "canonical",
             "transport1",
@@ -3312,10 +3316,7 @@ mod tests {
             find_agent_entry(&[legacy_a, legacy_b], "abcd1234"),
             Err(ResolveError::Ambiguous(_))
         ));
-    }
 
-    #[test]
-    fn find_agent_entry_name_and_short_id_collision_is_ambiguous() {
         let rows = vec![
             claude_row(
                 "deadbeef",
@@ -3328,10 +3329,7 @@ mod tests {
             find_agent_entry(&rows, "deadbeef"),
             Err(ResolveError::Ambiguous(_))
         ));
-    }
 
-    #[test]
-    fn find_agent_entry_duplicate_name_distinct_sessions_is_ambiguous() {
         let rows = vec![
             claude_row("same", "transport1", "aaaaaaaa-1111-7222-8333-4444deadbeef"),
             claude_row("same", "transport2", "bbbbbbbb-1111-7222-8333-4444cafefeed"),
@@ -3341,10 +3339,7 @@ mod tests {
             find_agent_entry(&rows, "same"),
             Err(ResolveError::Ambiguous(_))
         ));
-    }
 
-    #[test]
-    fn find_agent_entry_ambiguous_same_tier_short_collision() {
         // AC2-ERR: two rows sharing a short_id error as ambiguous, never first-match.
         let rows = vec![
             claude_row("aa", "abcd1234", "11111111-0000-0000-0000-000000000000"),
@@ -3354,17 +3349,11 @@ mod tests {
         let message = error.message();
         assert!(message.contains("11111111-0000-0000-0000-000000000000"));
         assert!(message.contains("22222222-0000-0000-0000-000000000000"));
-    }
 
-    #[test]
-    fn adopted_display_id_uses_canonical_head_eight() {
         let session = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4";
 
         assert_eq!(derived_short_id(session), "019f48e1");
-    }
 
-    #[test]
-    fn ambiguity_diagnostic_uses_v10_harness_field() {
         let rows = vec![
             json!({
                 "name": "one", "harness": "codex", "cwd": "/w", "log_path": "/l",
@@ -3383,10 +3372,7 @@ mod tests {
         assert!(message.contains("codex"));
         assert!(message.contains("opencode"));
         assert!(!message.contains("(?)"));
-    }
 
-    #[test]
-    fn find_agent_entry_unknown_and_empty_and_boundary() {
         // AC1-ERR: unknown token; empty token; 7/9-hex are not shorts.
         let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
         for tok in ["nope", "", "   ", "7c5dcf5", "7c5dcf5dd"] {
@@ -3395,10 +3381,7 @@ mod tests {
                 Err(ResolveError::NotFound(_))
             ));
         }
-    }
 
-    #[test]
-    fn find_agent_entry_opencode_row_preserves_canonical_handle_case() {
         let ses = "ses_7f3a9b2cAbCd1234";
         let row = json!({
             "name": "oc", "provider": "opencode", "cwd": "/w", "log_path": "/l",
@@ -3417,26 +3400,7 @@ mod tests {
     // --- registry-miss heal -----------------------------------------
 
     #[test]
-    fn session_shape_gate_admits_only_probeable_tokens() {
-        for t in [
-            "a1b2c3d4",
-            "A1B2C3D4",
-            "ses_7f3a9b2c1d0e",
-            CLAUDE_UUID_FIXTURE,
-            // A canonical OpenCode tail may be eight alphabetic characters,
-            // so a same-shaped registry name must join the store namespace.
-            "reviewer",
-        ] {
-            assert!(is_session_shaped(t), "{t} should be probeable");
-        }
-        // Short tokens of the wrong width remain outside the store seam.
-        for t in ["a1b2c3", "a1b2c3d45", "", "ses_", "SES_7f3a9b2c1d0e"] {
-            assert!(!is_session_shaped(t), "{t} should not be probeable");
-        }
-    }
-
-    #[test]
-    fn heal_wrapper_preserves_registry_hit_and_clean_miss_results() {
+    fn heal_rows() {
         // No `fno` is stubbed here, so any shellout would degrade to NotFound
         // anyway; what this pins is that a hit returns the ROW and a store miss
         // returns the original resolution error.
@@ -3452,10 +3416,7 @@ mod tests {
             err.message(),
             "no agent matching 'ghost'; accepted forms: name, canonical handle, transport short id, or full session id"
         );
-    }
 
-    #[test]
-    fn heal_wrapper_keeps_an_ambiguous_registry_ambiguous() {
         // Healing an ambiguous registry would pick the winner the registry
         // deliberately refused to pick.
         let rows = vec![
@@ -3466,10 +3427,7 @@ mod tests {
             resolve_entry_with_heal(&rows, "abcd1234", Path::new("/nonexistent/registry.json")),
             Err(ResolveError::Ambiguous(_))
         ));
-    }
 
-    #[test]
-    fn backfill_gives_a_healed_v10_row_the_fields_the_verbs_read() {
         // The shape `fno agents heal-token` emits: harness-only, no `provider`
         // and no `claude_session_uuid` (v10 removed both from disk). Without the
         // backfill, `logs` would take the codex branch and resume's dead arm
@@ -3482,10 +3440,7 @@ mod tests {
         backfill_row_aliases(row.as_object_mut().unwrap(), false);
         assert!(row.get("provider").is_none());
         assert_eq!(row["claude_session_uuid"], CLAUDE_UUID_FIXTURE);
-    }
 
-    #[test]
-    fn backfill_covers_the_non_claude_healed_row_too() {
         // The healer adopts codex rows as readily as claude ones, and their
         // resume path reads the legacy per-provider key just the same.
         let mut row = json!({
@@ -3496,10 +3451,42 @@ mod tests {
         assert!(row.get("provider").is_none());
         assert_eq!(row["codex_session_id"], CLAUDE_UUID_FIXTURE);
         assert!(row.get("claude_session_uuid").is_none());
+
+        let dir = cv_tmpdir();
+        let home = AgentsHome::at(dir.path());
+        let mut existing = mint_synthesized_entry(
+            &ManifestIdentity {
+                harness: "codex".into(),
+                harness_session_id: "existing-session".into(),
+                ..Default::default()
+            },
+            "t0",
+        );
+        existing.name = "01a0152f".into();
+        existing.short_id = "transport".into();
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(existing);
+        })
+        .unwrap();
+
+        let result = persist_manifest_identity(
+            &ManifestIdentity {
+                harness: "codex".into(),
+                harness_session_id: "01a0152f-45fd-78f0-b109-78f8dffdeeca".into(),
+                ..Default::default()
+            },
+            &home,
+        );
+
+        let Err(AdoptError::Io(message)) = result else {
+            panic!("registry collision must remain an adoption I/O error");
+        };
+        assert!(message.contains("collides with row"));
+        assert!(message.contains("01a0152f"));
     }
 
     #[test]
-    fn report_params_full_payload() {
+    fn py_rows() {
         let p = build_report_params(&[
             "--session-id".into(),
             "uuid-x".into(),
@@ -3518,10 +3505,7 @@ mod tests {
         assert_eq!(p["state"], "blocked");
         assert_eq!(p["reason"], "awaiting input");
         assert_eq!(p["ttl_ms"], 5000);
-    }
 
-    #[test]
-    fn report_params_minimal_omits_optionals() {
         let p = build_report_params(&[
             "--session-id=uuid-y".into(), // also exercises --k=v expansion
             "--seq".into(),
@@ -3533,10 +3517,7 @@ mod tests {
         assert_eq!(p["session_id"], "uuid-y");
         assert!(p.get("reason").is_none());
         assert!(p.get("ttl_ms").is_none());
-    }
 
-    #[test]
-    fn report_params_rejects_bad_input() {
         assert!(build_report_params(&[
             "--seq".into(),
             "1".into(),
@@ -3576,10 +3557,7 @@ mod tests {
             "working".into()
         ])
         .is_err()); // non-int seq
-    }
 
-    #[test]
-    fn python_json_uses_spaced_separators() {
         #[derive(Serialize)]
         struct S {
             active: bool,
@@ -3590,10 +3568,7 @@ mod tests {
             sessions: vec![],
         });
         assert_eq!(out, r#"{"active": false, "sessions": []}"#);
-    }
 
-    #[test]
-    fn drive_auth_json_shape_matches_python() {
         let out = DriveAuthOut {
             active: true,
             sessions: vec![DriveAuthSession {
@@ -3606,10 +3581,7 @@ mod tests {
             to_python_json(&out),
             r#"{"active": true, "sessions": [{"short_id": "wkI", "session_id": "d-1", "mode": "interactive"}]}"#
         );
-    }
 
-    #[test]
-    fn json_truthy_matches_python() {
         assert!(!json_truthy(None));
         assert!(!json_truthy(Some(&Value::Null)));
         assert!(!json_truthy(Some(&json!(false))));
@@ -3618,10 +3590,7 @@ mod tests {
         assert!(json_truthy(Some(&json!(1))));
         assert!(!json_truthy(Some(&json!(""))));
         assert!(json_truthy(Some(&json!("x"))));
-    }
 
-    #[test]
-    fn parse_iso8601_handles_z_and_naive() {
         let z = parse_iso8601("2026-05-26T10:30:45Z").unwrap();
         let off = parse_iso8601("2026-05-26T10:30:45+00:00").unwrap();
         assert_eq!(z, off);
@@ -3629,10 +3598,7 @@ mod tests {
         let naive = parse_iso8601("2026-05-26T10:30:45").unwrap();
         assert_eq!(naive, z);
         assert!(parse_iso8601("not-a-date").is_none());
-    }
 
-    #[test]
-    fn slice_limit_matches_python_slicing() {
         assert_eq!(slice_limit(vec![1, 2, 3, 4], 2), vec![1, 2]);
         assert_eq!(slice_limit(vec![1, 2, 3, 4], 0), Vec::<i32>::new());
         assert_eq!(slice_limit(vec![1, 2, 3, 4], 10), vec![1, 2, 3, 4]);
@@ -3643,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_name_required_without_all() {
+    fn trace_rows() {
         let args = TraceArgs {
             name: None,
             request_id: None,
@@ -3655,10 +3621,7 @@ mod tests {
         let r = trace_logic(&args, Path::new("/nonexistent"), Path::new("/nonexistent"));
         assert_eq!(r.exit_code, 2);
         assert!(r.stderr.contains("agent NAME is required unless --all"));
-    }
 
-    #[test]
-    fn trace_all_empty_events_says_no_events() {
         let args = TraceArgs {
             name: None,
             request_id: None,
@@ -3674,10 +3637,7 @@ mod tests {
         );
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.output, "no events yet\n");
-    }
 
-    #[test]
-    fn trace_surfaces_registry_ambiguity_instead_of_not_found() {
         let td = tempfile::TempDir::new().unwrap();
         let registry = td.path().join("registry.json");
         fs::write(
@@ -3733,7 +3693,7 @@ mod tests {
     /// support must resolve a non-empty identity from a row carrying only
     /// `harness_session_id` -- the shape every non-claude row actually has.
     #[test]
-    fn every_resumable_harness_resolves_an_identity() {
+    fn resume_rows() {
         let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
         let mut checked = 0usize;
         for harness in contract.harness.keys() {
@@ -3764,11 +3724,7 @@ mod tests {
             checked >= 2,
             "the resumable-harness loop never ran; contract declared {checked}"
         );
-    }
 
-    /// Both directions of the fallback, so neither reads as passing by accident.
-    #[test]
-    fn transport_key_wins_and_canonical_id_backstops() {
         // pi: the repro. Absent from `session_id_field`, so the read has
         // only the fallback to reach its id with.
         let pi = serde_json::json!({
@@ -3802,18 +3758,7 @@ mod tests {
         // A row carrying neither resolves to empty; callers' is_empty refusals keep firing.
         let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
         assert_eq!(resume_session_id(&bare, "pi"), "");
-    }
 
-    // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
-    // tests write bg session files, so a panicking test never leaks a /tmp tree.
-    fn cv_tmpdir() -> tempfile::TempDir {
-        let td = tempfile::TempDir::new().unwrap();
-        crate::paths::pin_test_claims_root(td.path().join("claims-root").as_path());
-        td
-    }
-
-    #[test]
-    fn claude_resume_argv_live_attaches_dead_resumes_absent_refuses() {
         use std::os::unix::net::UnixListener;
         let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
 
@@ -3864,10 +3809,7 @@ mod tests {
                 None, // live attach arm claims nothing
             )
         );
-    }
 
-    #[test]
-    fn live_claude_attach_delegates_dead_and_non_claude_and_mux_do_not() {
         // The live-attach arm ((["claude","attach",short_id], None)) is the one
         // this binary used to exec bare, with no pty/route/verification. It is
         // the only combination that should delegate to `fno-py agents resume`.
@@ -3888,29 +3830,7 @@ mod tests {
         ));
         // Every non-claude harness keeps its own provider resume CLI.
         assert!(!should_delegate_claude_live_attach("codex", &None, &None));
-    }
 
-    // ---- recover (task 3.2) --------------------------------------
-
-    fn forked_row() -> crate::state::RegistryEntry {
-        let mut entry = mint_synthesized_entry(
-            &ManifestIdentity {
-                harness: "claude".into(),
-                harness_session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-                ..Default::default()
-            },
-            "forked",
-        );
-        entry.cwd = std::env::temp_dir().to_string_lossy().to_string();
-        entry.name = "forked".into();
-        entry.short_id = "aaaaaaaa".into();
-        entry.launch_account = Some("default".into());
-        entry.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
-        entry
-    }
-
-    #[test]
-    fn recover_verb_refuses_two_ids_until_a_session_is_named() {
         // Recovery chooses a valid id, never a winner: with both slots
         // recorded the bare verb is the refusal, not a guess.
         let dir = cv_tmpdir();
@@ -3934,10 +3854,7 @@ mod tests {
             &home,
         );
         assert_eq!(code, crate::reentry::REENTRY_REFUSED_EXIT);
-    }
 
-    #[test]
-    fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
         // --print-command is the no-side-effect inspection form: the selected
         // fork id rides the argv and nothing launches.
         let dir = cv_tmpdir();
@@ -3958,10 +3875,7 @@ mod tests {
             &home,
         );
         assert_eq!(code, 0);
-    }
 
-    #[test]
-    fn recover_verb_without_a_name_is_exit_2() {
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
         assert_eq!(run_recover(&[], &home), 2);
@@ -3972,8 +3886,37 @@ mod tests {
         );
     }
 
+    /// Both directions of the fallback, so neither reads as passing by accident.
+
+    // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
+    // tests write bg session files, so a panicking test never leaks a /tmp tree.
+    fn cv_tmpdir() -> tempfile::TempDir {
+        let td = tempfile::TempDir::new().unwrap();
+        crate::paths::pin_test_claims_root(td.path().join("claims-root").as_path());
+        td
+    }
+
+    // ---- recover (task 3.2) --------------------------------------
+
+    fn forked_row() -> crate::state::RegistryEntry {
+        let mut entry = mint_synthesized_entry(
+            &ManifestIdentity {
+                harness: "claude".into(),
+                harness_session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                ..Default::default()
+            },
+            "forked",
+        );
+        entry.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        entry.name = "forked".into();
+        entry.short_id = "aaaaaaaa".into();
+        entry.launch_account = Some("default".into());
+        entry.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        entry
+    }
+
     #[test]
-    fn adopt_args_accept_cross_project_and_reject_extra_tokens() {
+    fn adopt_rows() {
         let (session_id, cross_project) =
             parse_adopt_args(&["full-session-id".to_string(), "--cross-project".to_string()])
                 .unwrap();
@@ -3988,10 +3931,7 @@ mod tests {
             ]),
             Err(2)
         );
-    }
 
-    #[test]
-    fn claude_resume_dead_arm_restores_a_recorded_route_or_refuses() {
         // the dead arm RELAUNCHES, so it is the one door on this verb
         // that can lose a route. Untested, the branch is a guard on paper: the
         // Python spawn door has its own tests and neither covers this one.
@@ -4056,10 +3996,7 @@ mod tests {
                 None
             )
         );
-    }
 
-    #[test]
-    fn claude_resume_argv_mux_row_relaunches_on_a_gone_verdict() {
         // a pane worker carries a canonical uuid but NO short_id (empty
         // by design: _validate_single_live_ref enforces mux XOR worker XOR bg, so
         // a mux row never gets the transport key). The loader backfill mirrors
@@ -4113,10 +4050,7 @@ mod tests {
             claude_resume_argv_with_truth(&ch, &entry_idless, "idless", |_| Some("done".into())),
             Err(13)
         );
-    }
 
-    #[test]
-    fn claude_resume_argv_reads_harness_session_id_when_uuid_is_absent() {
         // `claude_session_uuid` never serializes, so a row returned by
         // `serde_json::to_value(&RegistryEntry)` (the manifest adopt path) has
         // only `harness_session_id`. Resume must still relaunch it.
@@ -4135,10 +4069,7 @@ mod tests {
             argv,
             vec!["claude".to_string(), "--resume".into(), uuid.into()]
         );
-    }
 
-    #[test]
-    fn claude_resume_argv_live_pane_row_is_not_called_inconclusive() {
         // review #4: a live pane worker has no short_id, so the live
         // attach arm (which gates on a present short_id) does not fire. Pre-fix
         // it fell through to the else arm and printed "liveness is
@@ -4161,16 +4092,7 @@ mod tests {
             claude_resume_argv_with_truth(&ch, &entry, "live-pane", |_| Some("working".into()))
                 .expect_err("a live pane worker refuses cleanly instead of attaching");
         assert_eq!(code, 13);
-    }
 
-    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
-    fn _git(repo: &Path, args: &[&str]) {
-        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
-        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
-    }
-
-    #[test]
-    fn claude_resume_socket_miss_requires_family1_death() {
         let home = cv_tmpdir();
         let ch = ClaudeHome::at(home.path());
         let entry = serde_json::json!({
@@ -4190,8 +4112,14 @@ mod tests {
         );
     }
 
+    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
+    fn _git(repo: &Path, args: &[&str]) {
+        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
+        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
+    }
+
     #[test]
-    fn acquire_resume_session_claim_refuses_when_held_by_other() {
+    fn claim_rows() {
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
         let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
         let root = cv_tmpdir();
@@ -4215,10 +4143,7 @@ mod tests {
         // A session with no holder: the resumer wins.
         let uuid2 = "1111abcd-2222-3333-4444-555566667777";
         assert!(acquire_resume_session_claim(uuid2, Some(root.path()), None).is_ok());
-    }
 
-    #[test]
-    fn acquire_resume_session_claim_records_an_expiry_for_the_mux_path() {
         // The mux relaunch exits after pane dispatch, so its session claim cannot
         // ride the holder pid. A PID-only claim (ttl=None) goes Stale the moment
         // that pid dies, and a second resumer steals it before the resumed claude
@@ -4237,14 +4162,10 @@ mod tests {
             rec.expires_at.is_some(),
             "a TTL claim records an expiry; a PID-only claim would not"
         );
-    }
 
-    #[test]
-    fn acquire_named_session_claim_guards_resume_attach_keys() {
         // The live-attach route acquires this key before injecting. Verify the
         // shared lock contract independently: it refuses a second concurrent
         // writer on the same row, as the session-claim path does for its key.
-        use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
         let short_id = "deadbeef";
         let root = cv_tmpdir();
 
@@ -4279,10 +4200,73 @@ mod tests {
             None,
         );
         assert!(other.is_ok());
+
+        use std::os::unix::net::UnixListener;
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let dead = cv_tmpdir();
+        let ch_dead = ClaudeHome::at(dead.path());
+
+        // Dead row + uuid -> pointer naming both revival commands.
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        let msg = claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| Some("done".into()))
+            .expect("dead row -> pointer");
+        assert!(msg.contains("fno agents resume w"));
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
+
+        // No uuid -> no pointer (never print an unusable command).
+        let no_uuid = serde_json::json!({
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
+        });
+        assert_eq!(
+            claude_attach_pointer_with_truth(&ch_dead, &no_uuid, "w", |_| Some("done".into())),
+            None
+        );
+
+        // Adopted typed row: claude_session_uuid never serializes, so only
+        // harness_session_id is present - the pointer still resolves.
+        let adopted = serde_json::json!({
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
+            "harness_session_id": uuid,
+        });
+        let msg =
+            claude_attach_pointer_with_truth(&ch_dead, &adopted, "w", |_| Some("done".into()))
+                .expect("adopted row -> pointer through the canonical id");
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
+
+        // Live supervisor -> no pointer (fall through to a real attach).
+        let live_home = cv_tmpdir();
+        let sessions = live_home.path().join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let sock = live_home.path().join("live.sock");
+        let _l = UnixListener::bind(&sock).unwrap();
+        fs::write(
+            sessions.join("222.json"),
+            format!(
+                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
+                sock.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_attach_pointer_with_truth(
+                &ClaudeHome::at(live_home.path()),
+                &entry,
+                "w",
+                |_| None
+            ),
+            None
+        );
+        assert_eq!(
+            claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| None),
+            None
+        );
     }
 
     #[test]
-    fn parse_manifest_identity_reads_canonical_fields() {
+    fn manifest_rows() {
         let content = "---\n\
             fno_id: 20260804T202518Z-cl99002-4e0236\n\
             input: \"x-aaaa\"\n\
@@ -4304,19 +4288,13 @@ mod tests {
         assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
         assert!(!m.matches("nope"));
         assert!(!m.matches(""));
-    }
 
-    #[test]
-    fn manifest_identity_matches_codex_legacy_alias() {
         let m = ManifestIdentity {
             codex_thread_id: "thread-abc".into(),
             ..Default::default()
         };
         assert!(m.matches("thread-abc"));
-    }
 
-    #[test]
-    fn parse_manifest_identity_skips_forged_keys_in_input_scalar() {
         // A `/target` argument whose text spills across lines and contains
         // `key: value` continuations must NOT forge identity fields: the real
         // harness / harness_session_id (written after input) must win.
@@ -4335,10 +4313,7 @@ mod tests {
         assert_eq!(m.fno_id, "real-run");
         // The forged session id is never matchable.
         assert!(!m.matches("forged-id"));
-    }
 
-    #[test]
-    fn parse_manifest_identity_survives_ambiguous_scalar_terminator() {
         // `/target 'ship it \'` -> init writes an input whose closing quote is
         // preceded by a lone backslash, so the scalar's real terminator is the
         // next `plan_path: "..."` line. Consuming that line would leave the
@@ -4358,10 +4333,7 @@ mod tests {
         assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
         assert_eq!(m.owner_cwd, "/Users/x/wt");
         assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
-    }
 
-    #[test]
-    fn mint_uses_legacy_alias_when_canonical_session_is_null() {
         // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real
         // manifest can carry the session under the legacy alias alone. Keying on
         // the canonical field alone minted an empty session id / short_id and the
@@ -4389,10 +4361,7 @@ mod tests {
         assert_eq!(e.harness.as_deref(), Some("codex"));
         assert_eq!(e.harness_session_id.as_deref(), Some("thread-abcdef12"));
         assert_eq!(e.claude_session_uuid, None);
-    }
 
-    #[test]
-    fn parse_manifest_identity_single_line_input_does_not_open_scalar() {
         // `input: "x-aaaa"` closes on the same line; the next real key parses.
         let content = "input: \"x-aaaa\"\nharness: codex\n";
         let m = parse_manifest_identity(content);
@@ -4400,17 +4369,14 @@ mod tests {
     }
 
     #[test]
-    fn derived_short_id_uses_canonical_head_eight() {
+    fn mint_rows() {
         assert_eq!(
             derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"),
             "c7dc6218"
         );
         assert_eq!(derived_short_id("abc12345"), "abc12345");
         assert_eq!(derived_short_id("short"), "short");
-    }
 
-    #[test]
-    fn mint_synthesized_entry_sets_identity_short_id_and_fno_id() {
         let id = ManifestIdentity {
             harness: "codex".into(),
             harness_session_id: "thread-1234567890".into(),
@@ -4433,10 +4399,7 @@ mod tests {
         assert_eq!(e.name, "t-thread-1");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
-    }
 
-    #[test]
-    fn mint_synthesized_entry_claude_records_resume_uuid() {
         let id = ManifestIdentity {
             harness: "claude".into(),
             harness_session_id: "c7dc6218-493a-4299-916a-330ec0b0b055".into(),
@@ -4447,10 +4410,7 @@ mod tests {
             e.claude_session_uuid.as_deref(),
             Some("c7dc6218-493a-4299-916a-330ec0b0b055")
         );
-    }
 
-    #[test]
-    fn upsert_synthesized_row_is_idempotent_by_session_id() {
         let dir = cv_tmpdir();
         let reg = dir.path().join("registry.json");
         let id = ManifestIdentity {
@@ -4479,10 +4439,7 @@ mod tests {
         // longer names the row.
         let minted = rows[0].fno_id.clone().expect("minted at the first write");
         assert_ne!(minted, "run-1");
-    }
 
-    #[test]
-    fn upsert_synthesized_row_preserves_live_runtime_state() {
         // Re-adopting a session that already has a LIVE row (reachable when the
         // operator adopts by a legacy alias, which resolve_entry_with_heal
         // misses) must not downgrade it to Idle or drop its pid.
@@ -4557,41 +4514,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_manifest_identity_surfaces_registry_write_failure() {
-        let dir = cv_tmpdir();
-        let home = AgentsHome::at(dir.path());
-        let mut existing = mint_synthesized_entry(
-            &ManifestIdentity {
-                harness: "codex".into(),
-                harness_session_id: "existing-session".into(),
-                ..Default::default()
-            },
-            "t0",
-        );
-        existing.name = "01a0152f".into();
-        existing.short_id = "transport".into();
-        crate::state::update_registry(&home.registry_json(), |registry| {
-            registry.entries.push(existing);
-        })
-        .unwrap();
-
-        let result = persist_manifest_identity(
-            &ManifestIdentity {
-                harness: "codex".into(),
-                harness_session_id: "01a0152f-45fd-78f0-b109-78f8dffdeeca".into(),
-                ..Default::default()
-            },
-            &home,
-        );
-
-        let Err(AdoptError::Io(message)) = result else {
-            panic!("registry collision must remain an adoption I/O error");
-        };
-        assert!(message.contains("collides with row"));
-        assert!(message.contains("01a0152f"));
-    }
-
-    #[test]
     fn synthesize_and_adopt_miss_writes_no_row() {
         let _g = crate::claims::test_env_lock()
             .lock()
@@ -4613,83 +4535,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_attach_pointer_only_for_dead_revivable_claude_row() {
-        use std::os::unix::net::UnixListener;
-        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
-        let dead = cv_tmpdir();
-        let ch_dead = ClaudeHome::at(dead.path());
-
-        // Dead row + uuid -> pointer naming both revival commands.
-        let entry = serde_json::json!({
-            "name": "w", "provider": "claude",
-            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
-        });
-        let msg = claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| Some("done".into()))
-            .expect("dead row -> pointer");
-        assert!(msg.contains("fno agents resume w"));
-        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
-
-        // No uuid -> no pointer (never print an unusable command).
-        let no_uuid = serde_json::json!({
-            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
-        });
-        assert_eq!(
-            claude_attach_pointer_with_truth(&ch_dead, &no_uuid, "w", |_| Some("done".into())),
-            None
-        );
-
-        // Adopted typed row: claude_session_uuid never serializes, so only
-        // harness_session_id is present - the pointer still resolves.
-        let adopted = serde_json::json!({
-            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
-            "harness_session_id": uuid,
-        });
-        let msg =
-            claude_attach_pointer_with_truth(&ch_dead, &adopted, "w", |_| Some("done".into()))
-                .expect("adopted row -> pointer through the canonical id");
-        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
-
-        // Live supervisor -> no pointer (fall through to a real attach).
-        let live_home = cv_tmpdir();
-        let sessions = live_home.path().join(".claude").join("sessions");
-        fs::create_dir_all(&sessions).unwrap();
-        let sock = live_home.path().join("live.sock");
-        let _l = UnixListener::bind(&sock).unwrap();
-        fs::write(
-            sessions.join("222.json"),
-            format!(
-                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
-                sock.to_str().unwrap()
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            claude_attach_pointer_with_truth(
-                &ClaudeHome::at(live_home.path()),
-                &entry,
-                "w",
-                |_| None
-            ),
-            None
-        );
-        assert_eq!(
-            claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| None),
-            None
-        );
-    }
-
-    #[test]
-    fn shlex_quote_matches_python() {
+    fn pycompat_rows() {
         assert_eq!(shlex_quote(""), "''");
         assert_eq!(shlex_quote("/Users/foo/code"), "/Users/foo/code");
         assert_eq!(shlex_quote("abc-def_123"), "abc-def_123");
         assert_eq!(shlex_quote("a b"), "'a b'");
         // embedded single quote -> '"'"'
         assert_eq!(shlex_quote("a'b"), "'a'\"'\"'b'");
-    }
 
-    #[test]
-    fn py_repr_str_matches_cpython_common_cases() {
         assert_eq!(py_repr_str("worker-A"), "'worker-A'");
         // contains ' but not " -> double-quoted
         assert_eq!(py_repr_str("it's"), "\"it's\"");
@@ -4704,10 +4557,7 @@ mod tests {
         assert_eq!(py_repr_str("\u{1b}["), "'\\x1b['");
         // printable non-ASCII stays literal, matching CPython repr('café').
         assert_eq!(py_repr_str("café"), "'café'");
-    }
 
-    #[test]
-    fn tail_lines_of_str_matches_python_slice() {
         // tail 0 -> empty; tail > 0 -> last N lines keepends; over-large -> all.
         assert_eq!(tail_lines_of_str("a\nb\nc\n", 0), "");
         assert_eq!(tail_lines_of_str("a\nb\nc\n", 2), "b\nc\n");
@@ -4715,10 +4565,7 @@ mod tests {
         // last line without trailing newline is preserved as-is here (the file
         // reader is what appends the missing newline).
         assert_eq!(tail_lines_of_str("a\nb", 1), "b");
-    }
 
-    #[test]
-    fn tail_lines_keepends_appends_missing_newline() {
         let dir = std::env::temp_dir().join(format!(
             "fno-cv-logs-{}-{}",
             std::process::id(),
@@ -4741,10 +4588,7 @@ mod tests {
             "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n"
         );
         fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn follow_exit_code_maps_ctrl_c_to_zero() {
         use std::os::unix::process::ExitStatusExt;
         use std::process::ExitStatus;
         // claude caught SIGINT and exited 130 (128 + SIGINT): clean stop -> 0.
@@ -4761,7 +4605,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_logs_args_defaults_and_rejects_negative_tail() {
+    fn logs_rows() {
         let a = parse_logs_args(&["worker-A".to_string()]).unwrap();
         assert_eq!(a.name, "worker-A");
         assert_eq!(a.tail, 100);
@@ -4790,18 +4634,12 @@ mod tests {
         );
         let err = parse_logs_args(&["w".to_string(), "--tail".to_string(), "-3".to_string()]);
         assert!(matches!(err, Err((2, _))));
-    }
 
-    #[test]
-    fn parse_logs_args_accepts_json_short() {
         // (codex P2, PR #431): -J must parse like --json on the
         // Rust-routed `logs` path, not fall through to "unknown flag".
         let a = parse_logs_args(&["w".to_string(), "-J".to_string()]).unwrap();
         assert!(a.json_out);
-    }
 
-    #[test]
-    fn parse_trace_args_accepts_global_register_shorts() {
         // (codex P2, PR #431): -A/-J must parse identically to
         // --all/--json on the Rust-routed `trace` path.
         let short = parse_trace_args(&["-A".to_string(), "-J".to_string()]).unwrap();
@@ -4812,7 +4650,7 @@ mod tests {
     }
 
     #[test]
-    fn load_registry_entries_reads_agents_key_and_validates() {
+    fn registry_rows() {
         let dir = std::env::temp_dir().join(format!(
             "fno-cv-reg-{}-{}",
             std::process::id(),
@@ -4979,15 +4817,7 @@ mod tests {
         assert!(load_registry_entries(&reg).is_err());
 
         fs::remove_dir_all(&dir).ok();
-    }
 
-    /// load-gate relaxation, the Rust half of the cross-language parity
-    /// (AC1-FR): this reader accepts the same alien-harness fixture Python's
-    /// `test_load_gate` accepts, and refuses the same corrupt fixture -- both
-    /// directions pinned. Also covers AC1-EDGE (provider-less post-v10 shape)
-    /// and AC2-ERR (divergence loads).
-    #[test]
-    fn load_registry_gate_shape_check_x8dfc() {
         let dir = std::env::temp_dir().join(format!(
             "fno-cv-reg8dfc-{}-{}",
             std::process::id(),
@@ -5063,10 +4893,7 @@ mod tests {
         assert!(load_registry_entries(&reg).is_err());
 
         fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn expand_eq_splits_long_options_only() {
         assert_eq!(
             expand_eq(&["--limit=5".to_string(), "w".to_string()]),
             vec!["--limit".to_string(), "5".to_string(), "w".to_string()]
