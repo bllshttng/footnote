@@ -318,6 +318,15 @@ impl AgentsHome {
         self.root.join("roster-progress.json")
     }
 
+    /// Per-scope refusal-rate trend baseline (`refusal-trend.json`), beside
+    /// `registry.json`. The `reign_checkin` journal is the diff corpus, not
+    /// the trend baseline: a beat that prints but does not journal must
+    /// still advance the baseline, or a falling series reads RISING against
+    /// the same stale pair on every beat. See [`crate::refusal_trend`].
+    pub fn refusal_trend_json(&self) -> PathBuf {
+        self.root.join("refusal-trend.json")
+    }
+
     pub fn events_jsonl(&self) -> PathBuf {
         self.root.join("events.jsonl")
     }
