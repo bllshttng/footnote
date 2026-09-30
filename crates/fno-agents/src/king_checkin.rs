@@ -2588,34 +2588,25 @@ mod tests {
     }
 
     #[test]
-    fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
+    fn cause_rows() {
         let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
         assert_eq!(
             stderr_cause(stderr),
             "gh: API rate limit exceeded for user ID 4994564. (HTTP 403)"
         );
-    }
 
-    #[test]
-    fn gh_error_cause_removes_the_gh_api_prefix() {
         let error = "gh api repos/{owner}/{repo}/commits/<sha>/check-runs failed: fno config: x is not modeled\ngh: API rate limit exceeded (HTTP 403)";
         assert_eq!(
             gh_error_cause(error),
             "gh: API rate limit exceeded (HTTP 403)"
         );
-    }
 
-    #[test]
-    fn stderr_cause_falls_back_to_the_last_warning_or_empty_placeholder() {
         assert_eq!(
             stderr_cause("fno config: first\nfno config: last"),
             "fno config: last"
         );
         assert_eq!(stderr_cause(" \n\t"), "no stderr");
-    }
 
-    #[test]
-    fn stderr_cause_caps_at_120_unicode_characters() {
         let cause = "é".repeat(300);
         let result = stderr_cause(&cause);
         assert_eq!(result.chars().count(), 120);
@@ -2623,17 +2614,14 @@ mod tests {
     }
 
     #[test]
-    fn open_pr_total_sums_all_pages() {
+    fn count_rows() {
         let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
         let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
         assert_eq!(
             open_pr_total(&[first, second, json!({"unexpected": true}), json!([1, 2])]),
             109
         );
-    }
 
-    #[test]
-    fn scope_key_sanitizes_like_the_writer() {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
@@ -2768,19 +2756,13 @@ mod tests {
     }
 
     #[test]
-    fn user_marker_grabs_between_fences() {
+    fn marker_rows() {
         let doc = "intro\n<!-- fno:user -->\nline one\n<!-- /fno:user -->\ntail\n";
         assert_eq!(extract_user_marker(doc), Some("line one\n".to_string()));
-    }
 
-    #[test]
-    fn unclosed_marker_runs_to_writer_heading() {
         let doc = "<!-- fno:user -->\nkept\n## Merge order and why (r1)\nnot kept\n";
         assert_eq!(extract_user_marker(doc), Some("kept\n".to_string()));
-    }
 
-    #[test]
-    fn unclosed_marker_runs_to_next_fence_or_eof() {
         let doc = "<!-- fno:status -->\ns\n<!-- fno:user -->\nkept\n<!-- fno:other -->\n";
         assert_eq!(extract_user_marker(doc), Some("kept\n".to_string()));
         assert_eq!(
@@ -2788,10 +2770,7 @@ mod tests {
             Some("kept to end\n".to_string())
         );
         assert_eq!(extract_user_marker("no marker here"), None);
-    }
 
-    #[test]
-    fn placeholder_only_block_reads_as_empty() {
         assert!(is_user_placeholder(
             "_(write here; the machine reads this every refresh and never edits it)_\n"
         ));
@@ -2823,7 +2802,7 @@ mod tests {
     }
 
     #[test]
-    fn board_and_court_readings_reduce_the_payloads() {
+    fn scope_rows() {
         let board = Ok(board_payload());
         let folded = Ok(fold_payload());
         let board_value = r_board(&board, &folded, Ok(7)).unwrap();
@@ -2836,13 +2815,7 @@ mod tests {
         let rows = court["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["session"], json!("s1"));
-    }
 
-    /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
-    /// headline is the same sum over owned_counts, and a row another crown
-    /// owns drops off while an unread mark keeps its row.
-    #[test]
-    fn the_scope_reading_counts_active_and_owned_active() {
         let folded = Ok(json!({"fold": {
             "status": "ok", "total": 15,
             "counts": {"in_progress": 2, "ready": 1, "idea": 5, "deferred": 3, "done": 4},
@@ -2864,11 +2837,7 @@ mod tests {
             .map(|r| r["id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["x-1", "x-3"], "owned false drops; owned null stays");
-    }
 
-    /// AC16-HP: the scope line leads with the owned count.
-    #[test]
-    fn the_scope_line_leads_with_the_owned_count() {
         let readings = sample_readings(
             json!({"open_prs": 1, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 3, "owned_active": 1, "total_nodes": 15, "rows": []}),
@@ -2882,11 +2851,7 @@ mod tests {
             .find(|l| l.contains("owned active of"))
             .unwrap();
         assert_eq!(line, "x-bbbb: 1 owned active of 3 active, 15 nodes");
-    }
 
-    /// AC14-ERR: a failed owner read renders unmeasured with the reason.
-    #[test]
-    fn the_scope_line_reads_unmeasured_with_the_reason() {
         let mut readings = sample_readings(
             board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
@@ -2903,12 +2868,7 @@ mod tests {
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes")
             && lines.iter().any(|l| l == "  x-aaaa rung 2 mission x-aaaa live -/4 unreadable (the graph read returned 0 nodes)"));
-    }
 
-    /// AC15-EDGE: a previous beat row that carries active_nodes but no
-    /// owned_active reads unmeasured for one beat, never a fake movement.
-    #[test]
-    fn a_previous_row_without_owned_active_reads_unmeasured() {
         let mut prev = prev_row();
         prev["data"].as_object_mut().unwrap().remove("owned_active");
         let data = Map::new();
@@ -2916,8 +2876,19 @@ mod tests {
         assert_eq!(change, "unmeasured: previous row lacks owned_active");
     }
 
+    /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
+    /// headline is the same sum over owned_counts, and a row another crown
+    /// owns drops off while an unread mark keeps its row.
+
+    /// AC16-HP: the scope line leads with the owned count.
+
+    /// AC14-ERR: a failed owner read renders unmeasured with the reason.
+
+    /// AC15-EDGE: a previous beat row that carries active_nodes but no
+    /// owned_active reads unmeasured for one beat, never a fake movement.
+
     #[test]
-    fn the_epics_line_renders_right_after_the_scope_line() {
+    fn epics_rows() {
         // AC3-HP: the lead reads the cap distance on the court reading
         // itself, one line under the active count.
         let court = json!({
@@ -2942,10 +2913,7 @@ mod tests {
             .position(|l| l.starts_with("x-bbbb: ") && l.contains("active of"))
             .unwrap();
         assert_eq!(lines[scope_at + 1], "epics: e-1 16/15 full, e-2 3/15");
-    }
 
-    #[test]
-    fn the_epics_line_reads_unset_when_no_cap_is_configured() {
         // AC3-EDGE: `-` per cell and a trailing `(cap unset)`; seven rows
         // name five and count the rest.
         let line = epic_line(&json!({
@@ -2962,10 +2930,7 @@ mod tests {
         let line = epic_line(&json!({"epics": rows, "epic_cap": 15}));
         assert!(line.starts_with("epics: e-1 1/15, e-2 2/15, e-3 3/15, e-4 4/15, e-5 5/15"));
         assert!(line.ends_with("+2 more"));
-    }
 
-    #[test]
-    fn the_epics_line_degrades_honestly() {
         // AC3-ERR: a fold that never carried the load reads unmeasured, an
         // empty scope reads none, and a failed court reader prints its own
         // failure instead of an epics line.
@@ -3084,7 +3049,7 @@ mod tests {
     /// The journaled row carries the same starts and skips the lines print,
     /// and no territory line ever contains `blueprinter` again.
     #[test]
-    fn the_blueprint_journal_matches_the_lines_and_the_territory_line_is_clean() {
+    fn disagree_rows() {
         let readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3111,12 +3076,7 @@ mod tests {
             }
         }
         assert!(territory_seen, "territory line missing: {lines:?}");
-    }
 
-    // ---- check_account_login_with: one test per rule ----
-
-    #[test]
-    fn disagree_compares_meanings_not_spellings() {
         let pair = |fp: &str, gate_cpu: &str| {
             r_capacity_pair(
                 &json!({"admission": {"verdict": fp}, "unparsed_lines": 0}),
@@ -3140,8 +3100,10 @@ mod tests {
         assert!(!pair("admit_degraded", "pass"));
     }
 
+    // ---- check_account_login_with: one test per rule ----
+
     #[test]
-    fn capacity_pair_ignores_a_refusal_on_another_axis() {
+    fn capacity_rows() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3165,10 +3127,7 @@ mod tests {
             "line: {line}"
         );
         assert!(!line.contains("DISAGREE"), "line: {line}");
-    }
 
-    #[test]
-    fn capacity_pair_marks_a_cpu_divergence() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3190,10 +3149,7 @@ mod tests {
             line.contains("gate refused on cpu_share_undecidable, cpu refuse"),
             "line: {line}"
         );
-    }
 
-    #[test]
-    fn capacity_pair_without_a_gate_cpu_row_never_disagrees() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3213,10 +3169,7 @@ mod tests {
             .unwrap();
         assert!(line.contains("cpu -"), "line: {line}");
         assert!(!line.contains("DISAGREE"), "line: {line}");
-    }
 
-    #[test]
-    fn capacity_pair_renders_provider_lanes_in_order_or_as_unreadable() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3264,10 +3217,7 @@ mod tests {
         .find(|line| line.starts_with("capacity:"))
         .unwrap();
         assert!(unread_line.ends_with("| lanes lanes unreadable"));
-    }
 
-    #[test]
-    fn unparsed_capacity_line_names_the_floor_and_zero_stays_silent() {
         let capacity_line = |unparsed: i64| {
             let capacity = r_capacity_pair(
                 &json!({"admission": {"verdict": "admit"}, "unparsed_lines": unparsed}),
@@ -3309,7 +3259,7 @@ mod tests {
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
     #[test]
-    fn subagents_reading_names_held_agents_and_raises_attention() {
+    fn workers_rows() {
         let mut readings = sample_readings(
             board7(),
             court4(),
@@ -3352,12 +3302,7 @@ mod tests {
         );
         assert!(held_line.contains("TaskStop a1"), "line: {held_line}");
         assert!(held_line.contains("TaskStop bp-x"), "line: {held_line}");
-    }
 
-    // AC5: a non-claude harness fails the reading, the beat prints
-    // READER FAILED subagents:, and coverage counts it as failed.
-    #[test]
-    fn a_failed_subagents_reader_prints_its_own_line_and_counts_failed() {
         let mut readings = sample_readings(
             board7(),
             court4(),
@@ -3383,11 +3328,7 @@ mod tests {
                 .any(|l| l.starts_with("READER FAILED subagents:")),
             "lines: {lines:?}"
         );
-    }
 
-    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
-    #[test]
-    fn workers_payload_without_subagents_renders_a_dash() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("live_subagents"), Some(&Value::Null));
@@ -3399,10 +3340,15 @@ mod tests {
         );
     }
 
+    // AC5: a non-claude harness fails the reading, the beat prints
+    // READER FAILED subagents:, and coverage counts it as failed.
+
+    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
+
     // AC4: an over-ceiling wake ratio prints the OVER suffix and journals an
     // attention item, so an over beat is never journalled as a quiet one.
     #[test]
-    fn wake_ratio_line_prints_and_names_attention_when_over() {
+    fn wake_rows() {
         let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
@@ -3422,13 +3368,7 @@ mod tests {
             line,
             "wake_ratio: 287 machine / 44 user wakes = 6.5 to 1 - OVER 3 to 1"
         );
-    }
 
-    // AC5: a failed wake_meter reading prints the READER FAILED line, names
-    // itself in readers_failed, and no wake_ratio or subagent_tokens line
-    // prints.
-    #[test]
-    fn a_failed_wake_meter_reading_prints_the_reader_failed_line() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3447,12 +3387,7 @@ mod tests {
         );
         assert!(!lines.iter().any(|l| l.starts_with("wake_ratio:")));
         assert!(!lines.iter().any(|l| l.starts_with("subagent_tokens:")));
-    }
 
-    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
-    // the printed n/a line.
-    #[test]
-    fn wake_attention_without_typed_turns_names_n_a() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3468,12 +3403,19 @@ mod tests {
         assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
+    // AC5: a failed wake_meter reading prints the READER FAILED line, names
+    // itself in readers_failed, and no wake_ratio or subagent_tokens line
+    // prints.
+
+    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
+    // the printed n/a line.
+
     // AC2: the handoff signal reads the true beat-to-beat direction. Two
     // consecutive rises trip it; one rise, flat, or falling does not; and the
     // baseline advances with every measured beat, so beats whose row never
     // journaled can never pin the comparison to a stale pair.
     #[test]
-    fn refusal_rate_trend_reads_the_true_direction_across_unjournalled_beats() {
+    fn refusal_rows() {
         // Two rises: 0.05 -> 0.10 -> 0.20 trips the signal.
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate".into(), json!(0.20));
@@ -3522,14 +3464,7 @@ mod tests {
                 *current,
             );
         }
-    }
 
-    // AC1+AC2: the printed line carries the real refused/total/window counts
-    // and exactly one trend verdict - RISING on two consecutive rises,
-    // UNMEASURED on a missing prior pair - and the same rate lands in the
-    // journaled data.
-    #[test]
-    fn refusal_rate_line_carries_the_handoff_or_unmeasured_suffix() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
@@ -3556,12 +3491,7 @@ mod tests {
             line,
             "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
         );
-    }
 
-    // A rising refusal rate outranks silence the same way control-plane
-    // attention does: it must never journal as "no change".
-    #[test]
-    fn refusal_rate_rising_reads_as_attention_not_no_change() {
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate_rising".into(), json!(true));
         let change = derive_change(None, &data, "");
@@ -3571,8 +3501,16 @@ mod tests {
         );
     }
 
+    // AC1+AC2: the printed line carries the real refused/total/window counts
+    // and exactly one trend verdict - RISING on two consecutive rises,
+    // UNMEASURED on a missing prior pair - and the same rate lands in the
+    // journaled data.
+
+    // A rising refusal rate outranks silence the same way control-plane
+    // attention does: it must never journal as "no change".
+
     #[test]
-    fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
+    fn park_rows() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
@@ -3600,10 +3538,7 @@ mod tests {
         assert_eq!(unpark_rows.len(), 2, "lines: {lines:?}");
         assert!(unpark_rows[0].contains("owner/repo#101"));
         assert!(unpark_rows[0].contains("checks are red"));
-    }
 
-    #[test]
-    fn a_parked_reading_of_zero_rows_reads_parked_none() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
@@ -3632,7 +3567,7 @@ mod tests {
     }
 
     #[test]
-    fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
+    fn answer_rows() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3680,10 +3615,7 @@ mod tests {
                 .any(|l| l == "READER FAILED quiet_workers: peek exited 13"),
             "lines: {lines:?}"
         );
-    }
 
-    #[test]
-    fn held_rows_render_the_decide_verb_and_none_when_clear() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3737,7 +3669,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_against_previous_canonical_row() {
+    fn diff_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
@@ -3769,12 +3701,7 @@ mod tests {
             .find(|l| l.starts_with("vs last beat (2026-09-10T12:00:00Z)"))
             .unwrap();
         assert!(diff_line.contains("open_prs 9 -> 7"), "line: {diff_line}");
-    }
 
-    // AC6-HP: a 30-minute arm FAIL is attention, and a moved count still
-    // reports itself inside the attention change.
-    #[test]
-    fn an_overdue_arm_reads_attention_not_no_change() {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
@@ -3828,12 +3755,7 @@ mod tests {
             change,
             "attention: pr_watch_merge FAIL timeout for 2000s; moved: open_prs 9 -> 7"
         );
-    }
 
-    // AC6-ERR: a failed control_plane reading prints its own line, counts
-    // against coverage, and blocks the "no change" verdict.
-    #[test]
-    fn a_failed_control_plane_reader_blocks_the_quiet_beat() {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
@@ -3857,11 +3779,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.starts_with("coverage: 21 of 22 readings ok")));
-    }
 
-    // The self-hold line exposes both inputs, and either one raises attention.
-    #[test]
-    fn self_hold_attention_reads_clock_and_registry_together() {
         let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
@@ -3904,10 +3822,7 @@ mod tests {
         assert!(lines.iter().any(
             |l| l == "self_hold: clock active until 2030-01-01T00:00:00Z; delivery_policy none"
         ));
-    }
 
-    #[test]
-    fn hand_row_baseline_reads_unmeasured_not_no_change() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
@@ -3928,6 +3843,14 @@ mod tests {
             "line: {beat}"
         );
     }
+
+    // AC6-HP: a 30-minute arm FAIL is attention, and a moved count still
+    // reports itself inside the attention change.
+
+    // AC6-ERR: a failed control_plane reading prints its own line, counts
+    // against coverage, and blocks the "no change" verdict.
+
+    // The self-hold line exposes both inputs, and either one raises attention.
 
     #[test]
     fn faq_scope_line_matches() {
@@ -3960,7 +3883,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_scope_row_is_emitted() {
+    fn emit_rows() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-bbbb");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
@@ -3973,20 +3896,11 @@ mod tests {
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
-    }
 
-    #[test]
-    fn requested_emit_without_a_row_is_a_failure() {
         assert_eq!(finish_checkin(true, false, None), 3);
-    }
 
-    #[test]
-    fn no_emit_is_success_when_no_row_was_requested() {
         assert_eq!(finish_checkin(false, false, None), 0);
-    }
 
-    #[test]
-    fn a_broken_pipe_after_a_journalled_beat_is_success() {
         assert_eq!(
             finish_checkin(
                 true,
@@ -3995,10 +3909,7 @@ mod tests {
             ),
             0
         );
-    }
 
-    #[test]
-    fn a_broken_pipe_without_a_journalled_beat_still_fails() {
         assert_eq!(
             finish_checkin(
                 true,
@@ -4007,10 +3918,7 @@ mod tests {
             ),
             3
         );
-    }
 
-    #[test]
-    fn non_canonical_scope_refuses_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-cccc ready no build, idea");
         let data = json!({"scope": "x-cccc ready no build, idea", "change": "beat"});
@@ -4026,10 +3934,7 @@ mod tests {
                     .is_empty(),
             "the corrupted-scope row must not reach the journal"
         );
-    }
 
-    #[test]
-    fn emit_row_writes_through_the_capped_emitter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
@@ -4048,10 +3953,7 @@ mod tests {
             rows.contains("\"intended_kind\":\"reign_checkin\""),
             "rows: {rows}"
         );
-    }
 
-    #[test]
-    fn model_change_fills_change_and_derivation_moves_to_diff() {
         let mut data = Map::new();
         let change = finish_change(
             "moved: open_prs 9 -> 7".into(),
@@ -4068,10 +3970,7 @@ mod tests {
         assert_eq!(change, "no change");
         assert_eq!(data.get("change"), Some(&json!("no change")));
         assert_eq!(data.get("diff"), Some(&json!("no change")));
-    }
 
-    #[test]
-    fn previous_row_skips_hook_and_hand_rows() {
         let dir = tempfile::tempdir().unwrap();
         let rows = [
             json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin", "source": "loop",
@@ -4138,7 +4037,7 @@ mod tests {
     // AC9-HP: a paused tier leads the attention list with one breaker
     // summary, and no line prescribes a refresh.
     #[test]
-    fn a_paused_tier_leads_attention_with_the_breaker_summary() {
+    fn pause_rows() {
         use crate::loops_pause::DispatchPause;
         let rows: Vec<crate::tick_ledger::ArmStatus> =
             ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
@@ -4191,13 +4090,7 @@ mod tests {
             out.iter().all(|l| !l.contains("pr watch refresh")),
             "lines: {out:?}"
         );
-    }
 
-    // AC-EDGE: a manual loops pause names what it holds, and the tail
-    // never claims merges are held.
-    #[test]
-    fn a_manual_pause_says_loop_dispatch_is_held_and_merges_proceed() {
-        use crate::loops_pause::DispatchPause;
         let rows: Vec<crate::tick_ledger::ArmStatus> = ["king_wake", "watchdog"]
             .iter()
             .map(|a| pause_row(a))
@@ -4217,11 +4110,7 @@ mod tests {
             out[0]
         );
         assert!(out[0].contains("fno do loops status"), "line: {}", out[0]);
-    }
 
-    // AC10-EDGE: no pause, the output is today's: the row lines only.
-    #[test]
-    fn without_a_pause_attention_is_the_overdue_rows_alone() {
         let mut kw = crate::tick_ledger::ArmStatus {
             arm: "king_wake".to_string(),
             scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
@@ -4259,8 +4148,13 @@ mod tests {
         assert!(out[0].contains("tick_overdue"), "line: {}", out[0]);
     }
 
+    // AC-EDGE: a manual loops pause names what it holds, and the tail
+    // never claims merges are held.
+
+    // AC10-EDGE: no pause, the output is today's: the row lines only.
+
     #[test]
-    fn crown_split_fields_report_counts_and_lines_on_a_reading() {
+    fn crown_rows() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![crate::crown_split::ScopeSplit {
                 scope: "shared".into(),
@@ -4287,10 +4181,7 @@ mod tests {
                 "stale crown shared on king-dead (stored status orphaned); fno agents rm king-dead"
             ]
         );
-    }
 
-    #[test]
-    fn crown_split_fields_never_zero_an_unread_registry() {
         let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(
             Err("registry unreadable: boom".into()),
             &std::collections::BTreeMap::new(),
@@ -4303,11 +4194,7 @@ mod tests {
             vec!["crown split read failed: registry unreadable: boom"]
         );
         assert!(stale.is_empty());
-    }
 
-    // AC4-HP: the specimen line names the dead call and offers resume.
-    #[test]
-    fn stale_crown_line_names_the_dead_call_when_one_is_open() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
@@ -4331,11 +4218,7 @@ mod tests {
             stale,
             vec!["stale crown fno on king-fno-g6 (stored status exited): session 278c9a89-11ed-49af-a6fb-371bb36e410d stopped inside a Bash call made at 2026-09-21T08:21:13.913Z, before the last boot at 2026-09-21T13:33:58Z; fno agents resume king-fno-g6 relaunches it, fno agents rm king-fno-g6 drops the row and its crown".to_string()]
         );
-    }
 
-    // AC4-ERR: an unreadable reading appends the reason, never a clean read.
-    #[test]
-    fn stale_crown_line_appends_the_reason_when_unreadable() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
@@ -4357,6 +4240,10 @@ mod tests {
             vec!["stale crown fno on king-gone (stored status exited); fno agents rm king-gone (tool-call reading: no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d)".to_string()]
         );
     }
+
+    // AC4-HP: the specimen line names the dead call and offers resume.
+
+    // AC4-ERR: an unreadable reading appends the reason, never a clean read.
 
     /// The beat defaults under the equal-version trap this repo guards
     /// against: no `--scope`, no `--level`, no
