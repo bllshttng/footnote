@@ -373,7 +373,7 @@ pub fn run(args: &[String]) -> i32 {
         if scope.trim().is_empty() {
             String::new()
         } else {
-            format!("/fno:reign {}", scope.trim())
+            format!("/fno:lead {}", scope.trim())
         }
     });
     // The spawn door runs before the worker's session exists, and the

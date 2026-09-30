@@ -86,6 +86,8 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "GEMINI_SANDBOX",
     "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
     "OPENCODE_DB",  # points the intel fold at one opencode store; same category as CODEX_HOME
+    "OPENCODE_CONFIG",  # selects the active opencode config file
+    "XDG_CONFIG_HOME",  # redirects user config discovery, including opencode
     "GROK_HOME",  # grok's session store root; the same category pi once read a store-root var for
     "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "CLAUDE_CLI",
@@ -228,6 +230,11 @@ _RUNNER_PASSTHROUGH = (
     # Native claim-door tests pin the checkout binary; without this runner
     # channel hermetic children resolve an older PATH binary.
     "FNO_AGENTS_BIN",
+    # The store worker the same tests pin from the checkout build
+    # (conftest._door_binary_from_this_checkout): without this channel the
+    # sweep deletes the pin and a one-shot store exec resolves the older
+    # PATH binary, which refuses keeper methods this tree adds.
+    "FNO_AGENTS_WORKER",
     "FNO_BIN",  # the event store client pins the checkout's fno front door
     "FNO_AGENTS_FRONT",  # .github/actions/smoke-setup/action.yml
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml

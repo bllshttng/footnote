@@ -1910,6 +1910,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "pi",
     "cursor-agent",
     "grok",
+    "zcode",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1932,6 +1933,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "pi" => Some(Box::new(PiProvider)),
         "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
         "grok" => Some(Box::new(GrokProvider)),
+        "zcode" => Some(Box::new(crate::zcode::ZcodeProvider)),
         _ => None,
     }
 }
@@ -1969,7 +1971,7 @@ mod tests {
     // ---- argv shapes ----
 
     #[test]
-    fn claude_create_argv_uses_bg_not_print() {
+    fn claude_argv_rows() {
         let argv = ClaudeProvider.create_argv(&create_ctx());
         assert_eq!(
             argv,
@@ -1983,10 +1985,7 @@ mod tests {
             ]
         );
         assert!(!argv.iter().any(|a| a == "-p"), "LD38: never claude -p");
-    }
 
-    #[test]
-    fn claude_resume_argv_is_headless_resume() {
         let ctx = ResumeContext {
             session_id: "7c5dcf5d".into(),
             message: "follow up".into(),
@@ -1998,10 +1997,7 @@ mod tests {
             ClaudeProvider.resume_argv(&ctx),
             vec!["claude", "-p", "--resume", "7c5dcf5d", "--", "follow up"]
         );
-    }
 
-    #[test]
-    fn claude_stream_json_resume_argv_uses_p_and_full_uuid() {
         // The stream-json host lane resumes by the FULL UUID with -p +
         // stream-json IO (the only flags that yield a drivable bidirectional
         // pipe). -p here is the deliberate adoption lane (LD1), distinct from
@@ -2092,28 +2088,6 @@ mod tests {
     /// so a bounded worker cannot take index.lock and every commit fails. The
     /// Python create path grants it; this lane builds its own argv and would
     /// otherwise stay broken (a guard on one of N paths is decorative).
-    #[test]
-    fn codex_create_argv_grants_git_common_dir_when_cwd_is_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let mut ctx = create_ctx();
-        ctx.cwd = dir.path().to_path_buf();
-        let argv = CodexProvider.create_argv(&ctx);
-
-        let i = argv
-            .iter()
-            .position(|a| a == "--add-dir")
-            .expect("--add-dir");
-        assert_eq!(
-            std::fs::canonicalize(&argv[i + 1]).unwrap(),
-            std::fs::canonicalize(dir.path().join(".git")).unwrap()
-        );
-    }
 
     #[cfg(unix)]
     #[test]
@@ -2325,26 +2299,20 @@ mod tests {
     }
 
     #[test]
-    fn codex_create_argv_yolo_is_mutually_exclusive_with_sandbox() {
+    fn codex_sandbox_rows() {
         let mut ctx = create_ctx();
         ctx.yolo = true;
         let argv = CodexProvider.create_argv(&ctx);
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!argv.iter().any(|a| a == "--sandbox"));
-    }
 
-    #[test]
-    fn codex_create_argv_appends_reasoning_effort() {
         let mut ctx = create_ctx();
         ctx.reasoning_effort = Some("high".into());
         let argv = CodexProvider.create_argv(&ctx);
         assert!(argv
             .windows(2)
             .any(|w| w == ["-c", "model_reasoning_effort=high"]));
-    }
 
-    #[test]
-    fn codex_create_and_resume_normalize_direct_slash_commands() {
         let mut create = create_ctx();
         create.message = "  /fno:target x-aaaa  ".into();
         assert_eq!(
@@ -2374,6 +2342,26 @@ mod tests {
             render_verb_seed("  review this\n  code  ", "codex"),
             "  review this\n  code  "
         );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let mut ctx = create_ctx();
+        ctx.cwd = dir.path().to_path_buf();
+        let argv = CodexProvider.create_argv(&ctx);
+
+        let i = argv
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir");
+        assert_eq!(
+            std::fs::canonicalize(&argv[i + 1]).unwrap(),
+            std::fs::canonicalize(dir.path().join(".git")).unwrap()
+        );
     }
 
     /// the sigil says WHO WROTE the seed, never which harness runs
@@ -2381,7 +2369,7 @@ mod tests {
     /// rewritten to claude's native `/fno:verb`; a slash seed is already
     /// claude's spelling, and prose or an inline mention is never touched.
     #[test]
-    fn claude_create_and_resume_normalize_codex_dollar_commands() {
+    fn verb_rows() {
         let mut create = create_ctx();
         create.message = "  $fno:target x-aaaa  ".into();
         assert_eq!(
@@ -2416,13 +2404,7 @@ mod tests {
             render_verb_seed("build feature X", "claude"),
             "build feature X"
         );
-    }
 
-    /// the one renderer reads every sigil spelling and renders per
-    /// harness. Codex receives `$fno:verb` from all three seed spellings;
-    /// its native verbs and foreign prose stay literal.
-    #[test]
-    fn render_verb_seed_codex_accepts_every_sigil_and_keeps_natives() {
         for seed in ["/fno:target x-aaaa", "/target x-aaaa", "$fno:target x-aaaa"] {
             assert_eq!(
                 render_verb_seed(seed, "codex"),
@@ -2441,12 +2423,7 @@ mod tests {
         ] {
             assert_eq!(render_verb_seed(seed, "codex"), seed, "seed: {seed}");
         }
-    }
 
-    /// slash surfaces render the namespaced spelling per row; agy
-    /// strips the namespace it injects natively.
-    #[test]
-    fn render_verb_seed_slash_surfaces_render_per_harness() {
         assert_eq!(
             render_verb_seed("$fno:blueprint x", "claude"),
             "/fno:blueprint x"
@@ -2461,13 +2438,7 @@ mod tests {
             render_verb_seed("do a $fno:blueprint", "claude"),
             "do a $fno:blueprint"
         );
-    }
 
-    /// pi's skill-command form: a namespaced token AND a bare footnote verb
-    /// render through the row's nonempty `slash_prefix`, while pi's own
-    /// native verb stays literal (AC7-HP, AC7-EDGE).
-    #[test]
-    fn render_verb_seed_pi_renders_the_skill_command_form() {
         assert_eq!(
             render_verb_seed("/fno:target resume", "pi"),
             "/skill:target resume"
@@ -2487,11 +2458,7 @@ mod tests {
             render_verb_seed("/fno:target resume", "agy"),
             "/target resume"
         );
-    }
 
-    /// the parse owner reads both sigils with the shared shape rule.
-    #[test]
-    fn parse_verb_token_reads_both_sigils_and_rejects_paths() {
         assert_eq!(parse_verb_token("/fno:target"), Some(("target", true)));
         assert_eq!(parse_verb_token("$fno:target"), Some(("target", true)));
         assert_eq!(parse_verb_token("/target"), Some(("target", false)));
@@ -2507,6 +2474,19 @@ mod tests {
             assert_eq!(parse_verb_token(tok), None, "token: {tok}");
         }
     }
+
+    /// the one renderer reads every sigil spelling and renders per
+    /// harness. Codex receives `$fno:verb` from all three seed spellings;
+    /// its native verbs and foreign prose stay literal.
+
+    /// slash surfaces render the namespaced spelling per row; agy
+    /// strips the namespace it injects natively.
+
+    /// pi's skill-command form: a namespaced token AND a bare footnote verb
+    /// render through the row's nonempty `slash_prefix`, while pi's own
+    /// native verb stays literal (AC7-HP, AC7-EDGE).
+
+    /// the parse owner reads both sigils with the shared shape rule.
 
     /// The plan-dir grant is independent of git-repo-ness, so even a
     /// non-repo cwd re-pins `writable_roots` on resume unless yolo.
@@ -2542,7 +2522,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_create_argv_passes_session_id_and_default_approval() {
+    fn gemini_argv_rows() {
         let mut ctx = create_ctx();
         ctx.session_id = Some("uuid-g".into());
         let argv = GeminiProvider.create_argv(&ctx);
@@ -2561,10 +2541,7 @@ mod tests {
                 "uuid-g"
             ]
         );
-    }
 
-    #[test]
-    fn gemini_resume_argv_uses_resume_flag() {
         let ctx = ResumeContext {
             session_id: "uuid-g".into(),
             message: "m".into(),
@@ -2594,13 +2571,28 @@ mod tests {
     // ---- as_pty type-level routing ----
 
     #[test]
-    fn claude_is_not_pty_managed_others_are() {
+    fn pty_rows() {
         // The shellout `--bg` claude stays non-PTY; the interactive claude (E1)
         // and codex/gemini are PTY-managed.
         assert!(ClaudeProvider.as_pty().is_none());
         assert!(ClaudeInteractiveProvider.as_pty().is_some());
         assert!(CodexProvider.as_pty().is_some());
         assert!(GeminiProvider.as_pty().is_some());
+
+        assert!(OpencodeProvider.as_pty().is_some());
+        // An id-less row has nothing to look up, so the probe stays inconclusive
+        // and never orphans the pane. A row WITH an id is probed for real
+        // - see the opencode store-probe cases above.
+        let entry = AgentEntry {
+            name: "oc".into(),
+            provider: "opencode".into(),
+            substrate: None,
+            session_id: None,
+            cwd: PathBuf::from("/x"),
+        };
+        assert!(OpencodeProvider
+            .reachability(&entry, Duration::from_secs(1))
+            .is_err());
     }
 
     // ---- ClaudeInteractiveProvider (E1 keystone) ----
@@ -2608,7 +2600,7 @@ mod tests {
     // ---- OpencodeProvider ----
 
     #[test]
-    fn opencode_create_argv_is_headless_run_never_bare_tui() {
+    fn opencode_argv_rows() {
         // The trait's create path is the headless `opencode run` one-shot
         // (never-prompt via --dangerously-skip-permissions); the bare-`opencode`
         // TUI is the PANE form and lives in mux_spawn.build_pane_argv, not here.
@@ -2623,10 +2615,7 @@ mod tests {
                 "build feature X"
             ]
         );
-    }
 
-    #[test]
-    fn opencode_create_argv_routes_slash_command_via_command_flag() {
         // A rendered footnote slash command rides `--command <verb>` (opencode
         // expands the plugin command) with the rest as args - NOT a prose prompt
         // that `run` would run verbatim (/ codex P1).
@@ -2645,10 +2634,7 @@ mod tests {
                 "x-bbbb"
             ]
         );
-    }
 
-    #[test]
-    fn opencode_run_tail_prose_through_and_bare_verb() {
         // Prose rides behind the `--` fence; a bare verb has no args tail.
         assert_eq!(
             opencode_run_tail("build feature X"),
@@ -2661,10 +2647,7 @@ mod tests {
             opencode_run_tail("/fno:blueprint my multi word idea"),
             vec!["--command", "fno:blueprint", "my multi word idea"]
         );
-    }
 
-    #[test]
-    fn opencode_resume_argv_uses_session_flag() {
         let ctx = ResumeContext {
             session_id: "ses_abc".into(),
             message: "m".into(),
@@ -2684,24 +2667,6 @@ mod tests {
                 "m"
             ]
         );
-    }
-
-    #[test]
-    fn opencode_is_pty_managed_and_id_less_probe_is_inconclusive() {
-        assert!(OpencodeProvider.as_pty().is_some());
-        // An id-less row has nothing to look up, so the probe stays inconclusive
-        // and never orphans the pane. A row WITH an id is probed for real
-        // - see the opencode store-probe cases above.
-        let entry = AgentEntry {
-            name: "oc".into(),
-            provider: "opencode".into(),
-            substrate: None,
-            session_id: None,
-            cwd: PathBuf::from("/x"),
-        };
-        assert!(OpencodeProvider
-            .reachability(&entry, Duration::from_secs(1))
-            .is_err());
     }
 
     #[test]
@@ -2728,7 +2693,7 @@ mod tests {
     // ---- claude short-id parse ----
 
     #[test]
-    fn claude_parses_short_id_from_bg_line() {
+    fn claude_parse_rows() {
         let ev = ClaudeProvider.parse_stream_event("backgrounded · 7c5dcf5d · worker-A");
         assert_eq!(
             ev,
@@ -2736,10 +2701,7 @@ mod tests {
                 session_id: "7c5dcf5d".into()
             }
         );
-    }
 
-    #[test]
-    fn claude_non_id_line_is_unknown() {
         assert!(matches!(
             ClaudeProvider.parse_stream_event("starting up"),
             ParsedEvent::Unknown { .. }
@@ -2754,7 +2716,7 @@ mod tests {
     // ---- codex JSONL parse (pinned to fixture vocabulary) ----
 
     #[test]
-    fn codex_thread_started_is_session_created() {
+    fn codex_stream_rows() {
         let ev = parse_codex_line(
             r#"{"type":"thread.started","thread_id":"019e4958-80d1-7492-8054-2854dfda502c"}"#,
         );
@@ -2764,10 +2726,7 @@ mod tests {
                 session_id: "019e4958-80d1-7492-8054-2854dfda502c".into()
             }
         );
-    }
 
-    #[test]
-    fn codex_agent_message_is_output_chunk() {
         let ev = parse_codex_line(
             r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"hello"}}"#,
         );
@@ -2777,10 +2736,7 @@ mod tests {
                 text: "hello".into()
             }
         );
-    }
 
-    #[test]
-    fn codex_error_item_is_provider_error() {
         let ev = parse_codex_line(
             r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"boom"}}"#,
         );
@@ -2790,10 +2746,7 @@ mod tests {
                 message: "boom".into()
             }
         );
-    }
 
-    #[test]
-    fn codex_command_execution_is_tool_use() {
         let ev = parse_codex_line(
             r#"{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"echo hi"}}"#,
         );
@@ -2804,10 +2757,7 @@ mod tests {
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn codex_turn_completed_is_reply_complete_marker() {
         let ev = parse_codex_line(r#"{"type":"turn.completed","usage":{"output_tokens":91}}"#);
         assert_eq!(
             ev,
@@ -2816,10 +2766,7 @@ mod tests {
                 duration_ms: 0
             }
         );
-    }
 
-    #[test]
-    fn codex_preamble_and_control_frames_are_unknown() {
         assert!(matches!(
             parse_codex_line("Reading additional input from stdin..."),
             ParsedEvent::Unknown { .. }
@@ -2833,7 +2780,7 @@ mod tests {
     // ---- gemini blob parse ----
 
     #[test]
-    fn gemini_blob_response_is_reply_complete_with_latency() {
+    fn gemini_stream_rows() {
         let blob = r#"{
           "session_id": "abc",
           "response": "PONG",
@@ -2846,10 +2793,7 @@ mod tests {
                 duration_ms: 3359
             }
         );
-    }
 
-    #[test]
-    fn gemini_latency_sums_across_models() {
         let blob = r#"{
           "response": "ok",
           "stats": {"models": {
@@ -2864,10 +2808,7 @@ mod tests {
                 duration_ms: 350
             }
         );
-    }
 
-    #[test]
-    fn gemini_session_only_blob_is_session_created() {
         let ev = parse_gemini_blob(r#"{"session_id":"xyz"}"#);
         assert_eq!(
             ev,
@@ -2875,18 +2816,12 @@ mod tests {
                 session_id: "xyz".into()
             }
         );
-    }
 
-    #[test]
-    fn gemini_partial_or_garbage_is_unknown() {
         assert!(matches!(
             parse_gemini_blob(r#"{"session_id": "incomplete"#),
             ParsedEvent::Unknown { .. }
         ));
-    }
 
-    #[test]
-    fn gemini_session_id_recoverable_from_create_blob_even_with_reply() {
         // parse_stream_event surfaces the reply (single-event return), but the
         // session id is still recoverable from the same blob for the create path.
         let blob = r#"{"session_id":"abc-123","response":"hi","stats":{}}"#;

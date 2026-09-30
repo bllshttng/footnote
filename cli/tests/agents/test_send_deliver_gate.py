@@ -1953,7 +1953,7 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
     assert body.startswith('<fno_mail from="b0b00000"'), body
     assert 'from_name="bob"' in body
     assert 'to_name="alice"' in body
-    assert 'to_rank="L1 fno"' in body, body
+    assert 'to_rank="Head of fno"' in body, body
 
 
 def test_relay_continuation_with_unresolved_session_renders_no_crown_line(

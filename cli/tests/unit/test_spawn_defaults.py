@@ -399,8 +399,8 @@ def test_crown_profile_key_reaches_non_verb_seeds():
     assert _profile_key("/absolute/path/to/thing") == "crown"
     from fno.agents.spawn_defaults import _CROWN_VERBS
 
-    assert _CROWN_VERBS == frozenset({"reign", "fno-me"})
-    for verb in ("reign", "fno-me"):
+    assert _CROWN_VERBS == frozenset({"lead", "reign", "fno-me"})
+    for verb in ("lead", "reign", "fno-me"):
         assert _profile_key(f"$fno:{verb} x-a792") == "crown"
         assert _profile_key(f"/fno:{verb} x-a792") == "crown"
 

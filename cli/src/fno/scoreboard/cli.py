@@ -8,7 +8,7 @@ from __future__ import annotations
 import json as _json
 import sys
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -20,7 +20,6 @@ from fno.scoreboard.fold import (
     build_efficiency,
     build_lanes,
     build_plan_fidelity,
-    build_provider_scoreboard,
     build_scoreboard,
     build_skill_scoreboard,
     classify_deliveries,
@@ -222,13 +221,28 @@ def scoreboard_command(
         return _finish(eff, _render_efficiency)
 
     if by_provider:
-        pb = build_provider_scoreboard(
-            rows,
-            _nodes(),
-            since_days=since,
-            now=datetime.now(),
-        )
-        return _finish(pb, _render_by_provider)
+        from fno.graph.store import GRAPH_JSON, _client_for
+
+        try:
+            reply = _client_for(GRAPH_JSON).request(
+                "scoreboard_by_provider",
+                {
+                    "entries": _nodes(),
+                    "rows": rows,
+                    "since_days": since,
+                    "now": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except RuntimeError as exc:
+            if "unknown store method" in str(exc) and "scoreboard_by_provider" in str(exc):
+                typer.echo(
+                    "warning: the answering keeper predates scoreboard_by_provider; "
+                    "redeploy fno-agents so the by-provider view can run",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            raise
+        return _finish(reply["view"], lambda _v: sys.stdout.write(reply["text"]))
 
     if lanes:
         from fno.agents.registry import load_registry
@@ -428,37 +442,6 @@ def _render_by_skill(sb: dict) -> None:
             f"  {row['skill']:<32}{row['version']:<10}{row['runs']:>6}"
             f"{row['ship_rate_pct']:>6}%{revert:>9}"
             f"{row['touches_per_run']:>11}{row['cost_per_run']:>10.2f}  {row['method']}\n"
-        )
-
-
-def _render_by_provider(pb: dict) -> None:
-    out = sys.stdout.write
-    win = pb["since_days"]
-    if pb["state"] == "no_data":
-        out(f"fno whoami scoreboard --by-provider (last {win}d)\n\n  no terminal sessions in window.\n")
-        return
-
-    cov = pb["coverage"]
-    out(f"fno whoami scoreboard --by-provider (last {win}d)\n\n")
-    out("Coverage\n")
-    out(f"  rows in window:      {cov['rows']} execution rows\n")
-    out(f"  attributed:          {cov['attributed_pct']}%\n")
-    if cov["attributed_pct"] < 100:
-        out(f"  ! rows below reflect {cov['attributed_pct']}% provider attribution -"
-            " unattributed rows are a visible bucket, never dropped.\n")
-    out("\n")
-    out(f"  {'provider':<16}{'model':<22}{'runs':>6}{'ships':>7}{'nodes':>7}{'shared':>8}{'spend$':>10}{'$/ship':>9}{'bounce%':>13}{'med iter':>10}{'retries':>9}\n")
-    prev = None
-    for row in pb["rows"]:
-        provider = row["provider"] if row["provider"] != prev else ""
-        prev = row["provider"]
-        cps = f"{row['cost_per_shipped_usd']:.2f}" if row["cost_per_shipped_usd"] is not None else "n/a"
-        # bounce rides with its denominator: "50% of 4" never a bare rate
-        bounce = f"{row['bounce_rate_pct']}% of {row['shipped_linked']}" if row["bounce_rate_pct"] is not None else "n/a"
-        out(
-            f"  {provider:<16}{row['model']:<22}{row['runs']:>6}{row['shipped']:>7}"
-            f"{row.get('delivered_nodes', 0):>7}{row.get('shared_nodes', 0):>8}"
-            f"{row['spend_usd']:>10.2f}{cps:>9}{bounce:>13}{_fmt(row['median_iterations']):>10}{row['retry_rows']:>9}\n"
         )
 
 

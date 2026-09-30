@@ -159,6 +159,114 @@ pub fn request(params: &mut Map<String, Value>, positional: &[String]) -> Result
     Ok(())
 }
 
+/// Rename a registry label and, when the session holds a named live crown,
+/// its crown record in the same RPC.
+pub(crate) fn respond(
+    home: &crate::paths::AgentsHome,
+    req: &crate::protocol::Request,
+) -> crate::protocol::Response {
+    use crate::protocol::{ErrorCode, Response};
+    let token = match req.params.get("name").and_then(Value::as_str) {
+        Some(token) if !token.is_empty() => token,
+        _ => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "rename needs a <name> (current label, short id, or full session id)",
+            )
+        }
+    };
+    let Some(new_name) = req.params.get("new_name").and_then(Value::as_str) else {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "rename needs --name <new-label>",
+        );
+    };
+    if !crate::state::is_valid_registry_label(new_name) {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
+        );
+    }
+    let registry_path = home.registry_json();
+    let registry = match crate::state::load_registry(&registry_path) {
+        Ok(registry) => registry,
+        Err(error) => return Response::err(req.id, ErrorCode::Internal, error.to_string()),
+    };
+    let source = match crate::state::resolve_rename_source(&registry.entries, token) {
+        Ok(source) => source,
+        Err(error) => return Response::err(req.id, ErrorCode::Internal, error),
+    };
+    let old_label = source.name.clone();
+    let session = source.harness_session_id.clone();
+    let crown = match session.as_deref() {
+        Some(session) => match crate::crown_names::rename_crown(
+            &home.crown_names_json(),
+            &registry_path,
+            session,
+            new_name,
+            false,
+        ) {
+            Ok(crown) => crown,
+            Err(error) => {
+                return Response::err(req.id, ErrorCode::InvalidParams, error);
+            }
+        },
+        None => None,
+    };
+    let label = if crown.is_some() {
+        new_name.to_ascii_lowercase()
+    } else {
+        new_name.to_string()
+    };
+    let (old, new) = match crate::state::rename_agent(&registry_path, token, &label, None) {
+        Ok(result) => result,
+        Err(error) => return Response::err(req.id, ErrorCode::Internal, error),
+    };
+    let crown = match (crown, session.as_deref()) {
+        (Some(_), Some(session)) => {
+            let result = crate::crown_names::rename_crown(
+                &home.crown_names_json(),
+                &registry_path,
+                session,
+                new_name,
+                true,
+            )
+            .and_then(|crown| {
+                crown.ok_or_else(|| "the named live crown changed before rename".to_string())
+            });
+            match result {
+                Ok(crown) => Some(crown),
+                Err(crown_error) => {
+                    let rollback =
+                        crate::state::rename_agent(&registry_path, session, &old_label, None);
+                    let rollback_result = match rollback {
+                        Ok(_) => "registry label rolled back".to_string(),
+                        Err(error) => format!("registry rollback failed: {error}"),
+                    };
+                    return Response::err(
+                        req.id,
+                        ErrorCode::Internal,
+                        format!("crown rename failed: {crown_error}; {rollback_result}"),
+                    );
+                }
+            }
+        }
+        _ => None,
+    };
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "renamed": true,
+            "old_name": old,
+            "new_name": new,
+            "crown": crown.map(|(from, to)| serde_json::json!({"from": from, "to": to})),
+        }),
+    )
+}
+
 /// The receipt names BOTH labels: the new one is the live address, the old one
 /// the alias a later `peek`/`mail send` may still use.
 pub fn receipt(name: &str, result: &Value) -> Option<String> {
@@ -170,7 +278,16 @@ pub fn receipt(name: &str, result: &Value) -> Option<String> {
         .get("new_name")
         .and_then(Value::as_str)
         .unwrap_or("(unknown)");
-    Some(format!("renamed {old} -> {new}"))
+    let mut receipt = format!("renamed {old} -> {new}");
+    if let Some(crown) = result.get("crown") {
+        if let (Some(from), Some(to)) = (
+            crown.get("from").and_then(Value::as_str),
+            crown.get("to").and_then(Value::as_str),
+        ) {
+            receipt.push_str(&format!("; crown {from} -> {to}"));
+        }
+    }
+    Some(receipt)
 }
 
 #[cfg(test)]
@@ -191,6 +308,8 @@ mod tests {
     fn spawned(session: &str, name: &str, ts_ms: i64, seq: i64) -> EventRow {
         EventRow {
             seq,
+            history_only: false,
+            recovery_batch: None,
             event_id: format!("e{seq}"),
             ts_ms,
             r#type: "agent_spawned".into(),
@@ -211,6 +330,8 @@ mod tests {
     fn renamed(session: &str, to: &str, ts_ms: i64, seq: i64) -> EventRow {
         EventRow {
             seq,
+            history_only: false,
+            recovery_batch: None,
             event_id: format!("e{seq}"),
             ts_ms,
             r#type: "agent_renamed".to_string(),
@@ -253,6 +374,8 @@ mod tests {
         assert_eq!(plans[0].session, "sess-1");
         assert_eq!(plans[0].journal_name, "vellum");
         assert!(plans[0].reason.is_none());
+        let matching = vec![row("vellum", "sess-2")];
+        assert!(plan_from_journal(&matching, &[spawned("sess-2", "vellum", 100, 1)]).is_empty());
     }
 
     #[test]
@@ -275,13 +398,6 @@ mod tests {
         let plans = plan_from_journal(&rows, &events);
         assert_eq!(plans.len(), 1);
         assert!(plans[0].reason.is_some(), "the held name is named");
-    }
-
-    #[test]
-    fn plan_leaves_a_matching_row_alone() {
-        let rows = vec![row("vellum", "sess-2")];
-        let events = vec![spawned("sess-2", "vellum", 100, 1)];
-        assert!(plan_from_journal(&rows, &events).is_empty());
     }
 
     #[test]
@@ -371,6 +487,174 @@ mod tests {
             "the skipped row is untouched"
         );
         assert!(by_name("ghost").is_some(), "the other row still renames");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_crowned_codex_rename_shows_one_name_everywhere() {
+        use crate::protocol::{Request, ResponsePayload};
+
+        let dir = tmpdir("crowned-rename");
+        let home = AgentsHome::at(&dir);
+        let session = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
+        let other_session = "01a0ee3f-235d-7671-8fbb-e09af1d5fb53";
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            let mut crowned = row("kestrel", session);
+            crowned.harness = Some("codex".into());
+            crowned.status = crate::AgentStatus::Ready;
+            crowned.crown_scope = Some("x-test".into());
+            crowned.crown_level = Some(2);
+            let mut other = row("raven", other_session);
+            other.harness = Some("codex".into());
+            other.status = crate::AgentStatus::Ready;
+            other.crown_scope = Some("y-test".into());
+            other.crown_level = Some(2);
+            registry.entries = vec![crowned, other];
+        })
+        .unwrap();
+        std::fs::write(
+            home.crown_names_json(),
+            serde_json::json!({
+                "version": 1,
+                "crowns": {
+                    "x-test": {
+                        "name": "Kestrel",
+                        "regnal": 2,
+                        "holder_session": session,
+                        "nodes": [],
+                        "updated_at": "2026-09-29T00:00:00Z"
+                    },
+                    "y-test": {
+                        "name": "Bob",
+                        "regnal": 1,
+                        "holder_session": other_session,
+                        "nodes": [],
+                        "updated_at": "2026-09-29T00:00:00Z"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let before_registry = std::fs::read(home.registry_json()).unwrap();
+        let before_crowns = std::fs::read(home.crown_names_json()).unwrap();
+        let duplicate = respond(
+            &home,
+            &Request::new(
+                1,
+                "agent.rename",
+                serde_json::json!({"name": "kestrel", "new_name": "bob"}),
+            ),
+        );
+        let ResponsePayload::Err(error) = duplicate.payload else {
+            panic!("duplicate crown name was accepted");
+        };
+        assert!(error
+            .message
+            .contains("the name Bob is held by raven over y-test"));
+        assert_eq!(
+            std::fs::read(home.registry_json()).unwrap(),
+            before_registry
+        );
+        assert_eq!(
+            std::fs::read(home.crown_names_json()).unwrap(),
+            before_crowns
+        );
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.retain(|entry| entry.name != "raven");
+        })
+        .unwrap();
+        std::fs::write(
+            home.crown_names_json(),
+            serde_json::json!({
+                "version": 1,
+                "crowns": {
+                    "x-test": {
+                        "name": "Kestrel",
+                        "regnal": 2,
+                        "holder_session": session,
+                        "nodes": [],
+                        "updated_at": "2026-09-29T00:00:00Z"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let response = respond(
+            &home,
+            &Request::new(
+                1,
+                "agent.rename",
+                serde_json::json!({"name": "kestrel", "new_name": "bob"}),
+            ),
+        );
+        let ResponsePayload::Ok(result) = response.payload else {
+            panic!("rename failed: {:?}", response.payload);
+        };
+        assert_eq!(
+            receipt("kestrel", &result).as_deref(),
+            Some("renamed kestrel -> bob; crown Kestrel II -> Bob")
+        );
+
+        let registry = crate::state::load_registry(&home.registry_json()).unwrap();
+        let renamed = registry
+            .entries
+            .iter()
+            .find(|entry| entry.name == "bob")
+            .unwrap();
+        assert!(renamed.aliases.iter().any(|alias| alias == "kestrel"));
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.crown_names_json()).unwrap()).unwrap();
+        assert_eq!(record["crowns"]["x-test"]["name"], "bob");
+        assert_eq!(record["crowns"]["x-test"]["regnal"], 1);
+        assert_eq!(record["crowns"]["x-test"]["holder_session"], session);
+        assert!(crate::crown_names::ensure_named_crown(
+            &home.crown_names_json(),
+            &home.registry_json(),
+            "x-test"
+        )
+        .unwrap());
+        let envelope = crate::mail_envelope::render_at(
+            &serde_json::json!({
+                "mode": "tag",
+                "from_session": session,
+                "to": "x"
+            }),
+            &home.registry_json(),
+        )
+        .unwrap();
+        assert!(envelope.contains("from_name=\"bob\""));
+        assert_eq!(
+            crate::king_checkin::title_rename_command("codex", "bob", None),
+            None
+        );
+        assert_eq!(
+            crate::king_checkin::title_rename_command("claude", "bob", None).as_deref(),
+            Some("/rename bob")
+        );
+
+        let before_registry = std::fs::read(home.registry_json()).unwrap();
+        let before_crowns = std::fs::read(home.crown_names_json()).unwrap();
+        let refused = respond(
+            &home,
+            &Request::new(
+                2,
+                "agent.rename",
+                serde_json::json!({"name": "bob", "new_name": "bob_2"}),
+            ),
+        );
+        assert!(matches!(refused.payload, ResponsePayload::Err(_)));
+        assert_eq!(
+            std::fs::read(home.registry_json()).unwrap(),
+            before_registry
+        );
+        assert_eq!(
+            std::fs::read(home.crown_names_json()).unwrap(),
+            before_crowns
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -28,6 +28,11 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             king_output("allow", None, "corrupt king manifest; allowing exit", 0, 0),
         );
     };
+    // The reign view carries the clock across a re-scope. The cancel
+    // sentinel and the terminal-vs-arm read below keep the raw manifest:
+    // both ask about THIS arm, not the reign - a pre-re-scope terminal must
+    // not end the re-armed loop (AC7-EDGE).
+    let reign = crate::crown_names::reign_view(&manifest);
 
     let project_events = parsed
         .events_path
@@ -103,11 +108,12 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // The hook's half of the reign record: a beat the model skipped still
     // lands a row. Sits after the cancel-sentinel check, so a cancelled crown
     // writes none. The return value is ignored, so no decision changes.
-    crate::king_checkin::hook_beat(
+    crate::king_history::hook_beat(
         &project_events,
         &parsed.cwd,
         &manifest.scope,
         &session_id,
+        manifest.harness_session_id.as_deref(),
         &history,
         chrono::Utc::now(),
     );
@@ -133,7 +139,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                     king_output(
                         "allow",
                         None,
-                        &format!("reign already terminal ({reason} at {ts}); re-arm with fno agents king init"),
+                        &format!("reign already terminal ({reason} at {ts}); re-arm with fno agents org init"),
                         0,
                         history.total,
                     ),
@@ -169,7 +175,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
-    let (reading, term_json) = crate::king_term::current_reading(&manifest);
+    let (reading, term_json) = crate::king_term::current_reading(&reign);
     let emit_term = |body| crate::king_term::emit_journal(&emit, &term_json, body);
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
     // The reading is what the branch measured, never a guess.
@@ -190,7 +196,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         return result;
     }
     if let Some((gate_reading, gate_message)) = stale_crown_doc_gate(
-        &manifest,
+        &reign,
         &parsed.transcript_path,
         &parsed.cwd,
         &parsed.fno_bin,

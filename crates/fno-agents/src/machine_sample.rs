@@ -7,8 +7,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const MACHINE_SNAPSHOT_NAME: &str = "machine-process-snapshot.txt";
+const MACHINE_SNAPSHOT_ACTIVE_NAME: &str = "machine-process-snapshot.active";
+const MAX_MACHINE_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostTicks {
@@ -193,12 +199,17 @@ pub struct MachineSample {
     pub verdict: Option<String>,
     pub busy_band: Option<f64>,
     pub load_band_per_core: Option<f64>,
+    pub runaway_load_band_per_core: Option<f64>,
+    pub runaway_load_hold_seconds: Option<u64>,
+    pub hot_escalation_seconds: Option<u64>,
     pub took_ms: Option<u64>,
     pub sessions: Option<Value>,
     pub unresolved: Option<Value>,
     pub top_rss: Option<Value>,
     pub top_names: Option<Value>,
+    pub top_parents: Option<Value>,
     pub sessions_error: Option<String>,
+    pub mux_issues: Option<Value>,
     #[serde(skip)]
     pub(crate) procs: Vec<crate::census::ProcRow>,
     #[serde(skip)]
@@ -221,6 +232,7 @@ pub fn read(
     let (load_1m, load_5m, load_15m) = load_average()
         .map(|(a, b, c)| (Some(a), Some(b), Some(c)))
         .unwrap_or((None, None, None));
+    let mux_issues = mux_server_issues(&procs);
     let mut sample = MachineSample {
         sample_id: Some(sample_id()),
         load_1m,
@@ -265,12 +277,17 @@ pub fn read(
         verdict: None,
         busy_band: None,
         load_band_per_core: None,
+        runaway_load_band_per_core: None,
+        runaway_load_hold_seconds: None,
+        hot_escalation_seconds: None,
         took_ms: None,
         sessions: None,
         unresolved: None,
         top_rss: None,
         top_names: None,
+        top_parents: None,
         sessions_error: None,
+        mux_issues: Some(mux_issues),
         procs,
         top_cpu: Vec::new(),
         throttle_minutes: 60,
@@ -283,6 +300,7 @@ pub fn read(
     });
     sample.top_cpu.truncate(3);
     sample.top_names = Some(top_name_rows(&sample.procs));
+    sample.top_parents = Some(top_parent_rows(&sample.procs));
     let mut warnings = Vec::new();
     let live = crate::spawn_gate::live_rows(&home.registry_json(), &mut warnings);
     sample.live_rows = Some(live.len() as u64);
@@ -320,6 +338,66 @@ pub fn read(
     }
     sample.took_ms = Some(started.elapsed().as_millis() as u64);
     (sample, current)
+}
+
+fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
+    let mut sockets = std::collections::BTreeMap::<String, Vec<&crate::census::ProcRow>>::new();
+    let mut owner_sessions = std::collections::HashMap::<u32, Option<String>>::new();
+    let mut issues = Vec::new();
+    for row in procs {
+        let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
+            continue;
+        };
+        sockets.entry(socket.clone()).or_default().push(row);
+        let owner = crate::process_owner::owner_lease_for_server(row.pid, Path::new(&socket));
+        owner_sessions.insert(
+            row.pid,
+            match &owner {
+                crate::process_owner::OwnerRead::Owner(lease) => Some(lease.session.clone()),
+                _ => None,
+            },
+        );
+        match owner {
+            crate::process_owner::OwnerRead::Owner(lease) => {
+                match crate::process_owner::owner_status(&lease) {
+                    crate::process_owner::OwnerStatus::Dead => issues.push(json!({
+                        "kind": "dead_owner",
+                        "socket": socket,
+                        "pid": row.pid,
+                        "owner_session": lease.session,
+                        "command": row.command,
+                    })),
+                    crate::process_owner::OwnerStatus::Unknown => issues.push(json!({
+                        "kind": "owner_unknown",
+                        "socket": socket,
+                        "pid": row.pid,
+                        "owner_session": lease.session,
+                        "command": row.command,
+                    })),
+                    crate::process_owner::OwnerStatus::Alive => {}
+                }
+            }
+            crate::process_owner::OwnerRead::Unknown => issues.push(json!({
+                "kind": "owner_unknown",
+                "socket": socket,
+                "pid": row.pid,
+                "command": row.command,
+            })),
+            crate::process_owner::OwnerRead::Ownerless => {}
+        }
+    }
+    for (socket, servers) in sockets.into_iter().filter(|(_, servers)| servers.len() > 1) {
+        issues.push(json!({
+            "kind": "duplicate_socket_servers",
+            "socket": socket,
+            "servers": servers.iter().map(|row| json!({
+                "pid": row.pid,
+                "owner_session": owner_sessions.get(&row.pid).cloned().flatten(),
+                "command": row.command,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    Value::Array(issues)
 }
 
 impl MachineSample {
@@ -490,6 +568,96 @@ pub fn top_name_rows(procs: &[crate::census::ProcRow]) -> Value {
         .collect::<Vec<_>>())
 }
 
+/// Top process parents by child count, with the parent's command when it was
+/// present in the same process-table read.
+pub fn top_parent_rows(procs: &[crate::census::ProcRow]) -> Value {
+    let commands: std::collections::HashMap<u32, &str> = procs
+        .iter()
+        .map(|row| (row.pid, row.command.as_str()))
+        .collect();
+    let mut counts = std::collections::HashMap::<u32, u64>::new();
+    for row in procs {
+        *counts.entry(row.ppid).or_default() += 1;
+    }
+    let mut rows: Vec<(u32, u64)> = counts.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(10);
+    json!(rows
+        .into_iter()
+        .map(|(pid, children)| json!({
+            "pid": pid,
+            "children": children,
+            "command": commands.get(&pid).copied().unwrap_or("unavailable"),
+        }))
+        .collect::<Vec<_>>())
+}
+
+pub(crate) fn maybe_capture_process_snapshot(
+    home: &crate::paths::AgentsHome,
+    processes: usize,
+    baseline: Option<u64>,
+    capture: impl FnOnce() -> io::Result<Vec<u8>>,
+) -> io::Result<bool> {
+    let dynamic_threshold = baseline
+        .filter(|value| *value > 0)
+        .map(|value| value.saturating_mul(2));
+    let over_threshold = processes >= ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD
+        || dynamic_threshold.is_some_and(|threshold| processes as u64 >= threshold);
+    home.ensure_root()?;
+    let active = home.root().join(MACHINE_SNAPSHOT_ACTIVE_NAME);
+    if active.exists() {
+        if over_threshold || baseline.is_none() {
+            return Ok(false);
+        }
+        match std::fs::remove_file(&active) {
+            Ok(()) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if !over_threshold {
+        return Ok(false);
+    }
+
+    let raw = capture()?;
+    let mut contents = format!(
+        "captured_at: {}\nprocesses: {processes}\nthreshold: {}\n\n",
+        chrono::Utc::now().to_rfc3339(),
+        dynamic_threshold.map_or_else(
+            || ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD.to_string(),
+            |threshold| format!(
+                "{ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD} or 2x baseline ({threshold})"
+            ),
+        )
+    )
+    .into_bytes();
+    let remaining = MAX_MACHINE_SNAPSHOT_BYTES.saturating_sub(contents.len());
+    contents.extend_from_slice(&raw[..raw.len().min(remaining)]);
+
+    let snapshot = home.root().join(MACHINE_SNAPSHOT_NAME);
+    let temporary = snapshot.with_extension(format!("txt.{}.{}.tmp", std::process::id(), now_ms()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    let write_result = file.write_all(&contents).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, &snapshot) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    std::fs::write(active, chrono::Utc::now().to_rfc3339())?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn top_names_fold_ranks_by_count_folds_paths_and_skips_the_unnamed() {
+    fn process_pressure_snapshot_is_bounded_once_per_episode_and_names_top_parents() {
         let row =
             |pid: u32, ppid: u32, command: &str| crate::census::test_proc_row(pid, ppid, command);
         let procs = vec![
@@ -549,5 +717,60 @@ mod tests {
         assert_eq!(rows[1]["name"], "rustc", "count ties sort by name");
         assert_eq!(rows[2]["name"], "ssh");
         assert_eq!(rows.len(), 3, "an empty command names no group");
+
+        let pressure_procs: Vec<_> = std::iter::once(row(1, 0, "/sbin/launchd"))
+            .chain(
+                (2..=ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD as u32).map(|pid| row(pid, 1, "worker")),
+            )
+            .collect();
+        let parents = top_parent_rows(&pressure_procs);
+        assert_eq!(parents[0]["pid"], 1);
+        assert_eq!(parents[0]["children"], 1999);
+        assert_eq!(parents[0]["command"], "/sbin/launchd");
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = crate::paths::AgentsHome::at(dir.path());
+        let mut captured = 0;
+        let snapshot = maybe_capture_process_snapshot(&home, pressure_procs.len(), None, || {
+            captured += 1;
+            let mut ps_output = b"PID PPID RSS ELAPSED COMMAND\n".to_vec();
+            ps_output.extend(vec![b'x'; MAX_MACHINE_SNAPSHOT_BYTES * 2]);
+            Ok(ps_output)
+        })
+        .unwrap();
+        assert!(snapshot);
+        assert_eq!(captured, 1);
+        assert!(
+            !maybe_capture_process_snapshot(&home, pressure_procs.len(), None, || {
+                captured += 1;
+                Ok(Vec::new())
+            })
+            .unwrap()
+        );
+        assert_eq!(captured, 1, "one snapshot per pressure episode");
+        let contents = std::fs::read(dir.path().join(MACHINE_SNAPSHOT_NAME)).unwrap();
+        assert!(contents.starts_with(b"captured_at: "));
+        let ps_header = b"PID PPID RSS ELAPSED COMMAND";
+        assert!(contents
+            .windows(ps_header.len())
+            .any(|window| window == ps_header));
+        assert!(contents.len() <= MAX_MACHINE_SNAPSHOT_BYTES);
+        assert!(dir.path().join(MACHINE_SNAPSHOT_ACTIVE_NAME).exists());
+        assert!(!maybe_capture_process_snapshot(&home, 199, Some(100), || {
+            captured += 1;
+            Ok(Vec::new())
+        })
+        .unwrap());
+        assert!(dir.path().join(MACHINE_SNAPSHOT_NAME).exists());
+        assert!(!dir.path().join(MACHINE_SNAPSHOT_ACTIVE_NAME).exists());
+        assert!(maybe_capture_process_snapshot(&home, 201, Some(100), || {
+            captured += 1;
+            Ok(b"baseline threshold crossed\n".to_vec())
+        })
+        .unwrap());
+        assert_eq!(
+            captured, 2,
+            "a later pressure episode gets one new snapshot"
+        );
     }
 }

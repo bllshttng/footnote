@@ -97,7 +97,7 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 /// The unplanned queue's ready source answers in-process now; the label
 /// names the function, the way `agents claim list` labels its source.
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
-pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
+pub(crate) const SRC_WORKED: &str = "backlog::worked::json_rows (-J)";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
 /// The driver feed: registry rows that target a node. In-process,
 /// like SRC_READY; the label names the mechanism, not a command.
@@ -406,15 +406,20 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // budget, and an unbounded in-process read cannot honor a deadline).
     let graph_path = graph_json_path(&cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
+    let mut graph_error = None;
     let entries: Option<Vec<Value>> = match budget.source_deadline() {
         None => {
-            warnings.push("graph not read: board budget exhausted".to_string());
+            let error = "board budget exhausted".to_string();
+            warnings.push(format!("graph not read: {error}"));
+            graph_error = Some(error);
             None
         }
         Some(_) => match crate::backlog::api::rows(&store) {
             Ok(e) => Some(e),
             Err(e) => {
-                warnings.push(format!("graph unreadable: {}", e.0));
+                let error = format!("graph unreadable: {}", e.0);
+                warnings.push(error.clone());
+                graph_error = Some(error);
                 None
             }
         },
@@ -588,25 +593,35 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 run_json(cmd, &cwd, bound)
             })
         });
-        // The worked read is a full fno-py cold start plus fleet roster read,
-        // so it rides the concurrent section too: its join waits below, after
-        // the other subprocess threads are already running, and only the
-        // ready thread (its one consumer) waits for the result.
+        // The worked read answers in-process now: the authority is native
+        // (backlog::worked), and the Python leg it used to shell out to is a
+        // refusing tombstone. It still rides the concurrent section:
+        // the roster fold is real work, and only the ready thread (its one
+        // consumer) waits for the result.
         let t_worked = s_worked.map(|dl| {
-            let cwd = cwd_for_threads.clone();
             let spent_err = spent_err.clone();
             s.spawn(move || {
                 let bound = Budget::spawn_bound(dl);
                 if bound.is_zero() {
                     return SourceRead::over_budget(spent_err);
                 }
-                let mut cmd = fno_py_cmd();
-                cmd.extend([
-                    "backlog".to_string(),
-                    "worked".to_string(),
-                    "--json".to_string(),
-                ]);
-                run_json(cmd, &cwd, bound)
+                // The fold is in-process, so the subprocess read's kill at
+                // the slice becomes a race: the fold runs on its own thread
+                // and this one abandons it at the bound rather than joining
+                // forever. The abandoned thread holds only read locks and
+                // its result is dropped when it lands late.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::backlog::worked::json_rows());
+                });
+                match rx.recv_timeout(bound) {
+                    Ok(Ok(rows)) => SourceRead::ok(Value::Array(rows)),
+                    Ok(Err(reason)) => SourceRead::err(format!("worked: {reason}")),
+                    Err(_) => SourceRead::err(format!(
+                        "worked: killed at its {:.1}s slice of the board budget; the source did not fail",
+                        bound.as_secs_f64()
+                    )),
+                }
             })
         });
         let t_prs = s_prs.map(|dl| {
@@ -983,7 +998,30 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         }
         crown_scope = Some(scope.clone());
         let projects = project_map(&cwd);
-        match compile_scope_ids(&scope, entries.as_deref().unwrap_or(&[]), &projects) {
+        let Some(entries) = entries.as_deref() else {
+            return json!({
+                "actionable": 1,
+                "unreadable": 1,
+                "queues": [queue_json(&Queue {
+                    name: "scope",
+                    source: format!("king manifest scope {scope}"),
+                    status: "unreadable",
+                    error: format!(
+                        "graph unreadable, so scope {scope} is unknown: {}",
+                        graph_error.as_deref().unwrap_or("read failed")
+                    ),
+                    count: -1,
+                    rows: Vec::new(),
+                    actionable: true,
+                    note: String::new(),
+                    verb: "",
+                })],
+                "warnings": warnings,
+                "exit_code": 1,
+                "sources": Value::Object(sources),
+            });
+        };
+        match compile_scope_ids(&scope, entries, &projects) {
             Ok(ids) => scope_ids = Some(ids),
             Err(e) => {
                 return json!({
@@ -3114,12 +3152,27 @@ mod tests {
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
-        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "FNO_CONFIG",
+            "FNO_HOME",
+            "HOME",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[work.workspaces]\n").unwrap();
+        std::env::set_var("FNO_CONFIG", &config);
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("FNO_HOME", dir.path());
         crate::paths::pin_test_claims_root(dir.path());
+        crate::graph_store::seed_rows(
+            &graph_json_path(dir.path()),
+            &[json!({"id": "x-existing", "type": "epic", "status": "ready"})],
+        )
+        .unwrap();
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             state_path: Some(state),
@@ -3131,6 +3184,25 @@ mod tests {
         assert_eq!(queues[0]["status"], "unreadable");
         assert_eq!(queues[0]["actionable"], true);
         assert_eq!(payload["exit_code"], 1);
+        assert!(queues[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("neither a configured project nor a backlog node"));
+
+        let corrupt_home = dir.path().join("corrupt-state");
+        std::env::set_var("FNO_HOME", &corrupt_home);
+        let graph = graph_json_path(dir.path());
+        let db = crate::backlog::database_path(&graph);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::write(db, b"not a database").unwrap();
+        let payload = read_board(&BoardOpts {
+            budget_ms: 20_000,
+            state_path: Some(dir.path().join("king.md")),
+            ..Default::default()
+        });
+        let error = payload["queues"][0]["error"].as_str().unwrap();
+        assert!(error.contains("graph unreadable"), "{error}");
+        assert!(!error.contains("neither a configured project"), "{error}");
     }
 
     #[test]

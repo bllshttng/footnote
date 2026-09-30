@@ -726,7 +726,7 @@ mod tests {
     // -- AC1-HP: deletions are recoverable -----------------------------------
 
     #[test]
-    fn deletions_only_is_reapable_and_counts_them() {
+    fn porcelain_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::remove_file(repo.join("keep.py")).unwrap();
@@ -737,10 +737,7 @@ mod tests {
         assert!(v.reapable);
         assert_eq!(v.reason, "clean");
         assert_eq!(v.recoverable_deletions, 2);
-    }
 
-    #[test]
-    fn staged_deletion_is_also_recoverable() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         git(&repo, &["rm", "-q", "keep.py"]);
@@ -749,10 +746,7 @@ mod tests {
 
         assert!(v.reapable);
         assert_eq!(v.recoverable_deletions, 1);
-    }
 
-    #[test]
-    fn clean_worktree_is_reapable_with_zero_deletions() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
 
@@ -761,12 +755,7 @@ mod tests {
         assert!(v.reapable);
         assert_eq!(v.reason, "clean");
         assert_eq!(v.recoverable_deletions, 0);
-    }
 
-    // -- AC1-EDGE: modified tracked content blocks ---------------------------
-
-    #[test]
-    fn modified_tracked_file_blocks_and_names_it() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::write(repo.join("keep.py"), "x = 999\n").unwrap();
@@ -776,10 +765,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "modified-tracked");
         assert!(v.detail.contains("keep.py"));
-    }
 
-    #[test]
-    fn one_modification_beside_many_deletions_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::remove_file(repo.join("also.py")).unwrap();
@@ -789,10 +775,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "modified-tracked");
-    }
 
-    #[test]
-    fn staged_addition_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::write(repo.join("new.py"), "z = 3\n").unwrap();
@@ -802,12 +785,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "modified-tracked");
-    }
 
-    // -- AC1-ERR: untracked non-ignored content blocks ------------------------
-
-    #[test]
-    fn untracked_file_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::write(repo.join("scratch.py"), "nope\n").unwrap();
@@ -817,10 +795,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("scratch.py"));
-    }
 
-    #[test]
-    fn ignored_file_is_invisible_and_does_not_block() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::create_dir(repo.join("ignored")).unwrap();
@@ -830,23 +805,13 @@ mod tests {
 
         assert!(v.reapable);
         assert_eq!(v.reason, "clean");
-    }
 
-    // -- Conflicts are never recoverable, even when both sides deleted -------
-
-    #[test]
-    fn unmerged_codes_block_even_when_only_d_chars() {
         for code in UNMERGED {
             let v = classify(&format!("{code} conflicted.py\n"), None);
             assert!(!v.reapable, "{code} must block");
             assert_eq!(v.reason, "unmerged");
         }
-    }
 
-    // -- Probe failure fails CLOSED -------------------------------------------
-
-    #[test]
-    fn non_repo_path_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let plain = tmp.path().join("not-a-repo");
         fs::create_dir(&plain).unwrap();
@@ -855,10 +820,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "probe-failed");
-    }
 
-    #[test]
-    fn missing_path_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let gone = tmp.path().join("gone");
 
@@ -866,12 +828,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "probe-failed");
-    }
 
-    // -- The receipt line the bash and rust callers parse ---------------------
-
-    #[test]
-    fn receipt_line_is_one_parseable_line() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::remove_file(repo.join("keep.py")).unwrap();
@@ -882,10 +839,7 @@ mod tests {
         assert!(line.contains("reason=clean"));
         assert!(line.contains("recoverable_deletions=1"));
         assert!(!line.contains('\n'));
-    }
 
-    #[test]
-    fn blocking_receipt_names_the_reason_and_detail() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::write(repo.join("scratch.py"), "nope\n").unwrap();
@@ -895,10 +849,7 @@ mod tests {
         assert!(line.starts_with("reapable=no "));
         assert!(line.contains("reason=untracked"));
         assert!(line.contains("detail=scratch.py"));
-    }
 
-    #[test]
-    fn detail_never_breaks_the_line_grammar() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         fs::write(repo.join("two words.py"), "nope\n").unwrap();
@@ -907,23 +858,27 @@ mod tests {
 
         assert!(!line.contains('\n'));
         assert_eq!(line.matches("reapable=").count(), 1);
-    }
 
-    // -- Pure classify: the contract the equivalence test pins ----------------
-
-    #[test]
-    fn classify_is_pure_over_porcelain_text() {
         let v = classify(" D a.py\nD  b.py\n D c.py\n", None);
         assert!(v.reapable);
         assert_eq!(v.recoverable_deletions, 3);
-    }
 
-    #[test]
-    fn classify_empty_is_clean() {
         let v = classify("", None);
         assert!(v.reapable);
         assert_eq!(v.recoverable_deletions, 0);
     }
+
+    // -- AC1-EDGE: modified tracked content blocks ---------------------------
+
+    // -- AC1-ERR: untracked non-ignored content blocks ------------------------
+
+    // -- Conflicts are never recoverable, even when both sides deleted -------
+
+    // -- Probe failure fails CLOSED -------------------------------------------
+
+    // -- The receipt line the bash and rust callers parse ---------------------
+
+    // -- Pure classify: the contract the equivalence test pins ----------------
 
     // -- The merge check: the rm door's half of the third bucket --------------
 
@@ -943,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_but_unmerged_branch_blocks_the_rm_question() {
+    fn branch_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "leaf", "feature");
@@ -952,10 +907,7 @@ mod tests {
         commit_in(&wt, "work");
 
         assert_eq!(branch_merged(wt.to_str().unwrap()), Some(false));
-    }
 
-    #[test]
-    fn a_fast_forwarded_branch_reads_merged() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "leaf2", "done");
@@ -963,10 +915,7 @@ mod tests {
         git(&repo, &["merge", "-q", "done"]);
 
         assert_eq!(branch_merged(wt.to_str().unwrap()), Some(true));
-    }
 
-    #[test]
-    fn detached_head_answers_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "leaf3", "scratch");
@@ -1017,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_links_only_is_reapable_and_names_what_it_discounted() {
+    fn setup_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "setup", "feature/setup");
@@ -1043,10 +992,7 @@ mod tests {
         assert!(v
             .line()
             .contains(&format!("discounted={}", v.discounted.len())));
-    }
 
-    #[test]
-    fn one_modified_tracked_file_beside_setup_links_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "modified", "feature/modified");
@@ -1057,10 +1003,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "modified-tracked");
-    }
 
-    #[test]
-    fn one_plain_untracked_file_beside_setup_links_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "scratch", "feature/scratch");
@@ -1072,10 +1015,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("scratch.py"));
-    }
 
-    #[test]
-    fn a_symlink_out_of_the_canonical_checkout_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "outward", "feature/outward");
@@ -1089,10 +1029,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("elsewhere"));
-    }
 
-    #[test]
-    fn a_canonical_symlink_setup_never_writes_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "unknown", "feature/unknown");
@@ -1107,10 +1044,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("borrowed.py"));
-    }
 
-    #[test]
-    fn a_directory_mixing_a_setup_link_with_real_content_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "mixed", "feature/mixed");
@@ -1122,20 +1056,12 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("cli/.claude"));
-    }
 
-    #[test]
-    fn classify_without_a_discount_answers_exactly_as_before() {
         let v = classify("?? cli/.agents\n", None);
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.discounted.is_empty());
-    }
 
-    // -- Parity: the discount must track what setup-worktree.sh actually links
-
-    #[test]
-    fn every_path_setup_links_is_discounted() {
         // Read the script's own link calls; each must pass the predicate.
         // Without this, adding `link_dir ".cursor"` to setup-worktree.sh
         // silently puts every fresh worktree back in the kept-forever bucket,
@@ -1196,10 +1122,7 @@ mod tests {
                 );
             }
         }
-    }
 
-    #[test]
-    fn an_ignored_sibling_does_not_veto_the_discount() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "ignored", "feature/ignored");
@@ -1225,10 +1148,7 @@ mod tests {
             v.line()
         );
         assert_eq!(v.reason, "setup-links");
-    }
 
-    #[test]
-    fn a_setup_target_linked_from_the_wrong_place_still_blocks() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = canonical_with_cli(tmp.path());
         let wt = linked_wt(tmp.path(), &canonical, "misplaced", "feature/misplaced");
@@ -1240,12 +1160,7 @@ mod tests {
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
         assert!(v.detail.contains("vault"));
-    }
 
-    // -- an unborn worktree is not a finished tree ----------------------------
-
-    #[test]
-    fn an_unborn_linked_worktree_refuses_inside_the_setup_window() {
         // AC1-HP: the defect itself. A tree minutes old with no commit of its
         // own is a worker mid-setup, and the sweep ate those.
         let tmp = tempfile::tempdir().unwrap();
@@ -1259,8 +1174,12 @@ mod tests {
         assert!(v.detail.contains("no commit of its own"));
     }
 
+    // -- Parity: the discount must track what setup-worktree.sh actually links
+
+    // -- an unborn worktree is not a finished tree ----------------------------
+
     #[test]
-    fn a_rebased_and_landed_branch_inside_the_window_still_reaps() {
+    fn reflog_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "landed", "feature/landed");
@@ -1272,10 +1191,7 @@ mod tests {
         let v = reapable(wt.to_str().unwrap());
 
         assert!(v.reapable, "line was: {}", v.line());
-    }
 
-    #[test]
-    fn an_old_unborn_worktree_past_the_window_is_reclaimable() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "old", "feature/old");
@@ -1285,10 +1201,7 @@ mod tests {
 
         assert!(v.reapable);
         assert_eq!(v.reason, "clean");
-    }
 
-    #[test]
-    fn an_unreadable_reflog_never_authorizes_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "nolog", "feature/nolog");
@@ -1310,10 +1223,7 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "unborn");
-    }
 
-    #[test]
-    fn a_named_tree_may_skip_the_setup_window_refusal() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "named", "feature/named");
@@ -1322,10 +1232,7 @@ mod tests {
         let v = reapable_opts(wt.to_str().unwrap(), true, false);
         assert!(v.reapable);
         assert_eq!(v.reason, "clean");
-    }
 
-    #[test]
-    fn a_detached_head_is_not_judged_by_the_branch_reflog() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "detached", "scratch");
@@ -1399,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn done_node_yes_with_manifest_untracked_and_age() {
+    fn done_node_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
         let fakes = FakeReaders {
@@ -1417,10 +1324,7 @@ mod tests {
         assert!(v
             .line()
             .contains("evidence=node:x-abc123 untracked=1 detached=no"));
-    }
 
-    #[test]
-    fn without_the_flag_the_same_tree_reads_untracked() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
         let fakes = FakeReaders {
@@ -1432,6 +1336,149 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "untracked");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "balanced");
+        fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "modified-tracked");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "aggressive");
+        fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "aggressive");
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let porcelain = "UU conflicted.py\n";
+        let v = fakes.reap_arm(wt.as_path(), porcelain);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "unmerged");
+
+        use crate::agents_config::{worktree_prune_done, WorktreePruneDone};
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        write_prune_cfg(&wt, "aggressive");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Aggressive);
+        // A malformed value in the HIGHEST candidate must degrade, never fall
+        // through to a lower tier that may say otherwise.
+        write_prune_cfg(&wt, "fast");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
+        write_prune_cfg(&wt, "balanced");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
+
+        for status in ["in_progress", "deferred", "blocked", "triage"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let wt = done_node_fixture(tmp.path(), "x-abc123");
+            let fakes = FakeReaders {
+                rows: vec![value_row("x-abc123", status)],
+                claims: vec![],
+            };
+
+            let v = fakes.reap(wt.to_str().unwrap(), true);
+
+            assert!(!v.reapable, "status {status} must not reap");
+            assert_eq!(v.reason, "untracked", "status {status}");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "superseded")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        backdate(&wt, 20 * 60);
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "done-grace");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        backdate(&wt, 31 * 60);
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec!["x-abc123".to_string()],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "claim-live");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-other1", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "node-unknown");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        let readers = DoneNodeReaders {
+            read_rows: &|| None,
+            claim_live: &|_: &str| false,
+        };
+
+        let v = reapable_opts_with(wt.to_str().unwrap(), false, true, &readers);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "node-unknown");
     }
 
     /// Pin `worktree.prune_done` in the fixture's own `.fno/config.toml` -
@@ -1447,183 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn done_node_modified_tracked_stays_blocking() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        write_prune_cfg(&wt, "balanced");
-        fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "modified-tracked");
-    }
-
-    #[test]
-    fn aggressive_reads_a_modified_tracked_done_tree_as_done_node() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        write_prune_cfg(&wt, "aggressive");
-        fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(v.reapable, "line was: {}", v.line());
-        assert_eq!(v.reason, "done-node");
-    }
-
-    #[test]
-    fn aggressive_still_blocks_a_conflicted_done_tree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        write_prune_cfg(&wt, "aggressive");
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec![],
-        };
-
-        let porcelain = "UU conflicted.py\n";
-        let v = fakes.reap_arm(wt.as_path(), porcelain);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "unmerged");
-    }
-
-    #[test]
-    fn prune_done_reads_only_aggressive_and_degrades_to_balanced() {
-        use crate::agents_config::{worktree_prune_done, WorktreePruneDone};
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = tmp.path().join("wt");
-        fs::create_dir_all(&wt).unwrap();
-        write_prune_cfg(&wt, "aggressive");
-        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Aggressive);
-        // A malformed value in the HIGHEST candidate must degrade, never fall
-        // through to a lower tier that may say otherwise.
-        write_prune_cfg(&wt, "fast");
-        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
-        write_prune_cfg(&wt, "balanced");
-        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
-    }
-
-    #[test]
-    fn open_or_blocked_node_status_returns_the_base_verdict() {
-        for status in ["in_progress", "deferred", "blocked", "triage"] {
-            let tmp = tempfile::tempdir().unwrap();
-            let wt = done_node_fixture(tmp.path(), "x-abc123");
-            let fakes = FakeReaders {
-                rows: vec![value_row("x-abc123", status)],
-                claims: vec![],
-            };
-
-            let v = fakes.reap(wt.to_str().unwrap(), true);
-
-            assert!(!v.reapable, "status {status} must not reap");
-            assert_eq!(v.reason, "untracked", "status {status}");
-        }
-    }
-
-    #[test]
-    fn superseded_node_reaps_like_done() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "superseded")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(v.reapable, "line was: {}", v.line());
-        assert_eq!(v.reason, "done-node");
-    }
-
-    #[test]
-    fn a_younger_tree_reads_done_grace() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        backdate(&wt, 20 * 60);
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "done-grace");
-    }
-
-    #[test]
-    fn a_31_minute_tree_reads_done_node() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        backdate(&wt, 31 * 60);
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(v.reapable, "line was: {}", v.line());
-        assert_eq!(v.reason, "done-node");
-    }
-
-    #[test]
-    fn a_live_claim_keeps_the_tree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-abc123", "done")],
-            claims: vec!["x-abc123".to_string()],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "claim-live");
-    }
-
-    #[test]
-    fn a_node_no_store_knows_refuses() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        let fakes = FakeReaders {
-            rows: vec![value_row("x-other1", "done")],
-            claims: vec![],
-        };
-
-        let v = fakes.reap(wt.to_str().unwrap(), true);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "node-unknown");
-    }
-
-    #[test]
-    fn an_unreadable_store_refuses_fail_closed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let wt = done_node_fixture(tmp.path(), "x-abc123");
-        let readers = DoneNodeReaders {
-            read_rows: &|| None,
-            claim_live: &|_: &str| false,
-        };
-
-        let v = reapable_opts_with(wt.to_str().unwrap(), false, true, &readers);
-
-        assert!(!v.reapable);
-        assert_eq!(v.reason, "node-unknown");
-    }
-
-    #[test]
-    fn branch_tokens_resolve_when_the_manifest_is_absent() {
+    fn token_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "fixture", "feature/x-dead11");
@@ -1637,10 +1508,7 @@ mod tests {
 
         assert!(v.reapable, "line was: {}", v.line());
         assert_eq!(v.evidence.as_deref(), Some("node:x-dead11"));
-    }
 
-    #[test]
-    fn directory_basename_tokens_resolve_last() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         // detached HEAD, no manifest: only the basename can speak.
@@ -1660,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nodeless_unmerged_branch_returns_the_base_verdict() {
+    fn graph_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "leafy", "plain-branch");
@@ -1684,10 +1552,7 @@ mod tests {
             v.reason, "clean",
             "no done-node evidence, so no arm receipt"
         );
-    }
 
-    #[test]
-    fn a_nodeless_merged_branch_reads_merged_evidence() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = seed_repo(tmp.path());
         let wt = linked_wt(tmp.path(), &repo, "leafy2", "done-branch");
@@ -1708,10 +1573,7 @@ mod tests {
         assert_eq!(v.reason, "done-node");
         assert_eq!(v.evidence.as_deref(), Some("merged"));
         assert_eq!(v.untracked, 1);
-    }
 
-    #[test]
-    fn a_clean_merged_tree_keeps_todays_base_verdict_under_the_arm() {
         // The arm never shrinks an existing grant: a clean tree with a merged
         // branch is archived by the sweep's step-2 filter today, and the arm's
         // grace window must not veto it.
@@ -1729,10 +1591,7 @@ mod tests {
 
         assert!(v.reapable, "line was: {}", v.line());
         assert_eq!(v.reason, "clean", "base verdict, no arm receipt");
-    }
 
-    #[test]
-    fn the_working_graph_outranks_the_archive_on_conflict() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
         // Archive (appended second) says done; the working graph says open.

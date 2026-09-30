@@ -166,7 +166,7 @@ impl KingQueue {
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
             LoopError::Queue(format!(
-                "no king manifest at {} - crown the scope first (`fno agents spawn --crown \
+                "no king manifest at {} - grant the scope first (`fno agents spawn --promote \
                  <scope>` or `fno agents crown` arms it); the walk respawns a king, it \
                  cannot mint one",
                 manifest_path.display()
@@ -508,6 +508,14 @@ fn canonical_members(scope: &str, projects: &HashMap<String, String>) -> HashSet
         .filter(|m| !m.is_empty())
         .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
         .collect()
+}
+
+/// `canonical_members` for sibling modules: `court-rivals` names the shared
+/// territory of a rival pair, sorted so the answer is deterministic.
+pub(crate) fn territory_members(scope: &str, projects: &HashMap<String, String>) -> Vec<String> {
+    let mut members: Vec<String> = canonical_members(scope, projects).into_iter().collect();
+    members.sort();
+    members
 }
 
 /// The rung a scope sits on, derived from its members the way resolve_crown

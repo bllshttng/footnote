@@ -634,28 +634,6 @@ fn tab_close_rows() {
 fn pane_send_rows() {
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
-    core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
-    let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
-    addressed.name = "addressed".into();
-    addressed.harness_session_id = Some("target-id".into());
-
-    match core.pane_send(
-        pane,
-        b"payload",
-        false,
-        Some("target-id"),
-        Ok(vec![addressed]),
-        false,
-    ) {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
-            assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
-        }
-        other => panic!("expected identity refusal before typing, got {other:?}"),
-    }
-
-    let (mut core, pane) = template_core();
-    core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
     let mut first = agent_in("sess", pane, Some(AgentBadge::Done), false);
     first.name = "worker".into();
@@ -7595,24 +7573,24 @@ fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
     // (x-b029) AC3-HP: a pane the daemon re-homed through the resume path
     // resolves its fno_id from the (harness, session) record the resume
     // stamped at birth, even though the registry FILE's row still points
-    // at the pre-restart pane. The id is the one the resume argv carries,
-    // never a guess.
+    // at the pre-restart pane. The record maps to the row's OWN id - the
+    // pane never reports the harness session id when they differ.
     let mut core = empty_core();
     let uuid = "01a05fce-0000-7ccc-8000-000000000000";
+    let own_id = "0f6a4b2e-1111-4222-8333-444444444444";
     let mut row = bg_row("t-resumed-agy", "/repo", None);
     row.harness = Some("codex".into());
     row.harness_session_id = Some(uuid.into());
+    row.session_id = Some(own_id.into());
     row.mux = Some(("test".into(), 999));
     core.agents = vec![row];
     core.worker_session_pane
         .insert(("codex".into(), uuid.into()), 77);
     // The stale registry ref alone does not resolve the new pane...
-    assert_eq!(
-        core.fno_id_for_pane(999),
-        Some(uuid.to_string()),
-        "the stale row still resolves ITS OWN recorded pane"
-    );
-    assert_eq!(core.fno_id_for_pane(77), Some(uuid.to_string()));
+    assert_eq!(core.fno_id_for_pane(999), Some(own_id.to_string()));
+    // The resume birthright maps the recorded harness session to the row,
+    // so the re-homed pane reads the row's own id, not the harness session.
+    assert_eq!(core.fno_id_for_pane(77), Some(own_id.to_string()));
     // A pane the daemon never re-homed and no row hosts stays untracked.
     assert_eq!(core.fno_id_for_pane(78), None);
 }

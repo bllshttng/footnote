@@ -1345,6 +1345,27 @@ def query_pr_merge_state(
         )
     )
 
+    # Merged-PR facts never change: serve the permanent gh-cache row; injected readers bypass.
+    cached = None
+    if info_reader is None:
+        from fno.rust_binary import VerbUnavailable, verb_call
+        try:
+            ask = {"op": "read", "kind": "merged", "slug": repo, "pr": pr_number}
+            cached = verb_call("gh-cache", ask).get("row")
+        except VerbUnavailable:
+            pass
+    row: dict = cached if isinstance(cached, dict) else {}
+    info = row.get("info") if isinstance(row.get("info"), dict) else None
+    files_ok = not include_files or isinstance(row.get("files"), list)
+    if info is not None and isinstance(info.get("state"), str) and files_ok:
+        number = info.get("pr") if isinstance(info.get("pr"), int) else pr_number
+        files = list(row.get("files") or []) if include_files else []
+        return PrMergeState(
+            number=number, state=info["state"], url=info.get("url"),
+            merged_at=info.get("merged_at"), merge_sha=info.get("merge_sha"),
+            changed_files=files, files_truncated=False,
+        )
+
     try:
         info, reason = info_reader(pr_number, repo=repo, cwd=cwd)
     except ReconcileError:
@@ -1408,6 +1429,14 @@ def query_pr_merge_state(
             kind="malformed",
         ) from exc
 
+    if info_reader is None and state == "MERGED":
+        from fno.rust_binary import VerbUnavailable, verb_call
+        try:
+            row = {"info": info, **({"files": changed_files} if include_files else {})}
+            ask = {"op": "write", "kind": "merged", "slug": repo, "pr": pr_number, "row": row}
+            verb_call("gh-cache", ask)
+        except VerbUnavailable:
+            pass
     return PrMergeState(
         number=number,
         state=state,

@@ -450,7 +450,7 @@ def grant_error(
                     "as an agent fno cannot resolve, not an attended human. A "
                     "shell that once hosted a worker keeps that variable. If you "
                     "are the human at this shell, rerun as: "
-                    "env -u FNO_AGENT_SELF fno agents crown <args>."
+                    "env -u FNO_AGENT_SELF fno agents org promote <args>."
                 )
         return (
             "cannot verify the grantor's authority: the agent registry could not "
@@ -691,17 +691,23 @@ def settle_spawn_crown(
     plan: dict,
     exclude_name: Optional[str] = None,
     heir: Optional[str] = None,
+    heir_harness: Optional[str] = None,
+    heir_session: Optional[str] = None,
+    heir_cwd: Optional[str] = None,
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
     ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
     launch. Rust checks its holder identities against the rows this write sees
-    and returns indexes to clear. If Rust is unavailable or its answer is
-    malformed, the spawn declines without changing any row. Returns
-    ``(rows, outcome, vacated)``: outcome is
-    ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
-    dropping the crown fields when declined), and ``vacated`` lists
-    ``(row_before_clear, cause)`` to journal once the write commits.
+    and returns indexes to clear; it also composes the heir's owner block from
+    ``heir_harness``/``heir_session``/``heir_cwd``, so one session-id rule
+    writes it. If Rust is unavailable or its answer is malformed, the spawn
+    declines without changing any row. Returns ``(rows, outcome, vacated)``:
+    outcome is ``granted`` | ``succeeded`` | ``declined`` (the caller stamps
+    its own row, dropping the crown fields when declined), and ``vacated``
+    lists ``(row, cause)`` to journal once the write commits - cause
+    ``succession`` for a vacated holder, ``reowned`` for a court child whose
+    ``spawn_provenance.owner`` moved to the heir in this same write.
     """
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
@@ -709,6 +715,9 @@ def settle_spawn_crown(
         answer = spawn_overlay_call({
             "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
             "plan": plan, "heir": heir, "rows": [asdict(row) for row in rows],
+            "heir_identity": {
+                "harness": heir_harness, "session_id": heir_session, "cwd": heir_cwd,
+            },
         })
         outcome = answer["outcome"]
         if outcome not in ("granted", "succeeded", "declined"):
@@ -716,10 +725,19 @@ def settle_spawn_crown(
         marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
         marks += [(i, "succession") for i in answer["vacate_rows"]]
         vacated = [(rows[i], cause) for i, cause in marks]
+        reown_indexes = [int(i) for i in answer.get("reown_rows", [])]
+        [rows[i] for i in reown_indexes]  # an out-of-range index declines, like the marks
+        heir_owner = answer.get("reown_owner")
     except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
         return rows, "declined", []
     for index, _ in marks:
         rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
+    if heir_owner is not None:
+        for index in reown_indexes:
+            provenance = dict(rows[index].spawn_provenance or {})
+            provenance["owner"] = dict(heir_owner)
+            rows[index] = replace(rows[index], spawn_provenance=provenance)
+            vacated.append((rows[index], "reowned"))
     return rows, outcome, vacated
 
 
@@ -840,17 +858,20 @@ def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
 
 
 def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
-    """Journal one committed spawn write: a vacate line per cleared holder plus
-    the grant line. A declined launch moved no crown and writes nothing."""
+    """Journal one committed spawn write: a vacate line per cleared holder, one
+    reown line per court child that followed the crown, plus the grant line."""
+    from fno.agents import events
+
     for row, cause in vacated:
+        if cause == "reowned":
+            events.emit("agent_court_reowned", scope=scope, successor=name, child=row.name)
+            continue
         emit_crown_vacated(
             scope=scope, level=row.crown_level, holder=row.name,
             holder_session=row.harness_session_id, grantor=row.crown_grantor,
             cause=cause, successor=name if cause == "succession" else None,
         )
     if outcome in ("granted", "succeeded"):
-        from fno.agents import events
-
         events.emit(
             "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
             vacated_scope=None, vacated_level=None, stranded_subordinates=[],
@@ -1198,7 +1219,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 f"held by live row {holder.name!r} (holding "
                 f"{holder.crown_scope!r}). Three ways out, cheapest "
                 "first:\n"
-                f"  re-scope the holder   fno agents crown {holder.name} --scope "
+                f"  re-scope the holder   fno agents org promote {holder.name} --scope "
                 "<other territory>   (both sessions stay live; retry this "
                 "command after)\n"
                 "  holder looks dead     fno agents reconcile   (a row whose "
@@ -1285,9 +1306,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     from fno.agents.harness_map import DispatchResolveError, normalize_command
 
     try:
-        verb = normalize_command(f"/fno:reign {scope}", target_harness or "")
+        verb = normalize_command(f"/fno:lead {scope}", target_harness or "")
     except DispatchResolveError:
-        verb = f"/fno:reign {scope}"
+        verb = f"/fno:lead {scope}"
     if caller is not None and target_name == caller.name:
         receipt["reign_delivery"] = "skipped: self-edit, this session already reigns"
     else:

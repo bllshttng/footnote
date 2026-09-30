@@ -428,8 +428,8 @@ impl LocalPty {
         out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
-        let permit =
-            crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
+        let permit = crate::process_admission::admit_shell_pane()
+            .map_err(|e| PtyError::Spawn(e.to_string()))?;
         Self::spawn_with_permit(
             candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
         )
@@ -2223,7 +2223,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeper_command_carries_the_test_owner_env() {
+    fn keeper_shape_rows() {
         // AC7: under cfg(test) the builder stamps the owner identity the
         // worker watchdog reads, so the keeper reaps when the test process
         // exits. No keeper binary is needed to assert the command shape.
@@ -2256,6 +2256,34 @@ mod tests {
             envs.contains_key("FNO_TEST_OWNER_BIRTH"),
             "the birth token rides beside the pid"
         );
+
+        assert_eq!(
+            shell_candidates(Some(OsStr::new("/bin/zsh"))),
+            vec![OsString::from("/bin/zsh"), OsString::from("/bin/sh")]
+        );
+        assert_eq!(shell_candidates(None), vec![OsString::from("/bin/sh")]);
+        assert_eq!(
+            shell_candidates(Some(OsStr::new(""))),
+            vec![OsString::from("/bin/sh")]
+        );
+        assert_eq!(
+            shell_candidates(Some(OsStr::new("  "))),
+            vec![OsString::from("/bin/sh")]
+        );
+        // No duplicate when $SHELL already is /bin/sh.
+        assert_eq!(
+            shell_candidates(Some(OsStr::new("/bin/sh"))),
+            vec![OsString::from("/bin/sh")]
+        );
+
+        // A prefix match would let session `work` adopt session `work-2`'s
+        // live keeper panes at startup.
+        assert_eq!(pane_key_of("work-771", "work"), Some(771));
+        assert_eq!(pane_key_of("work-2-771", "work-2"), Some(771));
+        assert_eq!(pane_key_of("work-2-771", "work"), None);
+        assert_eq!(pane_key_of("work", "work"), None, "no pane key, not ours");
+        assert_eq!(pane_key_of("work-", "work"), None, "empty pane key");
+        assert_eq!(pane_key_of("work-abc", "work"), None, "non-numeric key");
     }
 
     /// Kills and reaps a spawned pane on every exit path, panic and
@@ -2432,29 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn server_spine_shell_candidates_prefer_env_then_sh() {
-        assert_eq!(
-            shell_candidates(Some(OsStr::new("/bin/zsh"))),
-            vec![OsString::from("/bin/zsh"), OsString::from("/bin/sh")]
-        );
-        assert_eq!(shell_candidates(None), vec![OsString::from("/bin/sh")]);
-        assert_eq!(
-            shell_candidates(Some(OsStr::new(""))),
-            vec![OsString::from("/bin/sh")]
-        );
-        assert_eq!(
-            shell_candidates(Some(OsStr::new("  "))),
-            vec![OsString::from("/bin/sh")]
-        );
-        // No duplicate when $SHELL already is /bin/sh.
-        assert_eq!(
-            shell_candidates(Some(OsStr::new("/bin/sh"))),
-            vec![OsString::from("/bin/sh")]
-        );
-    }
-
-    #[test]
-    fn keeper_shell_argv_zsh_carries_the_rc_dir_as_env() {
+    fn keeper_argv_rows() {
         let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/zsh"), "sess", 7) else {
             panic!("zsh candidate must produce a keeper argv");
         };
@@ -2476,10 +2482,7 @@ mod tests {
         assert!(dir.join(".zshenv").exists(), "the rc dir carries .zshenv");
         assert!(dir.join(".zshrc").exists(), "the rc dir carries .zshrc");
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn keeper_shell_argv_bash_carries_rcfile_tail() {
         let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/bash"), "sess", 8) else {
             panic!("bash candidate must produce a keeper argv");
         };
@@ -2493,56 +2496,32 @@ mod tests {
             "the rcfile exists: {rcfile}"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn keeper_shell_argv_skips_non_shell_candidates() {
         assert!(keeper_shell_argv(OsStr::new("/usr/bin/htop"), "sess", 9).is_none());
     }
 
     #[test]
-    fn keeper_socket_key_is_exact_per_session_not_by_prefix() {
-        // A prefix match would let session `work` adopt session `work-2`'s
-        // live keeper panes at startup.
-        assert_eq!(pane_key_of("work-771", "work"), Some(771));
-        assert_eq!(pane_key_of("work-2-771", "work-2"), Some(771));
-        assert_eq!(pane_key_of("work-2-771", "work"), None);
-        assert_eq!(pane_key_of("work", "work"), None, "no pane key, not ours");
-        assert_eq!(pane_key_of("work-", "work"), None, "empty pane key");
-        assert_eq!(pane_key_of("work-abc", "work"), None, "non-numeric key");
-    }
-
-    #[test]
-    fn fd_limit_target_clamps_infinite_hard_limit_to_platform_cap() {
+    fn fd_limit_rows() {
         assert_eq!(
             target_fd_limit(256, libc::RLIM_INFINITY, Some(245_760)),
             Some(245_760)
         );
-    }
 
-    #[test]
-    fn fd_limit_target_refuses_uninstallable_infinity() {
         assert_eq!(target_fd_limit(256, libc::RLIM_INFINITY, None), None);
-    }
 
-    #[test]
-    fn fd_limit_target_is_idempotent_at_ceiling() {
         assert_eq!(target_fd_limit(4_096, 4_096, Some(8_192)), None);
         assert_eq!(target_fd_limit(4_096, 8_192, Some(4_096)), None);
     }
 
     #[test]
-    fn fd_count_scans_existing_descriptors_without_a_reserve() {
+    fn fd_ceiling_rows() {
         let marker = std::fs::File::open("/dev/null").unwrap();
         let marker_fd = marker.as_raw_fd();
         let count = count_open_fds(marker_fd as libc::rlim_t + 1);
         assert!(count > 0);
         // The scan observes the marker without consuming or replacing it.
         assert_ne!(unsafe { libc::fcntl(marker_fd, libc::F_GETFD) }, -1);
-    }
 
-    #[test]
-    fn openpty_emfile_text_is_classified_as_fd_ceiling() {
         assert!(is_fd_ceiling(
             "failed to openpty: Os { code: 24, kind: Uncategorized, message: Too many open files }"
         ));
@@ -2552,10 +2531,7 @@ mod tests {
         assert!(!is_fd_ceiling(
             "failed to openpty: Os { code: 2, kind: NotFound, message: No such file or directory }"
         ));
-    }
 
-    #[test]
-    fn fd_ceiling_error_names_usage_limit_and_remedy() {
         let message = PtyError::OpenPtyFdLimit {
             open: 255,
             limit: 256,
@@ -2568,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_integration_detects_only_known_shells() {
+    fn shell_integration_rows() {
         // basename maps zsh/bash (bare or full-path); everything else is a
         // non-shell argv that passes through un-wrapped.
         assert!(matches!(
@@ -2586,20 +2562,14 @@ mod tests {
         assert!(shell_kind(OsStr::new("claude")).is_none());
         assert!(shell_kind(OsStr::new("/usr/bin/nvim")).is_none());
         assert!(shell_kind(OsStr::new("fish")).is_none());
-    }
 
-    #[test]
-    fn shell_integration_off_knob_only_matches_off() {
         // Only the literal "off" disables; absent / mux-panes / garbage read on.
         assert!(integration_disabled(Some(OsStr::new("off"))));
         assert!(!integration_disabled(None));
         assert!(!integration_disabled(Some(OsStr::new("mux-panes"))));
         assert!(!integration_disabled(Some(OsStr::new(""))));
         assert!(!integration_disabled(Some(OsStr::new("on"))));
-    }
 
-    #[test]
-    fn shell_integration_rc_embeds_snippet_and_sources_user_rc() {
         // zsh: restore-or-unset ZDOTDIR, source the user's .zshrc from
         // ${USER_ZDOTDIR:-$HOME} (not $ZDOTDIR, which may be unset), snippet LAST.
         let zshrc = zsh_zshrc();
@@ -2637,7 +2607,7 @@ mod tests {
     }
 
     #[test]
-    fn zsh_hop_preserves_user_default_zdotdir_and_installs_osc133() {
+    fn zsh_hop_rows() {
         // Regression guard: a non-exporting user (no ZDOTDIR in env) must
         // see ZDOTDIR *unset* when their own .zshrc runs, so a modular
         // ${ZDOTDIR:-$HOME/.config/zsh} idiom resolves to the user default and
@@ -2689,10 +2659,7 @@ mod tests {
             stdout.contains("PRECMD_OK"),
             "OSC 133 precmd hook missing: {stdout}"
         );
-    }
 
-    #[test]
-    fn zsh_hop_no_user_rc_opens_bare_shell_with_osc133() {
         // AC1-EDGE: a $HOME with no .zshrc opens a working bare zsh with OSC 133
         // installed and prints no rc error.
         if !have_zsh() {

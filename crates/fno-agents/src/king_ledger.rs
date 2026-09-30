@@ -1,11 +1,12 @@
-//! `reign-ledger`: the Crown Ledger page for `fno agents king ledger`.
+//!
+//! `reign-ledger`: the Rundown page for `fno agents org rundown`.
 //!
 //! Python resolves the court (registry adjudication, manifest limbs, the
 //! caller's paths) and hands one court JSON over; the native side owns the
 //! page assembly, the same split `king-history` applies to the journal
 //! readback, so the Python-tree ratchet holds. The crown-to-nodes join stays
 //! in the fold the Python side already ran (`scope_nodes` rides in the court
-//! JSON); titles, uncrowned epics, and orphan leaves are read from the graph
+//! JSON); titles, uncrowned epics, and Unassigned leaves are read from the graph
 //! through the SAME compiler `court-fold` uses, so the page cannot disagree
 //! with the court about who holds a node.
 //!
@@ -230,11 +231,8 @@ fn bar_and_legend(fold: &Value) -> String {
     format!("<div class=\"bar\" role=\"img\" aria-label=\"{aria}\">{segs}</div><ul class=\"legend\">{legend}</ul>")
 }
 
-fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
+fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>, needs: &NeedsUser) -> String {
     let level = crown.get("level").and_then(|l| l.as_i64());
-    let rung = level
-        .map(|l| format!("L{l}"))
-        .unwrap_or_else(|| "L?".to_string());
     let card_cls = if level == Some(1) {
         "crown root"
     } else {
@@ -264,15 +262,23 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
             )
         })
         .unwrap_or_default();
+    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
+    let scope_txt = s_str(crown, "scope").unwrap_or("-");
+    let title_txt = s_str(&fold, "title")
+        .map(String::from)
+        .unwrap_or_else(|| match level {
+            Some(l) => crate::crown_names::title(l as u32, scope_txt, None),
+            None => format!("L? {scope_txt}"),
+        });
     let mut out = format!(
         "<article class=\"{card_cls}\"><header class=\"ch\"><div class=\"ch-l\">\
-         <span class=\"rung\">{rung}</span><h2>{}</h2>\
-         <span class=\"{dot_cls}\" title=\"crown status: {}\"></span></div>\
+         <h2>{}</h2><span class=\"rung\">{}</span>\
+         <span class=\"{dot_cls}\" title=\"role status: {}\"></span></div>\
          <div class=\"ch-r\"><span class=\"{agree_cls}\">{agree_txt}</span>{source_tag}</div></header>",
-        esc(s_str(crown, "scope").unwrap_or("-")),
+        esc(&title_txt),
+        esc(scope_txt),
         esc(status),
     );
-    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
     let holder_line = match s_str(&fold, "name") {
         Some(name) => format!(
             "<p class=\"holder\">held by <b>{}</b> ({}) · granted by {}</p>",
@@ -290,6 +296,7 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
     if let Some(reason) = s_str(crown, "reason") {
         out.push_str(&format!("<p class=\"holder\">{}</p>", esc(reason)));
     }
+    out.push_str(&needs_user_block(scope_txt, needs));
     if s_str(&fold, "status") == Some("unresolved") {
         out.push_str(&format!(
             "<p class=\"holder\">scope fold: unresolved - {}</p>",
@@ -329,20 +336,121 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
     out
 }
 
-fn rung_heading(level: Option<i64>, count: usize) -> String {
-    match level {
-        Some(1) => "Rung 1 - the whole project".to_string(),
-        Some(n) => {
-            let word = if count == 1 {
-                "territory"
-            } else {
-                "territories"
-            };
-            format!("Rung {n} - {count} {word} granted beneath it")
+/// The section heading text: the stored people title, or the level title
+/// from the bare scope when the record predates titles.
+fn section_title(crown: &Value) -> String {
+    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
+    s_str(&fold, "title").map(String::from).unwrap_or_else(|| {
+        let scope = s_str(crown, "scope").unwrap_or("-");
+        match crown.get("level").and_then(|l| l.as_i64()) {
+            Some(l) => crate::crown_names::title(l as u32, scope, None),
+            None => format!("L? {scope}"),
         }
-        None => "Rung ? - crowns with no level".to_string(),
-    }
+    })
 }
+
+/// The page-head line for a Chief: its teams are the sections below, so the
+/// Chief is a banner, not a section of its own.
+fn chief_head(chief: &Value) -> String {
+    let scope = s_str(chief, "scope").unwrap_or("-");
+    let title_txt = section_title(chief);
+    let holder = s_str(chief, "holder").unwrap_or("-");
+    format!(
+        "<p class=\"holder\"><b>{}</b> · held by {} over {}</p>",
+        esc(&title_txt),
+        esc(holder),
+        esc(scope),
+    )
+}
+
+/// The needs-the-user read: the operator_question rows of the same board
+/// the check-in's termination read parses, attributed to teams by the
+/// asking session's crown scope. A queue that was not read renders its
+/// reason on every section - never an empty "none".
+type NeedsUser = (BTreeMap<String, Vec<String>>, Option<String>);
+
+fn needs_user(board: Option<&Value>) -> NeedsUser {
+    let Some(board) = board else {
+        return (BTreeMap::new(), Some("the board was not read".to_string()));
+    };
+    let queue = board
+        .get("queues")
+        .and_then(|q| q.as_array())
+        .and_then(|qs| {
+            qs.iter()
+                .find(|q| q.get("name").and_then(|n| n.as_str()) == Some("operator_question"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    let status = s_str(&queue, "status").unwrap_or("");
+    if crate::king_board::unreadable_status(status) || crate::king_board::not_read_status(status) {
+        let err = s_str(&queue, "error").unwrap_or("");
+        let reason = if status == "over_budget" {
+            format!("operator_question not read: {err}")
+        } else {
+            format!("operator_question is unreadable: {err}")
+        };
+        return (BTreeMap::new(), Some(reason));
+    }
+    let sessions = session_scope_map();
+    let mut per_scope: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in queue
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let text = s_str(row, "question")
+            .unwrap_or("a question is waiting")
+            .to_string();
+        let scope = row
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .and_then(|sid| sessions.get(sid))
+            .cloned()
+            .unwrap_or_default();
+        per_scope.entry(scope).or_default().push(text);
+    }
+    (per_scope, None)
+}
+
+/// Harness session id -> canonical crown scope, one registry read per
+/// render. A row with no crown scope attributes nowhere (unmatched rows are
+/// page-level, never dropped).
+fn session_scope_map() -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
+        if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
+            for row in &registry.entries {
+                if let (Some(sid), Some(scope)) = (&row.harness_session_id, &row.crown_scope) {
+                    map.insert(sid.clone(), crate::territory::canonical_scope(scope.trim()));
+                }
+            }
+        }
+    }
+    map
+}
+
+fn needs_user_block(scope: &str, needs: &NeedsUser) -> String {
+    let mut items: Vec<String> = Vec::new();
+    if let Some(rows) = needs.0.get(scope) {
+        for text in rows {
+            items.push(format!("<li>{}</li>", esc(text)));
+        }
+    }
+    if let Some(reason) = &needs.1 {
+        items.push(format!("<li class=\"nr\">not read: {}</li>", esc(reason)));
+    }
+    if items.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"needs\"><h3>needs the user</h3><ul>{}</ul></div>",
+        items.join("")
+    )
+}
+
+const NEEDS_CSS: &str = ".needs{margin-top:8px;padding:8px 10px;border:1px solid #d8d2c4;border-radius:8px}.needs h3{margin:0 0 4px;font:600 12px/1.4 'Public Sans',sans-serif;text-transform:uppercase;letter-spacing:.04em}.needs ul{margin:0;padding-left:16px}.needs li{margin:2px 0}.needs li.nr{color:#8a5a00}";
 
 fn reader_str(v: Option<&Value>) -> &'static str {
     match v {
@@ -460,7 +568,7 @@ fn verdict_card(
     if crowns.map(|c| !c.is_empty()).unwrap_or(false)
         && summary.get("sweep_ran") == Some(&Value::Bool(false))
     {
-        sweep_note = "<p class=\"vnote\">orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding</p>".to_string();
+        sweep_note = "<p class=\"vnote\">vacancy sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding</p>".to_string();
     }
     format!(
         "<section class=\"{cls}\">{body}{sweep_note}\
@@ -508,9 +616,9 @@ fn uncrowned_section(compiled: &[Option<BTreeSet<String>>], entries: &[Value]) -
     )
 }
 
-/// Orphan leaves: parent falsy, status actionable, and the id is no node's
+/// Unassigned: parent falsy, status actionable, and the id is no node's
 /// parent - work nobody contains and nobody contains the container of.
-fn orphan_leaves_section(entries: &[Value]) -> String {
+fn unassigned_section(entries: &[Value]) -> String {
     let parents: BTreeSet<&str> = entries.iter().filter_map(|e| s_str(e, "parent")).collect();
     let mut leaves: Vec<&Value> = entries
         .iter()
@@ -536,15 +644,10 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
         )
     });
     let rows: String = leaves.iter().map(|e| entry_row(e)).collect();
-    let word = if leaves.len() == 1 {
-        "orphan leaf"
-    } else {
-        "orphan leaves"
-    };
     format!(
-        "<h2 class=\"sect\">orphan leaves</h2><article class=\"crown\">\
-         <p class=\"holder\">{n} {word}, {p1} at p1</p>\
-         <div class=\"tscroll\"><table><caption>Orphan leaves</caption>\
+        "<h2 class=\"sect\">Unassigned</h2><article class=\"crown\">\
+         <p class=\"holder\">{n} unassigned, {p1} at p1</p>\
+         <div class=\"tscroll\"><table><caption>Unassigned</caption>\
          <thead><tr><th>node</th><th>work</th><th>state</th><th class=\"num\">priority</th></tr></thead>\
          <tbody>{rows}</tbody></table></div></article>",
         n = leaves.len(),
@@ -687,10 +790,14 @@ pub struct Arm {
 }
 
 /// The production runner: the page render, cwd-bound (config, the graph and
-/// the default out path all resolve per cwd).
-fn run_ledger() -> Result<(), String> {
-    let output = std::process::Command::new(crate::scrape::fno_py())
-        .args(["agents", "king", "ledger"])
+/// the default out path all resolve per cwd). The Rust front is the program:
+/// `org rundown` is its rewrite of `king ledger` plus the faithful-root
+/// `--out`; fno-py serves no `org` group and bare `king ledger` defaults to
+/// reign.html, which the /crown route does not read. Returns the page path
+/// the child named, so a tick can never call the wrong file rendered.
+fn run_ledger() -> Result<String, String> {
+    let output = std::process::Command::new(crate::scrape::fno_bin())
+        .args(["agents", "org", "rundown"])
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("spawn: {e}"))?;
@@ -707,20 +814,30 @@ fn run_ledger() -> Result<(), String> {
             output.status.code().unwrap_or(-1)
         ));
     }
-    Ok(())
+    let prefix = "reign ledger: ";
+    let named = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find(|l| l.starts_with(prefix))
+        .map(|l| l[prefix.len()..].trim().to_string())
+        .ok_or_else(|| "ledger printed no path".to_string())?;
+    if !std::path::Path::new(&named).exists() {
+        return Err(format!("named path missing: {named}"));
+    }
+    Ok(named)
 }
 
 /// One pass of the arm body: the run, then exactly one tick row - on every
 /// path, so a silent tick cannot be told from one that never ran.
 fn emit_one(
     home: &crate::paths::AgentsHome,
-    run: impl FnOnce() -> Result<(), String>,
+    run: impl FnOnce() -> Result<String, String>,
 ) -> crate::merge_close::CloseOutcome {
     let outcome = match run() {
-        Ok(()) => crate::merge_close::CloseOutcome {
+        Ok(path) => crate::merge_close::CloseOutcome {
             acted: 1,
             skip_reason: None,
-            detail: "reign.html rendered".to_string(),
+            detail: format!("{path} rendered"),
         },
         Err(e) => crate::merge_close::CloseOutcome {
             acted: 0,
@@ -755,7 +872,7 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
 fn maybe_tick_with(
     arm: &Arm,
     home: crate::paths::AgentsHome,
-    run: impl FnOnce() -> Result<(), String> + Send + 'static,
+    run: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) {
     let interval = std::time::Duration::from_secs(CROWN_LEDGER_INTERVAL_S);
     {
@@ -806,6 +923,7 @@ pub fn render(
     generated: &str,
     reload_s: i64,
     split_read: &Result<crate::crown_split::CrownSplits, String>,
+    board: Option<&Value>,
 ) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
@@ -816,49 +934,48 @@ pub fn render(
     let mut out = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Crown Ledger</title>\
+         <title>Rundown</title>\
          <link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Fraunces:wght@500;700&family=JetBrains+Mono:wght@400;600&family=Public+Sans:wght@400;600&display=swap\">\
-         <style>{CSS}</style></head><body><div class=\"wrap\">\
+         <style>{CSS}{NEEDS_CSS}</style></head><body><div class=\"wrap\">\
          <header class=\"masthead\">\
-         <span class=\"eyebrow\">fno agents court · {gen} · <span class=\"age\" data-generated=\"{gen}\"></span></span>\
-         <h1>Crown Ledger</h1>\
-         <p class=\"dek\">Who rules which territory in the fleet, what each crown still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
+         <span class=\"eyebrow\">fno agents org · {gen} · <span class=\"age\" data-generated=\"{gen}\"></span></span>\
+         <h1>Rundown</h1>\
+         <p class=\"dek\">Who leads which team, what each team still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
          </header>"
     );
     out.push_str(&verdict_card(court, &summary, split_read));
+    let needs = needs_user(board);
     if let Some(crowns) = &crowns {
         if !crowns.is_empty() {
-            // Rungs: level ascending, null level last, court order within a
-            // level; level 1 renders full width, the rest share the grid.
-            let mut order: Vec<&Value> = crowns.iter().collect();
-            order.sort_by_key(|c| {
-                let l = c.get("level").and_then(|l| l.as_i64());
-                (l.is_none(), l.unwrap_or(0))
-            });
-            let mut groups: Vec<(Option<i64>, Vec<&Value>)> = Vec::new();
-            for c in order {
-                let level = c.get("level").and_then(|l| l.as_i64());
-                match groups.last_mut() {
-                    Some((l, v)) if *l == level => v.push(c),
-                    _ => groups.push((level, vec![c])),
-                }
+            // A Chief has no section of its own: its title and holder head
+            // the page, because its teams are the Heads below it.
+            for chief in crowns
+                .iter()
+                .filter(|c| c.get("level").and_then(|l| l.as_i64()) == Some(0))
+            {
+                out.push_str(&chief_head(chief));
             }
-            for (level, group) in &groups {
-                out.push_str(&format!(
-                    "<h2 class=\"sect\">{}</h2>",
-                    rung_heading(*level, group.len())
-                ));
-                if *level == Some(1) {
-                    for c in group {
-                        out.push_str(&crown_card(c, &titles));
-                    }
-                } else {
-                    out.push_str("<div class=\"grid\">");
-                    for c in group {
-                        out.push_str(&crown_card(c, &titles));
-                    }
+            // One section per Lead or Head, in title order; level 1 renders
+            // full width, the rest share the grid.
+            let mut sections: Vec<&Value> = crowns
+                .iter()
+                .filter(|c| c.get("level").and_then(|l| l.as_i64()) != Some(0))
+                .collect();
+            sections.sort_by_key(|c| section_title(c));
+            let mut grid_open = false;
+            for c in sections {
+                let full = c.get("level").and_then(|l| l.as_i64()) == Some(1);
+                if full && grid_open {
                     out.push_str("</div>");
+                    grid_open = false;
+                } else if !full && !grid_open {
+                    out.push_str("<div class=\"grid\">");
+                    grid_open = true;
                 }
+                out.push_str(&crown_card(c, &titles, &needs));
+            }
+            if grid_open {
+                out.push_str("</div>");
             }
         }
         // One compile per crown, shared by the uncrowned union: the page
@@ -869,7 +986,7 @@ pub fn render(
             .collect();
         if !entries.is_empty() {
             out.push_str(&uncrowned_section(&compiled, entries));
-            out.push_str(&orphan_leaves_section(entries));
+            out.push_str(&unassigned_section(entries));
         }
     }
     // Footer: crown count always (when the court is a list); the root
@@ -908,7 +1025,7 @@ pub fn render(
         format!("<span>{}</span>", parts.join(" · "))
     };
     out.push_str(&format!(
-        "<footer><span>generated from fno agents court -n</span>{right}</footer>"
+        "<footer><span>generated from fno agents org</span>{right}</footer>"
     ));
     out.push_str(
         "</div><script>(function(){var el=document.querySelector(\".age\");if(!el)return;\
@@ -1017,14 +1134,28 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
         crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
             .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
             .map_err(|e| e.to_string());
+    // The needs-the-user read: the same board the check-in's termination
+    // read parses, fetched once per render. A failed read renders the
+    // not-read reason per team, never an empty "none".
+    let board = crate::king_board::read_board(&crate::king_board::BoardOpts {
+        cwd: std::env::current_dir().ok(),
+        ..Default::default()
+    });
     if let Err(e) = write_atomic(
         &out_path,
-        &render(&court, &entries, &generated, reload, &split_read),
+        &render(
+            &court,
+            &entries,
+            &generated,
+            reload,
+            &split_read,
+            Some(&board),
+        ),
     ) {
         eprintln!("fno-agents reign-ledger: {e}");
         return 1;
     }
-    println!("reign ledger: {}", out_path.display());
+    println!("rundown: {}", out_path.display());
     0
 }
 
@@ -1040,7 +1171,12 @@ mod tests {
             "2026-09-12T00:00:00Z",
             60,
             &Ok(crate::crown_split::CrownSplits::default()),
+            None,
         )
+    }
+
+    fn split_ok() -> Result<crate::crown_split::CrownSplits, String> {
+        Ok(crate::crown_split::CrownSplits::default())
     }
 
     fn base_crown() -> Value {
@@ -1130,18 +1266,18 @@ mod tests {
             json!({"id": "e-1", "type": "epic", "title": "reigned epic", "status": "ready", "priority": "p2"}),
             json!({"id": "x-9", "parent": "e-1", "title": "contained", "status": "in_progress"}),
             json!({"id": "e-2", "type": "epic", "title": "free one", "status": "ready", "priority": "p2"}),
-            json!({"id": "e-3", "type": "epic", "title": "urgent orphan", "status": "idea", "priority": "p1"}),
+            json!({"id": "e-3", "type": "epic", "title": "urgent stray", "status": "idea", "priority": "p1"}),
         ];
         let whole = page(base_court(json!([base_crown()])), entries);
         let at = whole.find("uncrowned epics").expect("uncrowned section");
         let section = &whole[at..];
         assert!(section.contains("2 uncrowned, 1 at p1"));
-        assert!(section.contains("free one") && section.contains("urgent orphan"));
+        assert!(section.contains("free one") && section.contains("urgent stray"));
         assert!(!section.contains("reigned epic"));
     }
 
     #[test]
-    fn orphan_leaves_follow_the_structural_rule() {
+    fn unassigned_leaves_follow_the_structural_rule() {
         let entries = vec![
             json!({"id": "e-1", "type": "epic", "parent": null, "status": "in_progress"}),
             json!({"id": "x-1", "parent": "e-1", "status": "in_progress", "title": "contained", "priority": "p1"}),
@@ -1152,9 +1288,9 @@ mod tests {
             json!({"id": "l-5", "title": "empty parent leaf", "parent": "", "status": "ready", "priority": "p2"}),
         ];
         let whole = page(base_court(json!([base_crown()])), entries);
-        let at = whole.find("orphan leaves").expect("leaves section");
+        let at = whole.find("Unassigned").expect("unassigned section");
         let section = &whole[at..];
-        assert!(section.contains("2 orphan leaves, 1 at p1"));
+        assert!(section.contains("2 unassigned, 1 at p1"));
         assert!(section.contains("free leaf"));
         assert!(!section.contains("done leaf"));
         assert!(!section.contains("container"));
@@ -1166,13 +1302,13 @@ mod tests {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("reign-ledger-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rundown-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
-        let out_path = dir.join("reign.html");
+        let out_path = dir.join("rundown.html");
         std::fs::write(&court_path, base_court(json!([base_crown()])).to_string()).unwrap();
         crate::graph_store::seed_rows(&graph_path, &[]).unwrap();
         let args: Vec<String> = [
@@ -1206,13 +1342,13 @@ mod tests {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("reign-ledger-mode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rundown-mode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
-        let out_path = dir.join("reign.html");
+        let out_path = dir.join("rundown.html");
         std::fs::write(&court_path, base_court(json!([base_crown()])).to_string()).unwrap();
         crate::graph_store::seed_rows(&graph_path, &[]).unwrap();
         let args: Vec<String> = [
@@ -1230,7 +1366,7 @@ mod tests {
         .collect();
         assert_eq!(run_reign_ledger(&args), 0);
         let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
+        assert_eq!(mode, 0o600, "rundown.html must match graph.html's 600 mode");
         std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1265,8 +1401,8 @@ mod tests {
     #[test]
     fn masthead_carries_the_generated_stamp_and_age_hook() {
         let page = page(base_court(json!([base_crown()])), vec![]);
-        assert!(page.contains("<h1>Crown Ledger</h1>"));
-        assert!(page.contains("fno agents court · 2026-09-12T00:00:00Z"));
+        assert!(page.contains("<h1>Rundown</h1>"));
+        assert!(page.contains("fno agents org · 2026-09-12T00:00:00Z"));
         assert!(page.contains("<span class=\"age\" data-generated=\"2026-09-12T00:00:00Z\">"));
         assert!(page.contains("Date.parse(el.getAttribute(\"data-generated\"))"));
     }
@@ -1296,6 +1432,7 @@ mod tests {
             "2026-09-12T00:00:00Z",
             60,
             &splits,
+            None,
         );
         assert!(page.contains("The court disagrees with itself."));
         assert!(page.contains(
@@ -1319,6 +1456,7 @@ mod tests {
             "2026-09-12T00:00:00Z",
             60,
             &splits,
+            None,
         );
         assert!(page.contains("The court agrees with itself."));
         assert!(page.contains(
@@ -1334,6 +1472,7 @@ mod tests {
             "2026-09-12T00:00:00Z",
             60,
             &Err("crown split read failed: boom".to_string()),
+            None,
         );
         assert!(page.contains(
             "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">double ruled</span></div>"
@@ -1375,26 +1514,80 @@ mod tests {
     }
 
     #[test]
-    fn rungs_group_crowns_by_level_with_headings() {
-        let mut l2a = base_crown();
-        l2a["scope"] = json!("e-a");
-        let mut l2b = base_crown();
-        l2b["scope"] = json!("e-b");
-        let mut l1 = base_crown();
-        l1["level"] = json!(1);
-        l1["scope"] = json!("fno");
-        let page = page(base_court(json!([l2a, l1, l2b])), vec![]);
-        let h1 = page
-            .find("Rung 1 - the whole project")
-            .expect("rung 1 heading");
-        let root = page.find("class=\"crown root\"").expect("root card");
-        let h2 = page
-            .find("Rung 2 - 2 territories granted beneath it")
-            .expect("rung 2 heading");
-        assert!(h1 < root && root < h2);
-        let la = page.find("<h2>e-a</h2>").unwrap();
-        let lb = page.find("<h2>e-b</h2>").unwrap();
-        assert!(la < lb);
+    fn sections_render_in_title_order_and_the_chief_heads_the_page() {
+        let mut b = base_crown();
+        b["scope"] = json!("e-b");
+        let mut a = base_crown();
+        a["scope"] = json!("e-a");
+        let mut chief = base_crown();
+        chief["level"] = json!(0);
+        chief["scope"] = json!("readyrule");
+        let page = page(base_court(json!([b, chief, a])), vec![]);
+        let head = page.find("Chief of readyrule").expect("chief banner");
+        let la = page.find("Lead of e-a").expect("section a");
+        let lb = page.find("Lead of e-b").expect("section b");
+        assert!(head < la && la < lb, "chief first, then title order");
+        assert!(page.contains("held by king over readyrule"));
+    }
+
+    #[test]
+    fn operator_questions_land_on_their_team_and_an_unread_queue_names_itself() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rundown-needs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        let doc = json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": [{
+                "name": "kestrel", "status": "live", "crown_scope": "e-1",
+                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-k",
+                "created_at": "2026-09-29T00:00:00Z"
+            }]
+        });
+        std::fs::write(
+            crate::paths::AgentsHome::from_env().registry_json(),
+            doc.to_string(),
+        )
+        .unwrap();
+        let board = json!({"queues": [
+            {"name": "operator_question", "status": "ok", "rows": [
+                {"id": "q-1", "question": "rule on the merge gate", "ts": "t",
+                 "session_id": "sess-k"}
+            ]},
+            {"name": "undriven_pr", "status": "ok", "rows": []}
+        ]});
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &split_ok(),
+            Some(&board),
+        );
+        assert!(page.contains("needs the user"), "{page}");
+        assert!(page.contains("rule on the merge gate"), "{page}");
+        let blind = json!({"queues": [
+            {"name": "operator_question", "status": "over_budget",
+             "error": "too many rows", "rows": []}
+        ]});
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &split_ok(),
+            Some(&blind),
+        );
+        assert!(
+            page.contains("not read: operator_question not read: too many rows"),
+            "{page}"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1535,18 +1728,58 @@ mod tests {
     }
 
     #[test]
-    fn crown_ledger_success_writes_one_acted_row() {
+    #[cfg(unix)]
+    fn crown_ledger_success_writes_one_acted_row_through_the_rust_front() {
+        // The real runner, not a synthetic Ok: FNO_BIN pins a stub naming a
+        // real page and FNO_PY a sentinel, so a regression to fno-py - which
+        // has no `org` command - fails this row instead of a daemon beat.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_bin = std::env::var_os("FNO_BIN");
+        let prior_py = std::env::var_os("FNO_PY");
+        let dir = tempfile::tempdir().unwrap();
+        let page = dir.path().join("rundown.html");
+        std::fs::write(&page, b"<html></html>").unwrap();
+        let stub = crate::write_exec_stub(
+            dir.path(),
+            "fno",
+            &format!("#!/bin/sh\necho \"reign ledger: {}\"\n", page.display()),
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        std::env::set_var("FNO_PY", "/nonexistent/fno-py-sentinel");
         let h = home();
-        let o = emit_one(&h, || Ok(()));
+        let o = emit_one(&h, run_ledger);
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
+        assert_eq!(o.detail, format!("{} rendered", page.display()));
+        // The wrong-page defense: exit 0 naming an absent page is an error
+        // row, so a rename can never again read as rendered.
+        let ghost = crate::write_exec_stub(
+            dir.path(),
+            "fno",
+            "#!/bin/sh\necho \"reign ledger: /nonexistent/ghost.html\"\n",
+        );
+        std::env::set_var("FNO_BIN", &ghost);
+        let o = emit_one(&h, run_ledger);
+        match prior_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        match prior_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("error"));
+        assert!(o.detail.contains("named path missing"), "{}", o.detail);
         let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert_eq!(
             log.matches("\"arm\":\"crown_ledger\"").count(),
-            1,
+            2,
             "log: {log}"
         );
-        assert!(log.contains("\"acted\":1"), "log: {log}");
+        assert_eq!(log.matches("\"acted\":1").count(), 1, "log: {log}");
         assert!(log.contains("\"interval_s\":300"), "log: {log}");
     }
 
@@ -1578,7 +1811,7 @@ mod tests {
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok", "name": "Barnaby II"},
         });
-        let card = crown_card(&crown, &BTreeMap::new());
+        let card = crown_card(&crown, &BTreeMap::new(), &(BTreeMap::new(), None));
         assert!(
             card.contains("held by <b>Barnaby II</b> (king-fno-g7)"),
             "{card}"
@@ -1592,7 +1825,7 @@ mod tests {
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok"},
         });
-        let card = crown_card(&crown, &BTreeMap::new());
+        let card = crown_card(&crown, &BTreeMap::new(), &(BTreeMap::new(), None));
         assert!(card.contains("held by <b>king-fno-g7</b>"), "{card}");
         assert!(!card.contains("Barnaby"), "{card}");
     }

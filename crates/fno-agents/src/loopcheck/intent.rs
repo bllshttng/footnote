@@ -17,11 +17,12 @@ pub(super) enum Intent {
         reason: String,
         pr: Option<String>,
         timeout: Option<String>,
+        task_id: Option<String>,
     },
     None,
 }
 
-pub(super) fn extract_assistant_text(val: &Value) -> String {
+pub(crate) fn extract_assistant_text(val: &Value) -> String {
     // Try /message/content as string
     if let Some(s) = val.pointer("/message/content").and_then(|v| v.as_str()) {
         return s.to_string();
@@ -63,10 +64,18 @@ pub(super) fn detect_intent_from_text(text: &str) -> Intent {
     if let Some(w_start) = text.find("<watching") {
         if let Some(gt) = text[w_start..].find('>') {
             let tag_text = &text[w_start..w_start + gt + 1];
+            let task_id = parse_xml_attr(tag_text, "task_id");
+            if task_id
+                .as_deref()
+                .is_some_and(|id| !valid_watch_task_id(id))
+            {
+                return Intent::None;
+            }
             return Intent::Watching {
                 reason: parse_xml_attr(tag_text, "reason").unwrap_or_default(),
                 pr: parse_xml_attr(tag_text, "pr"),
                 timeout: parse_xml_attr(tag_text, "timeout"),
+                task_id,
             };
         }
     }
@@ -74,6 +83,14 @@ pub(super) fn detect_intent_from_text(text: &str) -> Intent {
         return Intent::Promise;
     }
     Intent::None
+}
+
+fn valid_watch_task_id(task_id: &str) -> bool {
+    !task_id.is_empty()
+        && task_id.len() <= 128
+        && task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {

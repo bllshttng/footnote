@@ -22,9 +22,10 @@ from typing import Any, Dict, List, Literal, Optional
 import yaml
 
 from fno.claims.self_identity import resolve_self_identity
+from fno.claims.session_pid import resolve_session_harness
 from fno.harness_identity import resolve_harness_identity
 
-Harness = Literal["claude", "gemini", "codex"]
+Harness = str
 SessionKind = Literal["target", "session", "override"]
 FleetStatus = Literal["running", "paused"]
 
@@ -125,25 +126,25 @@ def _detect_project_root(warnings: List[str]) -> Path:
 
 
 def _detect_harness() -> Harness:
-    """Resolve harness via shared session markers first, plugin-root hints
-    second, default 'claude'. Mirrors init-target-state.sh's detect_provider,
-    which keeps the old name because it writes the persisted manifest field.
+    """Resolve the harness via the owned session identity first, then the
+    process-tree walk behind `fno agents claim session-pid`, else 'claude'.
+    Mirrors init-target-state.sh's detect_provider, which keeps the old name
+    because it writes the persisted manifest field.
 
-    Session markers win because a real codex/gemini session sets its thread or
-    session env but no ``*_PLUGIN_ROOT``; sniffing plugin roots alone silently
-    mislabeled those sessions as ``claude`` (the fail-open this fixes).
+    The owned identity wins because a real session sets its thread or
+    session env; the walk covers a harness the env cannot prove (a spawned
+    worker under opencode carries no marker of its own, and opencode was the
+    harness the old allow-list defaulted to claude). The CODEX_PLUGIN_ROOT
+    and GEMINI_PROJECT_DIR plugin-root sniffs are gone: codex sessions carry
+    CODEX_THREAD_ID and the walk sees a codex ancestor, and gemini is
+    retired.
     """
-    # OWNED, not precedence: this value is written to the persisted
-    # manifest as `provider`, and an inherited marker mislabels the session for
-    # the manifest's whole life. An ambiguous resolve falls through to the
-    # plugin-root sniff below rather than stamping a stranger's harness.
     harness = resolve_self_identity().harness
-    if harness in ("claude", "codex", "gemini"):
-        return harness  # type: ignore[return-value]
-    if os.environ.get("CODEX_PLUGIN_ROOT"):
-        return "codex"
-    if os.environ.get("GEMINI_PROJECT_DIR"):
-        return "gemini"
+    if harness:
+        return harness
+    walked = resolve_session_harness()
+    if walked:
+        return walked
     return "claude"
 
 

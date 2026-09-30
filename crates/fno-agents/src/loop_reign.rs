@@ -729,11 +729,9 @@ pub fn run_reign_term(args: &[String]) -> i32 {
         );
         return 1;
     }
-    let prior_reading = crate::king_term::reading(&manifest, chrono::Utc::now(), None);
-    let already_declared = manifest
-        .term
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
+    let view = crate::crown_names::reign_view(&manifest);
+    let prior_reading = crate::king_term::reading(&view, chrono::Utc::now(), None);
+    let already_declared = view.term.as_deref().is_some_and(|s| !s.trim().is_empty());
     let reached = matches!(
         prior_reading.state,
         crate::king_term::TermState::Reached { .. }
@@ -742,7 +740,7 @@ pub fn run_reign_term(args: &[String]) -> i32 {
     if (already_declared || reached) && reason.is_none() {
         eprintln!(
             "refusing to replace a declared or reached term without --reason: the extension is \
-             the receipt. Hand off instead: fno agents spawn --crown {scope} --succeed"
+             the receipt. Hand off instead: fno agents spawn --promote {scope} --succeed"
         );
         return 1;
     }
@@ -753,6 +751,13 @@ pub fn run_reign_term(args: &[String]) -> i32 {
     if let Err(e) = set_manifest_fields(&root, &scope, &fields, session.as_deref()) {
         eprintln!("{e}");
         return 1;
+    }
+    if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
+        if let Err(e) =
+            crate::crown_names::stamp_reign(&home.crown_names_json(), &manifest, Some(&term))
+        {
+            eprintln!("fno-agents reign-term: WARNING: reign clock not stamped: {e}");
+        }
     }
     let events_path = events_path.unwrap_or_else(|| crate::paths::events_path(&root));
     let global_events_path = global_events_path.unwrap_or_else(|| events_path.clone());
@@ -765,7 +770,7 @@ pub fn run_reign_term(args: &[String]) -> i32 {
             "session_id": manifest.harness_session_id,
             "term": term,
             "reason": reason,
-            "prior_term": manifest.term,
+            "prior_term": view.term,
             "prior_state": crate::king_term::state_word(&prior_reading.state),
         }),
     );

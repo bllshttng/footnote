@@ -108,18 +108,6 @@ fn build_argv(
     Ok(argv)
 }
 
-fn new_session_id() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| format!("could not mint session id: {error}"))?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::build_argv;
@@ -211,7 +199,7 @@ pub fn dispatch_grok_once(
         );
     }
 
-    let session_id = match new_session_id() {
+    let session_id = match crate::identity::mint_fno_id() {
         Ok(id) => id,
         Err(error) => return AskOutcome::error(error, 2),
     };

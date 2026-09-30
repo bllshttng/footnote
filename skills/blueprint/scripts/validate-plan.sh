@@ -1692,7 +1692,7 @@ check_python_rows_file() {
     # back to the ruling's starting value, so a checkout without the key
     # still gates. The budget is read only when a Grant row exists, so the
     # common Port/Delete plan pays no fno subprocess.
-    local grant_budget=30 declared grant_total=0 grant_config_out="" grant_config_rc=0
+    local grant_budget=30 declared grant_total=0 grant_config_out="" grant_config_rc=0 waiver_ruling=""
     if grep -qi 'grant' <<< "$rows"; then
         if grant_config_out=$(fno config get blueprint.python_repair_added_lines 2>"$TMPDIR_BASE_VAL/grant-budget.err"); then
             grant_budget=$(printf '%s\n' "$grant_config_out" | sed -n 1p)
@@ -1739,6 +1739,9 @@ check_python_rows_file() {
                                     || [[ -n "$node" && " $_DECISION_TEXT " =~ [^a-z0-9-]"$node"[^a-z0-9-] ]] \
                                     || [[ "$_DECISION_TEXT" == *"$path"* ]]; then
                                     scope_approved=1
+                                    if [[ -z "$waiver_ruling" && "$_DECISION_TEXT" == *"file-budget-exception"* ]]; then
+                                        waiver_ruling="$cited_id"
+                                    fi
                                 fi
                                 ;;
                             notlive)
@@ -1782,7 +1785,11 @@ check_python_rows_file() {
         esac
     done <<< "$rows"
     if (( grant_total > grant_budget )); then
-        findings+=("the Grant rows declare +$grant_total added cli/src/fno lines against a budget of $grant_budget (config blueprint.python_repair_added_lines) - port the change to crates/, or cut it under the budget")
+        if [[ -n "$waiver_ruling" ]]; then
+            echo "grant budget: +$grant_total declared added cli/src/fno lines against a budget of $grant_budget; ruling $waiver_ruling names file-budget-exception for $scope_node, so the ceiling is lifted here (the push-time gate still reads the PR label)"
+        else
+            findings+=("the Grant rows declare +$grant_total added cli/src/fno lines against a budget of $grant_budget (config blueprint.python_repair_added_lines) - port the change to crates/, or cut it under the budget")
+        fi
     fi
     local s
     while IFS= read -r s; do

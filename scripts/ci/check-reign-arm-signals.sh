@@ -38,7 +38,7 @@ FILES=()
 if [[ $# -gt 0 ]]; then
   FILES=("$@")
 else
-  FILES=("$REPO_ROOT/skills/reign/SKILL.md" "$REPO_ROOT/docs/architecture/reign.md")
+  FILES=("$REPO_ROOT/skills/lead/SKILL.md" "$REPO_ROOT/docs/architecture/reign.md")
 fi
 
 # Not journal events: fno doctor event find output fields; graph and feed

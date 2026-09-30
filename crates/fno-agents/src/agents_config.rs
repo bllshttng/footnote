@@ -651,6 +651,45 @@ pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_ORPHAN_MIN_ELAPSED_SECS)
 }
 
+/// Absolute one-minute load trigger for the Rust machine-watch arm. These
+/// resource-meter thresholds are intentionally read here rather than added to
+/// the Python settings model.
+pub fn runaway_load_per_core(cwd: &Path) -> f64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "runaway_load_per_core"],
+    )
+    .and_then(toml_number)
+    .filter(|value| *value > 0.0)
+    .unwrap_or(4.0)
+}
+
+pub fn runaway_load_hold_seconds(cwd: &Path) -> u64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "runaway_load_hold_seconds"],
+    )
+    .and_then(|value| value.as_integer().and_then(|n| u64::try_from(n).ok()))
+    .filter(|seconds| *seconds > 0)
+    .unwrap_or(600)
+}
+
+pub fn hot_escalation_seconds(cwd: &Path) -> u64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "hot_escalation_seconds"],
+    )
+    .and_then(|value| value.as_integer().and_then(|n| u64::try_from(n).ok()))
+    .filter(|seconds| *seconds > 0)
+    .unwrap_or(1800)
+}
+
+fn toml_number(value: toml::Value) -> Option<f64> {
+    value
+        .as_float()
+        .or_else(|| value.as_integer().map(|number| number as f64))
+}
+
 /// The default run-slot cap for [`max_cargo_runs`]: how many cargo runs may
 /// hold the machine at once (compile or execute doors together).
 pub const DEFAULT_MAX_CARGO_RUNS: u32 = 2;
@@ -1850,22 +1889,16 @@ mod tests {
     }
 
     #[test]
-    fn headless_yolo_default_true_when_absent() {
+    fn yolo_rows() {
         // No agents block -> hang-safe no-prompt default.
         assert_eq!(read_headless_yolo("schema_version = 1\n", "gemini"), None);
         assert_eq!(read_headless_yolo("schema_version = 1\n", "codex"), None);
-    }
 
-    #[test]
-    fn headless_yolo_reads_per_provider_optout() {
         let cfg = "[agents.gemini]\nheadless_yolo = false\n";
         assert_eq!(read_headless_yolo(cfg, "gemini"), Some(false));
         // codex untouched -> absent -> falls through to default.
         assert_eq!(read_headless_yolo(cfg, "codex"), None);
-    }
 
-    #[test]
-    fn sandbox_unavailable_defaults_to_refuse_and_accepts_warn() {
         assert_eq!(
             read_sandbox_on_unavailable("schema_version = 1\n"),
             SandboxUnavailablePolicy::Refuse
@@ -1878,6 +1911,24 @@ mod tests {
             read_sandbox_on_unavailable("[sandbox]\non_unavailable = \"oops\"\n"),
             SandboxUnavailablePolicy::Refuse
         );
+
+        // confirm + a2a siblings must not be mistaken for the provider block.
+        let cfg = "[agents]\nconfirm = \"auto\"\n\n[agents.a2a]\nauto = true\n\n\
+                   [agents.codex]\nheadless_yolo = false\n\n\
+                   [agents.gemini]\nheadless_yolo = true\n";
+        assert_eq!(read_headless_yolo(cfg, "codex"), Some(false));
+        assert_eq!(read_headless_yolo(cfg, "gemini"), Some(true));
+
+        // An inline-table provider entry resolves the same as a [agents.x] block.
+        let cfg = "[agents]\ngemini = { headless_yolo = false }\n";
+        assert_eq!(read_headless_yolo(cfg, "gemini"), Some(false));
+
+        let cfg = "[agents.gemini]\nheadless_yolo = \"banana\"\n";
+        assert_eq!(read_headless_yolo(cfg, "gemini"), None);
+
+        // A headless_yolo under some other block must not match.
+        let cfg = "[target]\nheadless_yolo = false\n";
+        assert_eq!(read_headless_yolo(cfg, "gemini"), None);
     }
 
     #[test]
@@ -1900,37 +1951,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_yolo_does_not_confuse_providers_or_sibling_keys() {
-        // confirm + a2a siblings must not be mistaken for the provider block.
-        let cfg = "[agents]\nconfirm = \"auto\"\n\n[agents.a2a]\nauto = true\n\n\
-                   [agents.codex]\nheadless_yolo = false\n\n\
-                   [agents.gemini]\nheadless_yolo = true\n";
-        assert_eq!(read_headless_yolo(cfg, "codex"), Some(false));
-        assert_eq!(read_headless_yolo(cfg, "gemini"), Some(true));
-    }
-
-    #[test]
-    fn headless_yolo_reads_inline_provider_table() {
-        // An inline-table provider entry resolves the same as a [agents.x] block.
-        let cfg = "[agents]\ngemini = { headless_yolo = false }\n";
-        assert_eq!(read_headless_yolo(cfg, "gemini"), Some(false));
-    }
-
-    #[test]
-    fn headless_yolo_malformed_value_is_none_not_a_guess() {
-        let cfg = "[agents.gemini]\nheadless_yolo = \"banana\"\n";
-        assert_eq!(read_headless_yolo(cfg, "gemini"), None);
-    }
-
-    #[test]
-    fn headless_yolo_ignores_non_agents_config() {
-        // A headless_yolo under some other block must not match.
-        let cfg = "[target]\nheadless_yolo = false\n";
-        assert_eq!(read_headless_yolo(cfg, "gemini"), None);
-    }
-
-    #[test]
-    fn agents_value_reads_spawn_gate_keys() {
+    fn agents_value_rows() {
         let cfg =
             "[agents]\nconfirm = \"auto\"\nmax_live = 5\nmin_free_gb = 2.5\nworker_qos = \"off\"\n";
         assert_eq!(read_agents_value(cfg, "max_live").as_deref(), Some("5"));
@@ -1939,10 +1960,7 @@ mod tests {
             Some("2.5")
         );
         assert_eq!(read_agents_value(cfg, "worker_qos").as_deref(), Some("off"));
-    }
 
-    #[test]
-    fn agents_value_absent_nested_or_prefix_is_none() {
         assert_eq!(read_agents_value("schema_version = 1\n", "max_live"), None);
         // provider-depth key must not read as the agents child.
         let nested = "[agents.codex]\nmax_live = 9\n";
@@ -1953,17 +1971,14 @@ mod tests {
     }
 
     #[test]
-    fn roster_scope_absent_is_none_and_resolves_to_the_default() {
+    fn roster_scope_rows() {
         // No agents.reap block -> the resolver's unwrap_or decides.
         assert_eq!(read_roster_scope("schema_version = 1\n"), None);
         assert_eq!(
             roster_scope(Path::new("/nonexistent-roster-scope")),
             DEFAULT_ROSTER_SCOPE
         );
-    }
 
-    #[test]
-    fn roster_scope_reads_each_value() {
         assert_eq!(
             read_roster_scope("[agents.reap]\nroster_scope = \"off\"\n"),
             Some(RosterScope::Off)
@@ -1981,10 +1996,7 @@ mod tests {
             read_roster_scope("[agents.reap]\nroster_scope = \" ALL \"\n"),
             Some(RosterScope::All)
         );
-    }
 
-    #[test]
-    fn roster_scope_unknown_value_degrades_in_place_to_the_default() {
         // An unknown value must not fall through to a lower-precedence file,
         // and must not widen or disable the sweep.
         assert_eq!(
@@ -1997,10 +2009,7 @@ mod tests {
             read_roster_scope("[agents.reap]\nroster_scope = 7\n"),
             Some(DEFAULT_ROSTER_SCOPE)
         );
-    }
 
-    #[test]
-    fn roster_scope_ignores_wrong_blocks_and_sibling_keys() {
         // A top-level [reap] block is not agents.reap.
         assert_eq!(read_roster_scope("[reap]\nroster_scope = \"all\"\n"), None);
         // A sibling key inside agents.reap does not answer for roster_scope.
@@ -2010,47 +2019,9 @@ mod tests {
     // change 2: the open-work window reads agents.reap and fails open
     // to the default - a zero would reap every open row on the next sweep,
     // so it is a typo, never a setting.
-    #[test]
-    fn open_work_retire_s_reads_agents_reap_and_coerces_zero_to_default() {
-        assert_eq!(
-            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 3600\n"),
-            Some(3600)
-        );
-        // No block, wrong block, sibling key: all absence.
-        assert_eq!(read_open_work_retire_s("schema_version = 1\n"), None);
-        assert_eq!(
-            read_open_work_retire_s("[reap]\nopen_work_retire_s = 3600\n"),
-            None
-        );
-        // Zero and negative coerce to None, so the resolver's default wins.
-        assert_eq!(
-            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 0\n"),
-            None
-        );
-        assert_eq!(
-            open_work_retire_secs(Path::new("/nonexistent-open-work")),
-            DEFAULT_OPEN_WORK_RETIRE_SECS
-        );
-    }
 
     // change 1.1: the run-slot cap reads test.max_cargo_runs and fails open
     // to the default, so a typo or a 0 never walls off every cargo.
-    #[test]
-    fn max_cargo_runs_reads_test_block_and_coerces_invalid_to_default() {
-        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 3\n"), Some(3));
-        // No block, wrong type, 0, negative: all absence, so the default wins.
-        assert_eq!(read_max_cargo_runs("schema_version = 1\n"), None);
-        assert_eq!(
-            read_max_cargo_runs("[test]\nmax_cargo_runs = \"3\"\n"),
-            None
-        );
-        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 0\n"), None);
-        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = -1\n"), None);
-        assert_eq!(
-            max_cargo_runs(Path::new("/nonexistent-max-cargo-runs")),
-            DEFAULT_MAX_CARGO_RUNS
-        );
-    }
 
     #[test]
     fn spawn_gate_knobs_coerce_invalid_to_defaults() {
@@ -2106,14 +2077,11 @@ mod tests {
     }
 
     #[test]
-    fn mux_bool_reads_mux_child_key() {
+    fn reader_knobs_rows() {
         let cfg = "[mux]\nnotify_on_blocked = false\nnotify_on_done = true\n";
         assert_eq!(read_mux_bool(cfg, "notify_on_blocked"), Some(false));
         assert_eq!(read_mux_bool(cfg, "notify_on_done"), Some(true));
-    }
 
-    #[test]
-    fn mux_bool_absent_is_none() {
         assert_eq!(
             read_mux_bool("[agents]\nconfirm = \"auto\"\n", "notify_on_blocked"),
             None
@@ -2122,10 +2090,7 @@ mod tests {
             read_mux_bool("schema_version = 1\n", "notify_on_done"),
             None
         );
-    }
 
-    #[test]
-    fn mux_bool_ignores_nested_and_bad_values() {
         // A key one level too deep must NOT be read as the mux-child.
         let nested = "[mux.pane]\nnotify_on_blocked = false\n";
         assert_eq!(read_mux_bool(nested, "notify_on_blocked"), None);
@@ -2135,12 +2100,47 @@ mod tests {
         // A prefix key must not match without the exact key.
         let prefix = "[mux]\nnotify_on_blocked_extra = true\n";
         assert_eq!(read_mux_bool(prefix, "notify_on_blocked"), None);
-    }
 
-    #[test]
-    fn mux_bool_reads_true() {
         let cfg = "[mux]\nnotify_on_done = true\n";
         assert_eq!(read_mux_bool(cfg, "notify_on_done"), Some(true));
+
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 3600\n"),
+            Some(3600)
+        );
+        // No block, wrong block, sibling key: all absence.
+        assert_eq!(read_open_work_retire_s("schema_version = 1\n"), None);
+        assert_eq!(
+            read_open_work_retire_s("[reap]\nopen_work_retire_s = 3600\n"),
+            None
+        );
+        // Zero and negative coerce to None, so the resolver's default wins.
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 0\n"),
+            None
+        );
+        assert_eq!(
+            open_work_retire_secs(Path::new("/nonexistent-open-work")),
+            DEFAULT_OPEN_WORK_RETIRE_SECS
+        );
+
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 3\n"), Some(3));
+        // No block, wrong type, 0, negative: all absence, so the default wins.
+        assert_eq!(read_max_cargo_runs("schema_version = 1\n"), None);
+        assert_eq!(
+            read_max_cargo_runs("[test]\nmax_cargo_runs = \"3\"\n"),
+            None
+        );
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 0\n"), None);
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = -1\n"), None);
+        assert_eq!(
+            max_cargo_runs(Path::new("/nonexistent-max-cargo-runs")),
+            DEFAULT_MAX_CARGO_RUNS
+        );
+
+        // A row must retire within one interval of becoming eligible: the
+        // default interval is a strict fraction of the default grace.
+        assert!(DEFAULT_RETIRE_INTERVAL_SECS * 3 <= DEFAULT_RETIRE_GRACE_SECS);
     }
 
     #[test]
@@ -2271,13 +2271,6 @@ mod tests {
         let cwd = write_project_settings("retire-interval-env", "schema_version = 1\n");
         assert_eq!(retire_interval_s(&cwd, 900), 30);
         std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
-    }
-
-    #[test]
-    fn retirement_sweep_interval_stays_under_the_grace_it_serves() {
-        // A row must retire within one interval of becoming eligible: the
-        // default interval is a strict fraction of the default grace.
-        assert!(DEFAULT_RETIRE_INTERVAL_SECS * 3 <= DEFAULT_RETIRE_GRACE_SECS);
     }
 
     #[test]

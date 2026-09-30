@@ -2384,7 +2384,6 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -2396,29 +2395,23 @@ def cmd_next(
     project_filter = project
     _external = active_backend_name() != "graph"
 
-    def _read_entries() -> list[dict]:
-        """The graph, strictly: corruption refuses instead of answering [].
+    # The graph-backend answer is native: the door (fno backlog next) owns
+    # the prelude, the occupancy, the selection, the reservation, and the
+    # receipts. This wheel spelling keeps only the external-backend branch,
+    # whose joined tracker candidates the door forwards here from inside its
+    # own arm.
+    if not _external:
+        typer.echo(
+            "Error: the selection is served by the native door; "
+            "run `fno backlog next`.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
-        `read_graph` swallows a corrupt file and answers no rows; a selection
-        over no rows prints `null`, which `advance` reads as the benign
-        `no-work` skip. An unreadable graph is not an empty backlog.
-        """
-        try:
-            return read_graph_strict(_graph_path())
-        except Exception as exc:  # noqa: BLE001 - unknown graph state refuses
-            typer.echo(f"Error: graph unreadable: {exc}; selection refused", err=True)
-            raise typer.Exit(code=1) from exc
-    # One read for the prelude AND selection: under an external backend the
-    # transient joined model (list_open + sidecar join, fail-closed); under
-    # the default backend the working graph, read at most once for project
-    # detection AND parent resolution (both need the full entry list).
+    # One read for the prelude AND selection: the transient joined model
+    # (list_open + sidecar join, fail-closed).
     try:
-        if _external:
-            pre_entries = _joined_open_candidates()
-        else:
-            pre_entries = None
-            if (not project_filter and not all_) or parent or claim:
-                pre_entries = _read_entries()
+        pre_entries = _joined_open_candidates()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
         raise typer.Exit(code=1)
@@ -2590,13 +2583,8 @@ def cmd_next(
                 result[0] = _dispatch_node_summary(winner)
                 break
     else:
-        if _external:
-            assert pre_entries is not None
-            entries = pre_entries
-        else:
-            # The prelude may already hold this graph, and nothing mutates it
-            # on the read-only path: a second read buys the same rows.
-            entries = pre_entries if pre_entries is not None else _read_entries()
+        assert pre_entries is not None
+        entries = pre_entries
         occupied, observer = _prepare(entries)
         candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
         if candidates:
@@ -2611,9 +2599,7 @@ def cmd_next(
     try:
         from fno.backlog.advance import _guard_staleness_days
 
-        recv_entries = (
-            pre_entries if _external else (wire_rows(path=_graph_path()) if claim else entries)
-        ) or []
+        recv_entries = pre_entries or []
         scope_ids = (
             descendants_of(recv_entries, parent_target_id)
             if parent_target_id is not None
@@ -2654,33 +2640,33 @@ def cmd_undispatched(
     mission: Optional[str] = typer.Option(None, "--mission"),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Name finalized, ready leaf plans with no node claim."""
+    """Name finalized, ready leaf plans with no node claim.
+
+    The graph-backend answer is native: the door (fno backlog undispatched)
+    owns the classify, the claim keys, and the worked fold. This wheel
+    spelling keeps only the external-backend branch, whose joined tracker
+    candidates the door forwards here from inside its own arm.
+    """
     del all_, json_output  # the observer is JSON by contract and all-scoped by default
-    from fno.backlog.undispatched import (
-        ObserverReadError,
-        read_planned_unclaimed,
-        read_planned_unclaimed_from_entries,
-    )
+    from fno.backlog.undispatched import ObserverReadError, read_planned_unclaimed_from_entries
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() == "graph":
+        typer.echo(
+            "Error: the observer is served by the native door; "
+            "run `fno backlog undispatched`.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     try:
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
-            receipt = read_planned_unclaimed_from_entries(
-                _joined_open_candidates(),
-                project=project,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent,
-            )
-        else:
-            receipt = read_planned_unclaimed(
-                graph_path=_graph_path(),
-                project=project,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent,
-            )
+        receipt = read_planned_unclaimed_from_entries(
+            _joined_open_candidates(),
+            project=project,
+            mission=mission,
+            roadmap_id=roadmap_id,
+            parent=parent,
+        )
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: tracker unreadable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -4191,32 +4177,20 @@ def cmd_view() -> None:
     import subprocess
 
     from fno.graph._constants import GRAPH_HTML
-    from fno.graph.render_html import load_render_entries, render_graph_html
 
-    try:
-        entries = load_render_entries(_display_entries("view", strict=True))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-    # Honor the configured row for this path rather than overwriting it with
-    # the whole-graph private board. An operator who scopes their board to one
-    # project got it silently widened by every `view`; one who points a PUBLIC
-    # projection here got the full-detail board written to a path the mux
-    # /backlog route serves. canonical_target() returns the default
-    # whole-graph local row when nothing else claims the path, so the plain
-    # case is unchanged.
-    try:
-        from fno.graph.roadmap_public import canonical_target, render_one_target
+    # The board is the native front binary's snapshot render: it re-gathers
+    # the store itself and writes every configured local target, the
+    # canonical board among them.
+    from fno.graph.roadmap_public import render_local_targets
 
-        row = canonical_target()
-    except Exception:
-        row = None
-    if row is not None:
-        render_one_target(row, entries)
-    else:
-        render_graph_html(entries, GRAPH_HTML)
+    failures = render_local_targets()
+    if failures:
+        typer.echo(
+            f"Error: local board render failed ({failures} target(s)); "
+            "see the warnings above",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":
@@ -4299,16 +4273,12 @@ def cmd_roadmap(
 
     from fno.graph._intake import detect_project_from_settings, repo_root
     from fno.graph.roadmap_public import (
-        public_projection_entries,
-        render_public_backlog_html,
-        render_public_roadmap_html,
-        render_public_roadmap_md,
-    )
-    from fno.graph.render_html import (
         atomic_write_documents,
         leak_refusal_report,
         load_render_entries,
+        public_projection_entries,
         public_title_leaks,
+        render_public_roadmap_md,
     )
 
     resolved_project = project or detect_project_from_settings(repo_root())
@@ -4333,28 +4303,28 @@ def cmd_roadmap(
 
     md = render_public_roadmap_md(entries, resolved_project)
 
+    if html or backlog_html:
+        # The public HTML pages were the second board this surface retired;
+        # refuse BY NAME so a script fails loudly instead of silently
+        # rendering nothing.
+        typer.echo(
+            "Error: --html/--backlog-html are retired; the web backlog page "
+            "is the one board (fno mux serve --web / fno backlog view). "
+            "The markdown roadmap still renders.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     documents: dict[Path, str] = {}
     out_path = Path(os.path.expanduser(out)) if out else None
     if out_path:
         documents[out_path] = md
-    if html:
-        documents[Path(os.path.expanduser(html))] = render_public_roadmap_html(
-            entries, resolved_project
-        )
-    if backlog_html:
-        documents[Path(os.path.expanduser(backlog_html))] = render_public_backlog_html(
-            entries, resolved_project
-        )
     atomic_write_documents(documents)
 
     if out_path:
         typer.echo(str(out_path))
     else:
         typer.echo(md, nl=False)
-    if html:
-        typer.echo(f"written public roadmap: {os.path.expanduser(html)}")
-    if backlog_html:
-        typer.echo(f"written public backlog: {os.path.expanduser(backlog_html)}")
 
 
 # -- tree --
@@ -4804,7 +4774,7 @@ def cmd_pick(
     from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import filter_by_project, _find_node, _graph_sort_key_fn
     from fno.graph._constants import has_node_id_prefix
-    from fno.graph.render_html import _load_obsidian_vault, _obsidian_url
+    from fno.graph.roadmap_public import _load_obsidian_vault, obsidian_url as _obsidian_url
 
     fzf = shutil.which("fzf")
     if not fzf:

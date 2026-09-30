@@ -30,9 +30,13 @@ crossing	crates/fno-agents/src/finalize.rs	let ok = Command::new(crate::scrape::
 crossing	crates/fno-agents/src/finalize.rs	let out = match Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/finalize.rs	let mut cmd = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/finalize_run_summary.rs	let mut cmd = Command::new(crate::loopcheck::loopcheck_fno_bin());
+crossing	crates/fno-agents/src/gate_probes.rs	let _ = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/gc.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	let mut argv = vec![fno_bin()];
+# The Rundown arm owns draining this site: the daemon renders through the
+# front door; the drain would be the front calling the ledger natively.
+crossing	crates/fno-agents/src/king_ledger.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/lifecycle_child.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	return Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	let out = Command::new(crate::scrape::fno_bin())
@@ -69,6 +73,7 @@ crossing	crates/fno-agents/src/route_slot.rs	let mut cmd = std::process::Command
 crossing	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	let bin = fno_bin();
 crossing	crates/fno-agents/src/scratch.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/select_read.rs	.unwrap_or_else(|_| crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/spawn_gate.rs	let _ = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	let mut cmd = Command::new(crate::scrape::fno_bin());
@@ -93,7 +98,7 @@ crossing	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::std_command(fno_bin());
 crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server/agent_actions.rs	let mut command = mux_command(fno_bin());
+crossing	crates/fno/src/server/agent_actions.rs	let bin = fno_bin();
 crossing	crates/fno/src/server/agent_launch.rs	let fno = super::fno_bin().display().to_string();
 crossing	crates/fno/src/server/agent_launch.rs	let fno = super::fno_bin().display().to_string();
 crossing	crates/fno/src/yard_overlay.rs	fn fno_bin() -> PathBuf {
@@ -113,6 +118,7 @@ resolver	crates/fno-agents/src/reclaim.rs	fn fno_plugin_dir(root: &Path) -> Path
 resolver	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString {
 resolver	crates/fno-agents/src/scrape.rs	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	fn diagnose_locate_failure() -> Option<String> {
+resolver	crates/fno/src/client_tests/theme_import_tests.rs	async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
 resolver	crates/fno/src/mux_cli.rs	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
 resolver	crates/fno/src/squad_store_tests.rs	fn build_tree_marker_detection_is_pure_over_path() {

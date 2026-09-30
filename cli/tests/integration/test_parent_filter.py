@@ -5,6 +5,7 @@ candidates to the transitive children of an epic so a walk can drain one
 epic's subtree. Mirrors the existing --roadmap-id filter.
 """
 from tests.fixtures.graph_seed import seed_graph
+from tests.goldens._door import door_graph
 import json
 
 import pytest
@@ -103,12 +104,11 @@ def _epic_with_children(tmp_graph):
 def test_ac2_hp_next_parent_scopes_to_children(tmp_graph):
     """`next --parent <epic>` only ever returns a child of the epic."""
     epic, c1, c2, loose = _epic_with_children(tmp_graph)
-    r = runner.invoke(
-        app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
-        catch_exceptions=False,
+    code, out, err = door_graph(
+        tmp_graph, "next", "--parent", epic, "--include-ideas", "--all",
     )
-    assert r.exit_code == 0, r.output
-    picked = json.loads(r.output)
+    assert code == 0, err
+    picked = json.loads(out)
     assert picked is not None
     assert picked["id"] in {c1, c2}
     assert picked["id"] != loose
@@ -131,26 +131,22 @@ def test_ac2_hp_ready_parent_scopes_to_children(tmp_graph):
 def test_ac2_err_next_missing_parent_exits_nonzero(tmp_graph):
     """`--parent ab-doesnotexist` is a hard error, not silent nothing."""
     _epic_with_children(tmp_graph)
-    r = runner.invoke(
-        app, ["backlog", "next", "--parent", "ab-doesnotexist", "--all"],
-        catch_exceptions=True,
-    )
-    assert r.exit_code != 0
-    assert "no such node" in r.output.lower() or "not found" in r.output.lower()
+    code, out, err = door_graph(tmp_graph, "next", "--parent", "ab-doesnotexist", "--all")
+    assert code != 0
+    assert "no such node" in err.lower() or "not found" in err.lower()
 
 
 def test_ac2_edge_parent_with_no_children_emits_message(tmp_graph):
     """A valid node with no children returns null + a 'no children' note,
     so the walker can fall back rather than treating it as an error."""
     epic, c1, c2, loose = _epic_with_children(tmp_graph)
-    r = runner.invoke(
-        app, ["backlog", "next", "--parent", loose, "--include-ideas", "--all"],
-        catch_exceptions=False,
+    code, out, err = door_graph(
+        tmp_graph, "next", "--parent", loose, "--include-ideas", "--all",
     )
-    assert r.exit_code == 0, r.output
-    # null payload on stdout, advisory message somewhere in output.
-    assert "null" in r.output
-    assert "no children under" in r.output.lower()
+    assert code == 0, err
+    # null payload on stdout, advisory message on stderr.
+    assert "null" in out
+    assert "no children under" in err.lower()
 
 
 def test_parent_combines_with_priority_order(tmp_graph):
@@ -160,9 +156,8 @@ def test_parent_combines_with_priority_order(tmp_graph):
     hi = _add(tmp_graph, "high child", priority="p1")
     _set_parent(tmp_graph, lo, epic)
     _set_parent(tmp_graph, hi, epic)
-    r = runner.invoke(
-        app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
-        catch_exceptions=False,
+    code, out, err = door_graph(
+        tmp_graph, "next", "--parent", epic, "--include-ideas", "--all",
     )
-    assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["id"] == hi
+    assert code == 0, err
+    assert json.loads(out)["id"] == hi

@@ -814,7 +814,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
-             skills/reign, and encode each ruling in the graph before \
+             skills/lead, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \
              implement nodes yourself, dispatch and rule.{wake_clause}{detail_clause}"
         )

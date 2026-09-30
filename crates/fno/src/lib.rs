@@ -8,10 +8,12 @@
 // away at every site.
 #![allow(clippy::doc_lazy_continuation)]
 
+pub mod agents_alias;
 pub mod agents_history;
 pub mod agents_view;
 pub mod attention_api;
 pub mod backlog_model;
+pub mod backlog_snapshot;
 pub mod backlog_view;
 pub mod backlog_write;
 pub mod board_reader;
@@ -42,6 +44,7 @@ pub mod mouse;
 pub mod mux_cli;
 pub mod mux_rows;
 pub mod needs_overlay;
+pub mod org_titles;
 pub mod pane_argv;
 pub mod pane_border;
 pub mod pane_cwd;
@@ -78,6 +81,7 @@ mod test_keeper_cleanup;
 #[cfg(test)]
 pub(crate) mod test_owner;
 pub mod theme;
+pub mod theme_import;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;
 pub mod tree;

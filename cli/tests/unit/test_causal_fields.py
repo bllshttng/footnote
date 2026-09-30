@@ -45,7 +45,7 @@ def _read(g: Path) -> list[dict]:
 
 
 def _node(nid: str, **extra) -> dict:
-    return {"id": nid, "title": nid, "domain": "code", "project": "p", **extra}
+    return {"id": nid, "title": "seed node", "domain": "code", "project": "p", **extra}
 
 
 # -- Entry model --------------------------------------------------------------

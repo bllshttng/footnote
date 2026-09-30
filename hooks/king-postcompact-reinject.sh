@@ -34,7 +34,7 @@ else
 fi
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 MARKER_LIB="$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh"
-BRIEF="$PLUGIN_ROOT/skills/reign/references/postcompact-brief.md"
+BRIEF="$PLUGIN_ROOT/skills/lead/references/postcompact-brief.md"
 
 [[ -r "$CARRIER_LIB" ]] || exit 0
 # shellcheck source=../scripts/lib/postcompact-carrier.sh

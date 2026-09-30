@@ -21,4 +21,13 @@ impl Core {
         self.last_topology_flush = Some(Instant::now());
         captured
     }
+
+    /// Teardown: capture the topology, then record the stop in the journal
+    /// so a restart bounce that closes nothing still names itself in the
+    /// feed. Every serve-loop break is Flow::Shutdown, so the cause word
+    /// is fixed.
+    pub(super) fn record_exit(&mut self) {
+        self.capture_topology_now();
+        self.emit_server_stopped("shutdown");
+    }
 }

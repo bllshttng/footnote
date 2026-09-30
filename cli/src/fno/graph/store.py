@@ -621,6 +621,28 @@ class _ExecClient(_Keeper):
         pass  # one-shot: nothing resident to shut down
 
 
+class _SkewTolerant(_Keeper):
+    """A resident keeper that may predate this tree's methods: an
+    unknown-method refusal re-serves the request through the one-shot exec
+    transport, which runs the CURRENT resolved worker (measured 2026-09-30:
+    reconcile's ledger_backstop through a resident built before it). Any
+    other error propagates. Everything else - sock identity, typed helpers,
+    shutdown - is the keeper's own.
+    """
+
+    def __init__(self, sock: Path, path: Path, **kwargs) -> None:
+        super().__init__(sock, **kwargs)
+        self.path = Path(path)
+
+    def request(self, method: str, params: dict) -> Any:
+        try:
+            return super().request(method, params)
+        except RuntimeError as exc:
+            if "unknown store method" not in str(exc):
+                raise
+            return _ExecClient(self.path).request(method, params)
+
+
 def shutdown_keeper(path: Path) -> None:
     """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
     try:
@@ -642,16 +664,17 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
-def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
+def _client_for(path: Path, *, spawn: bool = True) -> "_SkewTolerant | _ExecClient":
     """Connect to `path`'s keeper; when nothing is listening, serve by exec.
     A live keeper is still preferred (old binaries spawn them); the
     spawn-needed branch no longer mints one, because a resident keeper's
-    memory grows with requests served. An unreachable store still raises
-    StoreUnavailable - never an empty graph.
+    memory grows with requests served. A resident keeper older than this
+    tree is bypassed to the exec transport per request (_SkewTolerant). An
+    unreachable store still raises StoreUnavailable - never an empty graph.
     """
     path = Path(path)
     sock = store_socket_for(path)
-    keeper = _Keeper(sock)
+    keeper = _SkewTolerant(sock, path)
     try:
         probe = keeper._connect()
         probe.close()
@@ -1302,28 +1325,13 @@ def render_view_projections(
     _archived = entries_with_archive(entries)
     if is_canonical:
         try:
-            from fno.graph.roadmap_public import canonical_target, render_one_target
+            from fno.graph.roadmap_public import render_local_targets
 
-            _canonical_row = canonical_target()
-            if _canonical_row is not None:
-                render_one_target(_canonical_row, _archived)
+            failed = render_local_targets()
+            if failed:
+                _fail(f"local board render: {failed} target(s) failed")
         except Exception as e:
-            _fail(f"canonical board render failed: {e}")
-        try:
-            from fno.graph.roadmap_public import render_configured_targets
-
-            render_configured_targets(_archived, skip_canonical=True)
-        except Exception as e:
-            _fail(f"configured render targets failed: {e}")
-    else:
-        # Test and temporary graphs retain a sibling HTML artifact without
-        # ever touching the operator's configured targets.
-        try:
-            from fno.graph.render_html import render_graph_html
-
-            render_graph_html(_archived, path.with_name("graph.html"))
-        except OSError as e:
-            _fail(f"graph.html render failed: {e}")
+            _fail(f"local board render failed: {e}")
     return entries
 
 

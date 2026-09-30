@@ -27,9 +27,16 @@ fn live_entry_for_address<'a>(
     Some(row)
 }
 
-fn crown_label(row: &crate::state::RegistryEntry) -> Option<String> {
-    row.crown_level
-        .map(|level| format!("L{level} {}", row.crown_scope.as_deref().unwrap_or("?")))
+fn crown_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
+    let level = row.crown_level?;
+    let scope = row.crown_scope.as_deref().unwrap_or("?");
+    let theme =
+        crate::crown_names::theme_for(&registry_path.with_file_name("crown_names.json"), scope);
+    Some(crate::crown_names::title(
+        level as u32,
+        scope,
+        theme.as_deref(),
+    ))
 }
 
 fn attr<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
@@ -113,7 +120,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
         other => other,
     });
     let from_rank = if mode == "wrap" {
-        from_row.and_then(crown_label)
+        from_row.and_then(|row| crown_label(registry_path, row))
     } else {
         attr(input, "from_rank").map(str::to_string)
     };
@@ -141,7 +148,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             if fleet_is_crowned {
                 Some(
                     to_row
-                        .and_then(crown_label)
+                        .and_then(|row| crown_label(registry_path, row))
                         .unwrap_or_else(|| "none".to_string()),
                 )
             } else {
@@ -280,7 +287,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             claude,
-            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
+            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"Head of fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
         );
         let codex = render_at(
             &json!({
@@ -389,7 +396,7 @@ mod tests {
         .unwrap();
 
         assert!(wrapped.starts_with(
-            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\">"
+            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"Head of fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\">"
         ));
     }
 }

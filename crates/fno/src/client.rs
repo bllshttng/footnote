@@ -38,6 +38,9 @@ use crate::chrome;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
+mod wire_version;
+use row_menu::execute_row_menu_action;
+use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
@@ -501,60 +504,6 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Spawn `fno --server <socket>` detached: its own session (setsid) so the
-/// server never receives the terminal's SIGHUP, stderr to a per-session log.
-/// Two clients racing here both spawn; the bind is the lock, the losing
-/// server exits 0, and both clients attach to the winner (AC4-EDGE).
-fn spawn_server(path: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path(path))
-        .map_err(|e| format!("cannot open server log: {e}"))?;
-    let mut cmd = crate::process_admission::std_command(exe);
-    cmd.arg("--server")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(log);
-    // Config->env bridge for the interactive path. The pure-Rust mux
-    // server reads no config.toml, so `config.mux.shell_integration: off` was
-    // a silent no-op here (the Python spawn front-half already bridges
-    // dispatched panes). Latch it at server birth: an explicit env
-    // export wins (inherited naturally, never overwritten); otherwise a single
-    // bounded `fno config get` decides. Only `off` needs materializing - the
-    // server reads absent/anything-else as on (the default).
-    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
-        cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
-    }
-    // Same bridge, same reason, for the backlog board's project scope.
-    // Resolving it needs `fno config get`, and the SERVER must not shell out on
-    // its startup path: doing so delayed shutdown past the SIGTERM grace and
-    // perturbed multiclient frame ordering. The client already pays a bounded
-    // config read here, so the resolution happens once, in this process, and
-    // rides in on the env. An explicit export wins, inherited untouched.
-    if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
-        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
-        cmd.env(
-            "FNO_BOARD_SCOPE",
-            crate::backlog_view::board_scope_wire(&scope),
-        );
-    }
-    // Safety: setsid only detaches the child from our session/terminal; it is
-    // async-signal-safe and touches no shared state.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    crate::process_admission::std_spawn(&mut cmd)
-        .map(|_| ())
-        .map_err(|e| format!("cannot spawn the mux server: {e}"))
-}
-
 /// Whether the interactive path must disable OSC 133 injection. Bounded +
 /// fail-open through [`crate::server::config_get`]: any spawn/read error, a
 /// non-`off` value, or a read that overruns the budget all leave injection on
@@ -925,10 +874,14 @@ struct View {
     /// toggle; the fold's rows newest first. `None` closed. The panel's
     /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
+    /// The client-local input owner among the visible regions. Written by
+    /// explicit clicks and focus gestures (region_focus), read normalized
+    /// through `input_owner`.
+    region_owner: region_focus::RegionOwner,
     /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
     /// it is open, so an index into `feed.items` would silently re-point at a
     /// different event; the inspected event never changes under the reader.
-    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    feed_detail: Option<feed_detail::FeedDetailModal>,
     /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
     /// safety as [`View::ans_esc`]).
     feed_esc: Vec<u8>,
@@ -1064,6 +1017,11 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The attached server's wire version, announced on every Layout (v97).
+    /// `None` until the first layout arrives and forever on an older server;
+    /// commands the announcement predates are refused client-side rather
+    /// than sent into an unknown-variant read failure.
+    server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     sideline_view: crate::view_store::SidelineView,
@@ -1162,6 +1120,10 @@ struct View {
     /// Colors tab. Client-local ephemera like `create`/`rename`; dormant while
     /// another tab or no popup is front, reset on tab switch away from Colors.
     lane: LaneColorsUi,
+    /// The theme file importer, active only inside Settings > Theme.
+    theme_import: theme_import_ui::ThemeImportUi,
+    theme_import_gen: u64,
+    theme_import_esc: Vec<u8>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1424,6 +1386,9 @@ mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
 mod pane_paint;
+// Region input ownership + the mouse pre-pass, moved out of handle_stdin
+// under the file-budget ratchet.
+mod region_focus;
 pub(crate) use needs_view::needs_overlay_lines;
 
 /// The move-tab / move-pane destination picker's state (cursored by
@@ -1869,6 +1834,9 @@ pub(crate) enum AuxAction {
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
+    ThemeImportOpen,
+    ThemeImportSave,
+    ThemeImportCancel,
     /// Apply a validated mux prefix change now, then persist it through the CLI.
     ApplyPrefix(String),
     /// Open the color picker for one `[sideline.colors]` axis key
@@ -1887,11 +1855,13 @@ pub(crate) enum AuxAction {
 mod backlog_board;
 mod backlog_style;
 mod config_set;
+mod lane_entry;
 mod node_detail;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
 mod theme_ground;
+mod theme_import_ui;
 mod update_menu;
 
 use config_set::spawn_config_set;
@@ -2042,7 +2012,8 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
-            feed_detail_of: None,
+            region_owner: region_focus::RegionOwner::Pane,
+            feed_detail: None,
             feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
@@ -2090,12 +2061,16 @@ impl View {
             user_themes: Vec::new(),
             pending_ground: None,
             backlog: Vec::new(),
+            server_proto: None,
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
+            theme_import: theme_import_ui::ThemeImportUi::Idle,
+            theme_import_gen: 0,
+            theme_import_esc: Vec::new(),
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -5303,15 +5278,8 @@ impl View {
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(item) = &self.feed_detail_of {
-            feed_detail::draw(
-                self,
-                item,
-                &mut cells,
-                (rows, cols),
-                overlay_origin,
-                overlay_dims,
-            );
+        if let Some(m) = &self.feed_detail {
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if questions::draw_detail(
             self,
             &mut cells,
@@ -6875,6 +6843,7 @@ enum TabHit {
 
 /// What a left-click on chrome resolves to: server commands to send, or a
 /// local one-line hint for a row that isn't directly actionable.
+#[derive(Debug, Clone)]
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
@@ -8269,6 +8238,8 @@ async fn attach_and_run(
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+    let (theme_import_tx, mut theme_import_rx) =
+        tokio::sync::mpsc::unbounded_channel::<theme_import_ui::ImportMsg>();
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
 
@@ -8400,6 +8371,7 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        theme_import_ui::maybe_kick(&mut view, &theme_import_tx);
         // the backlog board's probe/gather kick, the same single-flight.
         backlog_board::maybe_kick(&mut view, &board_tx);
         // a queued board write verb runs off the UI loop too.
@@ -8669,9 +8641,10 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, .. }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, proto, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
                     view.backlog = backlog;
+                    view.server_proto = proto;
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -9044,6 +9017,12 @@ async fn attach_and_run(
                 // same-generation panel (a result for a closed/superseded open
                 // is discarded, the needs arm's contract, one consumer).
                 feed_view::apply_fold(&mut view, gen, outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(message) = theme_import_rx.recv() => {
+                theme_import_ui::apply_result(&mut view, message);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -9546,623 +9525,13 @@ async fn handle_stdin(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
     // Mouse pre-pass (US1/US2/US3): pull SGR reports out first, then feed the
-    // remaining bytes to the key scanner. A pane-rect event forwards for
-    // server-side routing; a chrome click is swallowed (nothing reaches a pane,
-    // AC3-UI); a Shift-modified event is dropped (native-selection, AC3-EDGE).
+    // remaining bytes to the key scanner.
     let (reports, passthrough) = crate::mouse::extract_mouse(mouse_carry, bytes);
-    for rep in reports {
-        // DIAGNOSTIC (header right-click toggle): log every mouse event one stdin
-        // chunk produces, so a single operator right-click can be COUNTED. Inert
-        // unless FNO_MUX_MOUSE_TRACE is set; drop once the event pair is read.
-        // Cached in a OnceLock: a drag or scroll emits dozens of reports a
-        // second, and the flag never changes mid-process.
-        static MOUSE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *MOUSE_TRACE.get_or_init(|| std::env::var_os("FNO_MUX_MOUSE_TRACE").is_some()) {
-            eprintln!(
-                "mux-mouse kind={:?} row={} col={} shift={}",
-                rep.kind, rep.row, rep.col, rep.shift
-            );
-        }
-        // Shift-modified reports are dropped so the terminal's own native
-        // selection keeps working. A RELEASE while a drag is in flight is the
-        // exception: some terminals report Shift on the release, and dropping it
-        // would leave the drag latched - visibly stuck, eating input until its
-        // timeout - for a gesture the operator has already finished. Nobody is
-        // shift-selecting text mid-drag, so nothing is taken away here.
-        // `press_hold` belongs in this list for the same reason and with
-        // more at stake: the press it latched DEFERRED a click, so dropping its
-        // release does not merely leave state armed - it swallows the action
-        // entirely. On a terminal that marks releases with Shift, every plain
-        // click on a workspace, section or card row would become a no-op, and
-        // the reaper would later open a menu nobody asked for.
-        let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
-            && (view.pane_drag.is_some()
-                || view.seam_drag.is_some()
-                || view.tab_drag.is_some()
-                || view.row_drag.is_some()
-                || view.press_hold.is_some());
-        // A close-chip gesture is also release-owned state. Let every event in
-        // it reach `modal_mouse`, even when the terminal marks it as Shift.
-        if rep.shift && !ends_a_drag && !view.modal_release_swallow {
-            continue;
-        }
-        if consume_modal_close_gesture(view, rep.kind) {
-            continue;
-        }
-        // A pointer action - click/press/wheel/drag, anything but passive hover
-        // (Move) - is "other input": it disarms the resize repeat window exactly
-        // as a non-resize keystroke does. Without this, a click that may have
-        // refocused a pane could be followed by a bare H/J/K/L that silently
-        // resizes (the mouse pre-pass strips reports before the scanner runs).
-        // Hover is left armed so mouse drift never breaks a held resize.
-        if !matches!(rep.kind, MouseKind::Move) {
-            scanner.disarm_repeat();
-        }
-        // (hover affordance) While a popup or modal owns the pointer, a
-        // pointer event reports ITS hover, not a pane cell's: drop the link
-        // probe so the underline cannot linger beneath the overlay. Any event
-        // counts, not just Move - a right-click that opens a menu or an
-        // overlay's own press should clear the underline too, and a family-B
-        // overlay (confirm, rename, create, nav) owning the mouse is as much
-        // a popup as the three menus.
-        if view.keys_modal.is_some()
-            || view.row_menu.is_some()
-            || view.aux.is_some()
-            || view.active_overlay_layout().is_some()
-        {
-            view.link_hover.clear();
-        }
-        // US3: while the which-key modal is open, the mouse drives it
-        // (hover selects, wheel scrolls, click executes or dismisses) and is
-        // SWALLOWED - it never reaches a pane or the chrome underneath.
-        if view.keys_modal.is_some() {
-            if let StdinFlow::Detach =
-                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
-            {
-                return Ok(StdinFlow::Detach);
-            }
-            continue;
-        }
-        // US2: the row context menu owns the mouse while open (hover
-        // selects, click runs, right-press re-anchors) and is swallowed.
-        if view.row_menu.is_some() {
-            row_menu_mouse(view, rep, sock_w).await?;
-            continue;
-        }
-        // US4/US5: the MENU popup / settings modal owns the mouse.
-        if view.aux.is_some() {
-            if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
-                return Ok(StdinFlow::Detach);
-            }
-            continue;
-        }
-        // Full-screen sideline: the sideline owns every cell, so every
-        // report routes to the sideline's own handlers - the dock first,
-        // then the hit path a normal-mode sideline click runs (clamped into
-        // the panel's column space) - and no byte ever reaches a pane.
-        if view.sideline_full {
-            sideline::route_mouse(view, rep, sock_w).await?;
-            continue;
-        }
-        // Full-screen board: the overlay owns every cell, so no press or
-        // wheel reaches the panes it covers. Keys stay with the board.
-        if view.backlog_board.is_some() && view.board_full {
-            continue;
-        }
-        // The new-agent composer owns presses that land inside its dock
-        // (a click focuses the row it hit; Launch submits). Anything else
-        // falls through: the list above and the panes stay live while it
-        // is open.
-        if view.launcher.is_some() && agent_launcher::launcher_mouse(view, rep, sock_w).await? {
-            continue;
-        }
-        // a seam drag in flight owns the mouse. The pointer routinely
-        // leaves the divider it grabbed - that is what dragging is - so this
-        // precedes every position-based route below, including the pane forward
-        // that would otherwise hand the drag to a PTY as text selection.
-        if view.seam_drag.is_some() {
-            match rep.kind {
-                MouseKind::Drag(MouseButton::Left) => {
-                    if let Some(cmd) = view.seam_drag_to(rep.row, rep.col, Instant::now()) {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("seam resize send failed: {e}"))?;
-                    }
-                    continue;
-                }
-                MouseKind::Release(MouseButton::Left) => {
-                    // The last applied ratio stands (no command travels).
-                    view.end_seam_drag(rep.row, rep.col);
-                    continue;
-                }
-                // Anything else (a wheel, another button) means the gesture is
-                // over; drop the drag and let the event route normally.
-                _ => view.end_seam_drag(rep.row, rep.col),
-            }
-        }
-        // a relocation drag owns the mouse, for the same reason a seam
-        // drag does - the pointer's whole job is to leave the pane it grabbed,
-        // so this must precede the pane forward that would otherwise feed the
-        // gesture to a PTY as a text selection.
-        if view.pane_drag.is_some() {
-            match rep.kind {
-                MouseKind::Drag(MouseButton::Left) => {
-                    view.pane_drag_to(rep.row, rep.col, Instant::now());
-                    continue;
-                }
-                MouseKind::Release(MouseButton::Left) => {
-                    // Re-hit-test at the RELEASE coordinates rather than trusting
-                    // the zone the last motion cached. A co-viewer can move the
-                    // targeted seam between that motion and this release, which
-                    // leaves the cached zone naming a slot the pointer no longer
-                    // sits in - and `set_layout` only clears the cache when the
-                    // target disappears, not when it merely moves.
-                    view.pane_drag_to(rep.row, rep.col, Instant::now());
-                    // Nothing goes on the wire until here: the whole drag is a
-                    // client-local preview, so the server only ever learns the
-                    // outcome (AC5-EDGE - a cancel sends nothing at all).
-                    if let Some(cmd) = view.commit_pane_drag() {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("pane move send failed: {e}"))?;
-                    }
-                    // Same release-recompute as the seam/sideline drags: clear a
-                    // grip accent the drag left on if the pointer ended off it.
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                    continue;
-                }
-                _ => {
-                    view.cancel_pane_drag();
-                    // A non-left termination ends the drag with no Release;
-                    // recompute hover so a grip accent the drag left on does not
-                    // linger (codex peer review).
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                }
-            }
-        }
-        // (G2) a tab-cell join drag owns the mouse, same ownership rule as
-        // a pane drag: the pointer's whole job is to leave the strip it grabbed.
-        if view.tab_drag.is_some() {
-            match rep.kind {
-                MouseKind::Drag(MouseButton::Left) => {
-                    view.tab_drag_to(rep.row, rep.col, Instant::now());
-                    // Real motion disqualifies the long-press. Set
-                    // here, not in tab_drag_to: the Release arm calls it too
-                    // (zone recompute at release coords) and a hold that never
-                    // moved must stay a hold.
-                    if let Some(d) = view.tab_drag.as_mut() {
-                        d.moved = true;
-                    }
-                    continue;
-                }
-                MouseKind::Release(MouseButton::Left) => {
-                    view.tab_drag_to(rep.row, rep.col, Instant::now());
-                    let held = view.tab_drag.map(|d| (d.src_tab, d.start_at, d.moved));
-                    // A motionless hold past MENU_LONG_PRESS consumes
-                    // the release BEFORE any commit: `moved` gates it (the
-                    // clock alone cannot tell a hold from a slow drag), and a
-                    // terminal that drops drag reports can place the release
-                    // coords on a drop zone - a hold must never execute a join
-                    // (codex peer review on #975). Under a usurping overlay
-                    // (rename typing) the hold degrades to the plain flow
-                    // below - a menu there would steal the overlay's keys.
-                    // Open the CAPTURED tab's menu, not whatever cell the
-                    // release reports: with no drag report ever arriving, the
-                    // release coords are the one unchecked signal left.
-                    let long_press = !view.menu_usurping_open()
-                        && held.is_some_and(|(_, start, moved)| held_long_enough(start, moved));
-                    if long_press {
-                        let opened = held.is_some_and(|(tid, _, _)| {
-                            view.open_tab_menu_by_id(
-                                tid,
-                                Anchor::At {
-                                    row: rep.row,
-                                    col: rep.col,
-                                },
-                            )
-                        });
-                        // The held tab closed mid-hold (e.g. a co-attached
-                        // client or server-driven layout change) - say so
-                        // rather than let the hold end in silence, mirroring
-                        // the row arm's "no menu on the held row" notice.
-                        if !opened {
-                            view.set_notice("no menu on the held tab".into());
-                        }
-                        view.tab_drag = None;
-                        view.refresh_hover_affordances(rep.row, rep.col);
-                        continue;
-                    }
-                    match view.commit_tab_drag() {
-                        Some(cmd) => {
-                            write_msg(sock_w, &ClientMsg::Command(cmd))
-                                .await
-                                .map_err(|e| format!("tab join send failed: {e}"))?;
-                        }
-                        // A zone-less release still ON the strip is a plain click:
-                        // select the tab (the click-to-select affordance the strip
-                        // has always had). Released off the strip it is a cancelled
-                        // drag - nothing travels.
-                        None => {
-                            if let Some((tid, _, _)) = held {
-                                if view.strip_at(rep.row, rep.col) {
-                                    write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
-                                        .await
-                                        .map_err(|e| format!("tab select send failed: {e}"))?;
-                                }
-                            }
-                        }
-                    }
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                    continue;
-                }
-                _ => {
-                    view.cancel_tab_drag();
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                }
-            }
-        }
-        // (G3) a sideline-row placement drag owns the mouse.
-        if view.row_drag.is_some() {
-            match rep.kind {
-                MouseKind::Drag(MouseButton::Left) => {
-                    view.row_drag_to(rep.row, rep.col, Instant::now());
-                    // Real motion disqualifies the long-press. Set
-                    // here, not in row_drag_to: the Release arm calls it too
-                    // (zone recompute at release coords) and a hold that never
-                    // moved must stay a hold.
-                    if let Some(d) = view.row_drag.as_mut() {
-                        d.moved = true;
-                    }
-                    continue;
-                }
-                MouseKind::Release(MouseButton::Left) => {
-                    view.row_drag_to(rep.row, rep.col, Instant::now());
-                    // Capture the pressed row's source BEFORE commit consumes the
-                    // drag, so a zone-less release can verify it landed back on the
-                    // SAME row.
-                    let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
-                    let held = view.row_drag.as_ref().map(|d| (d.start_at, d.moved));
-                    let still_on_row =
-                        pressed.is_some() && view.row_drag_source_at(rep.row, rep.col) == pressed;
-                    // A motionless hold past MENU_LONG_PRESS consumes the
-                    // release BEFORE any commit, exactly like the tab arm: a
-                    // terminal that drops drag reports can place the release
-                    // coords on a drop zone, and a hold must never execute a
-                    // placement (codex peer review on #975). long_press is a
-                    // TIME question, not a position one - it must not be gated
-                    // on still_on_row, or a release that slips off the pressed
-                    // row during a genuine motionless hold ends in total
-                    // silence. A hold that opens nothing still SAYS so. Under a
-                    // usurping overlay the hold degrades to the plain flow
-                    // below.
-                    let long_press = !view.menu_usurping_open()
-                        && held.is_some_and(|(start, moved)| held_long_enough(start, moved));
-                    if long_press {
-                        let opened = still_on_row
-                            && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
-                                view.open_row_menu(
-                                    i,
-                                    Anchor::At {
-                                        row: rep.row,
-                                        col: rep.col,
-                                    },
-                                )
-                            });
-                        if !opened {
-                            view.set_notice("no menu on the held row".into());
-                        }
-                        view.row_drag = None;
-                        view.refresh_hover_affordances(rep.row, rep.col);
-                        continue;
-                    }
-                    match view.commit_row_drag() {
-                        Some(cmd) => {
-                            write_msg(sock_w, &ClientMsg::Command(cmd))
-                                .await
-                                .map_err(|e| format!("row place send failed: {e}"))?;
-                        }
-                        // A zone-less release is a plain click ONLY when the
-                        // pointer is still on the row it was pressed on: run that
-                        // row's own action (focus / attach), unchanged from a
-                        // press-click. A slip to a different row - or a layout
-                        // shift under a held button, or a release over pinned
-                        // chrome (row_drag_source_at skips the density button) -
-                        // resolves to a different source (or None), so the gesture
-                        // cancels rather than acting on the wrong agent.
-                        None => {
-                            if still_on_row {
-                                if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                                    apply_hit(view, hit, sock_w).await?;
-                                }
-                            }
-                        }
-                    }
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                    continue;
-                }
-                _ => {
-                    view.cancel_row_drag();
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                }
-            }
-        }
-        // A press held on a menu-bearing sideline row that is not a drag
-        // source. The drag arms above own their own releases; this owns the rest,
-        // so a workspace row answers a hold the way an agent row does.
-        if view.press_hold.is_some() {
-            match rep.kind {
-                MouseKind::Release(MouseButton::Left) => {
-                    let held = view.press_hold.take();
-                    // A TIME question, not a position one, matching the row-drag
-                    // arm: a release that slips off the pressed row during a
-                    // genuine motionless hold must not end in silence. The menu
-                    // opens on the row the press LANDED on, never on whatever
-                    // the release reports, so a slip can never act on a
-                    // neighbour. Under a usurping overlay the hold degrades to
-                    // the plain click below - a menu there would steal the
-                    // overlay's keys.
-                    // Fail closed unless the pressed row is STILL that row. A
-                    // layout push during the hold rebuilds `display_rows()`, so
-                    // a row that vanished slides its neighbour under the same
-                    // index and the menu would open on a worker nobody pressed
-                    // - Stop and Remove aimed at the wrong agent. Re-checking
-                    // the identity is what `still_on_row` is for the drag arm.
-                    let same_row = held
-                        .as_ref()
-                        .is_some_and(|(i, id, _)| view.row_identity(*i).as_ref() == Some(id));
-                    let long_press = same_row
-                        && !view.menu_usurping_open()
-                        && held
-                            .as_ref()
-                            .is_some_and(|(_, _, start)| held_long_enough(*start, false));
-                    if long_press {
-                        let opened = held.as_ref().is_some_and(|(i, _, _)| {
-                            view.open_row_menu(
-                                *i,
-                                Anchor::At {
-                                    row: rep.row,
-                                    col: rep.col,
-                                },
-                            )
-                        });
-                        // A row whose menu `open_row_menu` declines (an inert
-                        // label) still SAYS so - the same
-                        // notice the row-drag arm emits, for the same reason.
-                        if !opened {
-                            view.set_notice("no menu on the held row".into());
-                        }
-                        view.refresh_hover_affordances(rep.row, rep.col);
-                        continue;
-                    }
-                    // Too short to be a hold: it was a click, so run the action
-                    // the press deferred.
-                    //
-                    // Two gates, because `chrome_hit` resolves at the RELEASE
-                    // coordinates and the identity check only vouches for the
-                    // PRESSED index. A release that slipped to another row - no
-                    // intervening Drag report is required, the row-drag arm
-                    // above assumes terminals that omit them - would otherwise
-                    // run the OTHER row's action: a different workspace
-                    // selected, a different card's dispatch confirm armed. So
-                    // the release must still land on the row that was pressed,
-                    // which is `still_on_row` in the drag arm's vocabulary.
-                    // Position matters here even though it must not gate the
-                    // MENU: opening a menu on the pressed row is unambiguous,
-                    // acting on a row nobody pressed is not.
-                    let still_on_row = held.as_ref().is_some_and(|(i, _, _)| {
-                        view.press_hold_row_at(rep.row, rep.col).map(|(j, _)| j) == Some(*i)
-                    });
-                    if same_row && still_on_row {
-                        if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                            apply_hit(view, hit, sock_w).await?;
-                        }
-                    }
-                    view.refresh_hover_affordances(rep.row, rep.col);
-                    continue;
-                }
-                // Real motion under the held button disqualifies the hold, and
-                // any other termination drops it. Neither runs the deferred
-                // click: a gesture that turned into something else is not one.
-                MouseKind::Drag(MouseButton::Left) => {
-                    view.press_hold = None;
-                }
-                MouseKind::Move => {}
-                _ => view.press_hold = None,
-            }
-        }
-        // the sideline border drag, same ownership rule as a seam drag.
-        // Client-local: the sideline is never on the wire, so a width change only
-        // tells the server its content area changed (: a free width now,
-        // reported per crossed column so inner apps reflow live).
-        if view.sideline_drag.is_some() {
-            match rep.kind {
-                MouseKind::Drag(MouseButton::Left) => {
-                    if view.drag_sideline_to(rep.col, Instant::now()) {
-                        let (r, c) = view.content_dims();
-                        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                            .await
-                            .map_err(|e| format!("sideline resize send failed: {e}"))?;
-                    }
-                    continue;
-                }
-                MouseKind::Release(MouseButton::Left) => {
-                    view.end_sideline_drag(rep.row, rep.col);
-                    continue;
-                }
-                // A non-left termination (a wheel, another button) ends the drag.
-                _ => view.end_sideline_drag(rep.row, rep.col),
-            }
-        }
-        if feed_view::drag_mouse(view, rep.row, rep.col, rep.kind, sock_w).await? {
-            continue;
-        }
-        // Name and confirmation overlays share the same framed layout and own
-        // every pointer event, including clicks outside their block.
-        if modal_mouse(view, rep) {
-            continue;
-        }
-        // Bare motion is hover: record the sideline highlight + the
-        // focus-follows-mouse settle target, and swallow it - a Move is never
-        // forwarded to a pane. The actual FocusPane is committed by the select
-        // loop's settle timer (a rested pointer emits no further motion event).
-        if matches!(rep.kind, MouseKind::Move) {
-            view.on_hover(rep.row, rep.col, Instant::now());
-            continue;
-        }
-        // A left click on chrome (tab bar / sideline) switches tab/squad, focuses
-        // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
-        // never reaches the pane underneath.
-        if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-            // (G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.
-            // Begin the drag before chrome_hit (which would apply the click action
-            // immediately); a zone-less release falls back to that same click
-            // action (select / focus / attach), so a plain click is unchanged.
-            if let Some(tid) = view.tab_cell_at(rep.row, rep.col) {
-                view.begin_tab_drag(tid, Instant::now());
-                continue;
-            }
-            if let Some(src) = view.row_drag_source_at(rep.row, rep.col) {
-                view.begin_row_drag(src, Instant::now());
-                continue;
-            }
-            // A sideline row that is NOT a drag source still has a menu
-            // to hold for - a workspace name row is the motivating case. Arm the
-            // hold clock and DEFER the click: the release decides between the
-            // menu and `chrome_hit`'s own action, exactly as the drag arm defers
-            // a zone-less release to that same action. Before `chrome_hit`, for
-            // the same reason `begin_row_drag` is: applying the click here would
-            // spend the press before the hold could be measured.
-            if let Some((i, id)) = view.press_hold_row_at(rep.row, rep.col) {
-                view.press_hold = Some((i, id, Instant::now()));
-                continue;
-            }
-            if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                apply_hit(view, hit, sock_w).await?;
-                continue;
-            }
-            // a press on a pane's grip starts a relocation. Before the
-            // seam check only for readability - grips sit on cells a pane
-            // covers and seams only on cells no pane covers, so the two can
-            // never contend for the same press.
-            if let Some(mover) = view.grip_at(rep.row, rep.col) {
-                view.begin_pane_drag(mover, Instant::now());
-                continue;
-            }
-            // a press on a divider grabs the seam. After chrome_hit so
-            // sideline and tab-bar affordances still win their own cells.
-            if let Some(seam) = view.seam_at(rep.row, rep.col) {
-                view.begin_seam_drag(seam, Instant::now());
-                continue;
-            }
-            // a press on a framed pane's border ring (name tab included)
-            // focuses that pane and reaches nothing else. After the grip and
-            // seam checks so a drag affordance always wins its own cells
-            // (AC9-EDGE); before the forward, so the frame never forwards.
-            if let Some(pid) = view.border_pane_at(rep.row, rep.col) {
-                write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
-                    .await
-                    .map_err(|e| format!("focus send failed: {e}"))?;
-                continue;
-            }
-            // Likewise the sideline's own border. Also after chrome_hit, so the
-            // density button keeps the cells it draws on. Remember the width at
-            // grab so a bare Esc reverts, and stamp `last_at` for the stuck-drag
-            // timeout.
-            if view.on_sideline_border(rep.row, rep.col) {
-                view.sideline_drag = Some(SidelineDrag {
-                    start_width: view.sideline_width,
-                    last_at: Instant::now(),
-                });
-                continue;
-            }
-            if view.begin_border_drag(rep.row, rep.col) {
-                continue;
-            }
-        }
-        // US2: right-click a sideline row opens its context menu (agent
-        // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
-        // (sideline_row_at -> None) falls through and forwards to the inner app,
-        // so pane right-click behavior is untouched (AC3-EDGE).
-        // Menu paths are blocked under overlays they would USURP -
-        // text inputs (including nav's typed filter) and interactive modals
-        // (rename's Enter would run a menu action; the key router checks
-        // row_menu first). The read-only peek overlay deliberately does not
-        // block the row/tab paths: a right-press on a row opened its menu
-        // over an open peek before this diff, and the open path clears peek
-        // itself. The pane path keeps the full
-        // overlay_open guard: a pane press under ANY overlay always fell
-        // through to the pane, and it still does.
-        if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) && !view.menu_usurping_open() {
-            // (5.1) A tab cell opens the tab menu, resolved through the
-            // same tab_cell_at the drag pickup uses. Checked first to mirror
-            // the left-press ordering; the strip and the sideline own disjoint
-            // columns, so the two tests can never contend for one cell.
-            if view.open_tab_menu(
-                rep.row,
-                rep.col,
-                Anchor::At {
-                    row: rep.row,
-                    col: rep.col,
-                },
-            ) {
-                continue;
-            }
-            if let Some(i) = view.sideline_row_at(rep.row, rep.col) {
-                // Swallow the press only when a menu actually opened: a header
-                // with no menu leaves the press to fall through instead of
-                // eating it silently, so the right-click never reads as a
-                // no-op that a following Left press then turns into a
-                // collapse toggle.
-                if view.open_row_menu(
-                    i,
-                    Anchor::At {
-                        row: rep.row,
-                        col: rep.col,
-                    },
-                ) {
-                    continue;
-                }
-            }
-            // A right-press on a PANE cell opens the owning agent's
-            // row menu - the same menu its sideline row opens - so a pane is a
-            // menu-bearing surface too. Same swallow-only-when-opened rule: an
-            // agent-less pane falls through to the forward below, keeping the
-            // inner app's own right-click (AC3-EDGE).
-            if !view.overlay_open() && view.open_pane_menu(rep.row, rep.col) {
-                continue;
-            }
-        }
-        // Wheel over the sideline scrolls the workspace/session list (there is no
-        // pane there to forward to); a wheel over the content area falls through
-        // to the pane below, unchanged.
-        if matches!(rep.kind, MouseKind::WheelUp | MouseKind::WheelDown) {
-            let panel_w = view.panel_w();
-            if panel_w > 0 && rep.col < panel_w {
-                view.scroll_sideline(matches!(rep.kind, MouseKind::WheelDown));
-                continue;
-            }
-            // The feed panel's columns: scroll its window, never a pane.
-            let feed_w = view.feed_panel_w();
-            if feed_w > 0 && rep.col >= view.term.1 - feed_w {
-                view.scroll_feed(matches!(rep.kind, MouseKind::WheelDown));
-                continue;
-            }
-        }
-        if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
-            write_msg(
-                sock_w,
-                &ClientMsg::Mouse {
-                    pane,
-                    event: MouseEvent {
-                        row: prow,
-                        col: pcol,
-                        kind: rep.kind,
-                    },
-                },
-            )
-            .await
-            .map_err(|e| format!("mouse send failed: {e}"))?;
-        }
+    // Reports route first; a left press against a visible region moves the
+    // client-local input owner (region_focus). Then the remaining bytes
+    // reach the key scanner below.
+    if let StdinFlow::Detach = region_focus::mouse_pre_pass(view, scanner, reports, sock_w).await? {
+        return Ok(StdinFlow::Detach);
     }
     if passthrough.is_empty() {
         return Ok(StdinFlow::Continue);
@@ -10272,6 +9641,12 @@ async fn dispatch_event(
             view.reveal_pane_ids_at(Instant::now());
         }
         Event::Cmd(cmd) => {
+            if let Command::SplitDir(_) = cmd {
+                if !server_has_splitdir(view.server_proto) {
+                    view.set_notice(split_skew_notice());
+                    return Ok(DispatchFlow::Continue);
+                }
+            }
             view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
                 .await
@@ -10703,9 +10078,9 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // Inspect first. The deep link is this view's own action, not the
+        // Inspect first: the deep link is the view's own action, not the
         // click path that opened it.
-        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
+        ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
@@ -10801,526 +10176,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
-/// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
-/// P1), never a misrouted action; every action maps to an existing Command /
-/// overlay / confirm (zero proto).
-async fn execute_row_menu_action(
-    view: &mut View,
-    action: MenuAction,
-    target: MenuTarget,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    let target = match (target, action) {
-        // The section menu's clear-dead action, resolved against the
-        // section rather than a single row.
-        (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
-            return clear_dead_confirm(view, key, label, squad);
-        }
-        // A workspace section's Rename opens the same overlay as selector `r`
-        //. The id is the section's squad, so a non-workspace header
-        // (`squad: None`) can never reach it - it falls to the refuse arm below.
-        (
-            MenuTarget::Section {
-                squad: Some(id), ..
-            },
-            MenuAction::Rename,
-        ) => {
-            view.open_rename(RenameTarget::Squad(id));
-            return Ok(());
-        }
-        // A workspace section's Move up/down sends the same `MoveSquad` the
-        // selector's `J`/`K` send; the server clamps at the edges silently, so
-        // an at-edge click is a no-op exactly like the key.
-        (
-            MenuTarget::Section {
-                squad: Some(sq), ..
-            },
-            MenuAction::MoveSquad(delta),
-        ) => {
-            view.sel_follow = Some(sq);
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
-            )
-            .await
-            .map_err(|e| format!("move-workspace send failed: {e}"))?;
-            return Ok(());
-        }
-        // A workspace section's Remove opens the SAME confirm the keyboard
-        // path builds - the destructive-action gate, never skipped by a mouse.
-        (
-            MenuTarget::Section {
-                squad: Some(sq), ..
-            },
-            MenuAction::RemoveSquad,
-        ) => {
-            let Some(s) = view.layout.squads.iter().find(|s| s.id == sq) else {
-                view.set_notice("workspace is no longer here".into());
-                return Ok(());
-            };
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::RemoveSquad {
-                    squad: sq,
-                    panes: s.panes,
-                    last: view.layout.squads.len() == 1,
-                },
-                label: s.name.clone(),
-            });
-            return Ok(());
-        }
-        // (5.1) The tab menu: every item re-resolves the pinned tab id
-        // against the live layout first, so a tab that closed or moved between
-        // open and pick is a notice, never a redirected action.
-        (MenuTarget::Tab(_tid), MenuAction::TabNew) => {
-            view.note_command_sent(&Command::NewTab);
-            write_msg(sock_w, &ClientMsg::Command(Command::NewTab))
-                .await
-                .map_err(|e| format!("new-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabRename) => {
-            if view.find_tab(tid).is_none() {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            }
-            view.open_rename(RenameTarget::Tab(tid));
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabReorder(delta)) => {
-            // The squad is resolved at execute, not carried from the menu: a
-            // tab can move workspaces between open and pick, and ReorderTab
-            // names both ids explicitly.
-            let Some((squad, _, _)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ReorderTab {
-                    squad,
-                    tab: tid,
-                    delta,
-                }),
-            )
-            .await
-            .map_err(|e| format!("reorder-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabMoveTo) => {
-            // Same execute-time re-resolution as the reorder pair: a tab that
-            // closed or moved between open and pick is a notice, never a
-            // redirected action.
-            if view.find_tab(tid).is_none() {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            }
-            view.open_move_to(tid);
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabJoin(dir)) => {
-            // Join the whole tab into the VIEWED tab as a split of the focused
-            // pane - the menu twin of dragging the tab cell onto a content
-            // edge. A join into itself is suppressed client-side (the wire's
-            // own rule), so it is named as a refusal rather than sent.
-            let Some((_, _, tab)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            if tab.panes.iter().any(|p| p.id == view.layout.focus) {
-                view.set_notice("cannot join a tab into itself".into());
-                return Ok(());
-            }
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::JoinTab {
-                    src_tab: tid,
-                    anchor_pane: view.layout.focus,
-                    dir,
-                }),
-            )
-            .await
-            .map_err(|e| format!("join-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabSplit(dir)) => {
-            // Split the viewed tab from its own cell: a SplitDir on the
-            // focused pane, the menu twin of the `%` family. The menu only
-            // builds Split rows on the viewed tab, so a non-viewed target
-            // here is a stale menu; name it rather than guess.
-            if view.active_squad_active_tab_id() != Some(tid) {
-                view.set_notice("split acts on the viewed tab".into());
-                return Ok(());
-            }
-            write_msg(sock_w, &ClientMsg::Command(Command::SplitDir(dir)))
-                .await
-                .map_err(|e| format!("split-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabClose) => {
-            let Some((_, _, tab)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            // A confirm owns the bottom row; a too-short terminal refuses
-            // rather than arm an invisible prompt (same gate as stop/remove).
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::CloseTab { tab: tid },
-                label: tab.name.clone(),
-            });
-            return Ok(());
-        }
-        // A menu is built for exactly one target kind, so a crossed pair can only
-        // come from a bug; refuse rather than guess at a target.
-        (MenuTarget::Section { .. }, _)
-        | (MenuTarget::Tab(_), _)
-        | (_, MenuAction::ClearDead)
-        | (_, MenuAction::TabNew)
-        | (_, MenuAction::TabRename)
-        | (_, MenuAction::TabReorder(_))
-        | (_, MenuAction::TabMoveTo)
-        | (_, MenuAction::TabJoin(_))
-        | (_, MenuAction::TabSplit(_))
-        | (_, MenuAction::TabClose) => {
-            view.set_notice("action does not apply to this row".into());
-            return Ok(());
-        }
-        (MenuTarget::Agent(a), _) => a,
-    };
-    // Fail closed unless the identity resolves to EXACTLY one live row: two rows
-    // sharing a name must never let a menu act on the wrong one (codex P1).
-    let mut hits = view.layout.agents.iter().filter(|a| target.matches(a));
-    let a = match (hits.next(), hits.next()) {
-        (Some(a), None) => a.clone(),
-        _ => {
-            view.set_notice(format!("agent {} is no longer uniquely here", target.name));
-            return Ok(());
-        }
-    };
-    match action {
-        MenuAction::OpenHere => {
-            let Some(id) = a.attach_id.clone() else {
-                view.set_notice("agent is no longer attachable".into());
-                return Ok(());
-            };
-            write_msg(sock_w, &ClientMsg::Command(Command::attach_agent_here(id)))
-                .await
-                .map_err(|e| format!("attach send failed: {e}"))?;
-        }
-        MenuAction::NewTab | MenuAction::Split(_) => {
-            let Some(id) = a.attach_id.clone() else {
-                view.set_notice("agent is no longer attachable".into());
-                return Ok(());
-            };
-            let split = match action {
-                MenuAction::Split(d) => Some(d),
-                _ => None,
-            };
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::AttachAgent {
-                    id,
-                    placement: PanePlacement {
-                        target: PaneTarget::CurrentRoute,
-                        split,
-                        ..Default::default()
-                    },
-                }),
-            )
-            .await
-            .map_err(|e| format!("attach send failed: {e}"))?;
-        }
-        // Where the pane already IS decides what "move it `dir`" can mean, so
-        // the destination is chosen on that and nothing else.
-        MenuAction::MoveDir(dir) => match a.pane_id {
-            Some(pid) => {
-                // On screen: step one place `dir`-ward from the pane itself, so
-                // leave `target` unset and let the server navigate from the
-                // mover - the geometry the keyboard bind uses. Naming the focus
-                // here would instead teleport the pane across any panes between
-                // them, and whenever it already sits `dir`-ward of the focus the
-                // reshape is identical to the current tree, which `move_leaf`
-                // reports as an origin drop and the server discards WITHOUT a
-                // notice - a menu entry that does nothing and says nothing.
-                //
-                // Off screen: there is no meaningful in-tab neighbour to step
-                // toward, so name the viewed focus and let the server graft the
-                // pane into the current view (the cross-tab arm). That is the
-                // destination `commit_row_drag` names from its drop zone.
-                let on_screen = view.layout.panes.iter().any(|(id, _)| *id == pid);
-                let target = (!on_screen).then_some(view.layout.focus);
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::MovePane {
-                        mover: Some(pid),
-                        target,
-                        dir,
-                    }),
-                )
-                .await
-                .map_err(|e| format!("move send failed: {e}"))?;
-            }
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::BreakOut => match a.pane_id {
-            Some(pid) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::BreakPane { pane: pid }),
-            )
-            .await
-            .map_err(|e| format!("break send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Detach => match (a.pane_id, a.exited) {
-            (Some(pid), false) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::DetachPane { pane: pid }),
-            )
-            .await
-            .map_err(|e| format!("detach send failed: {e}"))?,
-            _ => view.set_notice("only a live pane-hosted worker can detach".into()),
-        },
-        MenuAction::ClosePortal => match a.pane_id {
-            // One command, the seat named: FocusPane plus ClosePane would
-            // close whatever holds focus if the seat vanished between the
-            // two sends.
-            Some(pid) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ClosePortal { seat: pid }),
-            )
-            .await
-            .map_err(|e| format!("close portal send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::PortalPicker => {
-            // One decision path with sideline `P`: the picker itself refuses
-            // what it cannot show (not attachable, no open portals to keep).
-            match view.portal_pick_decision(Some(&a)) {
-                PortalPickDecision::Open(id) => view.open_portal_pick(id),
-                PortalPickDecision::Refuse(text) => view.set_notice(text),
-            }
-        }
-        MenuAction::MoveToWorkspace => match a.pane_id {
-            Some(pid) => {
-                // Recomputed at execute (a workspace added or removed between
-                // open and pick is reflected); `move_pick_keys` re-validates.
-                let dsts = view.move_dst_squads(a.squad);
-                if dsts.is_empty() {
-                    view.set_notice("no other workspace to move into".into());
-                } else {
-                    view.open_move_pick(MoveSrc::Pane(pid), dsts);
-                }
-            }
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Focus => match a.pane_id {
-            Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
-                .await
-                .map_err(|e| format!("focus send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Diff => {
-            // Send the pane too: the server prefers it, which keeps the diff on
-            // the row that was clicked when two share a name, and reaches a row
-            // the registry never had.
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ToggleDiffPane {
-                    agent: Some(a.name.clone()),
-                    pane: a.pane_id,
-                }),
-            )
-            .await
-            .map_err(|e| format!("diff send failed: {e}"))?;
-        }
-        MenuAction::RenameAgent => {
-            // The CURRENT label, re-resolved at execute above (a rename
-            // between menu-open and pick addresses the live row), seeded so
-            // Enter with no edit lands on the verb's same-label no-op.
-            view.open_rename_seeded(RenameTarget::Agent(a.name.clone()), a.name.clone());
-        }
-        MenuAction::Peek | MenuAction::Mail => {
-            let idx = view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
-            match idx {
-                Some(idx) => {
-                    fetch_peek(view, idx, a.name.clone(), sock_w).await?;
-                    // (6.2) Mail arms the SAME free-text composer peek
-                    // `m` opens - one input surface, two doors.
-                    if matches!(action, MenuAction::Mail) {
-                        view.peek_input = Some((a.name.clone(), String::new()));
-                        view.peek_input_esc.clear();
-                    }
-                }
-                None => view.set_notice("agent is no longer here".into()),
-            }
-        }
-        // (6.2) Resume: the same command peek `r` sends, re-checked
-        // against the row's LIVE state - a row that restarted on its own
-        // between open and pick must not be respawned again.
-        MenuAction::Resume => {
-            if a.exited {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::RespawnAgent {
-                        name: a.name.clone(),
-                    }),
-                )
-                .await
-                .map_err(|e| format!("respawn send failed: {e}"))?;
-            } else {
-                view.set_notice("only an exited row can resume".into());
-            }
-        }
-        MenuAction::Reattach => {
-            if !a.exited && a.pane_id.is_none() {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::ResumeAgent {
-                        name: a.name.clone(),
-                    }),
-                )
-                .await
-                .map_err(|e| format!("reattach send failed: {e}"))?;
-            } else {
-                view.set_notice("only a live paneless row can reattach".into());
-            }
-        }
-        // Unreachable: Rename is built only for a workspace section, which
-        // returns above. Visible refusal over a silent no-op.
-        MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
-        MenuAction::Stop | MenuAction::Remove => {
-            let kind = match action {
-                MenuAction::Stop => match (a.external, a.attach_id.clone()) {
-                    (true, Some(id)) => ConfirmKind::StopExternal {
-                        attach_id: id,
-                        name: a.name.clone(),
-                    },
-                    _ => ConfirmKind::StopAgent {
-                        name: a.name.clone(),
-                        sid: a.harness_session_id.clone(),
-                        pane_id: a.pane_id,
-                    },
-                },
-                // Remove routes by row KIND through [`remove_dead`], the same
-                // mapping the bulk clear uses, so the single-row and section
-                // paths cannot disagree about which store owns a dead row.
-                _ => match remove_dead(&a) {
-                    Command::DismissMember { squad, attach_id } => {
-                        ConfirmKind::DismissMember { squad, attach_id }
-                    }
-                    Command::RemoveExternal { attach_id, name } => {
-                        ConfirmKind::RemoveExternal { attach_id, name }
-                    }
-                    _ => ConfirmKind::RemoveAgent {
-                        name: a.name.clone(),
-                        sid: a.harness_session_id.clone(),
-                        pane_id: a.pane_id,
-                        measure: agent_lattice_state(&a) == LatticeState::Unmeasured,
-                    },
-                },
-            };
-            // (scope a+c) Same post-commit re-anchor slot the bare `x`
-            // arms: the sideline stays open, the cursor stays on the row.
-            view.row_slot = view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
-            // The confirm pref arms the overlay; the default (off)
-            // dispatches the SAME command the confirm would commit, so the two
-            // paths cannot disagree about what a gesture sends. The
-            // too-short-terminal guard rides the confirm branch only: it exists
-            // so the prompt is visible, which the default never shows.
-            if view.confirm_lifecycle {
-                // A confirm owns the bottom row; a too-short terminal refuses
-                // rather than arm an invisible prompt (matching the selector's
-                // stop/reap).
-                if view.term.0 < MIN_ROWS_FOR_STATUS {
-                    view.set_notice("terminal too short for the confirm prompt".into());
-                    return Ok(());
-                }
-                view.open_confirm(ConfirmAction {
-                    action: kind,
-                    label: a.name.clone(),
-                });
-            } else {
-                // The confirm path stamps the row when it commits; the default
-                // dispatch gets the same treatment, so the outcome notice
-                // renders at the row either way.
-                view.arm_row_stamp(&kind);
-                let sent = match kind.command() {
-                    Some(cmd) => {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("lifecycle dispatch send failed: {e}"))?;
-                        true
-                    }
-                    None => false,
-                };
-                if sent {
-                    view.reanchor_after_row_commit(Some(a.name.as_str()));
-                }
-            }
-        }
-        // Only ever built alongside `MenuTarget::Section`, which returned above.
-        // A Notice rather than `unreachable!` - a panic here would take the whole
-        // multiplexer down over a menu-construction bug.
-        MenuAction::ClearDead => view.set_notice("clear dead needs a section header".into()),
-        MenuAction::MoveSquad(_) | MenuAction::RemoveSquad => {
-            view.set_notice("move and remove need a workspace section header".into())
-        }
-        // Unreachable: the tab actions all pair with `MenuTarget::Tab`, which
-        // returns in the target match above. Visible refusal over a no-op.
-        MenuAction::TabNew
-        | MenuAction::TabRename
-        | MenuAction::TabReorder(_)
-        | MenuAction::TabMoveTo
-        | MenuAction::TabJoin(_)
-        | MenuAction::TabSplit(_)
-        | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
-    }
-    Ok(())
-}
-
-/// Arm the clear-dead confirm for a section, over the dead set as it
-/// stands NOW rather than as the menu found it.
-fn clear_dead_confirm(
-    view: &mut View,
-    key: SectionKey,
-    label: String,
-    squad: Option<u64>,
-) -> Result<(), String> {
-    let dead = view
-        .section_dead_rows(&key, squad)
-        .len()
-        .min(CLEAR_DEAD_MAX);
-    if dead == 0 {
-        view.set_notice(format!("no dead rows in {label}"));
-        return Ok(());
-    }
-    // A confirm owns the bottom row; a too-short terminal refuses rather than
-    // arm an invisible prompt (matching the selector's stop/reap).
-    if view.term.0 < MIN_ROWS_FOR_STATUS {
-        view.set_notice("terminal too short for the confirm prompt".into());
-        return Ok(());
-    }
-    view.open_confirm(ConfirmAction {
-        action: ConfirmKind::ClearDead { key, squad, dead },
-        label,
-    });
-    Ok(())
 }
 
 /// Run the row menu's selected entry (Enter/click), then close - the popup never
@@ -11549,6 +10404,7 @@ async fn execute_aux_action(
         // deliberately keeps it: it rebuilds the SAME view after an action.
         AuxAction::OpenSettings => {
             view.lane.reset();
+            theme_import_ui::reset(view);
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
@@ -11621,6 +10477,9 @@ async fn execute_aux_action(
         AuxAction::ApplyTheme(name) => {
             theme_ground::apply(view, &name).await?;
         }
+        AuxAction::ThemeImportOpen => theme_import_ui::open(view),
+        AuxAction::ThemeImportSave => theme_import_ui::save(view).await?,
+        AuxAction::ThemeImportCancel => theme_import_ui::cancel(view),
         AuxAction::ApplyPrefix(spec) => {
             let notice = match crate::keys::resolve_prefix_change(&spec) {
                 Err(refusal) => refusal,
@@ -11654,7 +10513,7 @@ async fn execute_aux_action(
         }
         AuxAction::LaneColorSet(axis, key, color) => {
             view.lane.pick = None;
-            lane_color_save(view, &axis, &key, &color).await?;
+            lane_entry::lane_color_save(view, &axis, &key, &color).await?;
         }
     }
     Ok(DispatchFlow::Continue)
@@ -11689,8 +10548,11 @@ async fn aux_keys(
 ) -> Result<StdinFlow, String> {
     // A lane-colors text entry (naming a key / typing a free-form
     // color) consumes the chunk, same precedence shape as create_keys.
+    if theme_import_ui::is_entry(&view.theme_import) {
+        return theme_import_ui::entry_keys(view, bytes).await;
+    }
     if view.lane.is_entry() {
-        return lane_entry_keys(view, bytes, sock_w).await;
+        return lane_entry::lane_entry_keys(view, bytes, sock_w).await;
     }
     let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
@@ -11701,7 +10563,10 @@ async fn aux_keys(
             break;
         }
         match tok {
-            ModalKey::Esc => view.aux = None,
+            ModalKey::Esc => {
+                theme_import_ui::reset(view);
+                view.aux = None;
+            }
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);
@@ -11757,13 +10622,18 @@ async fn aux_keys(
                     // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();
+                    theme_import_ui::reset(view);
                     view.reopen_settings_keeping_sel();
                 } else {
+                    theme_import_ui::reset(view);
                     view.aux = None;
                 }
             }
             // Any other (unbound) key dismisses, per the shared popup contract.
-            ModalKey::Byte(_) => view.aux = None,
+            ModalKey::Byte(_) => {
+                theme_import_ui::reset(view);
+                view.aux = None;
+            }
         }
     }
     Ok(StdinFlow::Continue)
@@ -11775,124 +10645,6 @@ async fn aux_keys(
 /// with the settings modal staying open underneath. Enter on an EMPTY buffer
 /// keeps the entry open; Enter on a custom entry validates through
 /// `parse_color` and saves or refuses with a notice.
-async fn lane_entry_keys(
-    view: &mut View,
-    bytes: &[u8],
-    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.lane.entry_esc);
-    let keys = fold_search_input(&mut esc, bytes);
-    view.lane.entry_esc = esc;
-    for key in keys {
-        // Re-read the mode each key: a submit or Esc mid-chunk closes it, and
-        // the rest of the chunk must be swallowed, never forwarded.
-        if !view.lane.is_entry() {
-            break;
-        }
-        match key {
-            SearchKey::Esc => {
-                view.lane.clear_entry();
-                view.reopen_settings_keeping_sel();
-                break;
-            }
-            SearchKey::Byte(b) => match b {
-                b'\r' | b'\n' => {
-                    if let Some((axis, buf)) = view.lane.key_entry.clone() {
-                        // Naming a NEW key: an empty buffer keeps the entry
-                        // open (the create_keys shape); a typed name opens the
-                        // picker for it.
-                        let name = buf.trim().to_string();
-                        if name.is_empty() {
-                            continue;
-                        }
-                        view.lane.clear_entry();
-                        view.lane.pick = Some((axis, name));
-                        view.reopen_settings_keeping_sel();
-                    } else if let Some(buf) = view.lane.custom_entry.clone() {
-                        // Free-form color: validate, then save through the
-                        // same path the picker rows use.
-                        let text = buf.trim().to_string();
-                        if let Some((axis, key)) = view.lane.pick.clone() {
-                            view.lane.clear_entry();
-                            if crate::sideline_color::parse_color(&text).is_some() {
-                                lane_color_save(view, &axis, &key, &text).await?;
-                            } else {
-                                view.set_notice(format!(
-                                    "{axis}.{key}: invalid color (name, indexed(n), #rrggbb)"
-                                ));
-                                view.reopen_settings_keeping_sel();
-                            }
-                        }
-                    }
-                }
-                0x7f | 0x08 => {
-                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                        buf.pop();
-                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                        buf.pop();
-                    }
-                }
-                0x20..=0x7e => {
-                    // Same bound as the create overlay: a key name or color
-                    // string never needs to grow without limit.
-                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                        if buf.len() < MAX_SEARCH_QUERY {
-                            buf.push(b as char);
-                        }
-                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                        if buf.len() < MAX_SEARCH_QUERY {
-                            buf.push(b as char);
-                        }
-                    }
-                }
-                _ => {}
-            },
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// Persist one lane color through the CLI block-replace form and
-/// reload the palette so it goes live without a restart. The merge source is
-/// re-read fresh first, so a config change written by another process since
-/// the palette loaded is not clobbered by the whole-block replace.
-async fn lane_color_save(
-    view: &mut View,
-    axis: &str,
-    key: &str,
-    color: &str,
-) -> Result<(), String> {
-    crate::sideline_color::reload_palette();
-    use crate::lane_colors_panel as panel;
-    let json = panel::merged_axis_json(
-        &panel::lane_axis_entries(crate::sideline_color::palette(), axis),
-        key,
-        color,
-    );
-    let notice = match spawn_config_set(&format!("sideline.colors.{axis}"), &json).await {
-        Ok(()) => {
-            crate::sideline_color::reload_palette();
-            // Verify at the palette's own source: the CLI write and the
-            // palette read can land in different config layers (a concurrent
-            // block-replace, or a project config shadowing the global write).
-            // A lost write is surfaced here, never silently swallowed.
-            if panel::current_lane_color(crate::sideline_color::palette(), axis, key).as_deref()
-                == Some(color)
-            {
-                format!("{axis}.{key}: {color}")
-            } else {
-                format!(
-                    "{axis}.{key}: save did not stick in the config the sideline reads; check config layering"
-                )
-            }
-        }
-        Err(_) => format!("{axis}.{key}: save failed"),
-    };
-    view.set_notice(notice);
-    view.reopen_settings_keeping_sel();
-    Ok(())
-}
-
 /// One mouse report while an aux popup is open (US4/US5): hover selects, a left
 /// click runs the entry (propagating detach), a click off the popup dismisses.
 async fn aux_mouse(
@@ -11919,6 +10671,7 @@ async fn aux_mouse(
                 .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
                 view.lane.clear_entry();
+                theme_import_ui::reset(view);
                 view.aux = None;
                 return Ok(StdinFlow::Continue);
             }
@@ -11927,7 +10680,7 @@ async fn aux_mouse(
                     // While a lane text entry owns the keyboard, row
                     // clicks are inert: acting on a picker row mid-typing
                     // would leave the buffer armed under a changed view.
-                    if view.lane.is_entry() {
+                    if view.lane.is_entry() || theme_import_ui::is_entry(&view.theme_import) {
                         return Ok(StdinFlow::Continue);
                     }
                     if let Some(m) = view.aux.as_mut() {
@@ -11944,6 +10697,7 @@ async fn aux_mouse(
                     // In-block miss (a header) is swallowed; off-block dismisses.
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
+                        theme_import_ui::reset(view);
                         view.aux = None;
                     }
                 }
@@ -13641,6 +12395,10 @@ fn exit_with_notice(notice: String) -> i32 {
 #[path = "client/compositor.rs"]
 mod compositor;
 
+#[path = "client/server_spawn.rs"]
+mod server_spawn;
+use self::server_spawn::spawn_server;
+
 use compositor::Compositor;
 
 #[cfg(test)]
@@ -13665,6 +12423,10 @@ mod esc_quiet_tests;
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
+
+#[cfg(test)]
+#[path = "client_tests/theme_import_tests.rs"]
+mod theme_import_tests;
 
 #[cfg(test)]
 #[path = "client_tests/keys_modal_tests.rs"]

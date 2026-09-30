@@ -55,6 +55,10 @@ enum Role {
     ServerSocket(OsString),
     /// `mux server [--session <name>]`: run the server for a named session.
     ServerSession(String),
+    /// The `fno agents org` group and the old role-verb spellings (the
+    /// lexical claim beside `agents_history`): forward the rewritten
+    /// argv, print native help, or refuse by name.
+    AgentsAlias(fno::agents_alias::Org),
     /// An attach invocation with no TTY: print the notice, exit 0.
     NotTty,
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
@@ -150,6 +154,9 @@ enum Role {
     /// `fno inbox decisions ...`: the native listing read, classified beside
     /// the law verbs; the Python `inbox` tree keeps every other name.
     InboxDecisions(Vec<OsString>),
+    /// `fno board-render`: the local board's snapshot writer, a native front
+    /// verb because the page and the read model both live in this crate.
+    BoardRender(Vec<String>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -203,6 +210,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
     }
+    // The `fno agents org` group claims itself lexically, beside
+    // agents_history: the people spelling of the role verbs rewrites to the
+    // argv that answers today, and the old spellings forward with a notice
+    // for the alias release.
+    if let Some(out) = fno::agents_alias::classify(args) {
+        return Role::AgentsAlias(out);
+    }
     // The backlog namespace claims itself lexically, like doctor-event: the
     // sibling dispatcher owns the whole namespace's spelling (grouped and
     // legacy), and anything it does not own yet it forwards to Python
@@ -212,6 +226,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
         return Role::InboxLaw(rest);
+    }
+    if let Some(rest) = fno::backlog_snapshot::classify(args) {
+        return Role::BoardRender(rest);
     }
     if let Some(rest) = fno::law_cli::classify_inbox_decisions(args) {
         return Role::InboxDecisions(rest);
@@ -374,8 +391,17 @@ fn main() {
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
+        Role::AgentsAlias(fno::agents_alias::Org::Forward(argv)) => bootstrap::forward(&argv),
+        Role::AgentsAlias(fno::agents_alias::Org::Help(text)) => {
+            println!("{text}");
+        }
+        Role::AgentsAlias(fno::agents_alias::Org::Refuse(message)) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
+        Role::BoardRender(rest) => std::process::exit(fno::backlog_snapshot::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
@@ -488,6 +514,36 @@ mod tests {
         );
         assert_eq!(
             decide_role(&os(&["agents", "history", "--help"]), false),
+            Role::Forward
+        );
+    }
+
+    #[test]
+    fn agents_alias_claims_the_org_group_and_old_spellings() {
+        use fno::agents_alias::Org;
+        assert_eq!(
+            decide_role(&os(&["agents", "org", "-J"]), false),
+            Role::AgentsAlias(Org::Forward(os(&["agents", "court", "-J"])))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["agents", "org", "promote", "folio", "--scope", "fno"]),
+                false
+            ),
+            Role::AgentsAlias(Org::Forward(os(&[
+                "agents", "crown", "folio", "--scope", "fno"
+            ])))
+        );
+        assert!(matches!(
+            decide_role(&os(&["agents", "org", "frobnicate"]), false),
+            Role::AgentsAlias(Org::Refuse(_))
+        ));
+        assert!(matches!(
+            decide_role(&os(&["agents", "promote", "x"]), false),
+            Role::AgentsAlias(Org::Refuse(_))
+        ));
+        assert_eq!(
+            decide_role(&os(&["agents", "whoami"]), false),
             Role::Forward
         );
     }

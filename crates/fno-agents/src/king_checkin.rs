@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+#[path = "king_checkin_watch_projection.rs"]
+mod watch_projection;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -159,7 +162,7 @@ pub(crate) fn stderr_cause(stderr: &str) -> String {
     line[..end].to_string()
 }
 
-fn gh_error_cause(error: &str) -> String {
+pub(crate) fn gh_error_cause(error: &str) -> String {
     stderr_cause(
         error
             .split_once(" failed: ")
@@ -340,38 +343,6 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
         ..Default::default()
     };
     Ok(read_board(&opts))
-}
-
-/// Apply `--name` / `--keep-name-from` before the beat runs. A refusal
-/// (duplicate live name, already-named crown, wrong holder) names the
-/// holder; the caller prints it and exits 2 with no beat journalled.
-fn apply_crown_naming(
-    name: Option<&str>,
-    keep_from: Option<&str>,
-    home: &crate::paths::AgentsHome,
-    scope: &str,
-) -> Result<(), String> {
-    let store = home.crown_names_json();
-    let registry = home.registry_json();
-    match (name, keep_from) {
-        (Some(_), Some(_)) => Err("use one of --name or --keep-name-from, not both".into()),
-        (Some(n), None) => crate::crown_names::name_crown(&store, &registry, scope, n).map(|_| ()),
-        (None, Some(old)) => crate::crown_names::keep_from(&store, &registry, old, scope),
-        (None, None) => Ok(()),
-    }?;
-    if !crate::crown_names::ensure_named_crown(&store, &registry, scope)? {
-        return Err("every live crown needs a name; check in with --name <name>".into());
-    }
-    Ok(())
-}
-
-/// The first line of every beat: the crown's identity, then the facts.
-/// Unnamed crowns get the once-only instruction instead of a name.
-fn crown_line_text(name: Option<&str>, level_txt: &str, scope: &str) -> String {
-    match name {
-        Some(name) => format!("crown: {name} ({level_txt} {scope})"),
-        None => "crown: unnamed - name it once: fno agents king checkin --name <name>".to_string(),
-    }
 }
 
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
@@ -864,7 +835,7 @@ fn r_refusal_rate() -> Result<Value, String> {
     crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
-/// The caller's own claude transcript, shared by the refusal and wake
+/// The caller's own claude transcript, shared by the check-in transcript
 /// readers. Only claude sessions keep a per-session transcript file today
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
 /// claude session whose transcript cannot be found) reads as an ordinary
@@ -872,7 +843,7 @@ fn r_refusal_rate() -> Result<Value, String> {
 pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
-        return Err("the wake and refusal readers need a claude transcript; \
+        return Err("the check-in transcript readers need a claude transcript; \
              this session's harness is not claude"
             .into());
     }
@@ -926,144 +897,6 @@ fn r_parked() -> Result<Value, String> {
         })
         .collect();
     Ok(json!({"open": open.len(), "rows": open}))
-}
-
-/// Per-workflow verdict inputs: (name, newest run, newest completed run).
-/// Row position is never trusted - the branch listing has served stale rows
-/// first - `created_at` alone picks the newest of each.
-fn fold_page<'a>(
-    acc: &mut Vec<(&'a str, &'a Value, Option<&'a Value>)>,
-    runs: impl Iterator<Item = &'a Value>,
-) {
-    for run in runs {
-        let name = run.get("name").and_then(Value::as_str).unwrap_or("");
-        if name.is_empty() {
-            continue;
-        }
-        let created = run.get("created_at").and_then(Value::as_str).unwrap_or("");
-        let completed = run.get("status").and_then(Value::as_str) == Some("completed");
-        match acc.iter_mut().find(|(seen, _, _)| *seen == name) {
-            None => acc.push((name, run, completed.then_some(run))),
-            Some((_, newest, newest_completed)) => {
-                if created
-                    > newest
-                        .get("created_at")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                {
-                    *newest = run;
-                }
-                if completed {
-                    let is_newest = match *newest_completed {
-                        Some(c) => {
-                            created > c.get("created_at").and_then(Value::as_str).unwrap_or("")
-                        }
-                        None => true,
-                    };
-                    if is_newest {
-                        *newest_completed = Some(run);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// One verdict token for the check-in line, from the workflow-run history on
-/// main, not the tip's check runs: a tip that fires no run of a workflow must
-/// not read green while that workflow's newest completed main run failed.
-/// `at_sha` carries the push runs at main's current head; a workflow run
-/// there is judged there - an in-flight head run reads pending rather than
-/// falling back - and only a workflow the head never fired is judged from
-/// the branch history page. Per workflow the newest COMPLETED run decides -
-/// red on fail or cancel, naming the workflow and the sha it ran on; a
-/// workflow whose newest run is still in flight reads pending; empty
-/// history reads pending, never green.
-fn main_ci_token_from_pages<'a>(at_sha: &'a [Value], on_main: &'a [Value]) -> Value {
-    let mut workflows: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
-    fold_page(&mut workflows, at_sha.iter());
-    let judged: Vec<&str> = workflows.iter().map(|(name, _, _)| *name).collect();
-    fold_page(
-        &mut workflows,
-        on_main.iter().filter(|run| {
-            let name = run.get("name").and_then(Value::as_str).unwrap_or("");
-            !judged.contains(&name)
-        }),
-    );
-    if let Some(run) = workflows
-        .iter()
-        .filter_map(|(_, _, completed)| *completed)
-        .filter(|run| matches!(crate::pr_push::rest_bucket(run), "fail" | "cancel"))
-        .max_by_key(|run| run.get("created_at").and_then(Value::as_str).unwrap_or(""))
-    {
-        let field = |k: &str| run.get(k).and_then(Value::as_str).unwrap_or("unknown");
-        return json!({
-            "verdict": "red",
-            "workflow": field("name"),
-            "sha": field("head_sha"),
-        });
-    }
-    let inflight = workflows
-        .iter()
-        .any(|(_, newest, _)| newest.get("status").and_then(Value::as_str) != Some("completed"));
-    Value::String(if workflows.is_empty() || inflight {
-        "pending".into()
-    } else {
-        "green".into()
-    })
-}
-
-/// The `main ci:` line body: a red verdict names the workflow and sha, the
-/// string tokens pass through untouched.
-fn main_ci_render(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::Object(o)) => {
-            let field = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("unknown");
-            format!(
-                "{} ({} at {})",
-                field("verdict"),
-                field("workflow"),
-                field("sha")
-            )
-        }
-        other => dash(other),
-    }
-}
-
-fn r_main_ci() -> Result<Value, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    // Judge at main's current head: the branch listing has served rows from
-    // five days before the head while newer runs existed, so the head's own
-    // push runs are read directly and only a workflow the head never fired
-    // falls back to the branch history page.
-    let head_raw = crate::pr_push::gh_api("gh", &cwd, "repos/{owner}/{repo}/branches/main", &[])
-        .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
-    let head_sha = serde_json::from_str::<Value>(&head_raw)
-        .ok()
-        .and_then(|page| {
-            page.pointer("/commit/sha")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|sha| !sha.is_empty())
-        .ok_or_else(|| "gh api branches/main returned no head sha".to_string())?;
-    // One un-paginated page per read: the listings grow with the repo's age,
-    // and a paginated read would walk the whole history on every beat. The
-    // branch page only backfills workflows the head sha page never carried.
-    let read_runs = |query: &str| -> Result<Vec<Value>, String> {
-        let raw = crate::pr_push::gh_api("gh", &cwd, query, &[])
-            .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
-        let runs = serde_json::from_str::<Value>(&raw)
-            .ok()
-            .and_then(|page| page.get("workflow_runs").and_then(Value::as_array).cloned())
-            .unwrap_or_default();
-        Ok(runs)
-    };
-    let at_sha = read_runs(&format!(
-        "repos/{{owner}}/{{repo}}/actions/runs?head_sha={head_sha}&event=push&per_page=100"
-    ))?;
-    let on_main = read_runs("repos/{owner}/{repo}/actions/runs?branch=main&per_page=100")?;
-    Ok(main_ci_token_from_pages(&at_sha, &on_main))
 }
 
 /// The control plane's own verdict: every arm failing past the notify
@@ -1264,6 +1097,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .map_err(Clone::clone)
             .and_then(crate::king_answers::workers_summary),
     );
+    take("watch_expiry", watch_projection::read());
     // The scope-answer readings share one scope compile and one top call.
     let scope_ids =
         crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
@@ -1288,8 +1122,16 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
-    take("main_ci", r_main_ci());
+    take("repeated_asks", crate::repeated_asks::reading());
+    take("skill_drift", crate::skill_drift::reading());
+    take("main_ci", crate::main_ci::r_main_ci());
     take("control_plane", r_control_plane(ctx));
+    take("self_hold", {
+        crate::claims::resolve_identity()
+            .0
+            .ok_or_else(|| "current session identity is unavailable".to_string())
+            .and_then(|session| crate::mail_hold::self_status(&session))
+    });
     take("parked", r_parked());
     readings
 }
@@ -1403,6 +1245,7 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(held) = get("held").filter(|r| r.ok) {
         data.insert("held_open".into(), held.value["open"].clone());
     }
+    watch_projection::add_data(readings, &mut data);
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
     }
@@ -1411,6 +1254,25 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "control_plane_attention".into(),
             cp.value.get("attention").cloned().unwrap_or(json!([])),
         );
+    }
+    if let Some(hold) = get("self_hold").filter(|r| r.ok) {
+        data.insert("self_hold".into(), hold.value.clone());
+    }
+    if let Some(sd) = get("skill_drift").filter(|r| r.ok) {
+        let names: Vec<String> = sd
+            .value
+            .get("stale")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !names.is_empty() {
+            data.insert("skill_drift_stale".into(), json!(names));
+        }
     }
     let failed: Vec<&Reading> = readings.iter().filter(|r| !r.ok).collect();
     data.insert("coverage".into(), json!(readings.len() - failed.len()));
@@ -1421,56 +1283,33 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     data
 }
 
-fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
-    match crate::king_history::scan(&ctx.events_paths, &ctx.scope) {
-        Ok(payload) => {
-            // Only the verb's own rows carry NUMERIC_DIFF_KEYS, so the diff
-            // baseline is the newest `loop` row; a hook row or a hand row
-            // must never baseline the diff.
-            let first = payload["events"]
-                .as_array()
-                .and_then(|e| e.iter().find(|r| s_str(r, "source") == Some("loop")))
-                .cloned();
-            (first, String::new())
-        }
+fn previous_row(ctx: &Ctx, holder: Option<&str>) -> (Option<Value>, String) {
+    match crate::king_history::previous_beat(&ctx.events_paths, &ctx.scope, holder, true) {
+        Ok(first) => (first, String::new()),
         Err(e) => (None, e),
     }
 }
 
-/// The `loop` row before `previous_row`'s. Needed only to tell a rising
-/// refusal rate from a single noisy tick - two consecutive rises, not one.
-fn second_previous_loop_row(ctx: &Ctx) -> Option<Value> {
-    let payload = crate::king_history::scan(&ctx.events_paths, &ctx.scope).ok()?;
-    payload["events"]
-        .as_array()?
-        .iter()
-        .filter(|r| s_str(r, "source") == Some("loop"))
-        .nth(1)
-        .cloned()
-}
-
-fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
-    previous_data?.get("refusal_rate")?.as_f64()
-}
-
 /// Sets `refusal_rate_rising`: true only when the current rate exceeds the
 /// last beat's, and that beat's exceeded the one before it. A single high
-/// tick is noise; two consecutive rises is the handoff signal.
+/// tick is noise; two consecutive rises is the handoff signal. The priors
+/// come from [`crate::refusal_trend`], whose baseline advances with every
+/// measured beat, journalled or not. A missing pair reads unmeasured, never
+/// rising.
 fn mark_refusal_rate_trend(
     data: &mut Map<String, Value>,
-    previous_data: Option<&Value>,
-    second_previous_data: Option<&Value>,
+    previous_rate: Option<f64>,
+    second_previous_rate: Option<f64>,
 ) {
     let current = data.get("refusal_rate").and_then(Value::as_f64);
-    let rising = match (
-        current,
-        refusal_rate_of(previous_data),
-        refusal_rate_of(second_previous_data),
-    ) {
+    let rising = match (current, previous_rate, second_previous_rate) {
         (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
         _ => false,
     };
     data.insert("refusal_rate_rising".into(), json!(rising));
+    let unmeasured =
+        current.is_some() && (previous_rate.is_none() || second_previous_rate.is_none());
+    data.insert("refusal_rate_trend_unmeasured".into(), json!(unmeasured));
 }
 
 fn derive_change(
@@ -1507,6 +1346,29 @@ fn derive_change(
                 .collect()
         })
         .unwrap_or_default();
+    let self_hold = data.get("self_hold");
+    if self_hold
+        .and_then(|hold| hold.get("clock_live"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || self_hold
+            .and_then(|hold| hold.get("delivery_policy"))
+            .and_then(Value::as_str)
+            == Some("bus-only")
+    {
+        attention.push("DND on".into());
+    }
+    let stale_skills: Vec<&str> = data
+        .get("skill_drift_stale")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !stale_skills.is_empty() {
+        attention.push(format!(
+            "skill text stale since compaction: {}",
+            stale_skills.join(", ")
+        ));
+    }
     if data
         .get("refusal_rate_rising")
         .and_then(Value::as_bool)
@@ -1759,6 +1621,8 @@ fn render_lines(
     lines.extend(crate::king_answers::answered_lines(readings));
 
     lines.extend(crate::king_answers::held_lines(readings));
+    lines.extend(crate::repeated_asks::lines(readings));
+    lines.extend(crate::skill_drift::lines(readings));
 
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
@@ -1818,19 +1682,26 @@ fn render_lines(
             let rows = territory.as_array().cloned().unwrap_or_default();
             lines.push(format!("territory: {} scopes", rows.len()));
             for row in rows.iter().take(MAX_COURT_ROWS) {
-                let kingless = if row.get("kingless").and_then(Value::as_bool) == Some(true) {
-                    " kingless"
-                } else {
-                    ""
-                };
                 lines.push(format!(
-                    "  {} rung {} mission {} live {}/{}{}",
+                    "  {} rung {} mission {} live {}/{}{}{}",
                     dash(row.get("scope")),
                     dash(row.get("rung")),
                     dash(row.get("mission")),
                     dash(row.get("live")),
                     dash(row.get("cap")),
-                    kingless,
+                    row["kingless"]
+                        .as_bool()
+                        .filter(|v| *v)
+                        .map(|_| " kingless")
+                        .unwrap_or(""),
+                    if row["membership"] == "unknown" {
+                        row["reason"]
+                            .as_str()
+                            .map(|r| format!(" unreadable ({r})"))
+                            .unwrap_or_else(|| " unreadable".to_string())
+                    } else {
+                        String::new()
+                    },
                 ));
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
@@ -1873,17 +1744,24 @@ fn render_lines(
         }
     }
 
+    if let Some(error) = watch_projection::read_error(readings) {
+        lines.push(format!("READER FAILED watch expiry: {error}"));
+    }
     match failed("workers") {
         Some(r) => {
             lines.push(format!("READER FAILED workers: {}", r.error));
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
-        None => lines.push(format!(
-            "workers: live {}, oldest activity {}, subagents active {}",
-            dash(data.get("live_workers")),
-            dash(data.get("oldest_worker_seen")),
-            dash(data.get("live_subagents")),
-        )),
+        None => {
+            let mut line = format!(
+                "workers: live {}, oldest activity {}, subagents active {}",
+                dash(data.get("live_workers")),
+                dash(data.get("oldest_worker_seen")),
+                dash(data.get("live_subagents")),
+            );
+            line.push_str(&watch_projection::workers_suffix(readings, data));
+            lines.push(line);
+        }
     }
     lines.extend(crate::king_answers::subagent_lines(readings));
 
@@ -1932,12 +1810,18 @@ fn render_lines(
                 dash(rr.get("total")),
                 dash(rr.get("window")),
             );
-            if data
+            let rising = data
                 .get("refusal_rate_rising")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let unmeasured = data
+                .get("refusal_rate_trend_unmeasured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if rising {
                 text.push_str(" - RISING (handoff signal)");
+            } else if unmeasured {
+                text.push_str(" - UNMEASURED (needs two prior beats)");
             }
             lines.push(text);
         }
@@ -1994,7 +1878,16 @@ fn render_lines(
     }
     match failed("main_ci") {
         Some(r) => lines.push(format!("READER FAILED main_ci: {}", r.error)),
-        None => lines.push(format!("main ci: {}", main_ci_render(data.get("main_ci")))),
+        None => {
+            lines.push(format!(
+                "main ci: {}",
+                crate::main_ci::main_ci_render(data.get("main_ci"))
+            ));
+            for line in crate::main_ci::main_ci_stale_lines(data.get("main_ci"), chrono::Utc::now())
+            {
+                lines.push(line);
+            }
+        }
     }
     match failed("control_plane") {
         Some(r) => lines.push(format!("READER FAILED control_plane: {}", r.error)),
@@ -2011,6 +1904,32 @@ fn render_lines(
                 for entry in attention {
                     lines.push(format!("  {entry}"));
                 }
+            }
+        }
+    }
+    match failed("self_hold") {
+        Some(r) => lines.push(format!("READER FAILED self_hold: {}", r.error)),
+        None => {
+            let hold = by_name("self_hold")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let clock_live = hold
+                .get("clock_live")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let clock = match (clock_live, hold.get("clock_until").and_then(Value::as_str)) {
+                (true, Some(until)) => format!("clock active until {until}"),
+                (true, None) => "clock active".into(),
+                (false, Some(until)) => format!("clock inactive (until {until})"),
+                (false, None) => "clock inactive".into(),
+            };
+            let policy = hold
+                .get("delivery_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
+            if clock_live || policy == "bus-only" {
+                lines.push("attention: DND on".into());
             }
         }
     }
@@ -2252,67 +2171,6 @@ fn finish_checkin(
     0
 }
 
-/// The stop hook's half of the reign record: when this scope's newest
-/// check-in is older than two check-in intervals, journal one row from what
-/// the previous fire measured. It never decides anything.
-pub(crate) fn hook_beat(
-    events_path: &Path,
-    cwd: &Path,
-    scope: &str,
-    session_id: &str,
-    history: &crate::loop_king::KingFireHistory,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    if scope.is_empty() {
-        return false;
-    }
-    let payload = match crate::king_history::scan(&[events_path.to_path_buf()], scope) {
-        Ok(p) => p,
-        // A blind due check must never write: a scan that cannot read the
-        // journal is no evidence a beat was missed.
-        Err(e) => {
-            eprintln!("king-checkin: WARNING: hook beat skipped: {e}");
-            return false;
-        }
-    };
-    let newest = payload["events"].as_array().and_then(|e| e.first());
-    let due = newest
-        .and_then(|r| s_str(r, "ts"))
-        .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
-        .map(|ts| {
-            now - ts
-                >= chrono::Duration::seconds(
-                    2 * crate::king_verdict_inputs::checkin_interval_secs(cwd),
-                )
-        })
-        .unwrap_or(true);
-    if !due {
-        return false;
-    }
-    // ponytail: two stops inside one second can both see the beat due and
-    // write two rows; a cross-process lock costs more than a doubled row.
-    let since = newest.and_then(|r| s_str(r, "ts")).unwrap_or("on record");
-    let undelivered = history
-        .last_undelivered
-        .map(|u| u.to_string())
-        .unwrap_or_else(|| "unread".into());
-    let data = json!({
-        "scope": scope,
-        "session_id": session_id,
-        "fires": history.total,
-        "dry": history.dry,
-        "last_actionable": history.last_ids.len(),
-        "last_undelivered": history.last_undelivered,
-        "change": format!(
-            "missed beat: no check-in since {since}; last fire actionable {}, undelivered {undelivered}, dry {} of {} fires",
-            history.last_ids.len(),
-            history.dry,
-            history.total
-        ),
-    });
-    emit_row(events_path, "hook", data.as_object().unwrap())
-}
-
 // ---------------------------------------------------------------------------
 // entry
 
@@ -2393,6 +2251,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut as_json = false;
     let mut model_change: Option<String> = None;
     let mut crown_name: Option<String> = None;
+    let mut theme: Option<String> = None;
     let mut keep_name_from: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -2405,6 +2264,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             i += 2;
         } else if flag("--name") {
             crown_name = Some(args[i + 1].clone());
+            i += 2;
+        } else if flag("--theme") {
+            theme = Some(args[i + 1].clone());
             i += 2;
         } else if flag("--keep-name-from") {
             keep_name_from = Some(args[i + 1].clone());
@@ -2445,7 +2307,8 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
                 "fno-agents king-checkin: --scope SCOPE --events-path PATH \
                  [--events-path ...] --graph PATH --handoffs-dir PATH \
                  [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] \
-                 [--change TEXT] [--name NAME] [--keep-name-from OLD-SCOPE] \
+                 [--change TEXT] [--name NAME] [--theme THEME] \
+                 [--keep-name-from OLD-SCOPE] \
                  [--no-emit] [--json]"
             );
             return 2;
@@ -2472,10 +2335,14 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let ts = iso_now();
-    if let Err(e) = apply_crown_naming(
+    let home = crate::paths::AgentsHome::from_env();
+    if let Err(e) = crate::crown_names::apply_crown_naming(
+        &home.crown_names_json(),
+        &home.registry_json(),
         crown_name.as_deref(),
         keep_name_from.as_deref(),
-        &crate::paths::AgentsHome::from_env(),
+        theme.as_deref(),
+        ctx.level,
         &ctx.scope,
     ) {
         eprintln!("fno-agents king-checkin: {e}");
@@ -2484,7 +2351,11 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     if let Err(error) = rename_harness_title_for_crown(&ctx.scope) {
         eprintln!("fno-agents king-checkin: harness title rename failed: {error}");
     }
-    let (previous, previous_error) = previous_row(&ctx);
+    // The beat stamps the reign clock first: the holder session it names is
+    // what the previous-beat lookup and the refusal trend key on.
+    let holder =
+        crate::crown_names::stamp_beat_reign(&home.crown_names_json(), &ctx.cwd, &ctx.scope);
+    let (previous, previous_error) = previous_row(&ctx, holder.as_deref());
     let since = previous
         .as_ref()
         .and_then(|p| p.get("ts"))
@@ -2495,10 +2366,19 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    if let Some(holder) = holder.as_deref() {
+        data.insert("holder_session".into(), json!(holder));
+    }
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let second_previous = second_previous_loop_row(&ctx);
-    let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
-    mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
+    let trend_dir = home.refusal_trend_dir();
+    let trend_key = holder.as_deref().unwrap_or(&ctx.scope);
+    let (previous_rate, second_previous_rate) = crate::refusal_trend::priors(&trend_dir, trend_key);
+    mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
+    // The baseline advances on the measurement the beat just printed,
+    // whether or not the full row journals below.
+    if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
+        crate::refusal_trend::record(&trend_dir, trend_key, &ts, rate);
+    }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
@@ -2522,9 +2402,14 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         .level
         .map(|l| format!("L{l}"))
         .unwrap_or_else(|| "L?".to_string());
+    let title_txt = crate::crown_names::stored_title(
+        &crate::paths::AgentsHome::from_env().crown_names_json(),
+        &ctx.scope,
+    )
+    .unwrap_or_else(|| format!("{level_txt} {}", ctx.scope));
     lines.insert(
         0,
-        crown_line_text(fold_name.as_deref(), &level_txt, &ctx.scope),
+        crate::crown_names::crown_line_text(fold_name.as_deref(), &title_txt, &ctx.scope),
     );
     // Bind an unbound record to the live holder's session and refresh the
     // node list from this beat's fold. A store write failure is a stated
@@ -2638,6 +2523,23 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+pub(crate) fn title_rename_command(
+    harness: &str,
+    label: &str,
+    title: Option<&str>,
+) -> Option<String> {
+    if title == Some(label) {
+        return None;
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
+    let capabilities = contract.capabilities(harness).ok()?;
+    capabilities
+        .native_verbs
+        .iter()
+        .any(|verb| verb == "/rename")
+        .then(|| format!("/rename {label}"))
+}
+
 fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
     let home = crate::paths::AgentsHome::from_env();
     let registry = crate::state::load_registry(&home.registry_json())
@@ -2675,10 +2577,9 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         return Err("the live crown holder is not this session".into());
     }
     let label = row.name.as_str();
-    if row.harness_title.as_deref() == Some(label) {
+    let Some(command) = title_rename_command(harness, label, row.harness_title.as_deref()) else {
         return Ok(());
-    }
-    let command = format!("/rename {label}");
+    };
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut child = std::process::Command::new(executable)
         .args([
@@ -2717,164 +2618,30 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn write_registry(home: &crate::paths::AgentsHome, agents: serde_json::Value) {
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": agents,
-        });
-        std::fs::write(home.registry_json(), doc.to_string()).unwrap();
+    mod watch_projection_tests {
+        include!("king_checkin_watch_tests.rs");
     }
 
     #[test]
-    fn an_unnamed_live_crown_cannot_complete_checkin() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-a", "status": "live", "crown_scope": "fno",
-                "crown_level": 1, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-a", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-
-        let err = apply_crown_naming(None, None, &home, "fno").unwrap_err();
-
-        assert!(err.contains("every live crown needs a name"), "{err}");
-    }
-
-    #[test]
-    fn a_successor_checkin_carries_the_name_into_its_registry_label() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-old", "status": "live", "crown_scope": "x-aaaa",
-                "crown_level": 2, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-old", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-        crate::crown_names::name_crown(
-            &home.crown_names_json(),
-            &home.registry_json(),
-            "x-aaaa",
-            "barnaby",
-        )
-        .unwrap();
-        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa", None).unwrap();
-        write_registry(
-            &home,
-            serde_json::json!([{
-                "name": "king-heir", "status": "live", "crown_scope": "x-aaaa",
-                "crown_level": 2, "cwd": "/repo", "harness": "claude",
-                "harness_session_id": "sess-heir", "created_at": "2026-09-23T20:00:00Z"
-            }]),
-        );
-
-        apply_crown_naming(None, None, &home, "x-aaaa").unwrap();
-
-        let registry = crate::state::load_registry(&home.registry_json()).unwrap();
-        assert_eq!(registry.entries[0].name, "barnaby");
-    }
-
-    #[test]
-    fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        let reg = home.registry_json();
-        let agents = serde_json::json!([
-            {"name": "king-a", "status": "live", "crown_scope": "x-aaaa",
-             "crown_level": 2, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-a",
-             "created_at": "2026-09-23T20:00:00Z"},
-            {"name": "king-b", "status": "live", "crown_scope": "fno",
-             "crown_level": 1, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-b",
-             "created_at": "2026-09-23T20:00:00Z"}
-        ]);
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": agents,
-        });
-        std::fs::write(&reg, doc.to_string()).unwrap();
-        apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
-        let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("barnaby"), "{err}");
-    }
-
-    #[test]
-    fn naming_an_already_named_crown_refuses() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = crate::paths::AgentsHome::at(tmp.path());
-        let reg = home.registry_json();
-        let doc = serde_json::json!({
-            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
-            "agents": [
-                {"name": "king-b", "status": "live", "crown_scope": "fno",
-                 "crown_level": 1, "cwd": "/repo", "harness": "claude",
-                 "harness_session_id": "sess-b",
-                 "created_at": "2026-09-23T20:00:00Z"}
-            ]
-        });
-        std::fs::write(&reg, doc.to_string()).unwrap();
-        apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap();
-        let err = apply_crown_naming(Some("ernest"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("already named"), "{err}");
-    }
-
-    #[test]
-    fn combining_the_two_naming_flags_refuses() {
-        assert!(apply_crown_naming(
-            Some("a"),
-            Some("old"),
-            &crate::paths::AgentsHome::at("/tmp"),
-            "fno"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
-        assert_eq!(
-            crown_line_text(Some("Barnaby II"), "L1", "fno"),
-            "crown: Barnaby II (L1 fno)"
-        );
-        assert_eq!(
-            crown_line_text(None, "L1", "fno"),
-            "crown: unnamed - name it once: fno agents king checkin --name <name>"
-        );
-    }
-
-    #[test]
-    fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
+    fn cause_rows() {
         let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
         assert_eq!(
             stderr_cause(stderr),
             "gh: API rate limit exceeded for user ID 4994564. (HTTP 403)"
         );
-    }
 
-    #[test]
-    fn gh_error_cause_removes_the_gh_api_prefix() {
         let error = "gh api repos/{owner}/{repo}/commits/<sha>/check-runs failed: fno config: x is not modeled\ngh: API rate limit exceeded (HTTP 403)";
         assert_eq!(
             gh_error_cause(error),
             "gh: API rate limit exceeded (HTTP 403)"
         );
-    }
 
-    #[test]
-    fn stderr_cause_falls_back_to_the_last_warning_or_empty_placeholder() {
         assert_eq!(
             stderr_cause("fno config: first\nfno config: last"),
             "fno config: last"
         );
         assert_eq!(stderr_cause(" \n\t"), "no stderr");
-    }
 
-    #[test]
-    fn stderr_cause_caps_at_120_unicode_characters() {
         let cause = "é".repeat(300);
         let result = stderr_cause(&cause);
         assert_eq!(result.chars().count(), 120);
@@ -2882,22 +2649,14 @@ mod tests {
     }
 
     #[test]
-    fn open_pr_total_sums_all_pages() {
+    fn count_rows() {
         let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
         let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
-        assert_eq!(open_pr_total(&[first, second]), 107);
-    }
-
-    #[test]
-    fn open_pr_total_ignores_non_array_pages() {
         assert_eq!(
-            open_pr_total(&[json!({"unexpected": true}), json!([1, 2])]),
-            2
+            open_pr_total(&[first, second, json!({"unexpected": true}), json!([1, 2])]),
+            109
         );
-    }
 
-    #[test]
-    fn scope_key_sanitizes_like_the_writer() {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
@@ -3032,19 +2791,13 @@ mod tests {
     }
 
     #[test]
-    fn user_marker_grabs_between_fences() {
+    fn marker_rows() {
         let doc = "intro\n<!-- fno:user -->\nline one\n<!-- /fno:user -->\ntail\n";
         assert_eq!(extract_user_marker(doc), Some("line one\n".to_string()));
-    }
 
-    #[test]
-    fn unclosed_marker_runs_to_writer_heading() {
         let doc = "<!-- fno:user -->\nkept\n## Merge order and why (r1)\nnot kept\n";
         assert_eq!(extract_user_marker(doc), Some("kept\n".to_string()));
-    }
 
-    #[test]
-    fn unclosed_marker_runs_to_next_fence_or_eof() {
         let doc = "<!-- fno:status -->\ns\n<!-- fno:user -->\nkept\n<!-- fno:other -->\n";
         assert_eq!(extract_user_marker(doc), Some("kept\n".to_string()));
         assert_eq!(
@@ -3052,245 +2805,12 @@ mod tests {
             Some("kept to end\n".to_string())
         );
         assert_eq!(extract_user_marker("no marker here"), None);
-    }
 
-    #[test]
-    fn placeholder_only_block_reads_as_empty() {
         assert!(is_user_placeholder(
             "_(write here; the machine reads this every refresh and never edits it)_\n"
         ));
         assert!(!is_user_placeholder("a real note"));
         assert!(!is_user_placeholder(""));
-    }
-
-    /// The workflow-run rows an `/actions/runs` page carries, in the fields
-    /// the reducer reads; row order is free.
-    fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
-        serde_json::json!({
-            "name": name, "head_sha": sha, "status": status,
-            "conclusion": conclusion, "created_at": created,
-        })
-    }
-
-    #[test]
-    fn main_ci_reads_green_when_every_workflows_newest_completed_run_passed() {
-        let runs = vec![
-            wf_run(
-                "guards",
-                "b1",
-                "completed",
-                "success",
-                "2026-09-26T03:00:00Z",
-            ),
-            wf_run(
-                "cli-ci",
-                "b1",
-                "completed",
-                "success",
-                "2025-09-26T02:50:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&runs, &[]),
-            Value::String("green".into())
-        );
-    }
-
-    /// The filed bug's shape: the newest completed cli-ci main run failed,
-    /// and the later tip fires no cli-ci at all. The tip-only reader read
-    /// green here; the history reader names the failed workflow and sha.
-    #[test]
-    fn main_ci_reads_red_from_a_newer_failed_cli_ci_when_the_tip_fires_none() {
-        let runs = vec![
-            wf_run(
-                "guards",
-                "b2",
-                "completed",
-                "success",
-                "2026-09-26T04:00:00Z",
-            ),
-            wf_run(
-                "rust-ci",
-                "b2",
-                "completed",
-                "success",
-                "2026-09-26T04:00:00Z",
-            ),
-            wf_run(
-                "cli-ci",
-                "a1",
-                "completed",
-                "failure",
-                "2026-09-26T03:35:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&runs, &[]),
-            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
-        );
-    }
-
-    /// A workflow whose newest run is still in flight reads pending even when
-    /// its newest completed run passed.
-    #[test]
-    fn main_ci_reads_pending_when_a_workflows_newest_run_is_in_flight() {
-        let runs = vec![
-            wf_run(
-                "guards",
-                "b2",
-                "completed",
-                "success",
-                "2026-09-26T04:00:00Z",
-            ),
-            wf_run("cli-ci", "b2", "in_progress", "", "2026-09-12T04:00:00Z"),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&runs, &[]),
-            Value::String("pending".into())
-        );
-    }
-
-    /// Red outranks an in-flight run of the same workflow: the newest
-    /// completed result is the failure until a newer run completes green.
-    #[test]
-    fn main_ci_reads_red_even_while_a_newer_run_of_the_same_workflow_is_in_flight() {
-        let runs = vec![
-            wf_run("cli-ci", "b3", "in_progress", "", "2026-09-26T04:10:00Z"),
-            wf_run(
-                "cli-ci",
-                "a1",
-                "completed",
-                "failure",
-                "2026-09-26T03:35:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&runs, &[]),
-            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
-        );
-    }
-
-    #[test]
-    fn main_ci_reads_pending_on_no_runs() {
-        assert_eq!(
-            main_ci_token_from_pages(&[], &[]),
-            Value::String("pending".into())
-        );
-    }
-
-    /// The filed bug's shape: the branch page led with a stale green from
-    /// five days before the head while the newer cli-ci run had failed.
-    /// Row position is never trusted, so the stale-first page still reads
-    /// red; the position-trusting reader read green here.
-    #[test]
-    fn main_ci_reads_red_when_the_branch_page_leads_with_a_stale_green() {
-        let on_main = vec![
-            wf_run(
-                "cli-ci",
-                "stale",
-                "completed",
-                "success",
-                "2026-09-23T05:52:00Z",
-            ),
-            wf_run(
-                "guards",
-                "stale",
-                "completed",
-                "success",
-                "2026-09-23T05:52:00Z",
-            ),
-            wf_run(
-                "cli-ci",
-                "fresh",
-                "completed",
-                "failure",
-                "2026-09-28T07:30:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&[], &on_main),
-            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "fresh"})
-        );
-    }
-
-    /// A workflow run at the head sha is judged there even mid-flight - a
-    /// pending head run beats the branch page's older green - and only a
-    /// workflow the head never fired falls back to the branch page.
-    #[test]
-    fn main_ci_judges_head_sha_runs_first_and_falls_back_only_for_absent_workflows() {
-        let at_sha = vec![wf_run(
-            "cli-ci",
-            "head",
-            "in_progress",
-            "",
-            "2026-09-28T08:00:00Z",
-        )];
-        let on_main = vec![
-            wf_run(
-                "cli-ci",
-                "stale",
-                "completed",
-                "success",
-                "2026-09-23T05:52:00Z",
-            ),
-            wf_run(
-                "guards",
-                "head",
-                "completed",
-                "success",
-                "2026-09-28T08:00:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&at_sha, &on_main),
-            Value::String("pending".into())
-        );
-    }
-
-    /// A workflow the head never fired is judged from the branch page's
-    /// newest completed run.
-    #[test]
-    fn main_ci_falls_back_to_the_branch_pages_newest_completed_run() {
-        let at_sha = vec![wf_run(
-            "guards",
-            "head",
-            "completed",
-            "success",
-            "2026-09-28T08:00:00Z",
-        )];
-        let on_main = vec![
-            wf_run(
-                "cli-ci",
-                "stale",
-                "completed",
-                "success",
-                "2026-09-23T05:52:00Z",
-            ),
-            wf_run(
-                "cli-ci",
-                "gone",
-                "completed",
-                "failure",
-                "2026-09-26T03:35:00Z",
-            ),
-        ];
-        assert_eq!(
-            main_ci_token_from_pages(&at_sha, &on_main),
-            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "gone"})
-        );
-    }
-
-    /// The rendered line names the workflow and sha; the string tokens pass
-    /// through untouched.
-    #[test]
-    fn main_ci_render_names_the_failed_workflow_and_sha() {
-        let red = serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"});
-        assert_eq!(main_ci_render(Some(&red)), "red (cli-ci at a1)".to_string());
-        assert_eq!(
-            main_ci_render(Some(&Value::String("green".into()))),
-            "green".to_string()
-        );
-        assert_eq!(main_ci_render(None), "-".to_string());
     }
 
     fn board_payload() -> Value {
@@ -3317,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn board_and_court_readings_reduce_the_payloads() {
+    fn scope_rows() {
         let board = Ok(board_payload());
         let folded = Ok(fold_payload());
         let board_value = r_board(&board, &folded, Ok(7)).unwrap();
@@ -3330,13 +2850,7 @@ mod tests {
         let rows = court["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["session"], json!("s1"));
-    }
 
-    /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
-    /// headline is the same sum over owned_counts, and a row another crown
-    /// owns drops off while an unread mark keeps its row.
-    #[test]
-    fn the_scope_reading_counts_active_and_owned_active() {
         let folded = Ok(json!({"fold": {
             "status": "ok", "total": 15,
             "counts": {"in_progress": 2, "ready": 1, "idea": 5, "deferred": 3, "done": 4},
@@ -3358,11 +2872,7 @@ mod tests {
             .map(|r| r["id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["x-1", "x-3"], "owned false drops; owned null stays");
-    }
 
-    /// AC16-HP: the scope line leads with the owned count.
-    #[test]
-    fn the_scope_line_leads_with_the_owned_count() {
         let readings = sample_readings(
             json!({"open_prs": 1, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 3, "owned_active": 1, "total_nodes": 15, "rows": []}),
@@ -3376,34 +2886,24 @@ mod tests {
             .find(|l| l.contains("owned active of"))
             .unwrap();
         assert_eq!(line, "x-bbbb: 1 owned active of 3 active, 15 nodes");
-    }
 
-    /// AC14-ERR: a failed owner read renders unmeasured with the reason.
-    #[test]
-    fn the_scope_line_reads_unmeasured_with_the_reason() {
-        let readings = sample_readings(
+        let mut readings = sample_readings(
             board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
                    "owned_reason": "territory: registry unreadable (x)", "rows": []}),
             cap_ok(),
             workers_none(),
         );
+        readings
+            .iter_mut()
+            .find(|reading| reading.name == "territory")
+            .unwrap()
+            .value = json!([{"scope":"x-aaaa","membership":"unknown","reason":"the graph read returned 0 nodes","rung":2,"mission":"x-aaaa","live":null,"cap":4}]);
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.contains("owned unmeasured"))
-            .unwrap();
-        assert_eq!(
-            line,
-            "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes"
-        );
-    }
+        assert!(lines.iter().any(|l| l == "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes")
+            && lines.iter().any(|l| l == "  x-aaaa rung 2 mission x-aaaa live -/4 unreadable (the graph read returned 0 nodes)"));
 
-    /// AC15-EDGE: a previous beat row that carries active_nodes but no
-    /// owned_active reads unmeasured for one beat, never a fake movement.
-    #[test]
-    fn a_previous_row_without_owned_active_reads_unmeasured() {
         let mut prev = prev_row();
         prev["data"].as_object_mut().unwrap().remove("owned_active");
         let data = Map::new();
@@ -3411,8 +2911,19 @@ mod tests {
         assert_eq!(change, "unmeasured: previous row lacks owned_active");
     }
 
+    /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
+    /// headline is the same sum over owned_counts, and a row another crown
+    /// owns drops off while an unread mark keeps its row.
+
+    /// AC16-HP: the scope line leads with the owned count.
+
+    /// AC14-ERR: a failed owner read renders unmeasured with the reason.
+
+    /// AC15-EDGE: a previous beat row that carries active_nodes but no
+    /// owned_active reads unmeasured for one beat, never a fake movement.
+
     #[test]
-    fn the_epics_line_renders_right_after_the_scope_line() {
+    fn epics_rows() {
         // AC3-HP: the lead reads the cap distance on the court reading
         // itself, one line under the active count.
         let court = json!({
@@ -3437,10 +2948,7 @@ mod tests {
             .position(|l| l.starts_with("x-bbbb: ") && l.contains("active of"))
             .unwrap();
         assert_eq!(lines[scope_at + 1], "epics: e-1 16/15 full, e-2 3/15");
-    }
 
-    #[test]
-    fn the_epics_line_reads_unset_when_no_cap_is_configured() {
         // AC3-EDGE: `-` per cell and a trailing `(cap unset)`; seven rows
         // name five and count the rest.
         let line = epic_line(&json!({
@@ -3457,10 +2965,7 @@ mod tests {
         let line = epic_line(&json!({"epics": rows, "epic_cap": 15}));
         assert!(line.starts_with("epics: e-1 1/15, e-2 2/15, e-3 3/15, e-4 4/15, e-5 5/15"));
         assert!(line.ends_with("+2 more"));
-    }
 
-    #[test]
-    fn the_epics_line_degrades_honestly() {
         // AC3-ERR: a fold that never carried the load reads unmeasured, an
         // empty scope reads none, and a failed court reader prints its own
         // failure instead of an epics line.
@@ -3553,10 +3058,15 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("watch_expiry", json!({"rows": []})),
             Reading::took("answered", json!({"rows": []})),
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": null}),
+            ),
             Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
     }
@@ -3574,7 +3084,7 @@ mod tests {
     /// The journaled row carries the same starts and skips the lines print,
     /// and no territory line ever contains `blueprinter` again.
     #[test]
-    fn the_blueprint_journal_matches_the_lines_and_the_territory_line_is_clean() {
+    fn disagree_rows() {
         let readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3601,12 +3111,7 @@ mod tests {
             }
         }
         assert!(territory_seen, "territory line missing: {lines:?}");
-    }
 
-    // ---- check_account_login_with: one test per rule ----
-
-    #[test]
-    fn disagree_compares_meanings_not_spellings() {
         let pair = |fp: &str, gate_cpu: &str| {
             r_capacity_pair(
                 &json!({"admission": {"verdict": fp}, "unparsed_lines": 0}),
@@ -3630,8 +3135,10 @@ mod tests {
         assert!(!pair("admit_degraded", "pass"));
     }
 
+    // ---- check_account_login_with: one test per rule ----
+
     #[test]
-    fn capacity_pair_ignores_a_refusal_on_another_axis() {
+    fn capacity_rows() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3655,10 +3162,7 @@ mod tests {
             "line: {line}"
         );
         assert!(!line.contains("DISAGREE"), "line: {line}");
-    }
 
-    #[test]
-    fn capacity_pair_marks_a_cpu_divergence() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3680,10 +3184,7 @@ mod tests {
             line.contains("gate refused on cpu_share_undecidable, cpu refuse"),
             "line: {line}"
         );
-    }
 
-    #[test]
-    fn capacity_pair_without_a_gate_cpu_row_never_disagrees() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3703,10 +3204,7 @@ mod tests {
             .unwrap();
         assert!(line.contains("cpu -"), "line: {line}");
         assert!(!line.contains("DISAGREE"), "line: {line}");
-    }
 
-    #[test]
-    fn capacity_pair_renders_provider_lanes_in_order_or_as_unreadable() {
         let capacity = r_capacity_pair(
             &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
@@ -3754,10 +3252,7 @@ mod tests {
         .find(|line| line.starts_with("capacity:"))
         .unwrap();
         assert!(unread_line.ends_with("| lanes lanes unreadable"));
-    }
 
-    #[test]
-    fn unparsed_capacity_line_names_the_floor_and_zero_stays_silent() {
         let capacity_line = |unparsed: i64| {
             let capacity = r_capacity_pair(
                 &json!({"admission": {"verdict": "admit"}, "unparsed_lines": unparsed}),
@@ -3795,42 +3290,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
-        assert!(board_line.contains("open_prs 7"), "line: {board_line}");
-        assert!(board_line.contains("blocked 2"));
-        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
-        assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(20)));
-        assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
-    }
-
-    // AC1: the printed body carries a refusal_rate line with the real
-    // refused/total/window counts, and the same rate lands in the
-    // journaled data.
-    #[test]
-    fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.starts_with("refusal_rate:"))
-            .unwrap();
-        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
-    }
-
     // The subagents reading: the workers line carries the fleet's active
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
     #[test]
-    fn subagents_reading_names_held_agents_and_raises_attention() {
+    fn workers_rows() {
         let mut readings = sample_readings(
             board7(),
             court4(),
@@ -3873,12 +3337,7 @@ mod tests {
         );
         assert!(held_line.contains("TaskStop a1"), "line: {held_line}");
         assert!(held_line.contains("TaskStop bp-x"), "line: {held_line}");
-    }
 
-    // AC5: a non-claude harness fails the reading, the beat prints
-    // READER FAILED subagents:, and coverage counts it as failed.
-    #[test]
-    fn a_failed_subagents_reader_prints_its_own_line_and_counts_failed() {
         let mut readings = sample_readings(
             board7(),
             court4(),
@@ -3895,7 +3354,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(21)), "21 of 22 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3904,11 +3363,7 @@ mod tests {
                 .any(|l| l.starts_with("READER FAILED subagents:")),
             "lines: {lines:?}"
         );
-    }
 
-    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
-    #[test]
-    fn workers_payload_without_subagents_renders_a_dash() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("live_subagents"), Some(&Value::Null));
@@ -3920,10 +3375,15 @@ mod tests {
         );
     }
 
+    // AC5: a non-claude harness fails the reading, the beat prints
+    // READER FAILED subagents:, and coverage counts it as failed.
+
+    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
+
     // AC4: an over-ceiling wake ratio prints the OVER suffix and journals an
     // attention item, so an over beat is never journalled as a quiet one.
     #[test]
-    fn wake_ratio_line_prints_and_names_attention_when_over() {
+    fn wake_rows() {
         let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
@@ -3943,13 +3403,7 @@ mod tests {
             line,
             "wake_ratio: 287 machine / 44 user wakes = 6.5 to 1 - OVER 3 to 1"
         );
-    }
 
-    // AC5: a failed wake_meter reading prints the READER FAILED line, names
-    // itself in readers_failed, and no wake_ratio or subagent_tokens line
-    // prints.
-    #[test]
-    fn a_failed_wake_meter_reading_prints_the_reader_failed_line() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3968,12 +3422,7 @@ mod tests {
         );
         assert!(!lines.iter().any(|l| l.starts_with("wake_ratio:")));
         assert!(!lines.iter().any(|l| l.starts_with("subagent_tokens:")));
-    }
 
-    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
-    // the printed n/a line.
-    #[test]
-    fn wake_attention_without_typed_turns_names_n_a() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -3989,48 +3438,95 @@ mod tests {
         assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
-    // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
-    // or a flat/falling rate, does not.
+    // AC5: a failed wake_meter reading prints the READER FAILED line, names
+    // itself in readers_failed, and no wake_ratio or subagent_tokens line
+    // prints.
+
+    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
+    // the printed n/a line.
+
+    // AC2: the handoff signal reads the true beat-to-beat direction. Two
+    // consecutive rises trip it; one rise, flat, or falling does not; and the
+    // baseline advances with every measured beat, so beats whose row never
+    // journaled can never pin the comparison to a stale pair.
     #[test]
-    fn refusal_rate_rising_only_after_two_consecutive_increases() {
+    fn refusal_rows() {
+        // Two rises: 0.05 -> 0.10 -> 0.20 trips the signal.
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate".into(), json!(0.20));
-        let row = |rate: f64| Some(json!({"refusal_rate": rate}));
-
-        // Two rises: 0.05 -> 0.10 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(false))
+        );
 
         // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.10).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.10));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
         // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.30).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.30), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
-        // Missing history reads as not-rising, never a false positive.
+        // Missing history reads unmeasured, never a false positive.
         mark_refusal_rate_trend(&mut data, None, None);
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
-    }
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(true))
+        );
 
-    #[test]
-    fn refusal_rate_rising_line_carries_the_handoff_suffix() {
+        // The filed defect: a falling series of unjournalled beats. Each
+        // beat's record advances the baseline, so the label follows the
+        // true direction instead of the same stale pair.
+        let dir = tempfile::tempdir().unwrap();
+        let trend = dir.path();
+        for (n, current) in [0.175, 0.165, 0.150].iter().enumerate() {
+            let (p1, p2) = crate::refusal_trend::priors(trend, "x-bbbb");
+            let mut data: Map<String, Value> = Map::new();
+            data.insert("refusal_rate".into(), json!(current));
+            mark_refusal_rate_trend(&mut data, p1, p2);
+            assert_eq!(
+                data.get("refusal_rate_rising"),
+                Some(&json!(false)),
+                "beat {n}: a falling series must not read RISING"
+            );
+            crate::refusal_trend::record(
+                trend,
+                "x-bbbb",
+                &format!("2026-09-15T10:0{n}:00Z"),
+                *current,
+            );
+        }
+
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let line = lines
             .iter()
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
-        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
-    }
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - RISING (handoff signal)"
+        );
 
-    // A rising refusal rate outranks silence the same way control-plane
-    // attention does: it must never journal as "no change".
-    #[test]
-    fn refusal_rate_rising_reads_as_attention_not_no_change() {
+        // A missing prior pair is stated on the line, never silently blank.
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("refusal_rate_trend_unmeasured".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
+        );
+
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate_rising".into(), json!(true));
         let change = derive_change(None, &data, "");
@@ -4040,39 +3536,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn failed_reader_prints_own_line_and_beat_continues() {
-        let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("board", "board payload names no undriven_pr queue".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        let change = derive_change(None, &data, "");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
-        assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
-        assert!(lines
-            .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
-        assert!(lines.iter().any(|l| l.contains("failed readers: board")));
-        assert_eq!(change, "no numeric movement; readings failed: board");
-        assert_eq!(data.get("open_prs"), None);
-        assert_eq!(data.get("readers_failed"), Some(&json!(["board"])));
-    }
+    // AC1+AC2: the printed line carries the real refused/total/window counts
+    // and exactly one trend verdict - RISING on two consecutive rises,
+    // UNMEASURED on a missing prior pair - and the same rate lands in the
+    // journaled data.
+
+    // A rising refusal rate outranks silence the same way control-plane
+    // attention does: it must never journal as "no change".
 
     #[test]
-    fn no_change_refused_while_a_reading_failed() {
-        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("drain", "drain unreadable".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
-    }
-
-    #[test]
-    fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
+    fn park_rows() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
@@ -4100,10 +3573,7 @@ mod tests {
         assert_eq!(unpark_rows.len(), 2, "lines: {lines:?}");
         assert!(unpark_rows[0].contains("owner/repo#101"));
         assert!(unpark_rows[0].contains("checks are red"));
-    }
 
-    #[test]
-    fn a_parked_reading_of_zero_rows_reads_parked_none() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
@@ -4132,7 +3602,7 @@ mod tests {
     }
 
     #[test]
-    fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
+    fn answer_rows() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
@@ -4180,28 +3650,26 @@ mod tests {
                 .any(|l| l == "READER FAILED quiet_workers: peek exited 13"),
             "lines: {lines:?}"
         );
-    }
 
-    #[test]
-    fn held_rows_render_the_decide_verb_and_none_when_clear() {
         let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
                 "held",
-                json!({"open": 2, "rows": [
+                json!({"open": 3, "rows": [
                     {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
-                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                    {"node": null, "question_id": "q-3", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
                 ]}),
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        assert_eq!(data.get("held_open"), Some(&json!(3)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
         assert!(
-            summary[0].contains("2 question(s) for this crown"),
+            summary[0].contains("3 question(s) for this crown"),
             "lines: {lines:?}"
         );
         let verbs: Vec<&String> = lines
@@ -4209,16 +3677,21 @@ mod tests {
             .filter(|l| l.contains("fno backlog decide"))
             .collect();
         assert_eq!(verbs.len(), 2, "each row names the decide verb");
-    }
-
-    #[test]
-    fn held_absent_reads_none() {
-        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
+        let clears: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno inbox outstanding clear"))
+            .collect();
+        assert_eq!(clears.len(), 1, "the nodeless row names the clear verb");
+        assert!(
+            clears[0].contains("the user answers it on the question board"),
+            "lines: {lines:?}"
+        );
+        // An absent held read keeps its line and says none; coverage counts it.
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4231,7 +3704,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_against_previous_canonical_row() {
+    fn diff_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
@@ -4246,7 +3719,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let readings = sample_readings(
             board7(),
@@ -4263,12 +3736,7 @@ mod tests {
             .find(|l| l.starts_with("vs last beat (2026-09-10T12:00:00Z)"))
             .unwrap();
         assert!(diff_line.contains("open_prs 9 -> 7"), "line: {diff_line}");
-    }
 
-    // AC6-HP: a 30-minute arm FAIL is attention, and a moved count still
-    // reports itself inside the attention change.
-    #[test]
-    fn an_overdue_arm_reads_attention_not_no_change() {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
@@ -4283,7 +3751,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
@@ -4322,12 +3790,7 @@ mod tests {
             change,
             "attention: pr_watch_merge FAIL timeout for 2000s; moved: open_prs 9 -> 7"
         );
-    }
 
-    // AC6-ERR: a failed control_plane reading prints its own line, counts
-    // against coverage, and blocks the "no change" verdict.
-    #[test]
-    fn a_failed_control_plane_reader_blocks_the_quiet_beat() {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
@@ -4350,27 +3813,68 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
-    }
+            .any(|l| l.starts_with("coverage: 21 of 22 readings ok")));
 
-    // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
-    #[test]
-    fn a_quiet_control_plane_reads_ok() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
-            data.get("control_plane_attention"),
-            Some(&json!([])),
-            "empty attention"
+            derive_change(None, &data, ""),
+            "first canonical beat for this scope"
         );
-        let change = derive_change(None, &data, "");
-        assert_eq!(change, "first canonical beat for this scope");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy none"));
         assert!(lines.iter().any(|l| l == "control plane: ok"));
-    }
 
-    #[test]
-    fn hand_row_baseline_reads_unmeasured_not_no_change() {
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": "bus-only"}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy bus-only"));
+        assert!(lines.iter().any(|l| l == "attention: DND on"));
+
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": true, "clock_until": "2030-01-01T00:00:00Z", "delivery_policy": null}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines.iter().any(
+            |l| l == "self_hold: clock active until 2030-01-01T00:00:00Z; delivery_policy none"
+        ));
+
+        // A stale carried skill body journals attention, never no change.
+        readings.push(Reading::took(
+            "skill_drift",
+            json!({
+                "compacted_at": "2026-09-30T01:35:00Z",
+                "carried": 1,
+                "stale": [{"name": "fno:reign", "file": "/tmp/skills/reign/SKILL.md", "reason": "text drift"}],
+            }),
+        ));
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(change.starts_with("attention:"), "change: {change}");
+        assert!(
+            change.contains("skill text stale since compaction: fno:reign"),
+            "change: {change}"
+        );
+
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
@@ -4391,6 +3895,14 @@ mod tests {
             "line: {beat}"
         );
     }
+
+    // AC6-HP: a 30-minute arm FAIL is attention, and a moved count still
+    // reports itself inside the attention change.
+
+    // AC6-ERR: a failed control_plane reading prints its own line, counts
+    // against coverage, and blocks the "no change" verdict.
+
+    // The self-hold line exposes both inputs, and either one raises attention.
 
     #[test]
     fn faq_scope_line_matches() {
@@ -4423,7 +3935,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_scope_row_is_emitted() {
+    fn emit_rows() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-bbbb");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
@@ -4436,20 +3948,11 @@ mod tests {
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
-    }
 
-    #[test]
-    fn requested_emit_without_a_row_is_a_failure() {
         assert_eq!(finish_checkin(true, false, None), 3);
-    }
 
-    #[test]
-    fn no_emit_is_success_when_no_row_was_requested() {
         assert_eq!(finish_checkin(false, false, None), 0);
-    }
 
-    #[test]
-    fn a_broken_pipe_after_a_journalled_beat_is_success() {
         assert_eq!(
             finish_checkin(
                 true,
@@ -4458,10 +3961,7 @@ mod tests {
             ),
             0
         );
-    }
 
-    #[test]
-    fn a_broken_pipe_without_a_journalled_beat_still_fails() {
         assert_eq!(
             finish_checkin(
                 true,
@@ -4470,10 +3970,7 @@ mod tests {
             ),
             3
         );
-    }
 
-    #[test]
-    fn non_canonical_scope_refuses_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-cccc ready no build, idea");
         let data = json!({"scope": "x-cccc ready no build, idea", "change": "beat"});
@@ -4489,10 +3986,7 @@ mod tests {
                     .is_empty(),
             "the corrupted-scope row must not reach the journal"
         );
-    }
 
-    #[test]
-    fn emit_row_writes_through_the_capped_emitter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
@@ -4511,10 +4005,7 @@ mod tests {
             rows.contains("\"intended_kind\":\"reign_checkin\""),
             "rows: {rows}"
         );
-    }
 
-    #[test]
-    fn model_change_fills_change_and_derivation_moves_to_diff() {
         let mut data = Map::new();
         let change = finish_change(
             "moved: open_prs 9 -> 7".into(),
@@ -4531,10 +4022,7 @@ mod tests {
         assert_eq!(change, "no change");
         assert_eq!(data.get("change"), Some(&json!("no change")));
         assert_eq!(data.get("diff"), Some(&json!("no change")));
-    }
 
-    #[test]
-    fn previous_row_skips_hook_and_hand_rows() {
         let dir = tempfile::tempdir().unwrap();
         let rows = [
             json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin", "source": "loop",
@@ -4557,86 +4045,11 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty(), "err: {err}");
         let previous = previous.expect("the newest loop row is the baseline");
         assert_eq!(s_str(&previous, "source"), Some("loop"));
         assert_eq!(previous["data"]["open_prs"], 9);
-    }
-
-    #[test]
-    fn hook_beat_writes_one_row_per_missed_beat() {
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let prior_config = std::env::var_os("FNO_CONFIG");
-        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
-        let path = journal(
-            dir.path(),
-            &[
-                json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
-                     "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
-            ],
-        );
-        let history = crate::loop_king::KingFireHistory {
-            total: 3,
-            dry: 1,
-            last_ids: vec!["undispatched:x-1".into()],
-            last_undelivered: Some(4),
-            last_terminal: None,
-        };
-        let base = "2026-09-15T10:00:00Z"
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .unwrap();
-        let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 109 minutes old: under two 55-minute intervals, nothing writes.
-        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(109));
-        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
-        // 111 minutes old: the beat is due, one hook row.
-        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(111));
-        let rows = crate::events::committed_journal_text(&path);
-        // A fresh row resets the clock: the next stop writes nothing.
-        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(112));
-        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
-        match prior_config {
-            Some(value) => std::env::set_var("FNO_CONFIG", value),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-
-        assert!(!early);
-        assert_eq!(rows_after_early, 1);
-        assert!(due);
-        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
-        assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
-        let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
-        assert_eq!(written["data"]["scope"], "x-bbbb");
-        assert!(!written["data"]["change"].as_str().unwrap().is_empty());
-        // The fresh row resets the clock: the next stop writes nothing.
-        assert!(!fresh);
-        assert_eq!(rows_after_fresh, 2);
-    }
-
-    #[test]
-    fn hook_beat_never_writes_for_a_blank_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        let history = crate::loop_king::KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: vec![],
-            last_undelivered: None,
-            last_terminal: None,
-        };
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "",
-            "sess",
-            &history,
-            chrono::Utc::now()
-        ));
-        assert!(!path.exists());
     }
 
     fn pause_row(arm: &str) -> crate::tick_ledger::ArmStatus {
@@ -4676,7 +4089,7 @@ mod tests {
     // AC9-HP: a paused tier leads the attention list with one breaker
     // summary, and no line prescribes a refresh.
     #[test]
-    fn a_paused_tier_leads_attention_with_the_breaker_summary() {
+    fn pause_rows() {
         use crate::loops_pause::DispatchPause;
         let rows: Vec<crate::tick_ledger::ArmStatus> =
             ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
@@ -4729,13 +4142,7 @@ mod tests {
             out.iter().all(|l| !l.contains("pr watch refresh")),
             "lines: {out:?}"
         );
-    }
 
-    // AC-EDGE: a manual loops pause names what it holds, and the tail
-    // never claims merges are held.
-    #[test]
-    fn a_manual_pause_says_loop_dispatch_is_held_and_merges_proceed() {
-        use crate::loops_pause::DispatchPause;
         let rows: Vec<crate::tick_ledger::ArmStatus> = ["king_wake", "watchdog"]
             .iter()
             .map(|a| pause_row(a))
@@ -4755,11 +4162,7 @@ mod tests {
             out[0]
         );
         assert!(out[0].contains("fno do loops status"), "line: {}", out[0]);
-    }
 
-    // AC10-EDGE: no pause, the output is today's: the row lines only.
-    #[test]
-    fn without_a_pause_attention_is_the_overdue_rows_alone() {
         let mut kw = crate::tick_ledger::ArmStatus {
             arm: "king_wake".to_string(),
             scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
@@ -4797,8 +4200,13 @@ mod tests {
         assert!(out[0].contains("tick_overdue"), "line: {}", out[0]);
     }
 
+    // AC-EDGE: a manual loops pause names what it holds, and the tail
+    // never claims merges are held.
+
+    // AC10-EDGE: no pause, the output is today's: the row lines only.
+
     #[test]
-    fn crown_split_fields_report_counts_and_lines_on_a_reading() {
+    fn crown_rows() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![crate::crown_split::ScopeSplit {
                 scope: "shared".into(),
@@ -4825,10 +4233,7 @@ mod tests {
                 "stale crown shared on king-dead (stored status orphaned); fno agents rm king-dead"
             ]
         );
-    }
 
-    #[test]
-    fn crown_split_fields_never_zero_an_unread_registry() {
         let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(
             Err("registry unreadable: boom".into()),
             &std::collections::BTreeMap::new(),
@@ -4841,11 +4246,7 @@ mod tests {
             vec!["crown split read failed: registry unreadable: boom"]
         );
         assert!(stale.is_empty());
-    }
 
-    // AC4-HP: the specimen line names the dead call and offers resume.
-    #[test]
-    fn stale_crown_line_names_the_dead_call_when_one_is_open() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
@@ -4869,11 +4270,7 @@ mod tests {
             stale,
             vec!["stale crown fno on king-fno-g6 (stored status exited): session 278c9a89-11ed-49af-a6fb-371bb36e410d stopped inside a Bash call made at 2026-09-21T08:21:13.913Z, before the last boot at 2026-09-21T13:33:58Z; fno agents resume king-fno-g6 relaunches it, fno agents rm king-fno-g6 drops the row and its crown".to_string()]
         );
-    }
 
-    // AC4-ERR: an unreadable reading appends the reason, never a clean read.
-    #[test]
-    fn stale_crown_line_appends_the_reason_when_unreadable() {
         let splits = crate::crown_split::CrownSplits {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
@@ -4895,6 +4292,10 @@ mod tests {
             vec!["stale crown fno on king-gone (stored status exited); fno agents rm king-gone (tool-call reading: no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d)".to_string()]
         );
     }
+
+    // AC4-HP: the specimen line names the dead call and offers resume.
+
+    // AC4-ERR: an unreadable reading appends the reason, never a clean read.
 
     /// The beat defaults under the equal-version trap this repo guards
     /// against: no `--scope`, no `--level`, no

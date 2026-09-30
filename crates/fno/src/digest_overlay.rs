@@ -25,6 +25,9 @@ use crate::proto;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+pub(crate) static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const DEFAULT_THRESHOLD_MIN: u64 = 10;
 /// Fail-open budget for the fold shell-out; a slow `fno-agents` yields no
 /// overlay rather than stalling the attach (AC-error: >800ms => no overlay).
@@ -153,23 +156,26 @@ pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::Keymap
     (t, join_warnings(user_warns))
 }
 
-/// The user's own themes: config `[mux.themes.<name>]` materialized through
-/// the same file ladder the keymap walks (`$FNO_CONFIG` sole, else project
-/// roots over the global file, a higher layer wins per role key - the
-/// Python loader's deep-merge, mirrored). Built-ins win name collisions, so
-/// a user theme can never shadow a shipped one. `inherit` names a built-in
-/// to start from (default `footnote-superscript`); every other key is a
-/// Theme role in the sideline color vocabulary, and a value the reader
-/// cannot parse is reported, never silently ignored. File-level problems
-/// (bad TOML, unreadable file) stay the keymap reader's warnings - it reads
-/// these same files and already reports them once.
+/// The user's own themes: the import's theme folder, then config
+/// `[mux.themes.<name>]` tables materialized through the same file ladder
+/// the keymap walks (`$FNO_CONFIG` sole, else project roots over the global
+/// file, a higher layer wins per role key - the Python loader's deep-merge,
+/// mirrored). The folder sits below every config layer, so a hand-written
+/// table tunes an imported theme one role at a time. Built-ins win name
+/// collisions, so a user theme can never shadow a shipped one. `inherit`
+/// names a built-in to start from (default `footnote-superscript`); every
+/// other key is a Theme role in the sideline color vocabulary, and a value
+/// the reader cannot parse is reported, never silently ignored. File-level
+/// problems (bad TOML, unreadable file) stay the keymap reader's warnings -
+/// it reads these same files and already reports them once.
 pub fn user_themes(
     cwd: &Path,
 ) -> (
     Vec<(String, crate::theme::Theme)>,
     Vec<crate::keys::KeymapWarning>,
 ) {
-    let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
+    let mut layers: Vec<PathBuf> = theme_folder_files();
+    layers.extend(match non_empty_env("FNO_CONFIG") {
         Some(explicit) => vec![PathBuf::from(explicit)],
         None => {
             let global = global_config_toml();
@@ -183,7 +189,7 @@ pub fn user_themes(
                 )
                 .collect()
         }
-    };
+    });
     let merged = merge_theme_layers(layers.iter().map(|p| themes_from_file(p)));
     let mut themes: Vec<(String, crate::theme::Theme)> = Vec::new();
     let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
@@ -214,7 +220,15 @@ fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(table) = content.parse::<toml::Table>() else {
+    themes_from_str(&content)
+}
+
+/// The `[mux.themes.<name>]` tables of one file's TEXT, the same shape
+/// [`themes_from_file`] returns. The theme importer parses fetched text
+/// through this reader, so a preview resolves through the exact code the
+/// reader runs.
+pub(crate) fn themes_from_str(text: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let Ok(table) = text.parse::<toml::Table>() else {
         return Vec::new();
     };
     let Some(themes) = table
@@ -245,6 +259,49 @@ fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
         .collect()
 }
 
+/// The imported-theme folder: `<state root>/mux/themes`. The import saves
+/// here and [`user_themes`] reads it as the lowest layer. `None` in test
+/// builds without an override: `mux_sidecar_root` has no test twin, so a
+/// test that wants the folder pins it through [`set_themes_dir_for_test`].
+pub(crate) fn themes_dir() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    {
+        Some(crate::proto::mux_sidecar_root().join("mux").join("themes"))
+    }
+    #[cfg(test)]
+    TEST_THEMES_DIR.with(|c| c.borrow().clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_THEMES_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_themes_dir_for_test(dir: Option<PathBuf>) {
+    TEST_THEMES_DIR.with(|c| *c.borrow_mut() = dir);
+}
+
+/// The folder's `*.toml` files, sorted by name: one layer per file, lowest
+/// precedence. A missing folder adds no layer; an unreadable file stays
+/// silent, the same posture as a bad config file.
+pub(crate) fn theme_folder_files() -> Vec<PathBuf> {
+    let Some(dir) = themes_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    files
+}
+
 /// Collapse theme layers, lowest precedence first, one (theme, role) pair at
 /// a time - the same shape as [`merge_key_layers`], keyed by theme name.
 fn merge_theme_layers(
@@ -271,7 +328,7 @@ fn merge_theme_layers(
 /// the parent's palette identity are interned with `Box::leak`: `Theme.name`
 /// is `&'static str`, and a config read is attach-rate, so the ceiling is
 /// bytes per distinct theme name per attach, not per render.
-fn materialize_user_theme(
+pub(crate) fn materialize_user_theme(
     name: &str,
     spec: &[(String, String)],
 ) -> (crate::theme::Theme, Vec<crate::keys::KeymapWarning>) {
@@ -451,7 +508,7 @@ mod theme_role_override_tests {
     use crate::theme::{cell_style, Role, Theme};
 
     #[test]
-    fn override_colors_take_the_sideline_palette_vocabulary() {
+    fn theme_override_rows() {
         assert_eq!(
             parse_override_color("#ff3434"),
             Some(Color::Rgb(0xff, 0x34, 0x34))
@@ -466,10 +523,7 @@ mod theme_role_override_tests {
         assert_eq!(parse_override_color("#zzzzzz"), None);
         assert_eq!(parse_override_color("ff3434"), None, "hex needs its #");
         assert_eq!(parse_override_color(""), None);
-    }
 
-    #[test]
-    fn overrides_repin_the_three_roles_under_any_theme_and_the_stamp_is_untouched() {
         for name in crate::theme::THEME_NAMES {
             let (mut t, _) = Theme::from_name(name);
             let (stamp, sel) = (t.stamp, t.sel);
@@ -482,10 +536,7 @@ mod theme_role_override_tests {
             assert_eq!(t.stamp, stamp, "{name}: the mark takes no override");
             assert_eq!(t.sel, sel, "{name}: only the overridden roles move");
         }
-    }
 
-    #[test]
-    fn an_unparseable_override_is_reported_not_ignored() {
         let (mut t, _) = Theme::from_name("terminal");
         let warn = apply_overrides_to(&mut t, Some("notacolor"), None, None)
             .expect("a bad value must warn");
@@ -493,10 +544,7 @@ mod theme_role_override_tests {
         assert!(warn.0.contains("notacolor"), "{warn:?}");
         // The untouched role keeps its theme value.
         assert_eq!(t.brand, Color::Indexed(3));
-    }
 
-    #[test]
-    fn border_override_recolors_every_border_under_any_theme() {
         // AC4-OVERRIDE: the border key recolors modal borders AND the focused
         // pane frame at once, because both read t.border. `default` resolves
         // to Color::Default, the terminal's own text color, so the border
@@ -1292,9 +1340,6 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dev_profile_dir_recognizes_both_cargo_binary_shapes() {
@@ -1330,16 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_mux_restore_hold_workers_is_readable() {
-        let body = "[mux.restore]\nhold_workers = false\n";
-        assert_eq!(
-            read_nested_value(body, "mux", "restore", "hold_workers"),
-            Some("false".into())
-        );
-    }
-
-    #[test]
-    fn reads_top_level_keys() {
+    fn config_reader_rows() {
         let cfg = "schema_version = 1\nstate_dir = \"~/.fno/\"\n";
         assert_eq!(read_top_value(cfg, "state_dir"), Some("~/.fno/".into()));
         assert_eq!(read_top_value(cfg, "schema_version"), Some("1".into()));
@@ -1368,11 +1404,34 @@ mod tests {
             read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),
             None
         );
+
+        let body = "[mux.restore]\nhold_workers = false\n";
+        assert_eq!(
+            read_nested_value(body, "mux", "restore", "hold_workers"),
+            Some("false".into())
+        );
+
+        let yaml = "[mux]\nattach_digest = false\nattach_digest_threshold_min = 30\n";
+        assert_eq!(
+            read_mux_value(yaml, "attach_digest").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            parse_bool(&read_mux_value(yaml, "attach_digest").unwrap()),
+            Some(false)
+        );
+        assert_eq!(
+            read_mux_value(yaml, "attach_digest_threshold_min").as_deref(),
+            Some("30")
+        );
+        assert_eq!(read_mux_value(yaml, "missing"), None);
     }
 
     #[test]
     fn the_top_ladder_reads_the_project_tier_the_explicit_reader_ignores() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = super::ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("fno-top-ladder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let proj_state = base.join("proj-state");
@@ -1448,43 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_mux_values() {
-        let yaml = "[mux]\nattach_digest = false\nattach_digest_threshold_min = 30\n";
-        assert_eq!(
-            read_mux_value(yaml, "attach_digest").as_deref(),
-            Some("false")
-        );
-        assert_eq!(
-            parse_bool(&read_mux_value(yaml, "attach_digest").unwrap()),
-            Some(false)
-        );
-        assert_eq!(
-            read_mux_value(yaml, "attach_digest_threshold_min").as_deref(),
-            Some("30")
-        );
-        assert_eq!(read_mux_value(yaml, "missing"), None);
-    }
-
-    #[test]
-    fn status_row_reads_the_project_config_and_defaults_on() {
-        let root = std::env::temp_dir().join(format!("fno-status-row-{}", std::process::id()));
-        let config_dir = root.join(".fno");
-        std::fs::create_dir_all(root.join(".git")).expect("repo marker");
-        std::fs::create_dir_all(&config_dir).expect("config dir");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            "[mux]\nstatus_row = false\n",
-        )
-        .expect("config");
-        assert!(!status_row_enabled(&root));
-
-        std::fs::write(config_dir.join("config.toml"), "[mux]\n").expect("config without key");
-        assert!(status_row_enabled(&root));
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn json_to_lines_frames_and_pads() {
+    fn json_lines_rows() {
         let json = r#"{"lines":["! 1 block (last: FAILURE) - resolved","PR #42 OPEN - CI SUCCESS - reviewed"]}"#;
         let lines = lines_from_json(json).expect("has lines");
         assert!(lines[0].starts_with("while you were gone"));
@@ -1493,49 +1516,14 @@ mod tests {
         // All padded to a common width (clean inverse rectangle).
         let w = lines[0].chars().count();
         assert!(lines.iter().all(|l| l.chars().count() == w));
-    }
 
-    #[test]
-    fn json_empty_lines_is_none() {
         assert_eq!(lines_from_json(r#"{"lines":[]}"#), None);
         assert_eq!(lines_from_json("not json"), None);
         assert_eq!(lines_from_json(r#"{"no_lines":1}"#), None);
     }
 
     #[test]
-    fn a_project_rebind_outranks_a_global_one_whatever_its_case() {
-        let layer = |a: &str, k: &str| vec![(a.to_string(), k.to_string())];
-        let merged = |a: Vec<(String, String)>, b: Vec<(String, String)>| {
-            merge_key_layers(vec![a, b].into_iter())
-        };
-        // Global first, project on top. The resolver folds case, so these two
-        // ids are ONE action and the higher layer has to win outright.
-        assert_eq!(
-            merged(layer("detach", "Q"), layer("Detach", "D")),
-            layer("detach", "D")
-        );
-        // And the other way round, or the test would only prove that `D` sorts
-        // before `Q`.
-        assert_eq!(
-            merged(layer("Detach", "D"), layer("detach", "Q")),
-            layer("detach", "Q")
-        );
-        // Untouched actions from the lower layer still survive the merge.
-        let global = vec![
-            ("detach".to_string(), "Q".to_string()),
-            ("zoom".to_string(), "z".to_string()),
-        ];
-        assert_eq!(
-            merge_key_layers(vec![global, layer("DETACH", "D")].into_iter()),
-            vec![
-                ("detach".to_string(), "D".to_string()),
-                ("zoom".to_string(), "z".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn the_project_layer_anchors_on_the_repo_root_not_the_launch_cwd() {
+    fn config_layer_rows() {
         // mux is routinely attached from a subdirectory. Anchored on cwd, the
         // project layer reads <repo>/sub/.fno/config.toml, which does not
         // exist, and every project key silently reads as unset.
@@ -1564,10 +1552,7 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&orphan).ok();
-    }
 
-    #[test]
-    fn an_unreadable_config_is_not_the_same_as_an_absent_one() {
         // Absence is the normal case and stays quiet. Every OTHER read error is
         // a file the operator DOES have and the mux cannot use, and collapsing
         // those into "no config here" is the same silent drop as discarding a
@@ -1597,71 +1582,7 @@ mod tests {
         assert_eq!(read_layer(&as_dir).1.len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn nothing_the_key_reader_cannot_use_disappears_quietly() {
-        let p = Path::new("/tmp/config.toml");
-
-        // A value that is not a string parses as valid TOML and is not a key.
-        // Filtering it out here left the resolver nothing to refuse, so the
-        // entry vanished and the keyboard silently kept its default.
-        let (entries, warnings) =
-            keys_from_toml(p, "[mux.keys]\ndetach = 3\nzoom = false\nfind = \"F\"\n");
-        assert_eq!(entries, vec![("find".to_string(), "F".to_string())]);
-        assert_eq!(warnings.len(), 2, "both bad values reported: {warnings:?}");
-        for want in ["detach", "zoom"] {
-            assert!(
-                warnings.iter().any(|w| w.0.contains(want)),
-                "{want} must be named: {warnings:?}"
-            );
-        }
-
-        // A file that will not parse defaults EVERY key, so it says so once
-        // rather than once per missing binding.
-        let (entries, warnings) = keys_from_toml(p, "[mux.keys\ndetach = \"Q\"\n");
-        assert!(entries.is_empty());
-        assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].0.contains("bad TOML") && warnings[0].0.contains("defaults"),
-            "and says what the operator is getting: {:?}",
-            warnings[0].0
-        );
-
-        // The ordinary cases stay quiet: a good file, and one with no [mux.keys]
-        // at all, which is what almost every config looks like.
-        assert_eq!(keys_from_toml(p, "[mux.keys]\ndetach = \"Q\"\n").1.len(), 0);
-        assert_eq!(keys_from_toml(p, "[mux]\nhover_focus = false\n").1.len(), 0);
-    }
-
-    #[test]
-    fn a_yaml_fno_config_says_so_instead_of_reading_as_empty() {
-        // Python reads an explicitly pinned file as-is and parses YAML by
-        // suffix, while every Rust reader here is TOML-only. That combination
-        // used to mean `fno config` showed values the mux silently never saw.
-        // TOML-only stays (fno_agents::agents_config settled the same way); what
-        // changes is that it says so.
-        for yaml in ["/tmp/settings.yaml", "/tmp/settings.yml", "/tmp/x.YAML"] {
-            let w = warn_if_not_toml(Path::new(yaml))
-                .unwrap_or_else(|| panic!("{yaml} must warn, not read as empty"));
-            assert!(w.0.contains(yaml), "the warning names the file: {}", w.0);
-            // Meaning BEFORE the path: the notice strip clips from the right, so
-            // a path-first message is a truncated path and nothing else on a
-            // 40-column terminal.
-            let head: String = w.0.chars().take(38).collect();
-            assert!(
-                head.contains("defaults") && head.contains("not TOML"),
-                "the first 38 columns must carry the meaning, got {head:?}"
-            );
-        }
-        assert!(warn_if_not_toml(Path::new("/tmp/config.toml")).is_none());
-        assert!(warn_if_not_toml(Path::new("/tmp/config.TOML")).is_none());
-        // No extension is left alone rather than warned about on every run.
-        assert!(warn_if_not_toml(Path::new("/tmp/fnoconfig")).is_none());
-    }
-
-    #[test]
-    fn a_bare_worktree_still_reaches_the_canonical_config() {
         // I had assumed setup-worktree.sh always symlinks the config in. It does
         // not: link_file skips a source that does not exist yet, so a worktree
         // created before the project config existed stays bare, and without this
@@ -1727,6 +1648,108 @@ mod tests {
         assert!(!canonical_suppressed(None));
 
         std::fs::remove_dir_all(&base).ok();
+
+        let root = std::env::temp_dir().join(format!("fno-status-row-{}", std::process::id()));
+        let config_dir = root.join(".fno");
+        std::fs::create_dir_all(root.join(".git")).expect("repo marker");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[mux]\nstatus_row = false\n",
+        )
+        .expect("config");
+        assert!(!status_row_enabled(&root));
+
+        std::fs::write(config_dir.join("config.toml"), "[mux]\n").expect("config without key");
+        assert!(status_row_enabled(&root));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn key_reader_rows() {
+        let p = Path::new("/tmp/config.toml");
+
+        // A value that is not a string parses as valid TOML and is not a key.
+        // Filtering it out here left the resolver nothing to refuse, so the
+        // entry vanished and the keyboard silently kept its default.
+        let (entries, warnings) =
+            keys_from_toml(p, "[mux.keys]\ndetach = 3\nzoom = false\nfind = \"F\"\n");
+        assert_eq!(entries, vec![("find".to_string(), "F".to_string())]);
+        assert_eq!(warnings.len(), 2, "both bad values reported: {warnings:?}");
+        for want in ["detach", "zoom"] {
+            assert!(
+                warnings.iter().any(|w| w.0.contains(want)),
+                "{want} must be named: {warnings:?}"
+            );
+        }
+
+        // A file that will not parse defaults EVERY key, so it says so once
+        // rather than once per missing binding.
+        let (entries, warnings) = keys_from_toml(p, "[mux.keys\ndetach = \"Q\"\n");
+        assert!(entries.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].0.contains("bad TOML") && warnings[0].0.contains("defaults"),
+            "and says what the operator is getting: {:?}",
+            warnings[0].0
+        );
+
+        // The ordinary cases stay quiet: a good file, and one with no [mux.keys]
+        // at all, which is what almost every config looks like.
+        assert_eq!(keys_from_toml(p, "[mux.keys]\ndetach = \"Q\"\n").1.len(), 0);
+        assert_eq!(keys_from_toml(p, "[mux]\nhover_focus = false\n").1.len(), 0);
+
+        // Python reads an explicitly pinned file as-is and parses YAML by
+        // suffix, while every Rust reader here is TOML-only. That combination
+        // used to mean `fno config` showed values the mux silently never saw.
+        // TOML-only stays (fno_agents::agents_config settled the same way); what
+        // changes is that it says so.
+        for yaml in ["/tmp/settings.yaml", "/tmp/settings.yml", "/tmp/x.YAML"] {
+            let w = warn_if_not_toml(Path::new(yaml))
+                .unwrap_or_else(|| panic!("{yaml} must warn, not read as empty"));
+            assert!(w.0.contains(yaml), "the warning names the file: {}", w.0);
+            // Meaning BEFORE the path: the notice strip clips from the right, so
+            // a path-first message is a truncated path and nothing else on a
+            // 40-column terminal.
+            let head: String = w.0.chars().take(38).collect();
+            assert!(
+                head.contains("defaults") && head.contains("not TOML"),
+                "the first 38 columns must carry the meaning, got {head:?}"
+            );
+        }
+        assert!(warn_if_not_toml(Path::new("/tmp/config.toml")).is_none());
+        assert!(warn_if_not_toml(Path::new("/tmp/config.TOML")).is_none());
+        // No extension is left alone rather than warned about on every run.
+        assert!(warn_if_not_toml(Path::new("/tmp/fnoconfig")).is_none());
+
+        let layer = |a: &str, k: &str| vec![(a.to_string(), k.to_string())];
+        let merged = |a: Vec<(String, String)>, b: Vec<(String, String)>| {
+            merge_key_layers(vec![a, b].into_iter())
+        };
+        // Global first, project on top. The resolver folds case, so these two
+        // ids are ONE action and the higher layer has to win outright.
+        assert_eq!(
+            merged(layer("detach", "Q"), layer("Detach", "D")),
+            layer("detach", "D")
+        );
+        // And the other way round, or the test would only prove that `D` sorts
+        // before `Q`.
+        assert_eq!(
+            merged(layer("Detach", "D"), layer("detach", "Q")),
+            layer("detach", "Q")
+        );
+        // Untouched actions from the lower layer still survive the merge.
+        let global = vec![
+            ("detach".to_string(), "Q".to_string()),
+            ("zoom".to_string(), "z".to_string()),
+        ];
+        assert_eq!(
+            merge_key_layers(vec![global, layer("DETACH", "D")].into_iter()),
+            vec![
+                ("detach".to_string(), "D".to_string()),
+                ("zoom".to_string(), "z".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1740,10 +1763,16 @@ mod tests {
 
 #[cfg(test)]
 mod user_theme_tests {
-    use super::{join_warnings, materialize_user_theme, merge_theme_layers};
+    use super::{
+        join_warnings, materialize_user_theme, merge_theme_layers, set_themes_dir_for_test,
+        user_themes,
+    };
     use crate::keys::KeymapWarning;
     use crate::proto::Color;
     use crate::theme::{ground_set, Theme};
+    use std::path::Path;
+
+    use super::ENVIRONMENT_LOCK;
 
     fn spec(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -1752,8 +1781,7 @@ mod user_theme_tests {
             .collect()
     }
 
-    #[test]
-    fn a_user_theme_loads_inherits_and_overrides() {
+    fn assert_user_theme_loads_inherits_and_overrides() {
         let (t, w) = materialize_user_theme(
             "midnight",
             &spec(&[
@@ -1771,8 +1799,7 @@ mod user_theme_tests {
         assert_eq!(t.sel, Theme::from_name("tokyo-night").0.sel);
     }
 
-    #[test]
-    fn the_default_inherit_is_the_brand_default_and_unknown_inherit_warns() {
+    fn assert_default_inherit_and_unknown_inherit_warn() {
         let (t, w) = materialize_user_theme("bare", &spec(&[]));
         assert!(w.is_empty());
         assert_eq!(t.inherit_from, "footnote-superscript");
@@ -1782,8 +1809,7 @@ mod user_theme_tests {
         assert_eq!(t.inherit_from, "footnote-superscript");
     }
 
-    #[test]
-    fn a_bad_hex_and_an_unknown_role_warn_and_are_ignored() {
+    fn assert_bad_hex_and_unknown_role_warn_and_are_ignored() {
         let (t, w) =
             materialize_user_theme("sloppy", &spec(&[("base", "#zzzzzz"), ("wat", "#112233")]));
         assert_eq!(w.len(), 2, "{w:?}");
@@ -1796,8 +1822,7 @@ mod user_theme_tests {
         );
     }
 
-    #[test]
-    fn a_user_theme_paints_its_ground_through_its_parents_palette() {
+    fn assert_user_theme_paints_its_ground_through_its_parents_palette() {
         let (t, w) = materialize_user_theme(
             "midnight",
             &spec(&[("inherit", "footnote-superscript"), ("base", "#0f0f14")]),
@@ -1811,6 +1836,14 @@ mod user_theme_tests {
         );
         // The parent's 16-slot table rides (OSC 4 slots emitted).
         assert!(s.contains("\x1b]4;0;"), "parent palette slots ride: {s:?}");
+    }
+
+    #[test]
+    fn user_theme_materialization_keeps_role_fallbacks_warnings_and_ground() {
+        assert_user_theme_loads_inherits_and_overrides();
+        assert_default_inherit_and_unknown_inherit_warn();
+        assert_bad_hex_and_unknown_role_warn_and_are_ignored();
+        assert_user_theme_paints_its_ground_through_its_parents_palette();
     }
 
     #[test]
@@ -1843,6 +1876,60 @@ mod user_theme_tests {
         assert!(a.1.iter().any(|(k, v)| k == "brand" && v == "#111111"));
         assert!(a.1.iter().any(|(k, v)| k == "base" && v == "#222222"));
         assert_eq!(a.1.len(), 2, "no key is dropped across layers");
+    }
+
+    #[test]
+    fn the_theme_folder_is_the_lowest_layer_and_a_config_table_wins_per_role() {
+        let _env = ENVIRONMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-themes-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("themes");
+        std::fs::create_dir_all(&dir).unwrap();
+        set_themes_dir_for_test(Some(dir.clone()));
+        let ambient = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", base.join("config.toml"));
+        std::fs::write(
+            dir.join("midnight.toml"),
+            "[mux.themes.midnight]\nbase = \"#101018\"\nstamp = \"#e8e8e8\"\nbrand = \"#0000ff\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("config.toml"),
+            "[mux.themes.midnight]\nbrand = \"#ff0000\"\n",
+        )
+        .unwrap();
+        let (themes, w) = user_themes(Path::new("/"));
+        assert!(w.is_empty(), "{w:?}");
+        let t = &themes.iter().find(|(n, _)| n == "midnight").unwrap().1;
+        assert_eq!(
+            t.base,
+            Color::Rgb(0x10, 0x10, 0x18),
+            "the folder supplies base"
+        );
+        assert_eq!(
+            t.brand,
+            Color::Rgb(0xff, 0x00, 0x00),
+            "the config table wins the role"
+        );
+        std::fs::write(
+            dir.join("gruvbox.toml"),
+            "[mux.themes.gruvbox]\nbase = \"#010203\"\n",
+        )
+        .unwrap();
+        let (themes, _) = user_themes(Path::new("/"));
+        assert!(
+            themes.iter().any(|(name, _)| name == "gruvbox"),
+            "the reader lists the folder name"
+        );
+        let (theme, warning) = Theme::from_name_in("gruvbox", &themes);
+        assert_eq!(theme.base, Theme::from_name("gruvbox").0.base);
+        assert!(warning.is_none());
+        match ambient {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        set_themes_dir_for_test(None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

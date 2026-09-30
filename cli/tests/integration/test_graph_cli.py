@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -117,12 +116,23 @@ def _invoke(*args, input=None):
     return runner.invoke(app, list(args), input=input, catch_exceptions=False)
 
 
+def _door_graph(g: Path, *args: str) -> _NativeResult:
+    """The native door against the fixture's store (selection verbs answer
+    natively now). Claims stay hermetic via FNO_CLAIMS_ROOT and the roster
+    stub answers an empty listing, so the fleet read never leaves the sandbox."""
+    from tests.goldens._door import door, roster_stub
+
+    code, out, err = door(g.parent, list(args), path_prepend=roster_stub(g.parent, []))
+    return _NativeResult(code, out, err)
+
+
 class _NativeResult:
     """The CliRunner-shaped face of a native-door run."""
 
     def __init__(self, code: int, out: str, err: str):
         self.exit_code = code
         self.output = out
+        self.stdout = out
         self.stderr = err
 
 
@@ -309,7 +319,7 @@ def test_legacy_id_resolves_under_configured_install(tmp_graph, monkeypatch):
 
 def test_ac1_hp_graph_next_empty(tmp_graph):
     """AC1-HP: fno graph next on empty graph returns null."""
-    r = _invoke("backlog", "next", "--all")
+    r = _door_graph(tmp_graph, "next", "--all")
     assert r.exit_code == 0, r.output
     assert r.output.strip() == "null"
 
@@ -323,7 +333,7 @@ def test_ac1_hp_graph_next_returns_highest_priority(tmp_graph):
     """
     _native_verb("add", "Low", "--priority", "p3")
     _native_verb("add", "High", "--priority", "p1")
-    r = _invoke("backlog", "next", "--all", "--include-ideas")
+    r = _door_graph(tmp_graph, "next", "--all", "--include-ideas")
     assert r.exit_code == 0
     data = json.loads(r.output)
     assert data["title"] == "High"
@@ -347,8 +357,7 @@ def test_ac1_hp_graph_ready_returns_json_array(tmp_graph):
     assert data[0]["title"] == "Feature 1"
 
 
-def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph, monkeypatch):
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph):
     _seed_graph_text(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-known-undispatched",
@@ -361,7 +370,7 @@ def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph, monke
         }]
     }) + "\n")
 
-    r = _invoke("backlog", "undispatched", "--all", "--json")
+    r = _door_graph(tmp_graph, "undispatched", "--all", "--json")
 
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
@@ -393,6 +402,21 @@ def test_ac1_hp_undispatched_external_backend_uses_tracker_join(tmp_graph, monke
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
     assert any(row["id"] == "x-external-undispatched" for row in data["rows"])
+
+
+def test_wheel_selection_verbs_tombstone_on_the_graph_backend(tmp_graph, monkeypatch):
+    """The wheel keeps only the external-tracker bodies: on the graph backend
+    both selection verbs refuse, naming the native door (exit 2)."""
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    seed_graph(tmp_graph, [])
+
+    r = _invoke("backlog", "next", "--all")
+    assert r.exit_code == 2, r.output
+    assert "the selection is served by the native door" in r.output
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+    assert r.exit_code == 2, r.output
+    assert "the observer is served by the native door" in r.output
 
 
 # --- get ---
@@ -507,7 +531,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
 
 # --- view ---
 
-def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch):
+def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC1-HP: fno graph view rerenders HTML and echoes the path."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -522,7 +546,7 @@ def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, mon
     assert "<html" in text
 
 
-def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch):
+def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC2-ERR: view on an empty graph produces an HTML shell, not an error."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -1150,7 +1174,7 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
     listing = json.loads(_invoke("backlog", "ready", "--all").stdout)
     assert listing[0]["model"] == "fable"
 
-    nxt = json.loads(_invoke("backlog", "next", "--all").stdout)
+    nxt = json.loads(_door_graph(tmp_graph, "next", "--all").stdout)
     assert nxt["model"] == "fable"
 
 
@@ -1170,7 +1194,7 @@ def test_dispatch_hold_is_absent_from_ready_and_next_destinations(tmp_graph, tmp
     ]}))
     ready_ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--all").stdout)]
     assert ready_ids == ["ab-1a2b"]
-    assert json.loads(_invoke("backlog", "next", "--all").stdout)["id"] == "ab-1a2b"
+    assert json.loads(_door_graph(tmp_graph, "next", "--all").stdout)["id"] == "ab-1a2b"
 
 
 def test_dispatch_hold_on_owner_hides_parent_and_contained_descendants(tmp_graph, tmp_path):
@@ -1189,9 +1213,10 @@ def test_dispatch_hold_on_owner_hides_parent_and_contained_descendants(tmp_graph
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}))
     ready_ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--all").stdout)]
     assert ready_ids == []
-    next_result = _invoke("backlog", "next", "--all")
+    next_result = _door_graph(tmp_graph, "next", "--all")
     assert json.loads(next_result.stdout) is None
-    assert "dispatch-hold:ab-5a5c" in next_result.output
+    # The door splits the streams: starvation receipts answer on stderr.
+    assert "dispatch-hold:ab-5a5c" in next_result.stderr
 
 
 def test_priority_read_path_backfill(tmp_graph):
@@ -1236,36 +1261,6 @@ def test_legacy_entry_without_additional_prs_loads_with_default(tmp_graph):
     ]}))
     data = json.loads(_native_get("ab-12345678"))
     assert not data.get("additional_prs")
-
-
-def test_render_html_renders_non_http_pr_url_as_plain_text(tmp_path):
-    """REGRESSION (Codex P2 on PR #316), carried onto the dashboard renderer.
-
-    A pr_url without a scheme ('github.com/x/y/pull/542') must never become an
-    anchor - it would resolve as a relative link. It must also stay VISIBLE as
-    escaped text; silently dropping it is the original defect.
-    """
-    from fno.graph.render_html import render_graph_html
-
-    entry = {
-        "id": "ab-abcdabcd", "title": "Multi", "priority": "p2",
-        "type": "feature", "domain": "code", "parent": None,
-        "plan_path": "x.md",
-        "pr_number": 542, "pr_url": "github.com/x/y/pull/542",
-        "created_at": "2026-01-01T00:00:00Z",
-        # Open, not done: the static half renders only what the chips show on
-        # first paint, so a closed node would exercise the payload alone and
-        # leave the no-JS anchor guard untested.
-        "status": "in_review",
-    }
-    out = tmp_path / "graph.html"
-    render_graph_html([entry], out)
-    html_out = out.read_text()
-    assert "github.com/x/y/pull/542" in html_out, (
-        "non-http url silently dropped"
-    )
-    assert 'href="github.com/x/y/pull/542"' not in html_out
-    assert "PR #542" in html_out
 
 
 def test_render_md_includes_additional_prs_on_done_nodes(tmp_graph):
@@ -1483,7 +1478,7 @@ def test_graph_next_picks_epic_child_over_higher_priority_loose(tmp_graph):
     """C3: `fno graph next` selects the epic child over a p0 loose node."""
     plan = _write_plan(tmp_graph.parent, "epic-next.md", "Epic next")
     _seed_graph_text(tmp_graph, json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
-    r = _invoke("backlog", "next", "--all")
+    r = _door_graph(tmp_graph, "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
     assert out["id"] == "ab-child"
@@ -1531,7 +1526,7 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
              "blocked_by": [], "plan_path": str(plan)},
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    r = _invoke("backlog", "next", "--all")
+    r = _door_graph(tmp_graph, "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
     assert out["id"] != "ab-epic"      # the in-progress container is skipped
@@ -1829,9 +1824,9 @@ def test_next_excludes_stale_ready_with_receipt(tmp_graph):
         "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-01-01T00:00:00+00:00",  # ~200d before real now -> stale
     }])
-    r = _invoke("backlog", "next", "--project", "fno")
-    assert "null" in r.output
-    assert "excluded ab-stale: quarantined" in r.output
+    r = _door_graph(tmp_graph, "next", "--project", "fno")
+    assert "null" in r.stdout
+    assert "excluded ab-stale: quarantined" in r.stderr
 
 
 def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
@@ -1846,9 +1841,9 @@ def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
          "parent": "ab-epic", "plan_path": str(plan),
          "created_at": recent, "priority": "p2"},
     ])
-    r = _invoke("backlog", "next", "--project", "fno")
-    assert "null" in r.output
-    assert "excluded ab-child: dead-ancestor" in r.output
+    r = _door_graph(tmp_graph, "next", "--project", "fno")
+    assert "null" in r.stdout
+    assert "excluded ab-child: dead-ancestor" in r.stderr
 
 
 def test_next_selects_healthy_ready_node(tmp_graph):
@@ -1862,13 +1857,12 @@ def test_next_selects_healthy_ready_node(tmp_graph):
         "status": "ready",
         "plan_path": str(plan), "created_at": recent, "priority": "p2",
     }])
-    r = _invoke("backlog", "next", "--project", "fno")
-    assert '"id": "ab-live"' in r.output
+    r = _door_graph(tmp_graph, "next", "--project", "fno")
+    assert '"id": "ab-live"' in r.stdout
 
 
 def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkeypatch):
-    from fno.claims.core import claim_status
-    from fno.graph.store import read_graph
+    from fno.claims.core import claim_status, release_claim
 
     recent = _recent_iso(1)
     plan = _write_plan(tmp_graph.parent, "claimed-next.md", "Claimed next")
@@ -1880,15 +1874,24 @@ def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkey
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "next-session")
 
-    result = _invoke("backlog", "next", "--project", "fno", "--claim", "next-session")
+    result = _door_graph(tmp_graph, "next", "--project", "fno", "--claim", "next-session")
 
     assert result.exit_code == 0, result.output
-    assert f'"id": "{node_id}"' in result.output
-    assert claim_status(f"node:{node_id}")["state"] == "live"
-    # The served holder is the claim projection: the lockfile is the holder
-    # of record and no graph owner is ever written.
+    assert f'"id": "{node_id}"' in result.stdout
+    # The acquirer is the door process, already exited: the lockfile holds
+    # with our holder and reads suspect (a dead pid never reads live).
+    verdict = claim_status(f"node:{node_id}")
+    assert verdict["holder"] == "next-session"
+    assert verdict["state"] == "suspect"
+    # The served owner is the read-time claim projection: it follows the
+    # lockfile and nothing persists it. Release the claim; the owner is gone.
+    from fno.graph.store import read_graph
+
     served = read_graph(tmp_graph)[0]
-    assert served["locked_by"] == "next-session"
+    assert served.get("locked_by") == "next-session"
+    release_claim(key=f"node:{node_id}", holder="next-session")
+    served_after = read_graph(tmp_graph)[0]
+    assert served_after.get("locked_by") is None
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):
@@ -1922,9 +1925,9 @@ def test_next_mission_receipts_ignore_other_mission(tmp_graph):
         {"id": "ab-otherm", "title": "other", "project": "fno",
          "mission_id": "mission-Y", "priority": "p2"},  # plan-less, mission Y
     ])
-    r = _invoke("backlog", "next", "--project", "fno", "--mission", "mission-X")
-    assert "null" in r.output
-    assert "ab-otherm" not in r.output  # out-of-mission node never reported
+    r = _door_graph(tmp_graph, "next", "--project", "fno", "--mission", "mission-X")
+    assert "null" in r.stdout
+    assert "ab-otherm" not in r.stdout + r.stderr  # out-of-mission node never reported
 
 
 def test_maintain_apply_skips_in_review_node(tmp_graph):
@@ -2155,16 +2158,3 @@ def test_provenance_external_reads_sidecar_edges(
     assert doc["sessions"] == [{"phase": "do", "session_id": "ext-sess"}]
     assert doc["source_node_id"] == "EXT-done"
     assert doc["source_node_title"] == "Closed blocker"
-
-
-def test_local_store_displays_refuse_cleanly_under_external(tmp_path, monkeypatch):
-    """Display renders of the LOCAL store's full records (view) refuse with
-    the backend named under an external selection - never a stale render."""
-    absent = tmp_path / "absent.json"
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: absent)
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "view")
-    assert r.exit_code == 2, r.output
-    assert "external" in r.output

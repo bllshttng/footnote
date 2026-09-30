@@ -166,7 +166,19 @@ pub(crate) enum HoldVerdict {
 }
 
 /// The PR's dispatch-hold word through the same probe the merge path reads.
-pub(crate) fn hold_verdict(cwd: &Path, pr: u64) -> HoldVerdict {
+/// The binding facts ride the caller's own PR read when it has one, so the
+/// common path runs in process; a read without the fields (a projection
+/// older than the facts keys) falls back to the spawned verb.
+pub(crate) fn hold_verdict(cwd: &Path, pr: u64, pr_json: Option<&Value>) -> HoldVerdict {
+    if let Some(payload) = pr_json {
+        if let Ok(facts) = crate::authorized_merge::facts_from_pulls(payload, Some(pr)) {
+            return match crate::gate_probes::dispatch_hold(cwd, &facts) {
+                crate::authorized_merge::ProbeOutcome::Clear => HoldVerdict::Clear,
+                crate::authorized_merge::ProbeOutcome::Refused(r) => HoldVerdict::Held(r),
+                crate::authorized_merge::ProbeOutcome::Inconclusive(_) => HoldVerdict::Unreadable,
+            };
+        }
+    }
     let out = match std::process::Command::new(crate::scrape::fno_bin())
         .args(["do", "pr", "hold-check", &pr.to_string()])
         .current_dir(cwd)

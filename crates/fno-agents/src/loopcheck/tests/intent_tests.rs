@@ -2,6 +2,24 @@ use super::super::intent::detect_intent_full;
 use super::*;
 
 #[test]
+fn extract_assistant_text_joins_string_array_and_top_level() {
+    let s = serde_json::json!({"message": {"content": "hi"}});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&s), "hi");
+    let arr = serde_json::json!({"message": {"content": [
+        {"type": "text", "text": "a"},
+        {"type": "tool_use", "name": "x"},
+        {"type": "text", "text": "b"}
+    ]}});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&arr), "a b");
+    let top = serde_json::json!({"role": "assistant", "content": "top-level"});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&top), "top-level");
+    assert_eq!(
+        crate::loopcheck::extract_assistant_text(&serde_json::json!({})),
+        ""
+    );
+}
+
+#[test]
 fn detect_intent_promise() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("t.jsonl");
@@ -133,7 +151,7 @@ fn detect_intent_payload_aborted_beats_promise() {
 #[test]
 fn watching_intent_parses_all_attrs() {
     let (intent, source) = detect_intent(
-        Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\">"),
+        Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\" task_id=\"task-123\">"),
         Path::new("/nonexistent"),
     );
     assert_eq!(source, "payload");
@@ -143,6 +161,7 @@ fn watching_intent_parses_all_attrs() {
             reason: "ci".into(),
             pr: Some("404".into()),
             timeout: Some("30m".into()),
+            task_id: Some("task-123".into()),
         }
     );
 }
@@ -158,7 +177,13 @@ fn watching_intent_malformed_attrs_default_to_absent() {
             reason: String::new(),
             pr: None,
             timeout: None,
+            task_id: None,
         }
+    );
+    assert_eq!(
+        detect_intent_from_text("<watching reason=\"local\" task_id=\"bad id\">"),
+        Intent::None,
+        "malformed task ids must not produce an accepted watch intent"
     );
 }
 

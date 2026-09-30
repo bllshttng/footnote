@@ -27,6 +27,7 @@ from fno.graph.strand import (
     _sweep_reparent_stranded_orphans,
 )
 from tests.conftest import run_native_create
+from tests.goldens._door import door_graph
 
 runner = CliRunner()
 
@@ -443,12 +444,12 @@ def test_next_winner_stdout_stays_clean_stderr_names_the_stranded(
     ]
     seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
-    r = runner.invoke(app, ["backlog", "next", "--all"], catch_exceptions=False)
-    assert r.exit_code == 0, r.output
+    code, out, err = door_graph(tmp_graph, "next", "--all")
+    assert code == 0, err
     # stdout is EXACTLY the winner JSON - the contract `_next_node` parses.
-    picked = json.loads(r.stdout)
+    picked = json.loads(out)
     assert picked["id"] == "x-winner"
     # stderr carries the capped strand receipt and the heal verb.
-    assert "stranded x-kid: dead-ancestor" in r.stderr
-    assert "1 node(s) stranded under terminal parents" in r.stderr
-    assert "fno backlog reconcile" in r.stderr
+    assert "stranded x-kid: dead-ancestor" in err
+    assert "1 node(s) stranded under terminal parents" in err
+    assert "fno backlog reconcile" in err

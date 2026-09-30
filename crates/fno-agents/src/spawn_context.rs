@@ -1286,16 +1286,13 @@ mod tests {
     }
 
     #[test]
-    fn single_family_resolves() {
+    fn identity_rows() {
         let get = env_of(&[("CODEX_THREAD_ID", "abc-123")]);
         let owned = resolve_owned_identity_from(&get, None, None);
         assert_eq!(owned.session_id.as_deref(), Some("abc-123"));
         assert_eq!(owned.harness.as_deref(), Some("codex"));
         assert_eq!(owned.disposition, OwnedDisposition::Single);
-    }
 
-    #[test]
-    fn two_families_never_launder() {
         let get = env_of(&[
             ("CODEX_THREAD_ID", "abc-123"),
             ("CLAUDE_CODE_SESSION_ID", "uuid-claude"),
@@ -1304,10 +1301,7 @@ mod tests {
         assert_eq!(owned.session_id, None);
         assert_eq!(owned.harness, None);
         assert_eq!(owned.disposition, OwnedDisposition::Ambiguous);
-    }
 
-    #[test]
-    fn same_family_disagreeing_ids_refuse() {
         let get = env_of(&[
             ("CODEX_THREAD_ID", "abc-123"),
             ("CODEX_SESSION_ID", "zzz-999"),
@@ -1315,10 +1309,7 @@ mod tests {
         let owned = resolve_owned_identity_from(&get, None, None);
         assert_eq!(owned.session_id, None);
         assert_eq!(owned.disposition, OwnedDisposition::Ambiguous);
-    }
 
-    #[test]
-    fn complete_stamp_proves_and_beats_collision() {
         let get = env_of(&[
             ("FNO_HARNESS_NAME", "claude"),
             ("FNO_HARNESS_SESSION_ID", "uuid-1"),
@@ -1330,10 +1321,7 @@ mod tests {
         assert_eq!(owned.session_id.as_deref(), Some("uuid-1"));
         // Proof is self: a live row holding this id is the session's own row.
         assert!(owned.rejected.is_empty(), "{:?}", owned.rejected);
-    }
 
-    #[test]
-    fn contested_stamp_id_rejects_named() {
         let get = env_of(&[
             ("FNO_HARNESS_NAME", "claude"),
             ("FNO_HARNESS_SESSION_ID", "uuid-2"),
@@ -1343,24 +1331,15 @@ mod tests {
         assert_eq!(owned.disposition, OwnedDisposition::Ambiguous);
         assert_eq!(owned.rejected.len(), 1);
         assert_eq!(owned.rejected[0].owner.as_deref(), Some("owner-x"));
-    }
 
-    #[test]
-    fn invalid_stamp_refuses() {
         let get = env_of(&[("FNO_HARNESS_NAME", "")]);
         let owned = resolve_owned_identity_from(&get, None, None);
         assert_eq!(owned.disposition, OwnedDisposition::Invalid);
-    }
 
-    #[test]
-    fn empty_env_reads_empty() {
         let get = env_of(&[]);
         let owned = resolve_owned_identity_from(&get, None, None);
         assert_eq!(owned.disposition, OwnedDisposition::Empty);
-    }
 
-    #[test]
-    fn proven_beats_foreign_family() {
         let get = env_of(&[
             ("CODEX_THREAD_ID", "foreign-thread"),
             ("CLAUDE_CODE_SESSION_ID", "mine"),
@@ -1370,19 +1349,13 @@ mod tests {
         assert_eq!(owned.session_id.as_deref(), Some("mine"));
         assert_eq!(owned.harness.as_deref(), Some("claude"));
         assert_eq!(owned.disposition, OwnedDisposition::Proven);
-    }
 
-    #[test]
-    fn session_key_case_rules() {
         assert_eq!(session_identity_key("ses_ABC"), "ses_ABC");
         assert_eq!(
             session_identity_key("ABC-DEF"),
             session_identity_key("abc-def")
         );
-    }
 
-    #[test]
-    fn shape_harness_port_lives_in_contract() {
         // The id-shape helper is exercised in spawn_contract tests; here we
         // pin the cross-module contract: the door validates a proven session
         // parent and refuses a shape contradiction.
@@ -1460,6 +1433,19 @@ mod tests {
 
     #[test]
     fn session_identity_refuses_a_spare_ancestor() {
+        // The walk answers the NEAREST harness ancestor: opencode sits nearer
+        // than claude (claude spawned a shell that launched opencode), so the
+        // walk stops at opencode, which is what makes whoami read opencode
+        // from inside one.
+        let table = table_of(&[
+            proc_row(100, 90, "zsh -l"),
+            proc_row(90, 80, "opencode"),
+            proc_row(80, 70, REAL_SESSION),
+        ]);
+        assert_eq!(
+            session_identity_from_table(&table, 100),
+            Some((90, "opencode"))
+        );
         // A thread worker's tool shells hang off a pooled bg-spare: the walk
         // must refuse, not continue to the daemon (pool machinery too) and
         // not pin the claim to machinery that outlives every session.

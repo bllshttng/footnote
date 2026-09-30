@@ -11,7 +11,11 @@
 //! {"version": 1, "crowns": {"<canonical scope>": {
 //!   "name": "Barnaby", "regnal": 1,
 //!   "holder_session": "<harness session uuid>" | null,
-//!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z"}}}
+//!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z",
+//!   "theme": "native backlog", "title": "Lead of native backlog",
+//!   "reign": {"session": "<uuid>", "scope": "<canonical scope>",
+//!             "armed_at": "<ts>", "started_at": "<ts>",
+//!             "term": "span:200h"} | absent}}}
 //! ```
 //!
 //! `holder_session` is the live holder row's `harness_session_id` (law
@@ -26,6 +30,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::loopcheck::KingManifest;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrownNameRecord {
     pub name: String,
@@ -36,11 +42,19 @@ pub struct CrownNameRecord {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The succession carried but not yet proven. Skipped in the JSON while
     /// absent, so the frozen wire shape above holds unless a succession is
     /// mid-flight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_succession: Option<PendingSuccession>,
+    /// The reign clock carried across a re-scope (see [`ReignClock`]).
+    /// Skipped in the JSON while absent, like `pending_succession`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reign: Option<ReignClock>,
 }
 
 /// A succession carried but not yet proven: written when `carry_succession`
@@ -54,6 +68,22 @@ pub struct PendingSuccession {
     #[serde(default)]
     pub predecessor_session: Option<String>,
     pub ts: String,
+}
+
+/// When a holder's reign began and the term it declared. Keyed on the
+/// session: a re-scope by the same session carries it, a new session (an
+/// heir) or a same-scope re-arm starts fresh.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReignClock {
+    pub session: String,
+    /// Canonical scope of the manifest last stamped.
+    pub scope: String,
+    /// That manifest's created_at.
+    pub armed_at: String,
+    /// The reign's first arm.
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
 }
 
 /// One reverted succession: the receipt the reap sweep reports and journals.
@@ -167,6 +197,39 @@ pub fn display(name: &str, regnal: u32) -> String {
     format!("{first}{}{numeral}", chars.as_str())
 }
 
+/// The people title for a level (L0 Chief of a portfolio, L1 Head of a
+/// project, L2 Lead of a theme). `scope` is the fallback text when no theme
+/// names the lead's epics, so a Chief with no named portfolio reads
+/// "Chief of" its project list.
+pub fn title(level: u32, scope: &str, theme: Option<&str>) -> String {
+    match level {
+        0 => format!("Chief of {}", theme.unwrap_or(scope)),
+        1 => format!("Head of {scope}"),
+        2 => format!("Lead of {}", theme.unwrap_or(scope)),
+        n => format!("L{n} {scope}"),
+    }
+}
+
+/// The pre-title rank string, `L{level} {scope}` - what queued mail from
+/// before the upgrade carries and what every stored rank must still verify
+/// against during the one-release window.
+pub fn legacy_label(level: u32, scope: &str) -> String {
+    format!("L{level} {scope}")
+}
+
+/// A theme is 2 to 40 characters of letters, digits, spaces, hyphens and
+/// apostrophes. No quote or angle bracket: the title rides inside a quoted
+/// mail attribute.
+fn valid_theme(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() >= 2
+        && b.len() <= 40
+        && b[0].is_ascii_alphanumeric()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b' ' || *c == b'\'' || *c == b'-')
+}
+
 /// The live crowns indexed by canonical scope - the one liveness read every
 /// rule here shares (`territory::live_crowns`, never a private copy).
 fn live_index(registry_path: &Path) -> Result<BTreeMap<String, crate::territory::Crown>, String> {
@@ -207,6 +270,29 @@ pub fn live_names(
     Ok(live_names_in(&store, &live))
 }
 
+/// Scope -> stored people title for every record that counts as live (the
+/// same liveness rule [`live_names`] applies). A record with no title yet is
+/// skipped, so the fold stamp reads `null` and the ledger falls back.
+pub fn live_titles(
+    store_path: &Path,
+    registry_path: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    let store = read(store_path)?;
+    let live = live_index(registry_path)?;
+    Ok(store
+        .crowns
+        .iter()
+        .filter_map(|(scope, rec)| {
+            let crown = live.get(scope)?;
+            let bound = rec.holder_session.as_deref();
+            if bound.is_some() && bound != crown.holder_session.as_deref() {
+                return None;
+            }
+            Some((scope.clone(), rec.title.clone()?))
+        })
+        .collect())
+}
+
 /// Name an un-named live crown. Refusals (pattern, a duplicate live name,
 /// an already-named crown) name the holder so the king can pick again.
 /// Success writes regnal 1 bound to the live holder's session and answers
@@ -239,21 +325,7 @@ pub fn name_crown(
                 "this crown is already named {existing}; the name belongs to the crown"
             ));
         }
-        if let Some((held_scope, _)) = store.crowns.iter().find(|(s, rec)| {
-            *s != &canon && names.contains_key(*s) && rec.name.eq_ignore_ascii_case(name)
-        }) {
-            let holder = live
-                .get(held_scope)
-                .map(|c| c.holder.as_str())
-                .unwrap_or("another crown");
-            return Err(format!(
-                "the name {} is held by {holder} over {held_scope}; pick another name",
-                display(
-                    &store.crowns[held_scope].name,
-                    store.crowns[held_scope].regnal
-                )
-            ));
-        }
+        check_duplicate_name(store, &names, &live, &canon, name)?;
         let holder_session = live.get(&canon).and_then(|c| c.holder_session.clone());
         store.crowns.insert(
             canon.clone(),
@@ -263,13 +335,121 @@ pub fn name_crown(
                 holder_session,
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
+                theme: None,
+                title: live
+                    .get(&canon)
+                    .map(|c| title(c.level as u32, &canon, None)),
                 pending_succession: None,
+                reign: None,
             },
         );
         Ok(display(name, 1))
     })?;
     ensure_named_crown(store_path, registry_path, &canon)?;
     Ok(shown)
+}
+
+fn check_duplicate_name(
+    store: &Store,
+    names: &BTreeMap<String, String>,
+    live: &BTreeMap<String, crate::territory::Crown>,
+    canon: &str,
+    name: &str,
+) -> Result<(), String> {
+    if let Some((held_scope, _)) = store.crowns.iter().find(|(scope, rec)| {
+        scope.as_str() != canon && names.contains_key(*scope) && rec.name.eq_ignore_ascii_case(name)
+    }) {
+        let holder = live
+            .get(held_scope)
+            .map(|crown| crown.holder.as_str())
+            .unwrap_or("another crown");
+        return Err(format!(
+            "the name {} is held by {holder} over {held_scope}; pick another name",
+            display(
+                &store.crowns[held_scope].name,
+                store.crowns[held_scope].regnal
+            )
+        ));
+    }
+    Ok(())
+}
+
+/// Rename the named live crown held by `session`, or return `None` when the
+/// session does not hold one. With `apply = false`, validate without writing.
+pub fn rename_crown(
+    store_path: &Path,
+    registry_path: &Path,
+    session: &str,
+    new_name: &str,
+    apply: bool,
+) -> Result<Option<(String, String)>, String> {
+    if !valid_name(new_name) {
+        let live = live_index(registry_path)?;
+        let holder = live
+            .values()
+            .find(|crown| crown.holder_session.as_deref() == Some(session));
+        if let Some(crown) = holder {
+            return Err(format!(
+                "{} holds the crown over {}, so its name is the crown name: 2-24 letters (apostrophes and hyphens after the first), got {new_name:?}",
+                crown.holder, crown.scope
+            ));
+        }
+        return Ok(None);
+    }
+    let live = live_index(registry_path)?;
+    let Some((scope, _crown)) = live
+        .iter()
+        .find(|(_, crown)| crown.holder_session.as_deref() == Some(session))
+    else {
+        return Ok(None);
+    };
+    let canon = crate::territory::canonical_scope(scope);
+    let prior = read(store_path)?;
+    let Some(record) = prior.crowns.get(&canon) else {
+        return Ok(None);
+    };
+    if record
+        .holder_session
+        .as_deref()
+        .is_some_and(|holder| holder != session)
+    {
+        return Ok(None);
+    }
+    if !apply {
+        let from = display(&record.name, record.regnal);
+        let to = display(new_name, 1);
+        let names = live_names_in(&prior, &live);
+        check_duplicate_name(&prior, &names, &live, &canon, new_name)?;
+        return Ok(Some((from, to)));
+    }
+    let result = update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        check_duplicate_name(store, &names, &live, &canon, new_name)?;
+        let current = store
+            .crowns
+            .get(&canon)
+            .ok_or_else(|| format!("no named crown over {canon}"))?;
+        if current
+            .holder_session
+            .as_deref()
+            .is_some_and(|holder| holder != session)
+        {
+            return Err(format!("crown over {canon} changed holder before rename"));
+        }
+        let from = display(&current.name, current.regnal);
+        let to = display(new_name, 1);
+        let record = store
+            .crowns
+            .get_mut(&canon)
+            .ok_or_else(|| format!("no named crown over {canon}"))?;
+        record.name = new_name.to_string();
+        record.regnal = 1;
+        record.holder_session = Some(session.to_string());
+        record.pending_succession = None;
+        record.updated_at = now_stamp();
+        Ok((from, to))
+    })?;
+    Ok(Some(result))
 }
 
 /// Keep the live holder's registry label in step with the name bound to this
@@ -379,12 +559,17 @@ pub fn keep_from(
             ));
         }
         store.crowns.remove(&old);
+        // A re-scope clears the theme: the epics changed, so the next
+        // check-in must name the theme again. The title recomputes from the
+        // bare scope until it does.
         store.crowns.insert(
             new.clone(),
             CrownNameRecord {
                 holder_session: crown.holder_session.clone(),
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
+                theme: None,
+                title: Some(title(crown.level as u32, &new, None)),
                 ..rec
             },
         );
@@ -413,6 +598,259 @@ pub fn carry_succession(
         }
         Ok(())
     })
+}
+
+/// RFC3339 compare that survives `Z` and `+00:00` spellings; a string
+/// compare backstops an unparsable stamp.
+fn ts_earlier(a: &str, b: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(x), Ok(y)) => {
+            if x <= y {
+                a.to_string()
+            } else {
+                b.to_string()
+            }
+        }
+        _ if a <= b => a.to_string(),
+        _ => b.to_string(),
+    }
+}
+
+/// The live clock for this manifest, if one applies. Candidates are every
+/// record whose `reign.session` names the manifest's own session; the
+/// newest `armed_at` wins, parsed as a `DateTime` because `Z` and `+00:00`
+/// spellings coexist in written stores. It applies on a re-scope not yet
+/// stamped (the clock's scope differs and this manifest is newer than the
+/// clock's arm) or on the scope it was stamped for; a same-scope re-arm
+/// (a newer manifest, same scope) and an older manifest apply nothing.
+fn clock_for(store: &Store, m: &KingManifest) -> Option<ReignClock> {
+    let session = m
+        .harness_session_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())?;
+    let scope = crate::territory::canonical_scope(&m.scope);
+    let created = m.created_at.as_deref().unwrap_or_default();
+    let mut best: Option<ReignClock> = None;
+    for rec in store.crowns.values() {
+        let Some(reign) = rec.reign.as_ref() else {
+            continue;
+        };
+        if reign.session != session || reign.armed_at.is_empty() {
+            continue;
+        }
+        let take = match best.as_ref() {
+            None => true,
+            Some(cur) => match (
+                chrono::DateTime::parse_from_rfc3339(&reign.armed_at),
+                chrono::DateTime::parse_from_rfc3339(&cur.armed_at),
+            ) {
+                (Ok(a), Ok(b)) => a > b,
+                _ => reign.armed_at.as_str() > cur.armed_at.as_str(),
+            },
+        };
+        if take {
+            best = Some(reign.clone());
+        }
+    }
+    let clock = best?;
+    let applies = if clock.scope != scope {
+        !created.is_empty()
+            && match (
+                chrono::DateTime::parse_from_rfc3339(created),
+                chrono::DateTime::parse_from_rfc3339(&clock.armed_at),
+            ) {
+                (Ok(c), Ok(a)) => c >= a,
+                _ => created >= clock.armed_at.as_str(),
+            }
+    } else {
+        clock.armed_at == created
+    };
+    applies.then_some(clock)
+}
+
+/// The manifest as the reign reads it: with a carried clock, the start is
+/// the reign's first arm and an undeclared term takes the carried one. An
+/// unreadable store returns the manifest unchanged.
+pub(crate) fn reign_view_in(store_path: &Path, m: &KingManifest) -> KingManifest {
+    let Ok(store) = read(store_path) else {
+        return m.clone();
+    };
+    let view_from = |clock: ReignClock| {
+        let mut view = m.clone();
+        view.created_at = Some(match m.created_at.as_deref() {
+            Some(created) if !created.is_empty() => ts_earlier(&clock.started_at, created),
+            _ => clock.started_at.clone(),
+        });
+        view.term = m.term.clone().or(clock.term);
+        view
+    };
+    clock_for(&store, m).map_or_else(|| m.clone(), view_from)
+}
+
+/// [`reign_view_in`] against the ambient agents home. `None` there (a test
+/// that declared no home) reads the manifest unchanged.
+pub(crate) fn reign_view(m: &KingManifest) -> KingManifest {
+    match crate::paths::AgentsHome::from_env_opt() {
+        Some(home) => reign_view_in(&home.crown_names_json(), m),
+        None => m.clone(),
+    }
+}
+
+/// Stamp the reign clock for this manifest arm onto the record for its
+/// canonical scope, inside the store lock. A carried clock keeps the
+/// earlier start and the declared term; no record, or no session, stamps
+/// nothing - the clock never creates a record.
+pub(crate) fn stamp_reign(
+    store_path: &Path,
+    m: &KingManifest,
+    term: Option<&str>,
+) -> Result<(), String> {
+    let Some(session) = m
+        .harness_session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(created) = m.created_at.clone().filter(|c| !c.trim().is_empty()) else {
+        return Ok(());
+    };
+    let canon = crate::territory::canonical_scope(&m.scope);
+    update(store_path, |store| {
+        let carried = clock_for(store, m);
+        let Some(rec) = store.crowns.get_mut(&canon) else {
+            return Ok(());
+        };
+        rec.reign = Some(ReignClock {
+            session,
+            scope: canon.clone(),
+            armed_at: created.clone(),
+            started_at: match &carried {
+                Some(c) => ts_earlier(&c.started_at, &created),
+                None => created.clone(),
+            },
+            term: term
+                .map(str::to_string)
+                .or_else(|| m.term.clone())
+                .or_else(|| carried.as_ref().and_then(|c| c.term.clone())),
+        });
+        rec.updated_at = now_stamp();
+        Ok(())
+    })
+}
+
+/// Stamp the beat's manifest arm and return the holder session it named.
+/// Best-effort: any failure prints one warning and never fails the beat.
+pub(crate) fn stamp_beat_reign(store_path: &Path, cwd: &Path, scope: &str) -> Option<String> {
+    let stamped = (|| -> Result<String, String> {
+        // The manifest lives under the canonical scope; a caller passing an
+        // unsorted member list still reads its own armed manifest.
+        let path = crate::loop_reign::manifest_path(
+            &crate::paths::space_dir(cwd),
+            &crate::territory::canonical_scope(scope),
+        )?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let manifest = crate::loopcheck::parse_king_manifest(&content)
+            .ok_or_else(|| format!("{}: no frontmatter", path.display()))?;
+        stamp_reign(store_path, &manifest, None)?;
+        Ok(manifest.harness_session_id.unwrap_or_default())
+    })();
+    match stamped {
+        Ok(s) if !s.is_empty() => Some(s),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("king-checkin: WARNING: reign clock not stamped: {e}");
+            None
+        }
+    }
+}
+
+/// Set (once per scope) a lead's theme. The crown must be live and named;
+/// L1 refuses ("Head of <project> takes the project name; no theme"); the
+/// same theme again is a no-op; a different theme names the current one and
+/// refuses (set once per scope, like the name).
+pub fn set_theme(
+    store_path: &Path,
+    registry_path: &Path,
+    scope: &str,
+    theme: &str,
+) -> Result<String, String> {
+    let theme = theme.trim();
+    if !valid_theme(theme) {
+        return Err(format!(
+            "a theme is 2-40 characters (letters, digits, spaces, hyphens and apostrophes; no quote or angle bracket), got {theme:?}"
+        ));
+    }
+    let canon = crate::territory::canonical_scope(scope);
+    let live = live_index(registry_path)?;
+    update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        if !names.contains_key(&canon) {
+            return Err("every live crown needs a name; check in with --name <name>".into());
+        }
+        if live.get(&canon).is_some_and(|c| c.level == 1) {
+            return Err("Head of <project> takes the project name; no theme".into());
+        }
+        let verdict = {
+            let rec = store
+                .crowns
+                .get(&canon)
+                .expect("the named check passed, so the record exists");
+            match rec.theme.as_deref() {
+                Some(existing) if existing == theme => Ok(rec
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| title(live[&canon].level as u32, &canon, Some(existing)))),
+                Some(existing) => Err(format!(
+                    "this lead's theme is already {existing:?}; the theme is set once per scope, like the name"
+                )),
+                None => Ok(String::new()),
+            }
+        };
+        verdict?;
+        let rec = store
+            .crowns
+            .get_mut(&canon)
+            .expect("the named check passed, so the record exists");
+        rec.theme = Some(theme.to_string());
+        rec.title = Some(title(live[&canon].level as u32, &canon, Some(theme)));
+        rec.updated_at = now_stamp();
+        Ok(rec.title.clone().unwrap_or_default())
+    })
+}
+
+/// The live theme over `scope`, or None. A missing or malformed store reads
+/// as no theme (the tolerant read the mail envelope uses).
+pub fn theme_for(store_path: &Path, scope: &str) -> Option<String> {
+    let canon = crate::territory::canonical_scope(scope);
+    let store = read(store_path).ok()?;
+    store.crowns.get(&canon)?.theme.clone()
+}
+
+/// Every stored theme keyed by canonical scope, tolerant (a missing or
+/// malformed file reads as empty) - the once-per-fold read the feed's
+/// crown rows and owner text render from.
+pub fn theme_map(store_path: &Path) -> BTreeMap<String, String> {
+    let store = match read(store_path) {
+        Ok(s) => s,
+        Err(_) => return BTreeMap::new(),
+    };
+    store
+        .crowns
+        .into_iter()
+        .filter_map(|(scope, rec)| rec.theme.map(|t| (scope, t)))
+        .collect()
+}
+
+/// The stored people title over `scope`, tolerant like [`theme_for`].
+pub fn stored_title(store_path: &Path, scope: &str) -> Option<String> {
+    let canon = crate::territory::canonical_scope(scope);
+    let store = read(store_path).ok()?;
+    store.crowns.get(&canon)?.title.clone()
 }
 
 /// Drop the record (a fresh grant over the scope starts unnamed).
@@ -582,8 +1020,350 @@ pub fn snapshot(store_path: &Path) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Apply `--name` / `--keep-name-from` / `--theme` before the beat runs. A
+/// refusal (duplicate live name, already-named crown, wrong holder, missing
+/// name or theme) names the holder or the missing flag; the caller prints
+/// it and exits 2 with no beat journalled.
+pub fn apply_crown_naming(
+    store_path: &Path,
+    registry_path: &Path,
+    name: Option<&str>,
+    rescope_from: Option<&str>,
+    theme: Option<&str>,
+    level: Option<i64>,
+    scope: &str,
+) -> Result<(), String> {
+    match (name, rescope_from) {
+        (Some(_), Some(_)) => Err("use one of --name or --keep-name-from, not both".into()),
+        (Some(n), None) => name_crown(&store_path, &registry_path, scope, n).map(|_| ()),
+        (None, Some(old)) => crate::crown_names::keep_from(&store_path, &registry_path, old, scope),
+        (None, None) => Ok(()),
+    }?;
+    if let Some(theme) = theme {
+        set_theme(&store_path, &registry_path, scope, theme)?;
+    }
+    if !ensure_named_crown(&store_path, &registry_path, scope)? {
+        return Err("every live crown needs a name; check in with --name <name>".into());
+    }
+    if matches!(level, Some(0) | Some(2)) && theme_for(&store_path, scope).is_none() {
+        return Err(
+            "every lead names its theme once per scope; check in with --theme <theme>".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The first line of every beat: identity first, then the facts. An unnamed
+/// lead gets the once-only instruction instead of a name.
+pub fn crown_line_text(name: Option<&str>, title_txt: &str, scope: &str) -> String {
+    match name {
+        Some(name) => format!("{name}, {title_txt} ({scope})"),
+        None => "unnamed lead - name it once: fno agents org checkin --name <name>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_checkin_naming_and_theme_flows() {
+        fn an_unnamed_live_crown_cannot_complete_checkin() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
+            let err = apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                None,
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("every live crown needs a name"), "{err}");
+        }
+
+        fn a_successor_checkin_carries_the_name_into_its_registry_label() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-old", "x-aaaa", 2, "sess-old")]),
+            );
+            name_crown(&store, &registry, "x-aaaa", "barnaby").unwrap();
+            carry_succession(&store, "x-aaaa", None).unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]),
+            );
+            apply_crown_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let rows = crate::state::load_registry(&registry).unwrap();
+            assert_eq!(rows.entries[0].name, "barnaby");
+        }
+
+        fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([
+                    crown_row("king-a", "x-aaaa", 2, "sess-a"),
+                    crown_row("king-b", "fno", 1, "sess-b"),
+                ]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                Some("native backlog"),
+                Some(2),
+                "x-aaaa",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("barnaby"), "{err}");
+            assert!(err.contains("x-aaaa"), "{err}");
+        }
+
+        fn naming_an_already_named_crown_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("king-b", "fno", 1, "sess-b")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            apply_crown_naming(
+                &store,
+                &registry,
+                Some("barnaby"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap();
+            let err = apply_crown_naming(
+                &store,
+                &registry,
+                Some("ernest"),
+                None,
+                None,
+                Some(1),
+                "fno",
+            )
+            .unwrap_err();
+            assert!(err.contains("already named"), "{err}");
+        }
+
+        fn combining_the_two_naming_flags_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            assert!(apply_crown_naming(
+                &store_path(tmp.path()),
+                &registry_path(tmp.path()),
+                Some("a"),
+                Some("old"),
+                None,
+                None,
+                "fno"
+            )
+            .is_err());
+        }
+
+        fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
+            assert_eq!(
+                crown_line_text(
+                    Some("Kestrel"),
+                    "Lead of native backlog",
+                    "x-dddd,x-eeee,x-ffff"
+                ),
+                "Kestrel, Lead of native backlog (x-dddd,x-eeee,x-ffff)"
+            );
+            assert_eq!(
+                crown_line_text(None, "L1 fno", "fno"),
+                "unnamed lead - name it once: fno agents org checkin --name <name>"
+            );
+        }
+
+        fn a_themed_l2_checkin_records_theme_and_title() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-dddd,x-eeee,x-ffff", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-dddd,x-eeee,x-ffff", "kestrel").unwrap();
+            let shown =
+                set_theme(&store, &registry, "x-dddd,x-eeee,x-ffff", "native backlog").unwrap();
+            assert_eq!(shown, "Lead of native backlog");
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["x-dddd,x-eeee,x-ffff"];
+            assert_eq!(rec["theme"], json!("native backlog"));
+            assert_eq!(rec["title"], json!("Lead of native backlog"));
+            assert_eq!(
+                stored_title(&store, "x-dddd,x-eeee,x-ffff").as_deref(),
+                Some("Lead of native backlog")
+            );
+        }
+
+        fn a_beat_without_a_theme_refuses_and_names_the_flag() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "x-aaaa")
+                .unwrap_err();
+            assert!(
+                err.contains("every lead names its theme once per scope"),
+                "{err}"
+            );
+            assert!(err.contains("--theme"), "{err}");
+        }
+
+        fn an_l1_refuses_a_theme_and_titles_by_project() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(tmp.path(), json!([crown_row("folio", "fno", 1, "sess-f")]));
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "fno", "folio").unwrap();
+            let err = set_theme(&store, &registry, "fno", "native backlog").unwrap_err();
+            assert!(err.contains("takes the project name"), "{err}");
+            assert_eq!(title(1, "fno", None), "Head of fno");
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["crowns"]["fno"]["title"], json!("Head of fno"));
+        }
+
+        fn titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form() {
+            assert_eq!(title(0, "fno", None), "Chief of fno");
+            assert_eq!(title(0, "fno", Some("ReadyRule")), "Chief of ReadyRule");
+            assert_eq!(title(2, "x-aaaa", None), "Lead of x-aaaa");
+            assert_eq!(title(7, "fno", Some("native backlog")), "L7 fno");
+            assert_eq!(
+                legacy_label(2, "x-dddd,x-eeee,x-ffff"),
+                "L2 x-dddd,x-eeee,x-ffff"
+            );
+        }
+
+        fn a_theme_with_a_quote_or_bad_length_refuses() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            for bad in ["na\"tive", "na<ti", "x"] {
+                let err = set_theme(&store, &registry, "x-aaaa", bad).unwrap_err();
+                assert!(err.contains("2-40 characters"), "{err}");
+            }
+            assert!(set_theme(&store, &registry, "x-aaaa", "o'brien-team").is_ok());
+        }
+
+        fn the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            assert_eq!(
+                set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap(),
+                "Lead of native backlog"
+            );
+            let err = set_theme(&store, &registry, "x-aaaa", "other theme").unwrap_err();
+            assert!(err.contains("native backlog"), "{err}");
+            assert!(err.contains("set once per scope"), "{err}");
+        }
+
+        fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_crown(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            set_theme(&store, &registry, "x-aaaa", "native backlog").unwrap();
+            // AC1-HP: the clock stamped on the old arm, the re-scope, and the
+            // next stamp on the new arm: the carried start and term survive.
+            let mk = |scope: &str, created: &str, term: Option<&str>| KingManifest {
+                scope: scope.to_string(),
+                created_at: Some(created.to_string()),
+                harness_session_id: Some("sess-k".to_string()),
+                term: term.map(str::to_string),
+                ..Default::default()
+            };
+            let (t0, t1, t2) = (
+                "2026-09-20T12:00:00Z",
+                "2026-09-29T21:00:00Z",
+                "2026-09-29T22:00:00Z",
+            );
+            stamp_reign(&store, &mk("x-aaaa", t0, Some("span:200h")), None).unwrap();
+            // The told-to re-scope: the same holder now holds a new scope.
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "new-scope", 2, "sess-k")]),
+            );
+            keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
+            let dump = snapshot(&store).unwrap();
+            let rec = &dump["crowns"]["new-scope"];
+            assert!(rec.get("theme").is_none() || rec["theme"].is_null());
+            assert_eq!(rec["title"], json!("Lead of new-scope"));
+            // The next arm on the new scope folds the carried clock in.
+            stamp_reign(&store, &mk("new-scope", t1, None), None).unwrap();
+            let view = reign_view_in(&store, &mk("new-scope", t1, None));
+            assert_eq!(view.created_at.as_deref(), Some(t0));
+            assert_eq!(view.term.as_deref(), Some("span:200h"));
+            // AC4-EDGE: a same-scope re-arm (a newer manifest, same scope)
+            // starts fresh; the carried clock does not apply.
+            let view = reign_view_in(&store, &mk("new-scope", t2, None));
+            assert_eq!(view.created_at.as_deref(), Some(t2));
+            assert_eq!(view.term, None);
+            let err = apply_crown_naming(&store, &registry, None, None, None, Some(2), "new-scope")
+                .unwrap_err();
+            assert!(err.contains("--theme"), "{err}");
+        }
+        an_unnamed_live_crown_cannot_complete_checkin();
+        a_successor_checkin_carries_the_name_into_its_registry_label();
+        a_duplicate_live_name_refuses_naming_and_names_the_holder();
+        naming_an_already_named_crown_refuses();
+        combining_the_two_naming_flags_refuses();
+        the_crown_line_leads_and_the_unnamed_line_teaches_the_flag();
+        a_themed_l2_checkin_records_theme_and_title();
+        a_beat_without_a_theme_refuses_and_names_the_flag();
+        an_l1_refuses_a_theme_and_titles_by_project();
+        titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form();
+        a_theme_with_a_quote_or_bad_length_refuses();
+        the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop();
+        a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one();
+    }
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
@@ -710,7 +1490,10 @@ mod tests {
                         holder_session: None,
                         nodes: Vec::new(),
                         updated_at: now_stamp(),
+                        theme: None,
+                        title: None,
                         pending_succession: None,
+                        reign: None,
                     },
                 )]),
             },
@@ -830,6 +1613,19 @@ mod tests {
             "barnaby",
         )
         .unwrap();
+        // The predecessor's reign clock: the heir must not read it.
+        stamp_reign(
+            &store_path(tmp.path()),
+            &KingManifest {
+                scope: "x-aaaa".into(),
+                created_at: Some("2026-09-20T12:00:00Z".into()),
+                harness_session_id: Some("sess-a".into()),
+                term: Some("span:200h".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
         // An unmarked carry (an old caller) keeps the frozen wire shape.
         carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
@@ -861,6 +1657,22 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("king-a"));
         assert_eq!(pending["predecessor_session"], json!("sess-a"));
         assert!(pending["ts"].is_string());
+        // AC3-EDGE: an heir is a new session. The carried clock keys on the
+        // predecessor's session, so the heir's manifest reads from its own
+        // arm; the predecessor's term is not read.
+        let heir_manifest = KingManifest {
+            scope: "x-aaaa".into(),
+            created_at: Some("2026-09-29T23:00:00Z".into()),
+            harness_session_id: Some("sess-heir".into()),
+            ..Default::default()
+        };
+        let view = reign_view_in(&store_path(tmp.path()), &heir_manifest);
+        assert_eq!(
+            view.created_at.as_deref(),
+            Some("2026-09-29T23:00:00Z"),
+            "an heir starts from its own manifest"
+        );
+        assert_eq!(view.term, None);
     }
 
     #[test]
@@ -954,7 +1766,10 @@ mod tests {
                     holder_session: Some("sess-a".into()),
                     nodes: vec!["x-1".into()],
                     updated_at: now_stamp(),
+                    theme: None,
+                    title: None,
                     pending_succession: None,
+                    reign: None,
                 },
             )]),
         };
@@ -984,7 +1799,10 @@ mod tests {
                     holder_session: Some("sess-other".into()),
                     nodes: Vec::new(),
                     updated_at: now_stamp(),
+                    theme: None,
+                    title: None,
                     pending_succession: None,
+                    reign: None,
                 },
             )]),
         };
@@ -1018,12 +1836,15 @@ mod tests {
             holder_session: None,
             nodes: Vec::new(),
             updated_at: now_stamp(),
+            theme: None,
+            title: None,
             pending_succession: Some(PendingSuccession {
                 heir_name: heir.into(),
                 predecessor_name: pred.into(),
                 predecessor_session: session.map(String::from),
                 ts: ts.into(),
             }),
+            reign: None,
         }
     }
 

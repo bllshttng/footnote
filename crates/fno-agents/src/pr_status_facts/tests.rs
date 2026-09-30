@@ -61,7 +61,7 @@ const REQUIRED_CHECKS_RULE: &str = r#"[
 // --- AC1-HP .. AC4-EDGE: merge_blocker --------------------------------------
 
 #[test]
-fn not_mergeable_conflicting_blocks_and_null_fails_closed() {
+fn block_rows() {
     let probes = FakeGh {
         ok: true,
         output: String::new(),
@@ -89,10 +89,7 @@ fn not_mergeable_conflicting_blocks_and_null_fails_closed() {
     assert!(out["blockers"].as_array().unwrap().is_empty());
     let out = merge_blocker(&probes, &json!({"merge_state": "clean", "cwd": "/repo"}));
     assert!(out["blockers"].as_array().unwrap().is_empty());
-}
 
-#[test]
-fn ac1_blocked_state_names_the_missing_required_check() {
     let probes = FakeGh {
         ok: true,
         output: rules_output(serde_json::from_str(REQUIRED_CHECKS_RULE).unwrap()),
@@ -117,10 +114,7 @@ fn ac1_blocked_state_names_the_missing_required_check() {
     let calls = probes.calls.borrow();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].iter().any(|a| a.contains("rules/branches/main")));
-}
 
-#[test]
-fn ac2_a_failed_rules_read_still_blocks_with_a_null_missing_list() {
     let probes = FakeGh {
         ok: false,
         output: "gh: HTTP 403".to_string(),
@@ -132,10 +126,7 @@ fn ac2_a_failed_rules_read_still_blocks_with_a_null_missing_list() {
     assert_eq!(out["blockers"], json!(["github_blocked"]));
     assert!(out["missing_required_checks"].is_null());
     assert!(out["source"].as_str().unwrap().contains("failed"));
-}
 
-#[test]
-fn ac3_the_states_existing_conjuncts_already_name_add_no_blocker() {
     for state in ["clean", "has_hooks", "unstable", "dirty", "unknown"] {
         let probes = FakeGh {
             ok: true,
@@ -161,10 +152,7 @@ fn ac3_the_states_existing_conjuncts_already_name_add_no_blocker() {
     };
     let out = merge_blocker(&probes, &json!({"merge_state": null, "cwd": "/repo"}));
     assert_eq!(out["blockers"], json!([]));
-}
 
-#[test]
-fn the_states_only_this_read_sees_get_their_named_blockers() {
     for (state, blocker) in [
         ("behind", "github_behind"),
         ("draft", "github_draft"),
@@ -179,10 +167,7 @@ fn the_states_only_this_read_sees_get_their_named_blockers() {
         let out = merge_blocker(&probes, &json!({"merge_state": state, "cwd": "/repo"}));
         assert_eq!(out["blockers"], json!([blocker]), "state {state}");
     }
-}
 
-#[test]
-fn a_required_review_rule_adds_required_review_to_the_missing_list() {
     let probes = FakeGh {
         ok: true,
         output: rules_output(json!([
@@ -199,10 +184,7 @@ fn a_required_review_rule_adds_required_review_to_the_missing_list() {
     // No pr on the payload: the review probe cannot run, so the requirement
     // is named - the safe direction.
     assert_eq!(out["missing_required_checks"], json!(["required_review"]));
-}
 
-#[test]
-fn a_green_status_row_satisfies_its_required_context() {
     // Commit statuses arrive in the context/state shape and uppercase.
     let probes = FakeGh {
         ok: true,
@@ -223,10 +205,7 @@ fn a_green_status_row_satisfies_its_required_context() {
     assert_eq!(out["blockers"], json!(["github_blocked"]));
     // Every required context passed, so the rules read explains nothing.
     assert!(out["missing_required_checks"].is_null());
-}
 
-#[test]
-fn a_pending_required_check_is_missing_not_satisfied() {
     let probes = FakeGh {
         ok: true,
         output: rules_output(serde_json::from_str(REQUIRED_CHECKS_RULE).unwrap()),
@@ -268,7 +247,7 @@ fn cross_door_log() -> String {
 }
 
 #[test]
-fn ac5_the_window_scopes_the_block_and_the_panic_names_the_real_cause() {
+fn cause_rows() {
     let payload = json!({
         "log": cross_door_log(),
         "window": ["2026-09-18T13:00:05Z", "2026-09-18T13:00:06Z"],
@@ -280,10 +259,7 @@ fn ac5_the_window_scopes_the_block_and_the_panic_names_the_real_cause() {
     );
     assert_eq!(out["source"], "cargo");
     assert_eq!(out["truncated"], false);
-}
 
-#[test]
-fn ac6_without_a_window_the_cargo_verdict_still_beats_the_earlier_error_line() {
     let payload = json!({"log": cross_door_log()});
     let out = failure_cause(&payload);
     assert_eq!(out["source"], "cargo");
@@ -295,10 +271,7 @@ fn ac6_without_a_window_the_cargo_verdict_still_beats_the_earlier_error_line() {
         "the passing test's stderr must not win: {}",
         out["cause"]
     );
-}
 
-#[test]
-fn ac7_pytest_notes_sink_and_the_real_diagnostic_is_joined_in() {
     let log = [
         "##[group]Pytest (unit + integration)",
         "FAILED cli/tests/lint/test_check_pitfalls.py::test_preamble_ceiling - AssertionError",
@@ -317,10 +290,7 @@ fn ac7_pytest_notes_sink_and_the_real_diagnostic_is_joined_in() {
     // The sunk note line is the LAST note text in the cause; the diagnostic
     // outranks it.
     assert!(cut < cause.rfind("note:").unwrap());
-}
 
-#[test]
-fn ac8_an_error_shaped_line_is_the_fallback() {
     let log = [
         "=== lint ===",
         "src/x.py:12: error: cannot determine type",
@@ -333,10 +303,7 @@ fn ac8_an_error_shaped_line_is_the_fallback() {
         json!("src/x.py:12: error: cannot determine type")
     );
     assert_eq!(out["source"], "error_line");
-}
 
-#[test]
-fn ac9_a_real_group_marker_opens_the_block_at_the_named_step() {
     let log = [
         "pre-group error: from an earlier step",
         "##[group]Sync + build",
@@ -346,10 +313,7 @@ fn ac9_a_real_group_marker_opens_the_block_at_the_named_step() {
     .join("\n");
     let out = failure_cause(&json!({"log": log, "step": "Sync + build"}));
     assert_eq!(out["cause"], json!("in-step error: the real one"));
-}
 
-#[test]
-fn a_build_script_panic_without_a_failed_line_is_named_alone() {
     let log = [
         at(0, 0, "thread 'build_script' panicked at build.rs:10:5:"),
         at(0, 0, "the registry file is unwritable"),
@@ -362,10 +326,7 @@ fn a_build_script_panic_without_a_failed_line_is_named_alone() {
         json!("panicked at build.rs:10: the registry file is unwritable")
     );
     assert_eq!(out["source"], "cargo");
-}
 
-#[test]
-fn the_earliest_matching_error_pattern_wins_not_the_strongest() {
     let log = [
         "cli/src/x.py:52:1: E402 module level import not at top of file",
         "Found 1 error.",
@@ -377,10 +338,7 @@ fn the_earliest_matching_error_pattern_wins_not_the_strongest() {
         out["cause"],
         json!("cli/src/x.py:52:1: E402 module level import not at top of file")
     );
-}
 
-#[test]
-fn an_oversized_cause_is_cut_and_the_cut_is_announced() {
     let long = format!(
         "test big ... FAILED\nthread 'big' panicked at a.rs:1:1:\n{}",
         "x".repeat(600)
@@ -390,17 +348,11 @@ fn an_oversized_cause_is_cut_and_the_cut_is_announced() {
     assert_eq!(out["truncated"], true);
     assert!(cause.ends_with(" chars cut]"));
     assert!(cause.chars().count() < 600);
-}
 
-#[test]
-fn an_empty_log_answers_a_null_cause_not_an_error() {
     let out = failure_cause(&json!({"log": ""}));
     assert!(out["cause"].is_null());
     assert_eq!(out["source"], "tail");
-}
 
-#[test]
-fn a_markerless_log_with_a_named_step_still_scans_the_prefix() {
     // The block boundary is an optimization, never a precondition (the old
     // Python contract, kept): no group marker, so the whole prefix before
     // the step-failed line is the block.
@@ -411,17 +363,14 @@ fn a_markerless_log_with_a_named_step_still_scans_the_prefix() {
     .join("\n");
     let out = failure_cause(&json!({"log": log, "step": "Ghost step"}));
     assert_eq!(out["cause"], json!("error: deeper than any marker"));
-}
 
-#[test]
-fn the_step_failed_line_itself_never_joins_the_block() {
     let log = "boom error: x\nstep failed, stopping fail-fast: s\n".to_string();
     let out = failure_cause(&json!({"log": log, "step": "s"}));
     assert_eq!(out["cause"], json!("boom error: x"));
 }
 
 #[test]
-fn a_satisfied_review_rule_is_not_named_missing() {
+fn rule_rows() {
     let probes = FakeGh {
         ok: true,
         output: rules_output(json!([
@@ -439,10 +388,7 @@ fn a_satisfied_review_rule_is_not_named_missing() {
     // for an approval that exists. The read then explains nothing, so the
     // missing list is null, not an empty array.
     assert!(out["missing_required_checks"].is_null());
-}
 
-#[test]
-fn the_steps_array_derives_the_failed_step_window() {
     // The Python transport passes the job's steps[] it already holds; the
     // failed step's [started_at, completed_at] scopes the block.
     let steps = json!([
@@ -457,10 +403,7 @@ fn the_steps_array_derives_the_failed_step_window() {
         .as_str()
         .unwrap()
         .contains("cross_door_property.rs:535"));
-}
 
-#[test]
-fn the_failed_step_window_stops_at_the_successor_even_within_the_same_second() {
     let steps = json!([
         {"name": "check-file-budget", "conclusion": "failure",
          "started_at": "2026-09-18T00:54:28Z", "completed_at": "2026-09-18T00:54:29Z"},
@@ -475,10 +418,7 @@ fn the_failed_step_window_stops_at_the_successor_even_within_the_same_second() {
     let out = failure_cause(&json!({"log": log, "window": steps}));
     assert!(out["cause"].as_str().unwrap().contains("check-file-budget"));
     assert!(!out["cause"].as_str().unwrap().contains("20 passed"));
-}
 
-#[test]
-fn fan_in_failure_cause_ends_before_runner_teardown() {
     let log = [
         "test-agents=failure test-mux=success",
         "##[error]Process completed with exit code 1.",
@@ -487,10 +427,7 @@ fn fan_in_failure_cause_ends_before_runner_teardown() {
     .join("\n");
     let out = failure_cause(&json!({"log": log}));
     assert_eq!(out["cause"], "test-agents=failure test-mux=success");
-}
 
-#[test]
-fn runner_chrome_is_removed_before_the_failure_tail_is_chosen() {
     let log = [
         "the policy check found the defect",
         "##[group]Post job cleanup",
@@ -503,44 +440,10 @@ fn runner_chrome_is_removed_before_the_failure_tail_is_chosen() {
 }
 
 #[test]
-fn unknown_ops_are_refused_by_name() {
+fn op_rows() {
     let out = run_op("status-nonsense", &json!({}));
     assert!(out.contains("unknown op status-nonsense"));
-}
 
-// --- zero-job runs: a run that failed before minting a job ---------------
-
-/// The 504b255 specimen: two failed cli-ci runs with 0 jobs (one newest),
-/// one successful rust-ci run a check run links to.
-fn specimen_runs() -> Vec<Value> {
-    json!([
-        {"id": 35344487208u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
-         "conclusion": "failure", "created_at": "2026-09-19T06:00:00Z",
-         "html_url": "https://github.com/o/r/actions/runs/35344487208"},
-        {"id": 35366958901u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
-         "conclusion": "failure", "created_at": "2026-09-19T07:00:00Z",
-         "html_url": "https://github.com/o/r/actions/runs/35366958901"},
-        {"id": 35344488345u64, "path": ".github/workflows/rust-ci.yml", "status": "completed",
-         "conclusion": "success", "created_at": "2026-09-19T06:00:00Z",
-         "html_url": "https://github.com/o/r/actions/runs/35344488345"},
-    ])
-    .as_array()
-    .unwrap()
-    .clone()
-}
-
-fn specimen_check_runs() -> Vec<Value> {
-    json!([
-        {"name": "rust-ci", "status": "completed", "conclusion": "success",
-         "details_url": "https://github.com/o/r/actions/runs/35344488345/job/99"},
-    ])
-    .as_array()
-    .unwrap()
-    .clone()
-}
-
-#[test]
-fn ac1_hp_the_newest_unlinked_failed_run_is_named_by_path() {
     let zero = 0u64;
     let found = zero_job_failures(&specimen_runs(), &specimen_check_runs(), &|_| Ok(zero)).unwrap();
     assert_eq!(found.len(), 1);
@@ -550,10 +453,7 @@ fn ac1_hp_the_newest_unlinked_failed_run_is_named_by_path() {
         "https://github.com/o/r/actions/runs/35366958901"
     );
     assert_eq!(found[0].conclusion, "failure");
-}
 
-#[test]
-fn ac1_err_a_failed_jobs_read_is_err_and_a_missing_runs_key_is_an_error() {
     assert!(zero_job_failures(
         &[json!({"id": 7u64, "path": "w.yml", "status": "completed", "conclusion": "failure"})],
         &[],
@@ -567,10 +467,7 @@ fn ac1_err_a_failed_jobs_read_is_err_and_a_missing_runs_key_is_an_error() {
     );
     assert!(out.contains("\"error\""), "got {out}");
     assert!(!out.contains("\"rows\""));
-}
 
-#[test]
-fn ac1_edge_a_linked_run_never_calls_jobs_total() {
     let runs = json!([
         {"id": 9u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
          "html_url": "https://github.com/o/r/actions/runs/9"},
@@ -586,10 +483,7 @@ fn ac1_edge_a_linked_run_never_calls_jobs_total() {
     .clone();
     let found = zero_job_failures(&runs, &checks, &|_| panic!("jobs_total must not run")).unwrap();
     assert!(found.is_empty());
-}
 
-#[test]
-fn ac1_edge_a_newer_success_supersedes_an_older_zero_job_failure() {
     let runs = json!([
         {"id": 5u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
          "html_url": "https://github.com/o/r/actions/runs/5"},
@@ -601,10 +495,7 @@ fn ac1_edge_a_newer_success_supersedes_an_older_zero_job_failure() {
     .clone();
     let found = zero_job_failures(&runs, &[], &|_| panic!("jobs_total must not run")).unwrap();
     assert!(found.is_empty());
-}
 
-#[test]
-fn ac1_edge_a_failed_run_with_jobs_is_not_reported() {
     let runs = json!([
         {"id": 7u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
          "html_url": "https://github.com/o/r/actions/runs/7"},
@@ -614,10 +505,7 @@ fn ac1_edge_a_failed_run_with_jobs_is_not_reported() {
     .clone();
     let found = zero_job_failures(&runs, &[], &|_| Ok(3)).unwrap();
     assert!(found.is_empty());
-}
 
-#[test]
-fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
     let probes = FakeGh {
         ok: true,
         // `--paginate --slurp` output: a JSON array of pages. The zero-job
@@ -640,10 +528,7 @@ fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
         .iter()
         .any(|a| a.contains("actions/runs?head_sha=abc123")));
     assert!(calls[0].iter().any(|a| a == "--paginate"));
-}
 
-#[test]
-fn the_op_answers_rows_in_the_python_rollup_shape() {
     let probes = FakeGh {
         ok: true,
         // `--paginate --slurp` output: one page holding the specimen runs.
@@ -678,8 +563,39 @@ fn the_op_answers_rows_in_the_python_rollup_shape() {
         .any(|a| a.contains("repos/o/r/actions/runs/35366958901/jobs"))));
 }
 
+// --- zero-job runs: a run that failed before minting a job ---------------
+
+/// The 504b255 specimen: two failed cli-ci runs with 0 jobs (one newest),
+/// one successful rust-ci run a check run links to.
+fn specimen_runs() -> Vec<Value> {
+    json!([
+        {"id": 35344487208u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
+         "conclusion": "failure", "created_at": "2026-09-19T06:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35344487208"},
+        {"id": 35366958901u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
+         "conclusion": "failure", "created_at": "2026-09-19T07:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35366958901"},
+        {"id": 35344488345u64, "path": ".github/workflows/rust-ci.yml", "status": "completed",
+         "conclusion": "success", "created_at": "2026-09-19T06:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35344488345"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
+fn specimen_check_runs() -> Vec<Value> {
+    json!([
+        {"name": "rust-ci", "status": "completed", "conclusion": "success",
+         "details_url": "https://github.com/o/r/actions/runs/35344488345/job/99"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
 #[test]
-fn timeout_annotation_selects_failure_annotations_with_the_timeout_message() {
+fn annot_rows() {
     let annotations = json!([
         {"annotation_level": "notice", "message": "some notice"},
         {"annotation_level": "failure", "message": "The job has exceeded the maximum execution time of 35m0s"},
@@ -689,10 +605,7 @@ fn timeout_annotation_selects_failure_annotations_with_the_timeout_message() {
         timeout_annotation(&annotations),
         Some("The job has exceeded the maximum execution time of 35m0s".to_string())
     );
-}
 
-#[test]
-fn the_op_relabels_cancelled_check_runs_with_timeout_annotations() {
     let message = "The job has exceeded the maximum execution time of 35m0s";
     let probes = AnnotationGh {
         ok: true,
@@ -711,10 +624,7 @@ fn the_op_relabels_cancelled_check_runs_with_timeout_annotations() {
     assert!(probes.calls.borrow().iter().any(|args| args
         .iter()
         .any(|arg| arg.contains("repos/o/r/check-runs/123/annotations"))));
-}
 
-#[test]
-fn the_op_keeps_cancelled_when_the_annotation_read_fails_or_names_preemption() {
     for (ok, annotations) in [
         (false, "annotation read failed"),
         (

@@ -50,17 +50,15 @@ def resolve_native_bin() -> str:
 
 
 def store_db_path(events_path: Path) -> Path:
-    """The store beside a journal: symlinks resolved, rotation suffixes and
-    the ``.jsonl`` stem stripped, ``.db`` appended - the same resolution the
-    native store performs, so a locator names one store from either side."""
-    resolved = Path(events_path).resolve()
-    stem = resolved.name
-    if stem.endswith(".jsonl"):
-        stem = stem[: -len(".jsonl")]
-    # A generation suffix (.1, .2) names the same store as the live journal.
-    if stem.rsplit(".", 1)[-1].isdigit():
-        stem = stem.rsplit(".", 1)[0]
-    return resolved.with_name(f"{stem}.db")
+    """Resolve the physical store through the native reader without importing."""
+    try:
+        receipt = subprocess.run(
+            [resolve_native_bin(), "doctor", "event", "rows", "--events", str(events_path), "--store-path-only"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return Path(json.loads(receipt.stdout)["store"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        raise EventStoreUnavailable(f"event store path unavailable for {events_path}: {exc}") from exc
 
 
 def native_rows(
@@ -70,7 +68,9 @@ def native_rows(
     include_rejected: bool = False,
     legacy_fallback: bool = False,
     timeout: float = 30,
-) -> Optional[list[str]]:
+    projection: Optional[str] = None,
+    query: Optional[dict[str, Any]] = None,
+) -> Any:
     """One native read pass: import, then committed envelope lines.
 
     The whole reader contract lives in the binary; this is the transport.
@@ -81,6 +81,8 @@ def native_rows(
     try:
         bin_path = resolve_native_bin()
     except EventStoreUnavailable:
+        if projection:
+            raise
         return None
     cmd = [bin_path, "doctor", "event", "rows", "--events", str(events_path)]
     for ty in types or []:
@@ -89,11 +91,18 @@ def native_rows(
         cmd.append("--include-rejected")
     if legacy_fallback:
         cmd.append("--legacy-fallback")
+    if projection:
+        cmd.append(projection)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        proc = subprocess.run(cmd, input=json.dumps(query) if query is not None else None,
+                              capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        if projection:
+            raise EventStoreUnavailable(f"native event projection unavailable: {exc}") from exc
         return None
     if proc.returncode != 0:
+        if projection:
+            raise EventStoreUnavailable((proc.stderr or f"native event read exited {proc.returncode}").strip())
         return None
     try:
         return json.loads(proc.stdout)
@@ -145,43 +154,18 @@ def query_rows(
     envelopes. A store that does not exist yet is an empty history; a locked
     or corrupt store raises EventStoreUnavailable - unavailable is never
     folded into an empty result."""
-    db = store_db_path(events_path)
-    if not db.exists():
-        return []
-    where: list[str] = []
-    args: list[Any] = []
-    if types:
-        where.append("type IN (%s)" % ",".join("?" * len(types)))
-        args.extend(types)
-    if session_id is not None:
-        where.append("session_id = ?")
-        args.append(session_id)
-    if since_ms is not None:
-        where.append("ts_ms >= ?")
-        args.append(since_ms)
-    if not include_rejected:
-        where.append("reject_reason IS NULL")
-    sql = "SELECT line FROM events"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY seq"
-    if limit is not None:
-        sql += f" LIMIT {int(limit)}"
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        _refuse_newer_schema(conn, db)
-        rows = conn.execute(sql, args).fetchall()
-    except sqlite3.Error as exc:
-        raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
-    finally:
-        conn.close()
-    out: list[dict[str, Any]] = []
-    for (line,) in rows:
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            out.append({"_corrupt": line})
-    return out
+    return read_projection(events_path, "--query-json", {
+        "types": types, "session_id": session_id, "since_ms": since_ms,
+        "limit": limit, "include_rejected": include_rejected,
+    })
+
+
+def read_projection(events_path: Path, mode: str, query: dict[str, Any]) -> Any:
+    """Transport for native read folds. A failed read never becomes empty."""
+    result = native_rows(events_path, projection=mode, query=query)
+    if not isinstance(result, dict) or result.get("projection") != mode or "rows" not in result:
+        raise EventStoreUnavailable(f"native event projection {mode} unavailable for {events_path}")
+    return result["rows"]
 
 
 def gc_ephemeral(

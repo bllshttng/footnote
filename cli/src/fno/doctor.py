@@ -2427,19 +2427,8 @@ def _emit_human(
         )
 
     surf = result.get("harness_surface") or {}
-    oc = surf.get("opencode")
-    if oc == "stale":
-        out(
-            "fno doctor: opencode footnote plugin is STALE (drifted from the "
-            "shipped source); re-run `fno config setup` to refresh it."
-        )
-    elif oc == "missing":
-        out(
-            "fno doctor: opencode is set up but its footnote plugin is missing; "
-            "re-run `fno config setup` to install it."
-        )
-    elif isinstance(oc, str):
-        out(f"fno doctor: opencode {oc}")
+    for line in surf.get("opencode_doctor_lines") or []:
+        out(f"fno doctor: {line}")
     _emit_codex_context_window(result, out=out)
 
     dupes = surf.get("codex_marketplace_duplicates") or []
@@ -3585,33 +3574,16 @@ def _harness_surface_report() -> dict[str, Any]:
                 "plugin-install", ["--status", "--json", "opencode"]
             )
             if err is None and isinstance(receipt, dict):
-                status = receipt.get("status")
-                # The message is built here so the printer stays string-only:
-                # partial names what never loaded, stale names version drift,
-                # and a legacy bridge-only machine learns what the bridge
-                # never carried.
-                if status == "stale":
-                    report["opencode"] = (
-                        f"surface is STALE: installed at footnote {receipt.get('version')}, "
-                        f"footnote ships {receipt.get('source_version')}; re-run "
-                        "`fno config plugin install opencode`."
-                    )
-                elif status == "partial":
-                    names = ", ".join(str(n) for n in (receipt.get("missing") or []))
-                    report["opencode"] = (
-                        "surface is PARTIAL: installed but not loaded: "
-                        + names
-                        + "; re-run `fno config plugin install opencode`."
-                    )
-                elif status == "absent":
-                    if receipt.get("bridge_present"):
-                        report["opencode"] = (
-                            "carries only the legacy stop bridge; the fno: "
-                            "commands, agents and skills are not installed; "
-                            "re-run `fno config plugin install opencode`."
-                        )
-                    else:
-                        report["opencode"] = "missing"
+                # The sentences are computed in Rust (status_json's
+                # doctor_lines: one line per install state, including omo
+                # findings and digest drift). Python only carries them.
+                lines = receipt.get("doctor_lines")
+                if isinstance(lines, list):
+                    report["opencode_doctor_lines"] = [
+                        str(line.get("text", ""))
+                        for line in lines
+                        if isinstance(line, dict) and line.get("text")
+                    ]
     except Exception:
         pass
 

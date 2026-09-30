@@ -176,6 +176,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "orphan_reap",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
@@ -205,7 +213,7 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
-        reader: Some("fno agents court --nodes"),
+        reader: Some("fno agents org --nodes"),
     },
     ArmSpec {
         arm: "provider_cap",
@@ -242,6 +250,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
         arm: "crown_ledger",
         default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "reign_eval",
+        default_interval_s: crate::reign_eval::REIGN_EVAL_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
@@ -1572,11 +1588,11 @@ mod tests {
         p
     }
 
-    /// AC8-HP: the readout knows the arm even before its first tick - one
-    /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
+    /// The readout knows its arms before the first tick and assigns the new
+    /// reign eval arm its 600-second daemon cadence.
     #[test]
-    fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 21);
+    fn arm_watch_merge_close_and_reign_eval_are_known_daemon_arms() {
+        assert_eq!(KNOWN_ARMS.len(), 23);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")
@@ -1628,6 +1644,15 @@ mod tests {
             crate::king_ledger::CROWN_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
+        let reign_eval = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "reign_eval")
+            .expect("reign_eval row");
+        assert_eq!(
+            reign_eval.default_interval_s,
+            crate::reign_eval::REIGN_EVAL_INTERVAL_S
+        );
+        assert_eq!(reign_eval.scheduler, SCHED_DAEMON);
         let settle = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "king_settle")
@@ -1721,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn unarmed_row_reads_unarmed_names_its_key_and_needs_no_attention() {
+    fn starve_rows() {
         let mut row = arm_status("heal", Some(SCHED_LAUNCHD), 600, None, None, 0);
         row.arm_key = Some("auto_heal.enabled".into());
         row.arm_value = Some("false".into());
@@ -1729,10 +1754,7 @@ mod tests {
         assert!(line.contains(" unarmed "), "{line}");
         assert!(line.contains("key=auto_heal.enabled=false"), "{line}");
         assert!(!needs_attention(&row));
-    }
 
-    #[test]
-    fn starved_when_every_in_window_tick_is_a_no_op() {
         let dir = temp_dir();
         let path = dir.join("events.jsonl");
         write_rows(
@@ -1776,14 +1798,7 @@ mod tests {
             render_row(heal)
         );
         assert!(!needs_attention(heal));
-    }
 
-    // A pass the tick's budget cut every time emits skip="starved",
-    // acted=0. That run of starved rows is starvation - the arm's input was
-    // never empty - so it must reach the starved verdict, not sit as an
-    // explained-skip ok row nobody reads.
-    #[test]
-    fn starved_skips_in_the_window_read_starved_not_ok() {
         let dir = temp_dir();
         let path = dir.join("events.jsonl");
         write_rows(
@@ -1828,10 +1843,7 @@ mod tests {
         let line = render_row(notify);
         assert!(line.contains(" starved "), "{line}");
         assert!(!line.contains("FAIL"), "{line}");
-    }
 
-    #[test]
-    fn one_acted_tick_in_the_window_reads_ok_not_starved() {
         let dir = temp_dir();
         let path = dir.join("events.jsonl");
         write_rows(
@@ -1869,10 +1881,7 @@ mod tests {
         mark_starved(&journals, &mut rows, now, 604_800);
         let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
         assert!(!heal.starved);
-    }
 
-    #[test]
-    fn an_explained_skip_or_a_failing_row_never_reads_starved() {
         let dir = temp_dir();
         let path = dir.join("events.jsonl");
         // Every in-window tick idles, but each names its skip reason: the arm
@@ -1904,10 +1913,7 @@ mod tests {
         mark_starved(&journals, &mut rows, now, 604_800);
         let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
         assert!(!heal.starved);
-    }
 
-    #[test]
-    fn a_failing_arm_keeps_fail_and_never_reads_starved() {
         let dir = temp_dir();
         let path = dir.join("events.jsonl");
         write_rows(
@@ -1941,6 +1947,11 @@ mod tests {
         assert_eq!(render_row(heal).split_whitespace().nth(1), Some("FAIL"));
     }
 
+    // A pass the tick's budget cut every time emits skip="starved",
+    // acted=0. That run of starved rows is starvation - the arm's input was
+    // never empty - so it must reach the starved verdict, not sit as an
+    // explained-skip ok row nobody reads.
+
     #[test]
     fn heal_row_folds_pr_heal_tick_receipts() {
         let dir = temp_dir();
@@ -1969,7 +1980,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_lands_one_row_in_the_journal() {
+    fn journal_rows() {
         let dir = temp_dir();
         let project = dir.join("events.jsonl");
         let journal = Journal::new_raw(project.clone(), dir.join("global.jsonl"));
@@ -1997,15 +2008,7 @@ mod tests {
         assert_eq!(lines[0]["data"]["interval_s"], 300);
         assert!(lines[0]["ts"].as_str().unwrap().ends_with('Z'));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    fn commit_row(journal: &Path, row: &Value) {
-        crate::event_store::append_envelope(journal, &serde_json::to_string(row).unwrap(), None)
-            .unwrap();
-    }
-
-    #[test]
-    fn a_row_committed_only_to_the_store_reads_fresh() {
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2028,10 +2031,7 @@ mod tests {
         assert_eq!(king.age_s, Some(10));
         assert!(!king.stale);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn an_unreadable_store_falls_back_to_the_live_rows() {
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         write_rows(
@@ -2054,10 +2054,7 @@ mod tests {
             .expect("king_wake row");
         assert_eq!(king.acted, Some(1));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_newer_store_row_outranks_a_frozen_live_row() {
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         let frozen = tick_envelope(
@@ -2088,10 +2085,7 @@ mod tests {
         assert_eq!(king.skip_reason.as_deref(), Some("no_trigger"));
         assert_eq!(king.age_s, Some(10));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn store_committed_no_op_ticks_mark_the_arm_starved() {
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2112,10 +2106,7 @@ mod tests {
             .expect("watchdog row");
         assert!(wd.starved);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn the_tick_trace_reads_a_store_committed_end() {
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2134,8 +2125,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn commit_row(journal: &Path, row: &Value) {
+        crate::event_store::append_envelope(journal, &serde_json::to_string(row).unwrap(), None)
+            .unwrap();
+    }
+
     #[test]
-    fn newest_row_per_arm_wins_across_journals() {
+    fn fresh_rows() {
         let dir = temp_dir();
         let a = dir.join("global.jsonl");
         let a_rotated = dir.join("global.jsonl.1");
@@ -2183,10 +2179,7 @@ mod tests {
         let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
         assert_eq!(ab.acted, Some(3));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn stale_at_twice_the_interval_and_on_row_interval_override() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // pr_watch_merge's table default is 600s, so 700s alone would read
@@ -2221,14 +2214,7 @@ mod tests {
         let wd = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
         assert!(!wd.stale);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    /// A fleet-tail arm runs one real run every three buckets, so mid-rotation
-    /// silence up to three intervals is its rest tick, not staleness. The old
-    /// one-bucket bound (2 x interval) called exactly this shape STALE and the
-    /// king check-in paged a healthy rotation.
-    #[test]
-    fn a_one_in_three_arm_on_its_rest_tick_is_not_stale() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -2253,14 +2239,7 @@ mod tests {
             wd.line
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    /// notify_watch is checked against the same reader rule: cadence 1, so it
-    /// goes stale past its own carried interval and never rides the fleet-tail
-    /// grace. Its rows carry the pr-watch bucket (600s), so a healthy
-    /// sub-bucket age reads fresh while a missed bucket reads STALE.
-    #[test]
-    fn notify_watch_is_judged_on_its_own_interval_not_the_fleet_tail() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -2285,10 +2264,7 @@ mod tests {
         let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
         assert!(nw.stale, "three silent buckets is stale: {}", nw.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn never_ticked_arm_is_unobserved_and_every_arm_appears() {
         // AC1-HP: an empty journal is not a staleness measurement. Every
         // known arm - interval-bearing or not - reads UNOBSERVED with
         // last_ts=null, stale=false, failing=false, and no measured cause.
@@ -2323,13 +2299,7 @@ mod tests {
             assert!(!row.line.contains("STALE"), "line: {}", row.line);
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    /// AC2-HP: an emitted `acted=0` row is a measurement. A fresh zero-work
-    /// tick keeps its skip reason, reads ok (not UNOBSERVED), and lands in
-    /// no attention set.
-    #[test]
-    fn a_real_zero_action_tick_is_observed_not_unobserved() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -2355,13 +2325,7 @@ mod tests {
         assert!(line.contains("skip=no_work"), "line: {line}");
         assert!(!line.contains("UNOBSERVED"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    /// AC5: the attention predicate is unobserved, stale, or failing - and
-    /// nothing else. A pending (daemon_young) row and an ok row ask for no
-    /// operator; a failing row does even while fresh.
-    #[test]
-    fn needs_attention_covers_exactly_unobserved_stale_and_failing() {
         let observed_fresh_ok = ArmStatus {
             arm: "a".into(),
             scheduler: None,
@@ -2398,6 +2362,24 @@ mod tests {
         assert!(needs_attention(&unobserved));
     }
 
+    /// A fleet-tail arm runs one real run every three buckets, so mid-rotation
+    /// silence up to three intervals is its rest tick, not staleness. The old
+    /// one-bucket bound (2 x interval) called exactly this shape STALE and the
+    /// king check-in paged a healthy rotation.
+
+    /// notify_watch is checked against the same reader rule: cadence 1, so it
+    /// goes stale past its own carried interval and never rides the fleet-tail
+    /// grace. Its rows carry the pr-watch bucket (600s), so a healthy
+    /// sub-bucket age reads fresh while a missed bucket reads STALE.
+
+    /// AC2-HP: an emitted `acted=0` row is a measurement. A fresh zero-work
+    /// tick keeps its skip reason, reads ok (not UNOBSERVED), and lands in
+    /// no attention set.
+
+    /// AC5: the attention predicate is unobserved, stale, or failing - and
+    /// nothing else. A pending (daemon_young) row and an ok row ask for no
+    /// operator; a failing row does even while fresh.
+
     /// An empty journal dir: every known arm reads never-ticked.
     fn empty_journal() -> (TempGuard, PathBuf) {
         let dir = temp_dir();
@@ -2416,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_off_skip_explains_as_configured_off() {
+    fn skip_rows() {
         // A stale row whose skip_reason says the arm is off in config must
         // explain as configured_off, not as a dead scheduler (AC6).
         let row = ArmStatus {
@@ -2446,10 +2428,7 @@ mod tests {
         let cause = stale_cause(&row, &DaemonFacts::Down, false, None).unwrap();
         assert_eq!(cause, "configured_off");
         assert!(cause_hint(&cause, &DaemonFacts::Down).contains("config"));
-    }
 
-    #[test]
-    fn env_broken_skip_fails_a_fresh_arm_row() {
         // env_broken means the resolver never produced a reading: the arm
         // could not have acted. That is a failure, not a skip - the
         // verdict must read FAIL and failing_for must age the break.
@@ -2488,10 +2467,7 @@ mod tests {
         assert!(line.contains("skip=env_broken"), "line: {line}");
         assert!(line.contains("failing_for=3600s"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_partial_reconcile_failures_skip_fails_the_merge_close_arm() {
         // failures is merge_close's partial-sweep token: the sweep ran and
         // left nodes unresolved. It must read FAIL like error, never ok -
         // a healthy read with nodes left open is the bug this closes.
@@ -2530,10 +2506,7 @@ mod tests {
         assert!(line.contains("skip=failures"), "line: {line}");
         assert!(line.contains("failing_for=3600s"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn degraded_skip_keeps_a_fresh_arm_row_ok() {
         // The regression the doc comment protects: degraded is deliberately
         // absent from FAILURE_SKIPS, so it must not turn a fresh row red.
         let dir = temp_dir();
@@ -2558,10 +2531,7 @@ mod tests {
         assert!(line.contains(" ok"), "line: {line}");
         assert!(line.contains("skip=degraded"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn budget_spent_short_pass_reads_fail_with_its_count() {
         // A king_wake pass that ran out of its slice before covering every
         // crown it enumerated is a failure, not an ok skip: the detail
         // carries the shortfall count (evaluated=0/5).
@@ -2619,7 +2589,7 @@ mod tests {
     }
 
     #[test]
-    fn explain_names_a_drifted_daemon_then_falls_through_to_unexplained() {
+    fn explain_rows() {
         // The drifted case runs first: it proves the stale_daemon rule CAN
         // fire before the second call proves the clean-daemon absence. A test
         // that asserted only the absence would pass on a reader that never
@@ -2667,10 +2637,7 @@ mod tests {
         assert_eq!(ab.cause.as_deref(), Some("unexplained"));
         assert!(ab.line.contains("STALE"), "line: {}", ab.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn explain_pends_a_young_daemon_window_instead_of_red() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // active_backlog last ticked 900s ago (interval 300: overdue at 600).
@@ -2700,10 +2667,7 @@ mod tests {
         assert_eq!(ab.cause.as_deref(), Some("daemon_young"));
         assert!(ab.line.contains("pending"), "line: {}", ab.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn explain_blames_a_timed_out_tick_for_the_arms_after_it() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // pr_watch_merge ticked 100s ago and its tick timed out; king_wake's
@@ -2741,383 +2705,7 @@ mod tests {
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         assert!(kw.line.contains("STALE"), "line: {}", kw.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_fresh_next_error_fails_the_auto_continue_arm() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[tick_envelope(
-                "2026-09-04T11:58:20Z",
-                "auto_continue",
-                "session",
-                0,
-                json!("next-error"),
-                1800,
-            )],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(!ac.stale, "the tick is 100s into a 1800s interval");
-        assert!(ac.failing, "an unreadable selection is a failed run");
-        assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
-        assert!(ac.line.contains("skip=next-error"), "line: {}", ac.line);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_fresh_select_unmeasured_fails_the_auto_continue_arm() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[tick_envelope(
-                "2026-09-04T11:58:20Z",
-                "auto_continue",
-                "session",
-                0,
-                json!("select-unmeasured"),
-                1800,
-            )],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(ac.failing, "an unmeasured selection is a failed run");
-        assert!(
-            ac.line.contains("skip=select-unmeasured"),
-            "line: {}",
-            ac.line
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The unmeasured detail as the writer shapes it, so the fold tests
-    /// round-trip the real token format instead of a local lookalike.
-    fn ac_detail(project: &str) -> Value {
-        Value::String(crate::select_read::unmeasured_detail(
-            SrKind::Next,
-            &["--project".to_string(), project.to_string()],
-            120,
-            None,
-        ))
-    }
-
-    /// One auto_continue row with an explicit detail: tick_envelope pins
-    /// `detail: null`, and the per-project retry fold reads the detail.
-    fn ac_envelope(ts: &str, skip: Value, acted: u64, detail: Value) -> Value {
-        json!({
-            "ts": ts,
-            "type": EVENT_TYPE,
-            "source": "loop",
-            "data": {
-                "arm": "auto_continue",
-                "scheduler": "session",
-                "acted": acted,
-                "skip_reason": skip,
-                "detail": detail,
-                "interval_s": 1800,
-            }
-        })
-    }
-
-    /// The masked retry: a later project's healthy tick must not
-    /// erase an earlier project's timed-out select read. The per-project
-    /// fold keeps it as a retry candidate while the newest row reads clean.
-    #[test]
-    fn a_healthy_tick_does_not_mask_an_earlier_projects_unmeasured_attempt() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[
-                ac_envelope(
-                    "2026-09-04T11:58:20Z",
-                    json!("select-unmeasured"),
-                    0,
-                    ac_detail("alpha"),
-                ),
-                tick_envelope(
-                    "2026-09-04T11:59:20Z",
-                    "auto_continue",
-                    "session",
-                    1,
-                    json!(null),
-                    1800,
-                ),
-            ],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:20Z").unwrap();
-        let rows = read_arms(&[journal], now);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(!ac.failing, "the newest tick is healthy: {}", ac.line);
-        assert!(!ac.stale);
-        assert_eq!(
-            ac.retries,
-            vec![UnmeasuredRetry {
-                project: "alpha".into(),
-                ts: "2026-09-04T11:58:20Z".into(),
-            }]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Two attempts for alpha and one for beta: only the newest per project
-    /// survives, sorted by ts ascending.
-    #[test]
-    fn retries_keep_the_newest_attempt_per_project() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[
-                ac_envelope(
-                    "2026-09-04T11:00:00Z",
-                    json!("select-unmeasured"),
-                    0,
-                    ac_detail("alpha"),
-                ),
-                ac_envelope(
-                    "2026-09-04T11:05:00Z",
-                    json!("select-unmeasured"),
-                    0,
-                    ac_detail("beta"),
-                ),
-                ac_envelope(
-                    "2026-09-04T11:10:00Z",
-                    json!("select-unmeasured"),
-                    0,
-                    ac_detail("alpha"),
-                ),
-            ],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T11:10:10Z").unwrap();
-        let rows = read_arms(&[journal], now);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert_eq!(
-            ac.retries,
-            vec![
-                UnmeasuredRetry {
-                    project: "beta".into(),
-                    ts: "2026-09-04T11:05:00Z".into(),
-                },
-                UnmeasuredRetry {
-                    project: "alpha".into(),
-                    ts: "2026-09-04T11:10:00Z".into(),
-                },
-            ]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// An attempt older than twice the interval ages out, and a row whose
-    /// detail names no project folds under `-`.
-    #[test]
-    fn retries_age_out_after_twice_the_interval_and_unnamed_projects_read_dash() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[
-                ac_envelope(
-                    "2026-09-04T11:00:00Z",
-                    json!("select-unmeasured"),
-                    0,
-                    ac_detail("beta"),
-                ),
-                ac_envelope(
-                    "2026-09-04T11:58:00Z",
-                    json!("select-unmeasured"),
-                    0,
-                    json!("bound=120s: stalled without a project token"),
-                ),
-            ],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:10Z").unwrap();
-        let rows = read_arms(&[journal], now);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert_eq!(
-            ac.retries,
-            vec![UnmeasuredRetry {
-                project: "-".into(),
-                ts: "2026-09-04T11:58:00Z".into(),
-            }]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_stale_timeout_row_stays_failing_and_names_its_skip_reason() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        // king_wake timed out once and never came back: age 1801s against a
-        // 900s interval reads stale, and the reason it stopped is still a
-        // failure the row must name.
-        write_rows(
-            &journal,
-            &[tick_envelope(
-                "2026-09-04T09:33:19Z",
-                "king_wake",
-                SCHED_LAUNCHD,
-                0,
-                json!("timeout"),
-                900,
-            )],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T10:03:20Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert!(kw.stale, "1801s against 2x900 must read stale");
-        assert!(kw.failing, "the newest run is a timeout, stale or not");
-        assert!(kw.line.contains("STALE"), "line: {}", kw.line);
-        assert!(kw.line.contains("skip=timeout"), "line: {}", kw.line);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn failing_for_s_counts_from_the_last_run_that_did_not_fail() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        // ok at 10:00, timeouts at 10:15 and 10:30, read at 10:31:40: the
-        // arm has been failing 1900s, not 100s since its newest word.
-        write_rows(
-            &journal,
-            &[
-                tick_envelope(
-                    "2026-09-04T10:00:00Z",
-                    "king_wake",
-                    SCHED_LAUNCHD,
-                    1,
-                    json!(null),
-                    900,
-                ),
-                tick_envelope(
-                    "2026-09-04T10:15:00Z",
-                    "king_wake",
-                    SCHED_LAUNCHD,
-                    0,
-                    json!("timeout"),
-                    900,
-                ),
-                tick_envelope(
-                    "2026-09-04T10:30:00Z",
-                    "king_wake",
-                    SCHED_LAUNCHD,
-                    0,
-                    json!("timeout"),
-                    900,
-                ),
-            ],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T10:31:40Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert!(kw.failing);
-        assert_eq!(kw.failing_for_s, Some(1900));
-        assert!(kw.line.contains("failing_for=1900s"), "line: {}", kw.line);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_failure_with_no_healthy_run_in_the_journal_says_so() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[tick_envelope(
-                "2026-09-04T11:58:20Z",
-                "auto_continue",
-                "session",
-                0,
-                json!("error"),
-                1800,
-            )],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(ac.failing);
-        assert_eq!(
-            ac.failing_for_s, None,
-            "no non-failure run anchors the count"
-        );
-        assert!(ac.line.contains("no_ok_in_journal"), "line: {}", ac.line);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_fresh_spawn_failed_fails_the_auto_continue_arm() {
-        let dir = temp_dir();
-        let journal = dir.join("global.jsonl");
-        write_rows(
-            &journal,
-            &[tick_envelope(
-                "2026-09-04T11:58:20Z",
-                "auto_continue",
-                "session",
-                0,
-                json!("spawn-failed"),
-                1800,
-            )],
-        );
-        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
-
-        let mut rows = read_arms(&[journal], now);
-        explain(&mut rows, &DaemonFacts::Unknown);
-        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(!ac.stale, "the tick is 100s into a 1800s interval");
-        assert!(
-            ac.failing,
-            "a dispatch that exited non-zero is a failed run"
-        );
-        assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
-        assert!(ac.line.contains("skip=spawn-failed"), "line: {}", ac.line);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn fresh_benign_auto_continue_skips_stay_ok() {
-        for skip in ["disabled", "no-work"] {
-            let dir = temp_dir();
-            let journal = dir.join("global.jsonl");
-            write_rows(
-                &journal,
-                &[tick_envelope(
-                    "2026-09-04T11:58:20Z",
-                    "auto_continue",
-                    "session",
-                    0,
-                    json!(skip),
-                    1800,
-                )],
-            );
-            let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
-
-            let mut rows = read_arms(&[journal], now);
-            explain(&mut rows, &DaemonFacts::Unknown);
-            let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-            assert!(!ac.failing, "{skip} is a choice, not a failure");
-            assert!(!ac.line.contains("FAIL"), "line: {}", ac.line);
-            assert!(ac.line.contains("ok"), "line: {}", ac.line);
-            std::fs::remove_dir_all(&dir).ok();
-        }
-    }
-
-    #[test]
-    fn explain_names_a_down_daemon_for_daemon_arms() {
         // Observed-stale receipts put the arms in the cause ladder at all;
         // an unobserved row would never enter it.
         let dir = temp_dir();
@@ -3165,10 +2753,7 @@ mod tests {
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn explain_blames_an_errored_tick_like_a_timed_out_one() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // pr_watch_merge ticked fresh but its run errored; king_wake is stale.
@@ -3206,10 +2791,7 @@ mod tests {
             kw.line
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn explain_corrects_a_merge_ok_row_that_its_tick_ended_timeout() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // The sweep finished inside its cap and stamped the merge row ok; the
@@ -3272,10 +2854,7 @@ mod tests {
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn explain_keeps_a_merge_ok_row_when_the_tick_end_predates_it() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // An end record older than the row is the PREVIOUS tick's outcome;
@@ -3306,41 +2885,7 @@ mod tests {
         assert_eq!(pm.cause, None);
         assert!(pm.line.contains("ok"), "line: {}", pm.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn an_all_unobserved_tier_establishes_no_measured_cause() {
-        let (guard, journal) = empty_journal();
-        // AC6-EDGE: every launchd arm unobserved. No receipt exists, so no
-        // cross-arm scheduler verdict and no tick_overdue may be derived:
-        // absence is not a measurement. Each row keeps UNOBSERVED and no
-        // cause, stating the absence as the fact it is.
-        let mut rows = read_arms(&[journal], 1_800_000_000);
-        let trace = TickTrace::default();
-        explain_with_trace(
-            &mut rows,
-            &DaemonFacts::Up {
-                uptime_s: 40_000,
-                drifted: false,
-            },
-            &trace,
-        );
-        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
-            let row = rows.iter().find(|r| r.arm == arm).unwrap();
-            assert_eq!(
-                row.producer_evidence,
-                ProducerEvidence::Unobserved,
-                "{arm} holds no receipt"
-            );
-            assert!(!row.stale, "{arm} must not read STALE, line: {}", row.line);
-            assert_eq!(row.cause, None, "no measured cause without a receipt");
-            assert!(row.line.contains("UNOBSERVED"), "line: {}", row.line);
-        }
-        drop(guard);
-    }
-
-    #[test]
-    fn explain_says_the_tick_started_and_did_not_complete_and_names_the_phase() {
         // The fault shape: launchd showed the job loaded and a tick
         // was running throughout, yet pr_watch_merge is stale because ticks
         // died before writing a merge row. The attempt + end records are the
@@ -3401,7 +2946,389 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_registration_names_the_path_and_the_refresh_hint() {
+    fn arm_rows() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("next-error"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.stale, "the tick is 100s into a 1800s interval");
+        assert!(ac.failing, "an unreadable selection is a failed run");
+        assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
+        assert!(ac.line.contains("skip=next-error"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("select-unmeasured"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.failing, "an unmeasured selection is a failed run");
+        assert!(
+            ac.line.contains("skip=select-unmeasured"),
+            "line: {}",
+            ac.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("spawn-failed"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.stale, "the tick is 100s into a 1800s interval");
+        assert!(
+            ac.failing,
+            "a dispatch that exited non-zero is a failed run"
+        );
+        assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
+        assert!(ac.line.contains("skip=spawn-failed"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+
+        for skip in ["disabled", "no-work"] {
+            let dir = temp_dir();
+            let journal = dir.join("global.jsonl");
+            write_rows(
+                &journal,
+                &[tick_envelope(
+                    "2026-09-04T11:58:20Z",
+                    "auto_continue",
+                    "session",
+                    0,
+                    json!(skip),
+                    1800,
+                )],
+            );
+            let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+            let mut rows = read_arms(&[journal], now);
+            explain(&mut rows, &DaemonFacts::Unknown);
+            let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+            assert!(!ac.failing, "{skip} is a choice, not a failure");
+            assert!(!ac.line.contains("FAIL"), "line: {}", ac.line);
+            assert!(ac.line.contains("ok"), "line: {}", ac.line);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:58:20Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                tick_envelope(
+                    "2026-09-04T11:59:20Z",
+                    "auto_continue",
+                    "session",
+                    1,
+                    json!(null),
+                    1800,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:20Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.failing, "the newest tick is healthy: {}", ac.line);
+        assert!(!ac.stale);
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "alpha".into(),
+                ts: "2026-09-04T11:58:20Z".into(),
+            }]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The unmeasured detail as the writer shapes it, so the fold tests
+    /// round-trip the real token format instead of a local lookalike.
+    fn ac_detail(project: &str) -> Value {
+        Value::String(crate::select_read::unmeasured_detail(
+            SrKind::Next,
+            &["--project".to_string(), project.to_string()],
+            120,
+            None,
+        ))
+    }
+
+    /// One auto_continue row with an explicit detail: tick_envelope pins
+    /// `detail: null`, and the per-project retry fold reads the detail.
+    fn ac_envelope(ts: &str, skip: Value, acted: u64, detail: Value) -> Value {
+        json!({
+            "ts": ts,
+            "type": EVENT_TYPE,
+            "source": "loop",
+            "data": {
+                "arm": "auto_continue",
+                "scheduler": "session",
+                "acted": acted,
+                "skip_reason": skip,
+                "detail": detail,
+                "interval_s": 1800,
+            }
+        })
+    }
+
+    /// The masked retry: a later project's healthy tick must not
+    /// erase an earlier project's timed-out select read. The per-project
+    /// fold keeps it as a retry candidate while the newest row reads clean.
+
+    /// Two attempts for alpha and one for beta: only the newest per project
+    /// survives, sorted by ts ascending.
+    #[test]
+    fn retry_rows() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:05:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:10:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T11:10:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![
+                UnmeasuredRetry {
+                    project: "beta".into(),
+                    ts: "2026-09-04T11:05:00Z".into(),
+                },
+                UnmeasuredRetry {
+                    project: "alpha".into(),
+                    ts: "2026-09-04T11:10:00Z".into(),
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:58:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    json!("bound=120s: stalled without a project token"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "-".into(),
+                ts: "2026-09-04T11:58:00Z".into(),
+            }]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // king_wake timed out once and never came back: age 1801s against a
+        // 900s interval reads stale, and the reason it stopped is still a
+        // failure the row must name.
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T09:33:19Z",
+                "king_wake",
+                SCHED_LAUNCHD,
+                0,
+                json!("timeout"),
+                900,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T10:03:20Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "1801s against 2x900 must read stale");
+        assert!(kw.failing, "the newest run is a timeout, stale or not");
+        assert!(kw.line.contains("STALE"), "line: {}", kw.line);
+        assert!(kw.line.contains("skip=timeout"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // ok at 10:00, timeouts at 10:15 and 10:30, read at 10:31:40: the
+        // arm has been failing 1900s, not 100s since its newest word.
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T10:00:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T10:15:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T10:30:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T10:31:40Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing);
+        assert_eq!(kw.failing_for_s, Some(1900));
+        assert!(kw.line.contains("failing_for=1900s"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("error"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.failing);
+        assert_eq!(
+            ac.failing_for_s, None,
+            "no non-failure run anchors the count"
+        );
+        assert!(ac.line.contains("no_ok_in_journal"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An attempt older than twice the interval ages out, and a row whose
+    /// detail names no project folds under `-`.
+
+    #[test]
+    fn an_all_unobserved_tier_establishes_no_measured_cause() {
+        let (guard, journal) = empty_journal();
+        // AC6-EDGE: every launchd arm unobserved. No receipt exists, so no
+        // cross-arm scheduler verdict and no tick_overdue may be derived:
+        // absence is not a measurement. Each row keeps UNOBSERVED and no
+        // cause, stating the absence as the fact it is.
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        let trace = TickTrace::default();
+        explain_with_trace(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+            &trace,
+        );
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert_eq!(
+                row.producer_evidence,
+                ProducerEvidence::Unobserved,
+                "{arm} holds no receipt"
+            );
+            assert!(!row.stale, "{arm} must not read STALE, line: {}", row.line);
+            assert_eq!(row.cause, None, "no measured cause without a receipt");
+            assert!(row.line.contains("UNOBSERVED"), "line: {}", row.line);
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn registration_rows() {
         // The fault shape: the registered plist lives under a pytest
         // tempdir instead of the installer's LaunchAgents path. The cause must
         // name the foreign path and the refresh command, not a bare
@@ -3461,10 +3388,7 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_healthy_registration_keeps_tick_overdue() {
         // The control: when the registered path IS the installer's, the trace
         // holds no foreign plist and the stale rows keep the existing
         // tick_overdue cause; an empty print output reads the same.
@@ -3497,10 +3421,7 @@ mod tests {
         let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
         assert_eq!(pm.cause.as_deref(), Some("tick_overdue"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn foreign_plist_path_parses_launchctl_print_output() {
         // stdout path / stderr path name the job's log files, not the plist;
         // the first bare `path = ` line wins. Empty output reads healthy.
         let home = std::env::temp_dir();
@@ -3518,10 +3439,7 @@ mod tests {
                 .display()
         );
         assert_eq!(foreign_plist_path(&healthy_first, &home), None);
-    }
 
-    #[test]
-    fn a_textually_different_but_same_file_path_is_not_foreign() {
         // A symlinked HOME spells the installer's path two ways; the file
         // identity, not the spelling, decides. The healthy textual match
         // short-circuits before any syscall in the common case.
@@ -3549,7 +3467,7 @@ mod tests {
     /// and 1113s against intervals 900, 600, 600 and 300. Three of the four
     /// pass the per-arm rule; the cross-arm verdict must still red them all.
     #[test]
-    fn cross_arm_flip_reds_the_whole_launchd_tier_in_the_measured_outage() {
+    fn flip_rows() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -3609,10 +3527,7 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn one_silent_arm_stays_an_arm_problem() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -3663,10 +3578,7 @@ mod tests {
             assert!(!row.stale, "{arm} ticked 100s ago and reads ok");
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn single_arm_scheduler_is_not_a_second_name_for_the_per_arm_rule() {
         // auto_continue is the only interval-bearing arm on the `session`
         // scheduler. Its silence is judged by its own rule alone - and an
         // empty journal is no silence measurement at all: the row stays
@@ -3679,10 +3591,7 @@ mod tests {
         assert!(!ac.stale, "unobserved auto_continue never reads stale");
         assert_eq!(ac.cause, None);
         drop(guard);
-    }
 
-    #[test]
-    fn interval_zero_arm_is_neither_counted_nor_flipped() {
         let (guard, journal) = empty_journal();
         let mut rows = read_arms(&[journal], 1_800_000_000);
         explain(&mut rows, &DaemonFacts::Unknown);
@@ -3691,10 +3600,7 @@ mod tests {
         assert!(!sh.stale, "event-driven arm never reads red from quiet");
         assert_eq!(sh.cause, None, "stop_hook is never explained");
         drop(guard);
-    }
 
-    #[test]
-    fn flipped_rows_that_reach_no_specific_cause_read_scheduler_down() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         // Daemon tier: reap is stale by its own rule (500s > 2x60);
@@ -3771,10 +3677,7 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_cross_arm_flip_never_outranks_the_tick_trace_evidence() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -3826,10 +3729,7 @@ mod tests {
         );
         assert_ne!(kw.cause.as_deref(), Some("scheduler_down"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_young_daemon_un_flips_its_arms_not_scheduler_down() {
         // Three observed-stale daemon arms (900s against intervals 60/300),
         // but the daemon is up 100s - inside reap's first window (2x60).
         // daemon_young un-flips them, and the cross-arm verdict must not
@@ -3885,10 +3785,7 @@ mod tests {
             assert_ne!(row.cause.as_deref(), Some("scheduler_down"));
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn the_healthy_machine_reading_flips_nothing() {
         // Measured live at 2026-09-11T11:37Z: the positive control for a
         // false red.
         let dir = temp_dir();
@@ -3949,7 +3846,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_list_without_merge_leaves_the_merge_row_ok() {
+    fn cut_rows() {
         // AC1-HP: the tick timed out, but the cut list names other phases.
         // The merge phase ran, so the row keeps its own ok.
         let dir = temp_dir();
@@ -3980,10 +3877,7 @@ mod tests {
         assert_eq!(pm.cause, None);
         assert!(!pm.line.contains("FAIL"), "line: {}", pm.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_cut_list_naming_merge_fails_the_merge_row() {
         // AC2-HP: the cut list names the merge phase itself, so the tick
         // timeout is a real merge fault.
         let dir = temp_dir();
@@ -4015,10 +3909,7 @@ mod tests {
         assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
         assert!(pm.line.contains("merge"), "line: {}", pm.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_stale_arm_named_in_the_cut_list_blames_the_tick() {
         // AC4-HP: king_wake is stale and the cut list names its own phase.
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
@@ -4057,10 +3948,7 @@ mod tests {
         assert!(kw.stale, "line: {}", kw.line);
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_stale_arm_left_out_of_the_cut_list_does_not_blame_the_tick() {
         // AC5-ERR: notify_watch is stale but the cut list names a different
         // phase, so the tick is not the reason this arm went quiet.
         let dir = temp_dir();
@@ -4182,7 +4070,7 @@ mod tests {
     }
 
     #[test]
-    fn an_armed_breaker_reads_paused_and_names_its_generation() {
+    fn pause_rows() {
         let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
         for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
@@ -4209,10 +4097,7 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn without_a_pause_fact_the_tier_keeps_tick_overdue() {
         let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
         let trace = TickTrace {
             pause: None,
@@ -4228,10 +4113,7 @@ mod tests {
             kw.line
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_real_fault_outranks_the_pause() {
         let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
         let trace = TickTrace {
             foreign_plist: Some("/tmp/pytest-xyz/sh.fno.pr-watcher.plist".to_string()),
@@ -4247,10 +4129,7 @@ mod tests {
         );
         assert!(kw.stale, "line: {}", kw.line);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn an_unreadable_breaker_stays_a_fault() {
         let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
         let trace = TickTrace {
             pause: Some(

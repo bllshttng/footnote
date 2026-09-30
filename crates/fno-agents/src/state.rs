@@ -1059,11 +1059,11 @@ pub struct RegistryEntry {
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
-    /// fno do target run id (v13): the `fno_id` of the /target session an
-    /// adopted orphan was working, so the revived session is linked to its node.
-    /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
-    /// every row that did not come from a target manifest. Identity-adjacent
-    /// linkage, or the stable pane identity for a harness without a session id;
+    /// Footnote's own id for this session (v13): a random UUID minted at the
+    /// row's first write, stable across succession, never a harness session id
+    /// and never a target run id. `harness_session_id` names the harness
+    /// conversation beside it. Rows written before the mint keep the value they
+    /// hold (a legacy harness copy, short id or name). Identity-adjacent only;
     /// never read for liveness or ownership. Same X3 passthrough as
     /// `route_settings_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1532,17 +1532,17 @@ impl RegistryEntry {
         true
     }
 
-    /// Clone this row as an independently addressable live branch.
+    /// Clone this row as an independently addressable live branch. The branch
+    /// leaves with no `fno_id`: the registry write mints it one of its own.
     pub fn fork_for_session(
         &self,
         name: &str,
         successor_session_id: &str,
         predecessor_session_id: &str,
-        fno_id: &str,
     ) -> Self {
         let mut branch = self.clone();
         branch.name = name.to_string();
-        branch.fno_id = Some(fno_id.to_string());
+        branch.fno_id = None;
         branch.harness_session_id = Some(successor_session_id.to_string());
         branch.predecessor_session_ids.clear();
         branch.forked_from_session_id = Some(predecessor_session_id.to_string());
@@ -1618,28 +1618,6 @@ impl RegistryEntry {
                     if !value.is_empty() && value != "null" {
                         self.harness_session_id = Some(value);
                     }
-                }
-            }
-        }
-    }
-
-    /// Thread-ref back-fill, the Rust mirror of the same rule in Python's
-    /// `load_registry`. A claude thread row is minted before its session uuid
-    /// exists, so `fno_id` lands empty and no write site ever fills it: the
-    /// observation seam back-fills `harness_session_id` and `short_id` and
-    /// stops there. For a thread row the two ids are the same value, so adopt
-    /// the session id at load. A row that HAS a thread ref keeps it, because a
-    /// branch is minted with its own and a succession keeps its stable one.
-    /// Three readers share this file: Python's `load_registry`, this one, and
-    /// `crates/fno`'s own raw reader, which already resolves the identity as
-    /// fno_id then session_id then harness_session_id. This restates that
-    /// fallback so a daemon-side read cannot see None where the other two see
-    /// the session id.
-    pub fn backfill_fno_id(&mut self) {
-        if self.fno_id.as_deref().is_none_or(str::is_empty) {
-            if let Some(sid) = self.harness_session_id.as_deref() {
-                if !sid.is_empty() {
-                    self.fno_id = Some(sid.to_string());
                 }
             }
         }
@@ -2079,11 +2057,6 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     for entry in &mut reg.entries {
         entry.migrate_provider_semantics(reg.schema_version);
         entry.backfill_harness_aliases();
-        // Thread-ref back-fill: a row that learned its session id after spawn
-        // has learned its thread ref at the same moment. Runs after the
-        // harness back-fill above, which is what resolves harness_session_id
-        // on a legacy row.
-        entry.backfill_fno_id();
         // v9 transport-key backfill: move a legacy row's
         // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
         // and warns once (never silently prefers the legacy value).
@@ -2463,6 +2436,35 @@ where
             entry.exited_at = None;
         }
     }
+    // The row-birth fill: a row whose fno_id is empty after the closure leaves
+    // the write with footnote's own id, never a harness id or a run id. A row
+    // that replaces a pre-existing row (the wholesale adopt merges) keeps the
+    // value its predecessor held - the harness session id is the primary key,
+    // so it names the same row whatever its label is; a row with no harness id
+    // matches by name instead. A non-empty fno_id is never touched, so legacy
+    // rows keep their harness copies, short ids and names.
+    for entry in &mut registry.entries {
+        if entry.fno_id.as_deref().is_some_and(|v| !v.is_empty()) {
+            continue;
+        }
+        let inherited = match entry.harness_session_id.as_deref() {
+            Some(sid) if !sid.is_empty() => before_entries
+                .iter()
+                .find(|b| b.harness_session_id.as_deref() == Some(sid))
+                .and_then(|b| b.fno_id.clone()),
+            _ => before_entries
+                .iter()
+                .find(|b| b.name == entry.name)
+                .and_then(|b| b.fno_id.clone()),
+        };
+        entry.fno_id = match inherited.filter(|v| !v.is_empty()) {
+            Some(v) => Some(v),
+            None => match crate::identity::mint_fno_id() {
+                Ok(id) => Some(id),
+                Err(msg) => return Err(StateError::InvariantViolation(msg)),
+            },
+        };
+    }
     // The shared-registry write guard. Fires only on the real shared
     // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -
     // so the refusal names exactly the two shapes that cost the fleet its
@@ -2525,8 +2527,8 @@ where
     Ok(out)
 }
 
-/// Rename a row's LABEL in one transaction, the Rust port of Python's
-/// `rename_agent` (`cli/src/fno/agents/registry.py:2632`). Label-only: the
+/// Rename a row's LABEL in one transaction, the verb's only implementation.
+/// Label-only: the
 /// harness identity `(harness, harness_session_id, short_id)` is the lock, so a
 /// rename never crosses into the worker's own harness - claude and codex keep
 /// their native session names. The old label lands in `aliases` and keeps
@@ -2568,48 +2570,9 @@ pub fn rename_agent_displacing(
             return Err("registry node must be non-empty when provided".to_string());
         }
     }
-    // Resolve BEFORE the lock. The resolution reads the same file the
-    // transaction re-reads under the lock, and the identity re-check inside the
-    // closure is what makes a mid-flight change a typed refusal rather than a
-    // rename of the wrong row (Python's "changed before rename"). The tiers
-    // mirror Python's `resolve_agent_in` exactly: a FULL session id (any of
-    // harness/related/predecessor, case-insensitive per the shared tier helper)
-    // wins outright; otherwise name, alias, transport short id, canonical
-    // handle (first-8) and legacy suffix (last-8) are unioned and the union
-    // must be unique.
-    use crate::identity::session_handle_tier;
+    // Resolve before the lock, then re-check the row identity inside it.
     let snapshot = load_registry(path).map_err(|e| e.to_string())?;
-    let session_tier = |e: &RegistryEntry| {
-        [
-            e.harness_session_id.as_deref(),
-            e.related_session_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .chain(e.predecessor_session_ids.iter().map(String::as_str))
-        .find_map(|session_id| session_handle_tier(token, session_id))
-    };
-    let label_tier = |e: &RegistryEntry| {
-        e.name == token
-            || (!e.short_id.is_empty() && e.short_id == token)
-            || e.aliases.iter().any(|a| a == token)
-            || session_tier(e).is_some()
-    };
-    let by_full: Vec<&RegistryEntry> = snapshot
-        .entries
-        .iter()
-        .filter(|e| session_tier(e) == Some(0))
-        .collect();
-    let matches: Vec<&RegistryEntry> = if by_full.is_empty() {
-        snapshot.entries.iter().filter(|e| label_tier(e)).collect()
-    } else {
-        by_full
-    };
-    let source = match matches.as_slice() {
-        [one] => one,
-        [] => return Err(format!("no such agent: {token}")),
-        _ => return Err(format!("{token} is ambiguous - use its full session id")),
-    };
+    let source = resolve_rename_source(&snapshot.entries, token)?;
     let identity = (
         source.harness.clone(),
         source.harness_session_id.clone(),
@@ -2729,6 +2692,43 @@ pub fn rename_agent_displacing(
     Ok((old_name, new_name.to_string()))
 }
 
+pub(crate) fn resolve_rename_source<'a>(
+    entries: &'a [RegistryEntry],
+    token: &str,
+) -> Result<&'a RegistryEntry, String> {
+    use crate::identity::session_handle_tier;
+    let session_tier = |entry: &RegistryEntry| {
+        [
+            entry.harness_session_id.as_deref(),
+            entry.related_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(entry.predecessor_session_ids.iter().map(String::as_str))
+        .find_map(|session_id| session_handle_tier(token, session_id))
+    };
+    let label_tier = |entry: &RegistryEntry| {
+        entry.name == token
+            || (!entry.short_id.is_empty() && entry.short_id == token)
+            || entry.aliases.iter().any(|alias| alias == token)
+            || session_tier(entry).is_some()
+    };
+    let by_full: Vec<&RegistryEntry> = entries
+        .iter()
+        .filter(|entry| session_tier(entry) == Some(0))
+        .collect();
+    let matches: Vec<&RegistryEntry> = if by_full.is_empty() {
+        entries.iter().filter(|entry| label_tier(entry)).collect()
+    } else {
+        by_full
+    };
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("no such agent: {token}")),
+        _ => Err(format!("{token} is ambiguous - use its full session id")),
+    }
+}
+
 /// Move `label` off `entries[idx]` inside the caller's transaction: the alias
 /// goes, and a row whose NAME is the label takes a spare one - its first
 /// non-colliding alias, else its short id - so the label answers for one row
@@ -2787,49 +2787,6 @@ pub fn is_valid_registry_label(name: &str) -> bool {
             .chars()
             .enumerate()
             .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (i > 0 && c == '\''))
-}
-
-/// The `agent.rename` RPC handler, beside the transaction it serves (the
-/// daemon module is shrink-only). Grammar is refused BEFORE any lock: a
-/// hostile token must never reach a write. `rename_agent` owns resolution,
-/// the identity lock, the duplicate refusal and the alias append; the harness
-/// session is untouched by construction.
-pub(crate) fn rename_response(
-    registry_path: &Path,
-    req: &crate::protocol::Request,
-) -> crate::protocol::Response {
-    use crate::protocol::{ErrorCode, Response};
-    let token = match req.params.get("name").and_then(|v| v.as_str()) {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidParams,
-                "rename needs a <name> (current label, short id, or full session id)",
-            )
-        }
-    };
-    let Some(new_name) = req.params.get("new_name").and_then(|v| v.as_str()) else {
-        return Response::err(
-            req.id,
-            ErrorCode::InvalidParams,
-            "rename needs --name <new-label>",
-        );
-    };
-    if !is_valid_registry_label(new_name) {
-        return Response::err(
-            req.id,
-            ErrorCode::InvalidParams,
-            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
-        );
-    }
-    match rename_agent(registry_path, token, new_name, None) {
-        Ok((old, new)) => Response::ok(
-            req.id,
-            serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
-        ),
-        Err(msg) => Response::err(req.id, ErrorCode::Internal, msg),
-    }
 }
 
 /// Removal accounting at the write choke point: every row the

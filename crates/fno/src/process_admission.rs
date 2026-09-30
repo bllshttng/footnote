@@ -382,60 +382,112 @@ fn brake_file_path() -> Option<std::path::PathBuf> {
 }
 
 /// The machine arm's runaway brake, honored at admission: an unexpired brake
-/// refuses every spawn and names the group that caused it. A missing,
+/// refuses every agent spawn and names the group that caused it. A missing,
 /// unreadable, or expired file is ignored - the brake is arm-authored and
 /// self-expiring, and the attributed-process ceiling stays the hard gate.
-fn runaway_brake() -> Option<String> {
+/// Answers the brake's `until_epoch` and its file body.
+fn runaway_brake() -> Option<(u64, serde_json::Value)> {
     let text = std::fs::read_to_string(brake_file_path()?).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let until = value.get("until_epoch")?.as_u64()?;
-    let now = std::time::SystemTime::now()
+    (unix_now()? < until).then_some((until, value))
+}
+
+fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    if now >= until {
-        return None;
-    }
-    let left = until - now;
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
+}
+
+/// The hold line for an armed brake. It reads the process table, so only a
+/// refusal or a first warning pays for it.
+fn describe_brake(until: u64, value: &serde_json::Value) -> String {
+    let left = until.saturating_sub(unix_now().unwrap_or(until));
     let reason = value
         .get("reason")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unspecified");
     let group = match value.get("group") {
         None | Some(serde_json::Value::Null) => "unmeasured".to_string(),
-        Some(group) => format!(
-            "{} x{} (ppid {})",
-            group
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?"),
-            group
-                .get("count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            group
+        Some(group) => {
+            let ppid = group
                 .get("ppid")
                 .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        ),
+                .unwrap_or(0);
+            let outside = u32::try_from(ppid)
+                .ok()
+                .filter(|pid| *pid != 0)
+                .and_then(group_outside_fleet)
+                .unwrap_or(false);
+            format!(
+                "{} x{} (ppid {ppid}){}",
+                group
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                group
+                    .get("count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                if outside { ", outside the fleet" } else { "" },
+            )
+        }
     };
-    Some(format!(
-        "machine runaway brake holds ({left}s left): {reason}; largest group {group}"
-    ))
+    format!("machine runaway brake holds ({left}s left): {reason}; largest group {group}")
 }
 
-/// One machine-runaway refusal for whichever scope admits. The brake is a
-/// world fact the arm measured, so it outranks the census read below.
-fn brake_failure(scope: Scope, ceiling: usize, hold: String) -> AdmissionFailure {
-    AdmissionFailure {
+/// Whether the brake's largest group descends from no fno root, so the load
+/// is not the fleet's. `None` when the parent cannot be read.
+fn group_outside_fleet(ppid: u32) -> Option<bool> {
+    let rows = snapshot_processes().ok()?;
+    let roots = process_root_names().ok()?;
+    let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
+    let parent = by_pid.get(&ppid)?;
+    reaches_root(parent, &by_pid, &roots, std::process::id())
+        .ok()
+        .map(|inside| !inside)
+}
+
+/// A human at a terminal is the recovery path, so the brake never holds
+/// their own command. The brake exists to stop agents spawning, and an agent
+/// either has no terminal or inherits its worker identity.
+fn human_at_tty() -> bool {
+    use std::io::IsTerminal;
+    std::env::var_os("FNO_AGENT_SELF")
+        .filter(|name| !name.is_empty())
+        .is_none()
+        && io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+}
+
+/// The brake check every admit shares. A `human` caller passes with one
+/// warning per armed brake instead of a refusal; a long-lived server still
+/// logs each new brake it waives. The brake is a world fact the arm
+/// measured, so it outranks the census read below.
+fn brake_check(scope: Scope, ceiling: usize, human: bool) -> Result<(), AdmissionFailure> {
+    let Some((until, value)) = runaway_brake() else {
+        return Ok(());
+    };
+    if human {
+        static WARNED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if WARNED_UNTIL.swap(until, std::sync::atomic::Ordering::Relaxed) != until {
+            eprintln!(
+                "fno: {}; admitting a human's own start anyway",
+                describe_brake(until, &value)
+            );
+        }
+        return Ok(());
+    }
+    Err(AdmissionFailure {
         decision: AdmissionDecision::Refuse {
             count: None,
             ceiling,
             scope,
             reason: AdmissionReason::MachineRunaway,
         },
-        detail: hold,
-    }
+        detail: describe_brake(until, &value),
+    })
 }
 
 fn override_failure(scope: Scope, ceiling: usize, detail: String) -> AdmissionFailure {
@@ -521,6 +573,16 @@ fn census_receipt_reason(census: &Census) -> Option<&str> {
 /// Acquire the machine-global admission lock, measure the relevant process
 /// tree, and return a permit that must remain alive through the spawn syscall.
 pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
+    admit_fleet_for(human_at_tty())
+}
+
+/// Fleet admission for a plain shell pane. A bare shell is how a human
+/// recovers a loaded machine, so the runaway brake never holds it.
+pub fn admit_shell_pane() -> Result<AdmissionPermit, AdmissionFailure> {
+    admit_fleet_for(true)
+}
+
+fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
         Ok(false) => {}
@@ -532,9 +594,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
             ))
         }
     }
-    if let Some(hold) = runaway_brake() {
-        return Err(brake_failure(Scope::Fleet, DEFAULT_MAX_PROCESSES, hold));
-    }
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human)?;
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -637,9 +697,7 @@ pub fn admit_tab(
         Ok(false) => {}
         Err(detail) => return Err(override_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, detail)),
     }
-    if let Some(hold) = runaway_brake() {
-        return Err(brake_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, hold));
-    }
+    brake_check(Scope::Tab, DEFAULT_PANE_GROUP_MAX, human_at_tty())?;
     let ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
@@ -716,9 +774,7 @@ pub fn admit_pane(
             ))
         }
     }
-    if let Some(hold) = runaway_brake() {
-        return Err(brake_failure(Scope::Fleet, DEFAULT_MAX_PROCESSES, hold));
-    }
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human_at_tty())?;
     let (fleet_ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -2009,26 +2065,32 @@ mod tests {
     }
 
     #[test]
-    fn an_unexpired_brake_refuses_and_an_absent_one_admits_unchanged() {
+    fn an_unexpired_brake_refuses_agents_admits_humans_and_names_outside_load() {
         let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "until_epoch": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + 600,
-                "reason": "machine runaway: 10005 processes",
-                "group": {"name": "g i t", "count": 8000, "ppid": 42},
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let arm = |ppid: u32| {
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "until_epoch": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + 600,
+                    "reason": "machine runaway: 10005 processes",
+                    "group": {"name": "g i t", "count": 8000, "ppid": ppid},
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
         std::env::set_var("FNO_MACHINE_BRAKE", &path);
-        let failure = admit_fleet().err().expect("brake refuses");
+        // A worker identity marks an agent even at a terminal.
+        std::env::set_var("FNO_AGENT_SELF", "brake-test-worker");
+        // The group's parent is this process, so the load is the fleet's.
+        arm(std::process::id());
+        let failure = admit_fleet().err().expect("brake refuses an agent");
         match failure.decision() {
             AdmissionDecision::Refuse {
                 reason: AdmissionReason::MachineRunaway,
@@ -2036,11 +2098,17 @@ mod tests {
             } => {}
             other => panic!("expected MachineRunaway, got {other:?}"),
         }
-        assert!(
-            failure.to_string().contains("largest group g i t x8000"),
-            "{}",
-            failure
-        );
+        let text = failure.to_string();
+        assert!(text.contains("largest group g i t x8000"), "{text}");
+        assert!(!text.contains("outside the fleet"), "{text}");
+        // pid 1 descends from no fno root: the refusal says whose load it is.
+        arm(1);
+        let text = admit_fleet().err().expect("brake refuses").to_string();
+        assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
+        // A human's shell pane is the recovery path and passes the brake.
+        let shell = admit_shell_pane();
+        std::env::remove_var("FNO_AGENT_SELF");
+        assert!(shell.is_ok(), "a shell pane passes the brake");
         // The absent-file branch: admission reads byte-for-byte as before.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
         let permit = admit_fleet();

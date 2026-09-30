@@ -22,6 +22,7 @@ use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
+use crate::main_ci::main_ci_red_run;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -278,6 +279,17 @@ pub struct Request {
     /// value: only the preview walk reads this, decide's own chain always
     /// probes live).
     pub supplied_dispatch_hold: Option<Option<String>>,
+    /// The review-hold answer the caller already probed (`review_activity`
+    /// reads the same registry the `review-hold check` verb does), as a
+    /// refusal sentence in `review_hold_refusal`'s own shape. `Some(None)` =
+    /// probed clear; `None` = not supplied (probe). Preview-only, same law as
+    /// the dispatch-hold answer above.
+    pub supplied_review_hold: Option<Option<String>>,
+    /// The caller's own PR read (the status payload's projection), parsed by
+    /// [`facts_from_pulls`] in place of the `fno do pr info` spawn. A payload
+    /// too old to parse stays a fallback to the spawn, never a wrong fact.
+    /// Preview-only.
+    pub supplied_facts: Option<Value>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -355,11 +367,11 @@ pub trait Probes {
     /// Does the graph see this PR? `Refused` when no binding key names a
     /// node, `Inconclusive` when the graph or the body cannot be read.
     fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
-    fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
-    fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn base_lineage(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     /// Compile the merge result (merge-tree + the repo-wide static step).
-    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn merge_result(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn require_fresh_ci(&self, cwd: &Path) -> bool;
     /// The PR number holding `merge-slot:<base_ref>` when the claim reads
@@ -392,6 +404,23 @@ pub trait Probes {
     /// disarmed wherever an impl does not count lanes (the sequential default).
     fn live_lanes(&self, _cwd: &Path) -> usize {
         0
+    }
+    /// The base branch `main`'s CI verdict, read by the king check-in's own
+    /// reduction (`main_ci::main_ci_reading`, behind a short TTL row cache):
+    /// a red object naming the failed workflow and head sha, or the
+    /// `green`/`pending` word. `Err` = the read could not answer, which never
+    /// reads as red. Default `pending` keeps the gate disarmed wherever an
+    /// impl does not read main.
+    fn main_ci_token(&self, _cwd: &Path) -> Result<Value, String> {
+        Ok(Value::String("pending".to_string()))
+    }
+    /// The main-repair exemption: `None` when this PR's node carries the
+    /// `main-repair` tag (the declared repair lands through a red main);
+    /// `Some(lane)` otherwise, the repair-lane sentence the refusal quotes.
+    /// Default `None` = exempt, so an impl that does not read the graph never
+    /// manufactures a refusal.
+    fn main_repair_hold(&self, _cwd: &Path, _facts: &PrFacts) -> Option<String> {
+        None
     }
 }
 
@@ -467,7 +496,23 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         ProbeOutcome::Inconclusive(reason) => return Err(Outcome::Unknown { reason }),
     }
 
-    if let Some(blocked) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
+    // The hold-while-red rule, mechanized: while main's latest settled run is
+    // red, only a PR whose node is the declared main repair may merge. The
+    // king check-in's own reduction answers, never a check count; a pending
+    // main is not red, and an unreadable verdict never manufactures a red
+    // (only a POSITIVE red holds, the checks gate's law).
+    if facts.base_ref == "main" {
+        let token = probes.main_ci_token(cwd);
+        if let Some((workflow, sha)) = token.as_ref().ok().and_then(main_ci_red_run) {
+            if let Some(lane) = probes.main_repair_hold(cwd, &facts) {
+                return Err(Outcome::Refused {
+                    reason: main_red_reason(&workflow, &sha, &lane),
+                });
+            }
+        }
+    }
+
+    if let Some(blocked) = probes.dispatch_hold(cwd, &facts).fail_closed() {
         return Err(Outcome::Held { reason: blocked });
     }
 
@@ -503,7 +548,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         });
     }
 
-    if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.base_lineage(cwd, &facts).fail_open() {
         return Err(Outcome::Refused {
             reason: format!("stale base: {reason}"),
         });
@@ -512,7 +557,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // Two green parents can merge red: git joins hunks that never met on one
     // machine (3334b826a133 broke main with F821 out of a clean textual
     // merge). Held, not refused: the remedy is rebase, fix, push, retry.
-    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.merge_result(cwd, &facts).fail_open() {
         return Err(Outcome::Held {
             reason: format!("red merge result: {reason}"),
         });
@@ -608,18 +653,19 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                             // ordering the slot exists to keep.
                             if let Some(m) = holder {
                                 if m != n {
-                                    let holder_held =
-                                        probes.dispatch_hold(cwd, m).fail_open().is_some();
-                                    let stale_holder = holder_held
-                                        || match probes.pr_facts(cwd, Some(m)) {
-                                            Ok(holder_facts) => {
-                                                is_terminal_state(&holder_facts.state)
-                                                    || probes.checks_read(cwd, m).verdict == "red"
-                                            }
-                                            // Unreadable holder PR keeps the
-                                            // slot; the TTL bounds it.
-                                            Err(_) => false,
-                                        };
+                                    let stale_holder = match probes.pr_facts(cwd, Some(m)) {
+                                        Ok(holder_facts) => {
+                                            probes
+                                                .dispatch_hold(cwd, &holder_facts)
+                                                .fail_open()
+                                                .is_some()
+                                                || is_terminal_state(&holder_facts.state)
+                                                || probes.checks_read(cwd, m).verdict == "red"
+                                        }
+                                        // Unreadable holder PR keeps the
+                                        // slot; the TTL bounds it.
+                                        Err(_) => false,
+                                    };
                                     if stale_holder {
                                         probes.release_slot(cwd, &facts.base_ref, m);
                                         holder = None;
@@ -778,18 +824,39 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
 
+    // (3b) main red: the same refusal the effect path raises, as a blocker.
+    if facts.base_ref == "main" {
+        let token = probes.main_ci_token(cwd);
+        if let Some((workflow, sha)) = token.as_ref().ok().and_then(main_ci_red_run) {
+            if let Some(lane) = probes.main_repair_hold(cwd, facts) {
+                blockers.push(Blocker::refused(
+                    "main_red",
+                    main_red_reason(&workflow, &sha, &lane),
+                ));
+            }
+        }
+    }
+
     // (4) holds, in decide's order. A preview ask may carry the dispatch-hold
     // answer its caller already probed; the supplied value rides only the
     // preview (advisory) walk, never decide's own merge chain.
     let dispatch_hold_outcome = match &request.supplied_dispatch_hold {
         Some(None) => ProbeOutcome::Clear,
         Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
-        None => probes.dispatch_hold(cwd, facts.number),
+        None => probes.dispatch_hold(cwd, facts),
     };
     if let Some(reason) = dispatch_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("dispatch_hold", reason));
     }
-    if let Some(reason) = probes.review_hold(cwd, facts.number).fail_closed() {
+    // The supplied review-hold answer rides the preview exactly like the
+    // dispatch-hold answer above: a probed clear is `Some(None)`, decide's own
+    // chain never sees a supplied value.
+    let review_hold_outcome = match &request.supplied_review_hold {
+        Some(None) => ProbeOutcome::Clear,
+        Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
+        None => probes.review_hold(cwd, facts.number),
+    };
+    if let Some(reason) = review_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("review_in_flight", reason));
     }
 
@@ -820,13 +887,13 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     }
 
     // (6) lineage + merge result, in decide's order.
-    if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.base_lineage(cwd, &facts).fail_open() {
         blockers.push(Blocker::refused(
             "stacked_base",
             format!("stale base: {reason}"),
         ));
     }
-    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+    if let Some(reason) = probes.merge_result(cwd, &facts).fail_open() {
         blockers.push(Blocker::held(
             "red_merge_result",
             format!("red merge result: {reason}"),
@@ -939,15 +1006,14 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         match probes.slot_holder(cwd, &facts.base_ref) {
             Err(_) => {}
             Ok(Some(m)) if m != n => {
-                let holder_held = probes.dispatch_hold(cwd, m).fail_open().is_some();
-                let evictable = holder_held
-                    || match probes.pr_facts(cwd, Some(m)) {
-                        Ok(hf) => {
-                            is_terminal_state(&hf.state)
-                                || probes.checks_read(cwd, m).verdict == "red"
-                        }
-                        Err(_) => false,
-                    };
+                let evictable = match probes.pr_facts(cwd, Some(m)) {
+                    Ok(hf) => {
+                        probes.dispatch_hold(cwd, &hf).fail_open().is_some()
+                            || is_terminal_state(&hf.state)
+                            || probes.checks_read(cwd, m).verdict == "red"
+                    }
+                    Err(_) => false,
+                };
                 if !evictable {
                     blockers.push(Blocker::held(
                         "merge_slot_held",
@@ -1403,13 +1469,16 @@ impl Probes for RealProbes {
         node_binding_probe(cwd, facts)
     }
 
-    fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "hold-check", &pr.to_string()]) {
-            Ok((code, stdout, stderr)) => classify_hold_probe(code == Some(0), &stdout, &stderr),
-            Err(error) => ProbeOutcome::Inconclusive(format!(
-                "dispatch hold check unavailable ({error}); refusing to assume unheld"
-            )),
-        }
+    fn main_ci_token(&self, cwd: &Path) -> Result<Value, String> {
+        crate::main_ci::main_ci_reading_cached(cwd)
+    }
+
+    fn main_repair_hold(&self, cwd: &Path, facts: &PrFacts) -> Option<String> {
+        main_repair_hold_probe(cwd, facts)
+    }
+
+    fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        crate::gate_probes::dispatch_hold(cwd, facts)
     }
 
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
@@ -1437,36 +1506,22 @@ impl Probes for RealProbes {
         }
     }
 
-    fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "base-lineage-check", &pr.to_string()]) {
-            Ok((code, _stdout, stderr)) => match code {
-                Some(0) => ProbeOutcome::Clear,
-                Some(3) => {
-                    ProbeOutcome::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
-                }
-                other => ProbeOutcome::Inconclusive(format!(
-                    "exit {other:?}: {}",
-                    String::from_utf8_lossy(&stderr).trim()
-                )),
-            },
-            Err(error) => ProbeOutcome::Inconclusive(format!("spawn error: {error}")),
-        }
+    fn base_lineage(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        let run = |args: &[&str], dir: &Path| {
+            let mut cmd = Command::new(args[0]);
+            cmd.args(&args[1..]).current_dir(dir);
+            crate::gate_probes::run_probe(cmd)
+        };
+        crate::gate_probes::base_lineage(cwd, facts, &run)
     }
 
-    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
-        match Self::fno(cwd, &["do", "pr", "merge-result-check", &pr.to_string()]) {
-            Ok((code, _stdout, stderr)) => match code {
-                Some(0) => ProbeOutcome::Clear,
-                Some(3) => {
-                    ProbeOutcome::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
-                }
-                other => ProbeOutcome::Inconclusive(format!(
-                    "exit {other:?}: {}",
-                    String::from_utf8_lossy(&stderr).trim()
-                )),
-            },
-            Err(error) => ProbeOutcome::Inconclusive(format!("spawn error: {error}")),
-        }
+    fn merge_result(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        let run = |args: &[&str], dir: &Path| {
+            let mut cmd = Command::new(args[0]);
+            cmd.args(&args[1..]).current_dir(dir);
+            crate::gate_probes::run_probe(cmd)
+        };
+        crate::gate_probes::merge_result(cwd, facts, &run)
     }
 
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
@@ -1883,6 +1938,92 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
+/// The graph tag that declares a repair lane: a node carrying it may merge
+/// through a red main, because it IS the repair.
+const MAIN_REPAIR_TAG: &str = "main-repair";
+
+/// The refusal: the red run named, then the repair lane.
+fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
+    format!(
+        "main is red: {workflow} failed at {}; merges hold while main's latest \
+         settled run is red. {lane}",
+        sha.chars().take(8).collect::<String>()
+    )
+}
+
+/// Does one graph entry carry the tag?
+fn node_carries_tag(entry: &Value, tag: &str) -> bool {
+    entry
+        .get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(|t| t == tag))
+}
+
+/// The main-repair exemption probe over the live graph: `None` when this
+/// PR's node carries the [`MAIN_REPAIR_TAG`], else the repair-lane sentence.
+fn main_repair_hold_probe(cwd: &Path, facts: &PrFacts) -> Option<String> {
+    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    match backlog_api::rows(&store) {
+        Err(e) => Some(format!(
+            "the graph is unreadable ({}) so no repair lane can be named; tag \
+             the repair node: fno backlog update <node> --tag {MAIN_REPAIR_TAG}",
+            e.0
+        )),
+        Ok(entries) => main_repair_hold_from_entries(&entries, facts),
+    }
+}
+
+/// The pure half of [`main_repair_hold_probe`], over already-read entries.
+/// The PR's node is found by the same binding keys the node-binding gate
+/// trusts; any one of them carrying the tag exempts the PR.
+fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<String> {
+    let keys = pr_binding_keys(
+        facts.number as i64,
+        &facts.head_ref,
+        Some(&facts.url),
+        facts.body.as_deref(),
+        entries,
+    );
+    let entry_of = |nid: &str| {
+        entries
+            .iter()
+            .find(|e| crate::graph_store::entry_id(e) == Some(nid))
+    };
+    let bound: Vec<&Value> = keys
+        .branch
+        .iter()
+        .chain(&keys.backrefs)
+        .chain(&keys.trailer)
+        .filter_map(|nid| entry_of(nid))
+        .collect();
+    if bound.iter().any(|e| node_carries_tag(e, MAIN_REPAIR_TAG)) {
+        return None;
+    }
+    // The lane is named within the PR's own project: another project's
+    // main-repair tag declares that project's main, never this one.
+    let project = bound
+        .iter()
+        .find_map(|e| e.get("project").and_then(Value::as_str));
+    let lanes: Vec<&str> = entries
+        .iter()
+        .filter(|e| node_carries_tag(e, MAIN_REPAIR_TAG))
+        .filter(|e| match project {
+            Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
+            None => true,
+        })
+        .filter_map(|e| crate::graph_store::entry_id(e))
+        .collect();
+    Some(if lanes.is_empty() {
+        format!(
+            "no node is declared the repair lane; tag the repair node: \
+             fno backlog update <node> --tag {MAIN_REPAIR_TAG}"
+        )
+    } else {
+        format!("the declared repair lane is {}", lanes.join(", "))
+    })
+}
+
 /// The node-binding gate over the live graph. The scope is the canonical repo
 /// root: a repo whose graph names no node under it (a stock install that
 /// never used the backlog, an external-tracker project) has nothing to bind
@@ -1942,6 +2083,64 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
         ));
     }
     ProbeOutcome::Clear
+}
+
+/// Parse the status read's own pull projection into [`PrFacts`]: the same
+/// facts the `fno do pr info` spawn answers, from the payload the read
+/// already fetched. A projection older than the `url`/`body` fields is NOT a
+/// fact - the caller falls back to the spawn rather than walking with an
+/// unevaluable backref key or a dead-instrument head.
+pub fn facts_from_pulls(pulls: &Value, fallback_pr: Option<u64>) -> Result<PrFacts, String> {
+    let number = pulls
+        .get("number")
+        .and_then(Value::as_u64)
+        .or(fallback_pr)
+        .ok_or_else(|| "the pull payload carried no PR number".to_string())?;
+    let head_sha = pulls
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if head_sha.is_empty() {
+        return Err(format!(
+            "the pull payload carried no head sha for PR {number}"
+        ));
+    }
+    let url = pulls
+        .get("html_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let body = pulls.get("body").and_then(Value::as_str);
+    if url.is_empty() || body.is_none() {
+        return Err("the pull payload predates the url/body fields".to_string());
+    }
+    Ok(PrFacts {
+        number,
+        head_sha,
+        head_ref: pulls
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        base_ref: pulls
+            .get("baseRefName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        url,
+        body: Some(body.unwrap_or("").to_string()),
+        state: pulls
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("OPEN")
+            .to_string(),
+        armed: pulls
+            .get("auto_merge")
+            .map(|v| !v.is_null())
+            .unwrap_or(false),
+    })
 }
 
 /// Parse `fno do pr info`. An error field, a missing number, or a missing head
@@ -2258,6 +2457,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         );
         return (0, out, String::new());
     }
+    // The effect ops are the effect-classification door the ported Python
+    // approvals callers route through, the same transport the grant ops use:
+    // `{"op": "effect-classify"|"effect-submit"|"effect-verdict", ...}`.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("effect-"))
+    {
+        let out = crate::effect_gate::run_op(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     // The status ops are the pr-status fact readers riding this verb's
     // payload, the same transport the hold and grant ops use:
     // `{"op": "status-merge-blocker"|"status-failure-cause", ...}`.
@@ -2317,7 +2530,17 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
 /// verdicts.
 pub(crate) fn preview_receipt(request: &Request) -> Value {
     let cwd = request.cwd.as_path();
-    match RealProbes.pr_facts(cwd, request.pr) {
+    // Supplied facts win (preview-only): the status read's own projection
+    // parses in process, and a payload too old to carry the fields falls back
+    // to the guarded spawn so the walk never rides half a fact.
+    let facts = request
+        .supplied_facts
+        .as_ref()
+        .and_then(|p| facts_from_pulls(p, request.pr).ok());
+    match match facts {
+        Some(facts) => Ok(facts),
+        None => RealProbes.pr_facts(cwd, request.pr),
+    } {
         Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
         Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
             PreviewVerdict::Go { waiver } => {
@@ -2452,6 +2675,13 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             Value::Null => None,
             other => Some(other.to_string()),
         }),
+        // Same tri-state as the dispatch-hold answer above.
+        supplied_review_hold: payload.get("review_hold_reason").map(|v| match v {
+            Value::String(reason) => Some(reason.to_owned()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        }),
+        supplied_facts: payload.get("facts").filter(|v| v.is_object()).cloned(),
     })
 }
 
@@ -2516,6 +2746,11 @@ mod tests {
         /// Dispatch holds keyed by PR, so a test can hold a holder without
         /// holding the PR under decision.
         other_holds: RefCell<HashMap<u64, ProbeOutcome>>,
+        /// The main-ci verdict the gate reads; `None` (the default) reads the
+        /// `pending` word, so every pre-existing test keeps its behavior.
+        main_ci: Option<Result<Value, String>>,
+        /// The main-repair exemption answer; `None` (the default) reads exempt.
+        main_repair: Option<Option<String>>,
     }
 
     fn open_facts() -> PrFacts {
@@ -2652,8 +2887,8 @@ mod tests {
         fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn dispatch_hold(&self, _cwd: &Path, pr: u64) -> ProbeOutcome {
-            if let Some(hold) = self.other_holds.borrow().get(&pr) {
+        fn dispatch_hold(&self, _cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+            if let Some(hold) = self.other_holds.borrow().get(&facts.number) {
                 return hold.clone();
             }
             self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
@@ -2661,10 +2896,10 @@ mod tests {
         fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.review_hold.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn base_lineage(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.lineage.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn merge_result(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.merge_result.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn ci_base(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
@@ -2734,6 +2969,14 @@ mod tests {
         fn strategy(&self, _cwd: &Path) -> String {
             "squash".to_string()
         }
+        fn main_ci_token(&self, _cwd: &Path) -> Result<Value, String> {
+            self.main_ci
+                .clone()
+                .unwrap_or_else(|| Ok(Value::String("pending".to_string())))
+        }
+        fn main_repair_hold(&self, _cwd: &Path, _facts: &PrFacts) -> Option<String> {
+            self.main_repair.clone().flatten()
+        }
         fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String), String> {
             self.gh_calls.borrow_mut().push(args.to_vec());
             if args.first().map(String::as_str) == Some("api") {
@@ -2796,6 +3039,8 @@ mod tests {
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
             supplied_dispatch_hold: None,
+            supplied_review_hold: None,
+            supplied_facts: None,
         }
     }
 
@@ -2896,38 +3141,29 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_decisions_read_is_unreadable_never_a_grant() {
-        // AC2-ERR: nonzero exit fails closed as unreadable.
+    fn an_unreadable_decisions_read_is_never_a_grant() {
+        // AC2-ERR: a nonzero exit or a malformed payload fails closed as
+        // unreadable; neither becomes a grant. One contract, two transports.
         let mut req = request(Effect::Merge);
         req.approved = Some(false);
-        let fake = Fake {
-            decisions_exit: Some(1),
-            ..clean()
-        };
-        let outcome = run(&fake, &req);
-        assert_eq!(outcome.word(), "refused");
-        assert!(
-            outcome.detail().contains("unreadable"),
-            "{}",
-            outcome.detail()
-        );
-    }
-
-    #[test]
-    fn a_malformed_decisions_payload_is_unreadable_never_a_grant() {
-        let mut req = request(Effect::Merge);
-        req.approved = Some(false);
-        let fake = Fake {
-            decisions_stdout: Some(br#"{"error":"damaged"}"#.to_vec()),
-            ..clean()
-        };
-        let outcome = run(&fake, &req);
-        assert_eq!(outcome.word(), "refused");
-        assert!(
-            outcome.detail().contains("unreadable"),
-            "{}",
-            outcome.detail()
-        );
+        for fake in [
+            Fake {
+                decisions_exit: Some(1),
+                ..clean()
+            },
+            Fake {
+                decisions_stdout: Some(br#"{"error":"damaged"}"#.to_vec()),
+                ..clean()
+            },
+        ] {
+            let outcome = run(&fake, &req);
+            assert_eq!(outcome.word(), "refused");
+            assert!(
+                outcome.detail().contains("unreadable"),
+                "{}",
+                outcome.detail()
+            );
+        }
     }
 
     #[test]
@@ -3286,7 +3522,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_base_verdict_refuses_the_pr_2094_shape() {
+    fn ci_base_verdict_reads_each_branch() {
         let runs = (0..8)
             .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
             .collect::<Vec<_>>();
@@ -3294,10 +3530,6 @@ mod tests {
         assert!(
             matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_uses_each_workflows_newest_run() {
         let runs = vec![
             ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
             ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
@@ -3307,27 +3539,15 @@ mod tests {
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_clears_when_head_contains_base() {
         let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
         assert_eq!(
             ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_clears_without_runs() {
         assert_eq!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
             ProbeOutcome::Clear
         );
-    }
-
-    #[test]
-    fn ci_base_verdict_is_inconclusive_for_malformed_timestamps() {
         let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
         assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
@@ -3336,7 +3556,7 @@ mod tests {
     }
 
     #[test]
-    fn oldest_current_run_uses_each_workflows_newest_run_then_takes_the_oldest() {
+    fn oldest_current_run_reads_each_branch() {
         let runs = vec![
             ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
             ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
@@ -3346,15 +3566,11 @@ mod tests {
             oldest_current_run(&runs),
             Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
         );
-    }
-
-    #[test]
-    fn oldest_current_run_returns_none_without_workflow_runs() {
         assert_eq!(oldest_current_run(&[]), None);
     }
 
     #[test]
-    fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
+    fn stale_overlap_verdict_reads_each_branch() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             2094,
@@ -3365,10 +3581,6 @@ mod tests {
             }),
         );
         assert_eq!(outcome, ProbeOutcome::Clear);
-    }
-
-    #[test]
-    fn a_stale_ci_base_refuses_with_shared_paths_and_a_bounded_list() {
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             8,
@@ -3384,24 +3596,20 @@ mod tests {
             }),
         );
         assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-            if reason.starts_with("ci_base_stale")
-                && reason.contains("docs/guide.md")
-                && reason.contains("hooks/a.json")
-                && reason.contains("hooks/b.json")
-                && reason.contains("and 1 more")
-                && !reason.contains("hooks/c.json")));
-    }
-
-    #[test]
-    fn an_unreadable_stale_overlap_fails_closed() {
+        if reason.starts_with("ci_base_stale")
+            && reason.contains("docs/guide.md")
+            && reason.contains("hooks/a.json")
+            && reason.contains("hooks/b.json")
+            && reason.contains("and 1 more")
+            && !reason.contains("hooks/c.json")));
         let outcome = stale_overlap_verdict(
             "ci_base_stale: old run".to_string(),
             8,
             Err("fetch failed".to_string()),
         );
         assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-            if reason.starts_with("ci_base_stale")
-                && reason.contains("file overlap unreadable (fetch failed)")));
+        if reason.starts_with("ci_base_stale")
+            && reason.contains("file overlap unreadable (fetch failed)")));
     }
 
     #[test]
@@ -3447,7 +3655,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inconclusive_ci_base_probe_fails_open() {
+    fn ci_base_freshness_gates_the_chain() {
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Inconclusive("gh unavailable".to_string())),
             ..clean()
@@ -3455,10 +3663,6 @@ mod tests {
         let mut req = request(Effect::Merge);
         req.require_checks = true;
         assert_eq!(run(&fake, &req).word(), "merged");
-    }
-
-    #[test]
-    fn disabled_fresh_ci_requirement_skips_the_probe() {
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
             fresh_ci: Some(false),
@@ -3927,7 +4131,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ruleset_hold_holds_and_names_the_missing_context() {
+    fn a_ruleset_hold_holds() {
         // The door fetched the hold's own name moments before `gh pr merge`
         // and used to spend a failure on it. Held, not Failed: a required
         // check that is merely pending still arrives.
@@ -3942,10 +4146,6 @@ mod tests {
         assert_eq!(outcome.word(), "held");
         assert!(outcome.detail().contains("smoke"));
         assert!(fake.gh_calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn a_ruleset_hold_outranks_the_require_checks_flag() {
         // A ruleset hold is not a question about CI greenness. A door gated on
         // the flag would attempt the bypass its own reader just refused.
         let fake = Fake {
@@ -4405,6 +4605,14 @@ mod tests {
                 },
             ),
             (
+                "main_red",
+                Fake {
+                    main_ci: Some(Ok(red_main())),
+                    main_repair: Some(Some("the declared repair lane is x-fix".to_string())),
+                    ..base()
+                },
+            ),
+            (
                 "dispatch_hold",
                 Fake {
                     dispatch_hold: Some(ProbeOutcome::Refused(
@@ -4500,6 +4708,89 @@ mod tests {
         assert!(fake.take_slot_calls.borrow().is_empty());
         assert!(fake.release_slot_calls.borrow().is_empty());
         assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    /// The king check-in's red token, stubbed: the run name and the sha it
+    /// failed on. A stub verdict, never a live merge.
+    fn red_main() -> Value {
+        serde_json::json!({
+            "verdict": "red",
+            "workflow": "cli-ci",
+            "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        })
+    }
+
+    #[test]
+    fn the_main_red_gate_refuses_red_and_exempts_only_the_declared_repair() {
+        // Reproduction of 2026-09-30 (four merges landed on a red main): the
+        // merge preview walks a stubbed red main verdict, never a live merge.
+        let lane = "no node is declared the repair lane; tag the repair node \
+                    (fno backlog update <node> --tag main-repair)";
+        let refusing = Fake {
+            main_ci: Some(Ok(red_main())),
+            main_repair: Some(Some(lane.to_string())),
+            ..clean()
+        };
+        let codes: Vec<String> = preview_blockers(&refusing, &preview_request(7))
+            .into_iter()
+            .map(|b| b.code.to_string())
+            .collect();
+        assert!(
+            codes.contains(&"main_red".to_string()),
+            "the preview walked a red main with no main_red blocker: {codes:?}"
+        );
+        let err = decide(&refusing, &request(Effect::Merge)).unwrap_err();
+        assert_eq!(err.word(), "refused", "{}", err.detail());
+        let detail = err.detail();
+        assert!(detail.contains("cli-ci"), "{detail}");
+        assert!(detail.contains("deadbeef"), "{detail}");
+        assert!(detail.contains("repair lane"), "{detail}");
+
+        // The exemption: a PR whose node carries the tag is the declared
+        // repair, and it lands through the red.
+        let repair = Fake {
+            main_ci: Some(Ok(red_main())),
+            main_repair: Some(None),
+            ..clean()
+        };
+        assert!(decide(&repair, &request(Effect::Merge)).is_ok());
+
+        // A pending main is not red, and an unreadable verdict never
+        // manufactures one; the gate names main, not every base.
+        for clearing in [
+            Fake {
+                main_ci: Some(Ok(Value::String("pending".into()))),
+                main_repair: Some(Some(lane.to_string())),
+                ..clean()
+            },
+            Fake {
+                main_ci: Some(Err("gh api failed: rate limited".to_string())),
+                main_repair: Some(Some(lane.to_string())),
+                ..clean()
+            },
+            Fake {
+                facts: Some(PrFacts {
+                    base_ref: "release".to_string(),
+                    ..open_facts()
+                }),
+                main_ci: Some(Ok(red_main())),
+                ..clean()
+            },
+        ] {
+            assert!(
+                decide(&clearing, &request(Effect::Merge)).is_ok(),
+                "{}",
+                err_words(&clearing)
+            );
+        }
+    }
+
+    /// The refused word of a decide on `fake`, for a failure message.
+    fn err_words(fake: &Fake) -> String {
+        match decide(fake, &request(Effect::Merge)) {
+            Ok(_) => "authorized".to_string(),
+            Err(outcome) => format!("{}: {}", outcome.word(), outcome.detail()),
+        }
     }
 
     #[test]

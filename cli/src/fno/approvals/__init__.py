@@ -12,8 +12,6 @@ delivery or later business success.
 from __future__ import annotations
 
 from fno.approvals.models import (
-    DENIED_EFFECT_CLASSES,
-    INERT_EFFECT_CLASSES,
     AdapterCapability,
     ApprovalDecision,
     ApprovalRequest,
@@ -40,13 +38,11 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalRequest",
     "Authority",
-    "DENIED_EFFECT_CLASSES",
     "DecisionKind",
     "EffectAttempt",
     "EffectDisposition",
     "EffectState",
     "EffectStore",
-    "INERT_EFFECT_CLASSES",
     "PrepareResult",
     "ReconciliationRead",
     "Refusal",

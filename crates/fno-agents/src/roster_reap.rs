@@ -1003,7 +1003,7 @@ mod tests {
     // marker - no sessions join, no receipt - the keep names the missing
     // marker.
     #[test]
-    fn an_unowned_session_with_weak_or_no_provenance_keeps_without_a_marker() {
+    fn provenance_rows() {
         let dir = tmpdir("marker-weak");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
@@ -1033,6 +1033,159 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut entry = RegistryEntry::default();
+        entry.name = "target-x-aaaa-worker".into();
+        entry.harness_session_id = Some("sid-1".into());
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[entry],
+            &|| Some(graph_done("x-aaaa")),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.kept_owned, 1);
+        assert!(summary.retired.is_empty());
+
+        let dir = tmpdir("adopted-unshield");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut entry = RegistryEntry::default();
+        entry.name = "adopted-worker".into();
+        entry.short_id = "adopted-worker".into();
+        entry.origin = Some("adopted".into());
+        entry.harness = Some("claude".into());
+        entry.harness_session_id = Some("sid-1".into());
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[entry],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.kept_owned, 0, "{summary:?}");
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut spawn = RegistryEntry::default();
+        spawn.name = "w-spawn".into();
+        spawn.origin = Some("spawn".into());
+        spawn.harness_session_id = Some("sid-1".into());
+        let mut operator = RegistryEntry::default();
+        operator.name = "w-operator".into();
+        operator.origin = Some("operator".into());
+        operator.harness_session_id = Some("sid-1".into());
+        let mut crowned = RegistryEntry::default();
+        crowned.name = "w-crowned".into();
+        crowned.origin = Some("adopted".into());
+        crowned.crown_level = Some(1);
+        crowned.harness_session_id = Some("sid-1".into());
+        let mut unstamped = RegistryEntry::default();
+        unstamped.name = "w-unstamped".into();
+        unstamped.harness_session_id = Some("sid-1".into());
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows),
+            &[spawn, operator, crowned, unstamped],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.kept_owned, 1, "{summary:?}");
+        assert!(summary.retired.is_empty(), "{summary:?}");
+
+        let mut r = row("ab12cd34", Some("sid-1"), Some("hand-typed-name"));
+        r.state = Some("working".into());
+        let rows = vec![r];
+        let scopes = [RosterScope::Off, RosterScope::Provenanced, RosterScope::All];
+        for scope in scopes {
+            let summary = run(
+                &no_home(),
+                900,
+                scope,
+                true,
+                &roster(rows.clone()),
+                &[],
+                &|| Some(GraphRead::default()),
+                &|_| None,
+                &|_| HashMap::new(),
+                crate::daemon::now_epoch_secs(),
+                &|_| CascadeOutcome::NotApplicable,
+            );
+            assert!(
+                summary.retired.is_empty(),
+                "scope {scope:?} retired a no-provenance row: {summary:?}"
+            );
+            let reason = &summary.kept[0].reason;
+            if scope == RosterScope::Off {
+                assert!(reason.contains("roster scope off"), "{summary:?}");
+            } else {
+                assert!(reason.contains("no provenance"), "{summary:?}");
+            }
+        }
+
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(GraphRead::default()),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty());
+        assert!(
+            summary.kept[0].reason.contains("no provenance"),
+            "{summary:?}"
+        );
+
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-bbbb".into(), "in_progress".into());
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty());
+        assert!(summary.kept[0].reason.contains("open work"), "{summary:?}");
     }
 
     // AC5-HP, the leaked-retirement class: a session with NO provenance in
@@ -1096,109 +1249,19 @@ mod tests {
     }
 
     // An owned row is the registry sweep's business.
-    #[test]
-    fn owned_row_is_kept_for_the_registry_sweep() {
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
-        let mut entry = RegistryEntry::default();
-        entry.name = "target-x-aaaa-worker".into();
-        entry.harness_session_id = Some("sid-1".into());
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[entry],
-            &|| Some(graph_done("x-aaaa")),
-            &|_| None,
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.kept_owned, 1);
-        assert!(summary.retired.is_empty());
-    }
 
     // AC1-HP: an adopted, uncrowned registry row does NOT shield its listed
     // session. The session still needs its own gates - marker, quiet - but
     // the adopted keep is no longer one of them.
-    #[test]
-    fn an_adopted_row_does_not_shield_its_listed_session() {
-        let dir = tmpdir("adopted-unshield");
-        let transcript = quiet_transcript(&dir, "sid-1");
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
-        let mut entry = RegistryEntry::default();
-        entry.name = "adopted-worker".into();
-        entry.short_id = "adopted-worker".into();
-        entry.origin = Some("adopted".into());
-        entry.harness = Some("claude".into());
-        entry.harness_session_id = Some("sid-1".into());
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[entry],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_e| Some(vec![transcript.clone()]),
-            &|entries| {
-                entries
-                    .iter()
-                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
-                    .collect::<HashMap<_, _>>()
-            },
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.kept_owned, 0, "{summary:?}");
-        assert_eq!(summary.retired.len(), 1, "{summary:?}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     // AC3-ERR: spawn, operator, crowned, and unstamped entries all still
     // shield their listed session; only the adopted-uncrowned carve-out
     // stops shielding.
-    #[test]
-    fn a_spawn_operator_crowned_or_unstamped_row_still_shields() {
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
-        let mut spawn = RegistryEntry::default();
-        spawn.name = "w-spawn".into();
-        spawn.origin = Some("spawn".into());
-        spawn.harness_session_id = Some("sid-1".into());
-        let mut operator = RegistryEntry::default();
-        operator.name = "w-operator".into();
-        operator.origin = Some("operator".into());
-        operator.harness_session_id = Some("sid-1".into());
-        let mut crowned = RegistryEntry::default();
-        crowned.name = "w-crowned".into();
-        crowned.origin = Some("adopted".into());
-        crowned.crown_level = Some(1);
-        crowned.harness_session_id = Some("sid-1".into());
-        let mut unstamped = RegistryEntry::default();
-        unstamped.name = "w-unstamped".into();
-        unstamped.harness_session_id = Some("sid-1".into());
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::All,
-            true,
-            &roster(rows),
-            &[spawn, operator, crowned, unstamped],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_| None,
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.kept_owned, 1, "{summary:?}");
-        assert!(summary.retired.is_empty(), "{summary:?}");
-    }
 
     // AC6-HP: the age seam is called ONCE with every candidate, and a
     // candidate the batch does not answer keeps as `transcript unresolved`.
     #[test]
-    fn the_age_seam_is_called_once_for_every_candidate() {
+    fn sweep_rows() {
         let dir = tmpdir("age-batch");
         let transcript = quiet_transcript(&dir, "sid-a");
         let rows = vec![
@@ -1244,6 +1307,100 @@ mod tests {
             .expect("the unanswered candidate keeps");
         assert_eq!(unresolved.short_id, "sid-b", "{summary:?}");
         std::fs::remove_dir_all(&dir).ok();
+
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &ClaudeAgentsSnapshot::unknown("claude exited 1"),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 0);
+        assert!(summary.kept[0].reason.contains("roster unreadable"));
+
+        let dir = tmpdir("refuse");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            false,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::Failed("rm exited 3".into()),
+        );
+        assert!(summary.retired.is_empty());
+        assert_eq!(summary.refused.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = tmpdir("dedupe");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![
+            row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker")),
+            row("ef56ab78", Some("sid-1"), Some("target-x-aaaa-copy")),
+        ];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1);
+        assert_eq!(summary.deduped, 1);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = tmpdir("nothing-resolved");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![]),
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.probed > 0);
+        assert_eq!(summary.answered, 0);
+        assert!(summary.nothing_resolved(), "{summary:?}");
+        let out = render(&summary, false, true);
+        assert!(
+            out.contains("refusing: every probe came back unresolved"),
+            "{out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // a terminal harness state releases the open-work keep inside
@@ -1252,7 +1409,7 @@ mod tests {
     // the reason names the release so the operator sees what a wider scope
     // would do.
     #[test]
-    fn x2774_terminal_state_releases_open_work_inside_the_scope() {
+    fn terminal_rows() {
         let dir = tmpdir("term");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
@@ -1289,14 +1446,7 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // The open-PR keep at scope all: an open node whose PR is unmerged and
-    // whose driver is THIS session keeps its row even on a terminal roster
-    // state. The default scope keeps the row too, but under the unchanged
-    // open-work reason.
-    #[test]
-    fn open_pr_keep_at_scope_all_beats_the_terminal_release() {
         let dir = tmpdir("open-pr");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
@@ -1335,12 +1485,7 @@ mod tests {
         let kept = &summary.kept[0];
         assert!(kept.reason.contains("open pr: x-bbbb #1943"), "{summary:?}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // At the default scope, the same row keeps - but the reason names the
-    // terminal state, so the hold is legible.
-    #[test]
-    fn x2774_terminal_state_names_itself_at_the_default_scope() {
         let dir = tmpdir("term-keep");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
@@ -1380,62 +1525,7 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // An open node holds the row: the work is not done.
-    #[test]
-    fn open_node_keeps_the_row() {
-        let mut g = graph_done("x-aaaa");
-        g.statuses.insert("x-bbbb".into(), "in_progress".into());
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(g.clone()),
-            &|_| None,
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert!(summary.retired.is_empty());
-        assert!(summary.kept[0].reason.contains("open work"), "{summary:?}");
-    }
-
-    // No provenance keeps the row: the positive reason is named, never an
-    // absence dressed as a removal. The row's harness state reads done, but
-    // with no receipt marker the done release never reaches the quiet gate.
-    #[test]
-    fn unresolved_provenance_keeps_the_row() {
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(GraphRead::default()),
-            &|_| None,
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert!(summary.retired.is_empty());
-        assert!(
-            summary.kept[0].reason.contains("no provenance"),
-            "{summary:?}"
-        );
-    }
-
-    // A fresh transcript does NOT save a row whose harness state reads
-    // terminal: the roster's done is a finish line, not a turn boundary
-    //. A working row inside grace still keeps.
-    #[test]
-    fn fresh_transcript_does_not_save_a_terminal_roster_row() {
         let dir = tmpdir("fresh");
         let transcript = dir.join("sid-1.jsonl");
         std::fs::write(&transcript, "{\"message\":{}}\n").unwrap();
@@ -1468,39 +1558,15 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // A roster the sweep cannot see removes nothing.
-    #[test]
-    fn unreadable_roster_keeps_everything() {
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &ClaudeAgentsSnapshot::unknown("claude exited 1"),
-            &[],
-            &|| Some(graph_done("x-aaaa")),
-            &|_| None,
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.retired.len(), 0);
-        assert!(summary.kept[0].reason.contains("roster unreadable"));
-    }
-
-    // A removal that does not confirm lands in refused, never in retired.
-    #[test]
-    fn unconfirmed_removal_refuses_named() {
-        let dir = tmpdir("refuse");
-        let transcript = quiet_transcript(&dir, "sid-1");
+        let dir = tmpdir("term-recency");
+        let transcript = fresh_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
         let summary = run(
             &no_home(),
             900,
             RosterScope::Provenanced,
-            false,
+            true,
             &roster(rows),
             &[],
             &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
@@ -1512,15 +1578,74 @@ mod tests {
                     .collect::<HashMap<_, _>>()
             },
             crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::Failed("rm exited 3".into()),
+            &|_| CascadeOutcome::NotApplicable,
         );
-        assert!(summary.retired.is_empty());
-        assert_eq!(summary.refused.len(), 1);
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .contains("session terminal: harness state done"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = tmpdir("term-recency-keep");
+        let transcript = fresh_transcript(&dir, "sid-1");
+        let mut working = row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"));
+        working.state = Some("working".into());
+        let rows = vec![working];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        assert!(
+            summary.kept[0]
+                .reason
+                .starts_with("active: transcript written "),
+            "{summary:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // The open-PR keep at scope all: an open node whose PR is unmerged and
+    // whose driver is THIS session keeps its row even on a terminal roster
+    // state. The default scope keeps the row too, but under the unchanged
+    // open-work reason.
+
+    // At the default scope, the same row keeps - but the reason names the
+    // terminal state, so the hold is legible.
+
+    // An open node holds the row: the work is not done.
+
+    // No provenance keeps the row: the positive reason is named, never an
+    // absence dressed as a removal. The row's harness state reads done, but
+    // with no receipt marker the done release never reaches the quiet gate.
+
+    // A fresh transcript does NOT save a row whose harness state reads
+    // terminal: the roster's done is a finish line, not a turn boundary
+    //. A working row inside grace still keeps.
+
+    // A roster the sweep cannot see removes nothing.
+
+    // A removal that does not confirm lands in refused, never in retired.
+
     #[test]
-    fn roster_reap_emits_positive_event_for_confirmed_removal() {
+    fn event_rows() {
         let dir = tmpdir("event-confirmed");
         let home = crate::paths::AgentsHome::at(dir.join("home"));
         home.ensure_root().unwrap();
@@ -1562,10 +1687,7 @@ mod tests {
             .as_str()
             .is_some_and(|basis| basis.contains("every named node done")));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn roster_reap_emits_no_reap_event_for_unconfirmed_removal() {
         let dir = tmpdir("event-refused");
         let home = crate::paths::AgentsHome::at(dir.join("home"));
         home.ensure_root().unwrap();
@@ -1695,7 +1817,7 @@ mod tests {
 
     // The renderer prints every bucket at every pass, zero included.
     #[test]
-    fn render_names_every_bucket_even_at_zero() {
+    fn render_rows() {
         let summary = RosterReapSummary {
             enumerated: 75,
             probed: 3,
@@ -1726,70 +1848,34 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "bucket {key} missing: {json_out}");
         }
+
+        let summary = RosterReapSummary {
+            kept: vec![
+                judgement_class("owned", None, "owned".into(), false, "owned"),
+                judgement_class("hand", None, "hand-started".into(), false, "unmarked"),
+                judgement_class("hold", None, "hold".into(), false, "contested"),
+            ],
+            retired: vec![judgement_class(
+                "planner",
+                None,
+                "planning finished".into(),
+                true,
+                "fleet",
+            )],
+            ..Default::default()
+        };
+        let text = render(&summary, false, true);
+        assert!(text.contains("classes: fleet 1, unmarked 1, owned 1, contested 1"));
+        assert!(text.contains("kept hand [unmarked]"));
+        let json = render(&summary, true, true);
+        assert!(json.contains("\"class\":\"fleet\""));
     }
 
     // AC1-ERR: a run where every probe came back unresolved refuses rather
     // than reporting a clean pass.
-    #[test]
-    fn a_run_where_no_candidate_resolved_refuses() {
-        let dir = tmpdir("nothing-resolved");
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_e| Some(vec![]),
-            &|_| HashMap::new(),
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert!(summary.probed > 0);
-        assert_eq!(summary.answered, 0);
-        assert!(summary.nothing_resolved(), "{summary:?}");
-        let out = render(&summary, false, true);
-        assert!(
-            out.contains("refusing: every probe came back unresolved"),
-            "{out}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     // One session listed twice is judged once: the duplicate is counted in
     // `deduped`, never judged, never removed twice.
-    #[test]
-    fn duplicate_visit_never_judged_twice() {
-        let dir = tmpdir("dedupe");
-        let transcript = quiet_transcript(&dir, "sid-1");
-        let rows = vec![
-            row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker")),
-            row("ef56ab78", Some("sid-1"), Some("target-x-aaaa-copy")),
-        ];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_e| Some(vec![transcript.clone()]),
-            &|entries| {
-                entries
-                    .iter()
-                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
-                    .collect::<HashMap<_, _>>()
-            },
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.retired.len(), 1);
-        assert_eq!(summary.deduped, 1);
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     // --- Scope. The knob names the population that may retire;
     // no scope reaches a row with no provenance. ---
@@ -1799,43 +1885,11 @@ mod tests {
     // gate. This row is still working, so the missing provenance keeps it
     // at every scope. At `off` the sweep does not even judge the row, so
     // the reason names the scope.
-    #[test]
-    fn no_provenance_row_is_never_a_candidate_at_any_scope() {
-        let mut r = row("ab12cd34", Some("sid-1"), Some("hand-typed-name"));
-        r.state = Some("working".into());
-        let rows = vec![r];
-        let scopes = [RosterScope::Off, RosterScope::Provenanced, RosterScope::All];
-        for scope in scopes {
-            let summary = run(
-                &no_home(),
-                900,
-                scope,
-                true,
-                &roster(rows.clone()),
-                &[],
-                &|| Some(GraphRead::default()),
-                &|_| None,
-                &|_| HashMap::new(),
-                crate::daemon::now_epoch_secs(),
-                &|_| CascadeOutcome::NotApplicable,
-            );
-            assert!(
-                summary.retired.is_empty(),
-                "scope {scope:?} retired a no-provenance row: {summary:?}"
-            );
-            let reason = &summary.kept[0].reason;
-            if scope == RosterScope::Off {
-                assert!(reason.contains("roster scope off"), "{summary:?}");
-            } else {
-                assert!(reason.contains("no provenance"), "{summary:?}");
-            }
-        }
-    }
 
     // The default is the stated contract, not an accident: a provenanced,
     // done, quiet row retires.
     #[test]
-    fn provenanced_scope_retires_a_done_quiet_row() {
+    fn scope_rows() {
         let dir = tmpdir("scope-default");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
@@ -1860,15 +1914,7 @@ mod tests {
         assert_eq!(summary.retired.len(), 1, "{summary:?}");
         assert!(summary.retired[0].reason.contains("every named node done"));
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // `all` is exercised beyond the default - but only for rows fno itself
-    // spawned. A row whose open node was resolved by NAME (a pattern match,
-    // exactly how a hand-started session acquires a phantom node) stays
-    // kept even at `all`; the same open row resolved by the sessions join
-    // retires.
-    #[test]
-    fn all_scope_keeps_a_name_provenanced_open_node_row() {
         let dir = tmpdir("scope-all-weak");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
@@ -1921,13 +1967,7 @@ mod tests {
         );
         assert_eq!(at_default.retired.len(), 1, "{at_default:?}");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // The `all` widening fires for a sessions-provenanced open row: the
-    // reverse join names the session, its node is open, the transcript is
-    // quiet past the grace.
-    #[test]
-    fn all_scope_retires_a_spawn_provenanced_open_node_row() {
         let dir = tmpdir("scope-all-sessions");
         let transcript = quiet_transcript(&dir, "sid-1");
         // A non-terminal state: the widening itself is under test here. A
@@ -1996,11 +2036,7 @@ mod tests {
             "{at_default:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // `off` keeps even a fully eligible row, and names the scope.
-    #[test]
-    fn off_scope_keeps_a_fully_eligible_row() {
         let dir = tmpdir("scope-off");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
@@ -2028,12 +2064,7 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    // A hold (PR contradiction here) stays a keep at `all`: contested truth
-    // is not a scope question.
-    #[test]
-    fn hold_stays_kept_at_all_scope() {
         let dir = tmpdir("scope-hold");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
@@ -2068,6 +2099,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // `all` is exercised beyond the default - but only for rows fno itself
+    // spawned. A row whose open node was resolved by NAME (a pattern match,
+    // exactly how a hand-started session acquires a phantom node) stays
+    // kept even at `all`; the same open row resolved by the sessions join
+    // retires.
+
+    // The `all` widening fires for a sessions-provenanced open row: the
+    // reverse join names the session, its node is open, the transcript is
+    // quiet past the grace.
+
+    // `off` keeps even a fully eligible row, and names the scope.
+
+    // A hold (PR contradiction here) stays a keep at `all`: contested truth
+    // is not a scope question.
+
     /// A fresh transcript (inside grace, unlike `quiet_transcript`).
     fn fresh_transcript(dir: &std::path::Path, sid: &str) -> PathBuf {
         let path = dir.join(format!("{sid}.jsonl"));
@@ -2080,73 +2126,9 @@ mod tests {
     /// the roster-side twin of the grace_gate conjunct. An AllDone
     /// row reading done with a transcript 60s old retires and names the
     /// early fire; reading working it keeps with the active line.
-    #[test]
-    fn xb7f8_terminal_state_overrides_recency_at_the_roster_sweep() {
-        let dir = tmpdir("term-recency");
-        let transcript = fresh_transcript(&dir, "sid-1");
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_e| Some(vec![transcript.clone()]),
-            &|entries| {
-                entries
-                    .iter()
-                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
-                    .collect::<HashMap<_, _>>()
-            },
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert_eq!(summary.retired.len(), 1, "{summary:?}");
-        assert!(
-            summary.retired[0]
-                .reason
-                .contains("session terminal: harness state done"),
-            "{summary:?}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-
-        let dir = tmpdir("term-recency-keep");
-        let transcript = fresh_transcript(&dir, "sid-1");
-        let mut working = row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"));
-        working.state = Some("working".into());
-        let rows = vec![working];
-        let summary = run(
-            &no_home(),
-            900,
-            RosterScope::Provenanced,
-            true,
-            &roster(rows),
-            &[],
-            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
-            &|_e| Some(vec![transcript.clone()]),
-            &|entries| {
-                entries
-                    .iter()
-                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
-                    .collect::<HashMap<_, _>>()
-            },
-            crate::daemon::now_epoch_secs(),
-            &|_| CascadeOutcome::NotApplicable,
-        );
-        assert!(summary.retired.is_empty(), "{summary:?}");
-        assert!(
-            summary.kept[0]
-                .reason
-                .starts_with("active: transcript written "),
-            "{summary:?}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     #[test]
-    fn a_finished_planner_retires_after_its_planning_grace() {
+    fn basis_rows() {
         let dir = tmpdir("finished-planner");
         let transcript = quiet_transcript(&dir, "s-plan");
         let rows = vec![row("plan1234", Some("s-plan"), Some("blueprinter-plan"))];
@@ -2191,10 +2173,7 @@ mod tests {
         );
         assert_eq!(summary.retired[0].class, "fleet");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn a_recorded_terminal_territory_blueprinter_retires_without_transcript_provenance() {
         let dir = tmpdir("territory-blueprinter");
         let transcript = quiet_transcript(&dir, "sid-blue");
         let rows = vec![row(
@@ -2232,29 +2211,5 @@ mod tests {
         );
         assert_eq!(summary.retired[0].class, "fleet");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn render_names_roster_classes() {
-        let summary = RosterReapSummary {
-            kept: vec![
-                judgement_class("owned", None, "owned".into(), false, "owned"),
-                judgement_class("hand", None, "hand-started".into(), false, "unmarked"),
-                judgement_class("hold", None, "hold".into(), false, "contested"),
-            ],
-            retired: vec![judgement_class(
-                "planner",
-                None,
-                "planning finished".into(),
-                true,
-                "fleet",
-            )],
-            ..Default::default()
-        };
-        let text = render(&summary, false, true);
-        assert!(text.contains("classes: fleet 1, unmarked 1, owned 1, contested 1"));
-        assert!(text.contains("kept hand [unmarked]"));
-        let json = render(&summary, true, true);
-        assert!(json.contains("\"class\":\"fleet\""));
     }
 }

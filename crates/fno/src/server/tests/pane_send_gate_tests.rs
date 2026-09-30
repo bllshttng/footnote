@@ -32,10 +32,12 @@ fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
 }
 
 #[test]
-fn pane_send_refuses_a_labelled_pane_whose_identity_resolves_nothing() {
+fn pane_send_labelled_pane_identity_resolution() {
     // The measured incident shape: a worker label, a readable registry,
     // and no session id joining the two. A plain send used to type
-    // straight into whatever the pty now held.
+    // straight into whatever the pty now held. The complement: identity is
+    // the session uuid, never the name - a uuid-matched send lands despite
+    // a stale label, and a different uuid refuses.
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("drifter".into());
@@ -47,6 +49,86 @@ fn pane_send_refuses_a_labelled_pane_whose_identity_resolves_nothing() {
             assert!(msg.contains("fno mux where"), "names the way out: {msg}");
         }
         other => panic!("expected unresolved-identity refusal, got {other:?}"),
+    }
+    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-heir".into());
+    let uuid = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
+    let mut good = agent_in("sess", pane, None, false);
+    good.name = "bob".into();
+    good.harness_session_id = Some(uuid.into());
+    match core.pane_send(pane, b"payload", false, Some(uuid), Ok(vec![good]), false) {
+        ServerMsg::Ok => {}
+        other => panic!("a uuid-matched send must land, got {other:?}"),
+    }
+    let mut impostor = agent_in("sess", pane, None, false);
+    impostor.name = "bob".into();
+    impostor.harness_session_id = Some("d4c0ffee-0000-0000-0000-000000000000".into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(uuid),
+        Ok(vec![impostor]),
+        false,
+    ) {
+        ServerMsg::Err { code, msg } => {
+            assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+            assert!(msg.contains(uuid), "names the uuid: {msg}");
+        }
+        other => panic!("a uuid mismatch must refuse, got {other:?}"),
+    }
+}
+
+#[test]
+fn pane_send_addresses_either_id_of_a_split_row() {
+    // After the id split the row carries two ids: its own minted fno_id and
+    // its harness session id. A send naming EITHER lands; a third id refuses.
+    let (mut core, pane) = template_core();
+    core.session_name = "sess".into();
+    core.panes.get_mut(&pane).unwrap().name = Some("split".into());
+    let own_id = "0f6a4b2e-1111-4222-8333-444444444444";
+    let harness_id = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
+    let mut row = agent_in("sess", pane, None, false);
+    row.name = "bob".into();
+    row.session_id = Some(own_id.into());
+    row.harness_session_id = Some(harness_id.into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(own_id),
+        Ok(vec![row.clone()]),
+        false,
+    ) {
+        ServerMsg::Ok => {}
+        other => panic!("a send naming the row's own fno_id must land, got {other:?}"),
+    }
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some(harness_id),
+        Ok(vec![row]),
+        false,
+    ) {
+        ServerMsg::Ok => {}
+        other => panic!("a send naming the harness session id must land, got {other:?}"),
+    }
+    let mut third = agent_in("sess", pane, None, false);
+    third.name = "bob".into();
+    third.session_id = Some(own_id.into());
+    third.harness_session_id = Some(harness_id.into());
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("d4c0ffee-0000-4000-8000-000000000000"),
+        Ok(vec![third]),
+        false,
+    ) {
+        ServerMsg::Err { code, .. } => {
+            assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+        }
+        other => panic!("a send naming a third id must refuse, got {other:?}"),
     }
 }
 

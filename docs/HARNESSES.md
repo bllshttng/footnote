@@ -18,11 +18,23 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 | Gemini CLI | Multi-CLI hook integration. | Sequential |
 | Hermes | Loop-wrapper path. | Sequential |
 | Openclaw | Loop-wrapper path. | Sequential |
-| OpenCode | Native stop-hook plugin (world-gated, in-session re-drive) + loop-wrapper fallback. Reads `AGENTS.md` natively. One file speaks both the 1.x and 2.x plugin contracts (V2: no task delegation; agents come from installed files). | Yes on the 1.x task tool. V2 seats agents from installed files. The capability row carries no `subagent_dispatch` claim, so the matrix cell reads unmeasured |
+| OpenCode | First-class: `fno config plugin install opencode` installs commands, agents, skills and the bridge for every project, and switches oh-my-openagent off with consent. The bridge hosts footnote's hooks.json through opencode's plugin events (guards, injections, compaction, identity stamp) and drives the same completion gate on idle. The repo-local plugin keeps task delegation and the orchestrator prompt. Replacement guide: docs/guide/opencode.md. | Yes on the 1.x task tool. V2 seats agents from installed files. The capability row carries no `subagent_dispatch` claim, so the matrix cell reads unmeasured |
 | Antigravity CLI (`agy`) | Native `Stop`-hook adapter (world-gated, `decision:"continue"` re-drive). Claude-shaped hook events, Gemini-family wire format. | Sequential |
 | pi (`@earendil-works/pi-coding-agent`) | Keeper-hosted TUI on the thread lane (spawn measured native, 2026-09-01); `pi --mode rpc` is the driving transport the same session rides. | Sequential |
 | cursor-agent (Cursor CLI agent) | fno drives the hosted TUI: a mux pane attended, the keeper-hosted thread lane dispatched. The `--print` stream is output-only; no rpc, acp, serve, or stdio transport exists. | Sequential |
 | grok CLI | fno drives its hosted TUI. Rust ACP is separate. Headless `grok -p` awaits signed-in create/resume proof. | Sequential |
+| zcode (ZCode's CLI agent) | Headless one-shot lane: fno runs `zcode -p` turns and resumes the minted `sess_<uuid>` by name. The TUI lane is unmeasured on the 3.14.3 bundle. | Sequential |
+
+### zcode
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Cannot find package '@zcode/tui'` on any TUI launch | The 3.14.3 app bundle resolves no tui package beside zcode.cjs, and the source checkout is not installed | Use the headless lane (`zcode -p`); the interactive forms stay unsupported until zcode ships the package |
+| zcode exits with the provider-config error before any turn | The bundle carries no provider config at its own paths | The `zcode` launcher exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`; `~/.zcode/cli/config.json` carries `model.main` |
+| A one-shot wrote outside its cwd | Headless yolo is unsandboxed (measured 2026-09-29) | Treat zcode workers as unsandboxed; scope the spawn cwd |
+| A looping dispatch is refused | The plugin Stop hook inside a `-p` turn is not yet measured | `fno config plugin install zcode` links the stage into `plugins.dirs`; the row flips after a live fire proves the hook |
+
+One-time setup: put a `zcode` launcher on PATH that execs `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"` and exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` for the built-in provider config. `~/.zcode/cli/config.json` names `model.main`. Then run `fno config plugin install zcode`.
 
 Other CLIs (Cursor's GUI editor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 

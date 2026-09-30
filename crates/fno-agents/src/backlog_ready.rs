@@ -1060,7 +1060,7 @@ fn is_stale_ready(entry: &Value, now_ms: i64, staleness_days: i64) -> bool {
 /// Skip reason for a would-be-selected node, or None to select it. The plan
 /// hold is checked FIRST and fails CLOSED; every later guard fails OPEN -
 /// missing or malformed data selects normally, never starves live work.
-fn selection_guards(
+pub(crate) fn selection_guards(
     entry: &Value,
     by_id: &BTreeMap<String, Value>,
     now_ms: i64,
@@ -1193,7 +1193,7 @@ pub(crate) fn detect_project(entries: &[Value], repo_root: &str) -> Option<Strin
 /// `filter_by_project`'s narrowing rule, one row at a time against a project
 /// already resolved by detection or flag: an explicit project filters,
 /// --all shows everything, detection returning nothing shows everything.
-fn row_matches_project(e: &Value, project: Option<&str>) -> bool {
+pub(crate) fn row_matches_project(e: &Value, project: Option<&str>) -> bool {
     match project {
         Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
         None => true,
@@ -1319,7 +1319,7 @@ fn is_orphan(entry: &Value, by_id: &BTreeMap<String, Value>) -> bool {
     !has_epic_ancestor(entry, by_id)
 }
 
-fn orphan_ids(entries: &[Value], by_id: &BTreeMap<String, Value>) -> BTreeSet<String> {
+pub(crate) fn orphan_ids(entries: &[Value], by_id: &BTreeMap<String, Value>) -> BTreeSet<String> {
     entries
         .iter()
         .filter(|e| is_dict(e))
@@ -1517,7 +1517,7 @@ pub(crate) fn make_effective_priority(
 /// then priority, fan-out, orphan, evidence, age. Terms are compared
 /// position-wise like Python's tuples; the epic and loose branches only ever
 /// diverge at the tier term, so the tail terms never compare across branches.
-fn selection_sort_key(
+pub(crate) fn selection_sort_key(
     node: &Value,
     by_id: &BTreeMap<String, Value>,
     child_progress: &BTreeSet<String>,
@@ -1593,7 +1593,7 @@ fn selection_sort_key(
 /// the positions where two branches could meet are decided by the tier term
 /// before any variant mismatch is reached.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Term {
+pub(crate) enum Term {
     B(bool),
     I(i64),
     F(OrdF64),
@@ -1602,7 +1602,7 @@ enum Term {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct OrdF64(f64);
+pub(crate) struct OrdF64(f64);
 
 impl Eq for OrdF64 {}
 
@@ -1626,7 +1626,7 @@ impl Ord for OrdF64 {
 
 /// The ONE projection a dispatcher sees when it picks work: the union of
 /// every field either dispatch surface carried, key order preserved.
-fn dispatch_node_summary(e: &Value) -> Value {
+pub(crate) fn dispatch_node_summary(e: &Value) -> Value {
     let mut out = Map::new();
     let keys = [
         "slug",
@@ -1907,7 +1907,7 @@ pub fn select(entries: &[Value], opts: &ReadyOpts) -> Result<ReadyReply, NoSuchP
 /// The sort tables the board mode reads, built once per read from the full
 /// graph. The key's other three inputs (child progress, fan-out, orphans)
 /// stay local to [`order_by_selection_key`]: nothing reads them back.
-struct KeyTables {
+pub(crate) struct KeyTables {
     effective_priority: BTreeMap<String, String>,
     epic_in_progress: BTreeSet<String>,
 }
@@ -1915,7 +1915,7 @@ struct KeyTables {
 /// The one selection order: `rows` sorted by [`selection_sort_key`], with the
 /// tables it was built from handed back so the board mode answers from the
 /// same facts instead of rebuilding them.
-fn order_by_selection_key(
+pub(crate) fn order_by_selection_key(
     rows: Vec<Value>,
     entries: &[Value],
     by_id: &BTreeMap<String, Value>,
@@ -2013,7 +2013,7 @@ fn container_ids(entries: &[Value]) -> BTreeSet<String> {
 }
 
 /// How many OPEN nodes wait on each id (`make_selection_sort_key`'s fan-out).
-fn dependents_fanout(entries: &[Value]) -> BTreeMap<String, i64> {
+pub(crate) fn dependents_fanout(entries: &[Value]) -> BTreeMap<String, i64> {
     let mut dependents: BTreeMap<String, i64> = BTreeMap::new();
     for e in entries {
         if !is_dict(e) || !node_is_open(e) {

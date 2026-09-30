@@ -157,7 +157,13 @@ fn crown_at(grants: &[JEvent], vacates: &[JEvent], name: &str, before_ts: &str) 
     }
     let level = g.data.get("level").and_then(Value::as_i64)?;
     let scope = s_str(&g.data, "scope")?;
-    Some(format!("L{level} {scope}"))
+    let theme = crate::paths::AgentsHome::from_env_opt()
+        .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), scope));
+    Some(crate::crown_names::title(
+        level as u32,
+        scope,
+        theme.as_deref(),
+    ))
 }
 
 /// The pure fold. One `Removal` per receipt, plus one per `registry_row_removed`
@@ -416,7 +422,7 @@ mod tests {
             r.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        assert_eq!(r.crown.as_deref(), Some("L2 x-eeee,x-4444"));
+        assert_eq!(r.crown.as_deref(), Some("Lead of x-eeee,x-4444"));
         assert_eq!(r.resume, None, "no receipt, no resume line");
     }
 
