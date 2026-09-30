@@ -891,9 +891,9 @@ async fn connect_attach(socket: &Path) -> Result<(OwnedReadHalf, ServerMsg), Str
 
     let mut reader = reader;
     // A busy server is still the user's server: say so once, keep waiting.
-    let first = crate::client::await_attach_reply(
+    let first = crate::client::attach_handshake::await_attach_reply(
         proto::read_msg::<_, ServerMsg>(&mut reader),
-        crate::client::ATTACH_BUSY_NOTICE,
+        crate::client::attach_handshake::ATTACH_BUSY_NOTICE,
         &mut false,
         || eprintln!("fno: server is busy, still waiting (Ctrl-C to stop; `fno mux ls`)"),
     )
