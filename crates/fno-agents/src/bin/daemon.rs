@@ -96,10 +96,15 @@ fn main() {
             owner_birth,
             "fno-daemon-owner",
             move || {
-                eprintln!(
-                    "fno-agents-daemon: owner_reaped owner_pid={owner_pid} owner_birth={owner_birth} owner_session={}",
-                    owner_session.as_deref().unwrap_or("test")
-                );
+                if let Some(owner_session) = owner_session {
+                    eprintln!(
+                        "fno-agents-daemon: owner_reaped owner_pid={owner_pid} owner_birth={owner_birth} owner_session={owner_session}"
+                    );
+                } else {
+                    eprintln!(
+                        "fno-agents-daemon: test_owner_reaped owner_pid={owner_pid} owner_birth={owner_birth}"
+                    );
+                }
                 // SAFETY: SIGTERM to self enters the existing graceful shutdown arm.
                 unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
             },
