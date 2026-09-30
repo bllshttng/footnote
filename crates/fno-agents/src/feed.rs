@@ -474,7 +474,7 @@ pub fn project(
             continue;
         };
         if kind == "server_stopped" {
-            let cause = s_field(data, "cause").unwrap_or("unknown");
+            let cause = s_field(data, "cause").unwrap_or_else(|| "unknown".into());
             rows.push(FeedRow {
                 ts: ts.to_string(),
                 kind: "server_stopped".into(),
@@ -483,13 +483,13 @@ pub fn project(
             });
             continue;
         }
-        let name = s_field(data, "name").unwrap_or("");
+        let name = s_field(data, "name").unwrap_or_default();
         let pane = data
             .get("pane")
             .and_then(Value::as_u64)
             .map(|p| p.to_string())
             .unwrap_or_default();
-        let reason = s_field(data, "reason").unwrap_or("no reason recorded");
+        let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
         let title = if name.is_empty() {
             format!("pane {pane} closed: {reason}")
         } else {
@@ -498,10 +498,10 @@ pub fn project(
         rows.push(FeedRow {
             ts: ts.to_string(),
             kind: "pane_closed".into(),
-            session_id: s_field(data, "harness_session").map(str::to_string),
-            harness: s_field(data, "harness").map(str::to_string),
+            session_id: s_field(data, "harness_session"),
+            harness: s_field(data, "harness"),
             title,
-            reason: Some(reason.to_string()),
+            reason: Some(reason),
             ..FeedRow::default()
         });
     }
@@ -1556,7 +1556,7 @@ mod tests {
             }),
         ];
         let crown = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_crowned","source":"python","data":{"grantor":"s-king","level":2,"name":"heir","scope":"x-epic"}}"#;
-        let p = project("", &entries, &[], "", crown);
+        let p = project("", &entries, &[], "", crown, "");
         let child = p
             .rows
             .iter()
