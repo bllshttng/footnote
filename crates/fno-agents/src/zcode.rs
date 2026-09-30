@@ -1,6 +1,6 @@
 //! The zcode harness's identity half: the `sess_<uuid>` shape and the
 //! stream-json turn parser. Measured live 2026-09-29 against ZCode.app 3.14.3:
-//! a headless `zcode -p <prompt> --mode yolo --output-format stream-json`
+//! a headless `zcode --prompt=<prompt> --mode yolo --output-format stream-json`
 //! turn emits one JSON event per line - every line carries `sessionId` of the
 //! shape `sess_<uuid>`, and the final `result` line carries `response` and
 //! `usage`. A second process `--resume <id>` recalls the first turn's

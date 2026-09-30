@@ -84,10 +84,14 @@ fn build_argv(
         }
     }
     let mode = resolve_mode(permission_mode, yolo);
+    // Equal-form seed, probed 2026-09-30: zcode's parser rejects a
+    // dash-leading value after `-p` ("Option '-p' argument is ambiguous")
+    // and its own error names `--prompt=-XYZ` as the escape; the equal-form
+    // round-trips a dash-leading prompt (PONG). The seed binds to the flag,
+    // so it can never be read as a launcher flag.
     let mut argv = vec![
         "zcode".to_string(),
-        "-p".to_string(),
-        prompt.to_string(),
+        format!("--prompt={prompt}"),
         "--mode".to_string(),
         mode,
         "--output-format".to_string(),
@@ -392,8 +396,9 @@ pub fn dispatch_zcode_once(
 }
 
 /// Client interceptor for the `ask` verb on a zcode row: resume by name. The
-/// turn runs fresh (`-p --resume <sess>`), tees into the same log, and the
-/// reply prints. Returns `None` for non-zcode targets (fall through).
+/// turn runs fresh (`--prompt=<seed> --resume <sess>`), tees into the same
+/// log, and the reply prints. Returns `None` for non-zcode targets (fall
+/// through).
 pub fn maybe_run_zcode_ask(
     home: &AgentsHome,
     params: &serde_json::Value,
@@ -491,14 +496,16 @@ mod tests {
 
     #[test]
     fn create_argv_carries_the_measured_shape() {
+        // The seed rides the EQUAL form, probed 2026-09-30: a dash-leading
+        // prompt after bare `-p` dies in zcode's parser, and the equal form
+        // binds the seed so no launcher flag can be read from it.
         let argv = build_argv(None, "seed", None, true, &[]).unwrap();
         assert_eq!(argv[0], "zcode");
-        assert_eq!(argv[1], "-p");
-        assert_eq!(argv[2], "seed");
-        assert_eq!(argv[3], "--mode");
-        assert_eq!(argv[4], "yolo");
-        assert_eq!(argv[5], "--output-format");
-        assert_eq!(argv[6], "stream-json");
+        assert_eq!(argv[1], "--prompt=seed");
+        assert_eq!(argv[2], "--mode");
+        assert_eq!(argv[3], "yolo");
+        assert_eq!(argv[4], "--output-format");
+        assert_eq!(argv[5], "stream-json");
         assert!(!argv.contains(&"--resume".to_string()));
     }
 

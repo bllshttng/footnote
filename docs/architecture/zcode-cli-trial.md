@@ -39,7 +39,7 @@ zcode's client overhead is roughly half of Claude Code's on a trivial turn. One 
 - The interactive TUI forms stay unsupported: the 3.14.3 bundle resolves no `@zcode/tui`, so a TUI launch exits 1 before painting. Captured twice on 2026-09-29.
 - The callee-minted session binding shipped as read-back from the create turn's own stream. No separate mint turn and no store reader were needed.
 - Looping dispatch stays refused until a live fire proves the plugin Stop hook inside a `-p` turn. The three-continuation cap (`hooks.ts`) is the re-drive follow-up.
-- Desktop-visible lane: adopted. fno drives `zcode -p --output-format stream-json` with cwd inside a desktop-open workspace. Sessions surface in the desktop and its phone remote control after a restart.
+- Desktop-visible lane: adopted. fno drives `zcode --prompt=<prompt> --output-format stream-json` with cwd inside a desktop-open workspace. Sessions surface in the desktop and its phone remote control after a restart.
 - The original skip premise measured false: CLI sessions can be seen remotely, conditional on the setup facts above.
 
 ## Known limits
