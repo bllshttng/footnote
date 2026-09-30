@@ -1654,7 +1654,6 @@ fn files_byte_equal(a: &Path, b: &Path) -> std::io::Result<bool> {
     }
 }
 
-
 /// zcode's CLI config: `~/.zcode/cli/config.json`, HOME-derived. Tests pass
 /// an explicit path to the inner fn.
 fn zcode_config_path() -> Result<PathBuf, String> {
@@ -1679,9 +1678,7 @@ fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, Stri
     let existing = match std::fs::read_to_string(config_path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(format!("cannot read {}: {e}", config_path.display()))
-        }
+        Err(e) => return Err(format!("cannot read {}: {e}", config_path.display())),
     };
     let mut config: serde_json::Value = match existing.as_deref() {
         Some(text) => serde_json::from_str(text).map_err(|e| {
@@ -1733,13 +1730,21 @@ fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, Stri
     // dir exactly once (the desktop may rewrite the file while it runs).
     let back = std::fs::read_to_string(config_path)
         .map_err(|e| format!("cannot re-read {}: {e}", config_path.display()))?;
-    let parsed: serde_json::Value = serde_json::from_str(&back)
-        .map_err(|e| format!("{} no longer parses after write: {e}", config_path.display()))?;
+    let parsed: serde_json::Value = serde_json::from_str(&back).map_err(|e| {
+        format!(
+            "{} no longer parses after write: {e}",
+            config_path.display()
+        )
+    })?;
     let listed = parsed
         .get("plugins")
         .and_then(|p| p.get("dirs"))
         .and_then(|d| d.as_array())
-        .map(|dirs| dirs.iter().filter(|d| d.as_str() == Some(stage_str.as_str())).count())
+        .map(|dirs| {
+            dirs.iter()
+                .filter(|d| d.as_str() == Some(stage_str.as_str()))
+                .count()
+        })
         .unwrap_or(0);
     if listed != 1 {
         return Err(format!(
@@ -2300,7 +2305,6 @@ mod tests {
         let dirs = parsed["plugins"]["dirs"].as_array().unwrap();
         assert!(dirs.iter().any(|d| d == "/keep-me"));
     }
-
 
     /// One git command, panicking on failure - fixtures abort the test loudly.
     fn git_in(dir: &Path, args: &[&str]) {
