@@ -78,6 +78,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `slot_login_health` | `daemon` | `fno-agents-daemon` | health-checks every shared-slot managed Claude login and raises one operator notice when one dies | 120 s |
 | `merge_close` | `daemon` | `fno-agents-daemon` | merge-close sweeps | 900 s |
 | `crown_ledger` | `daemon` | `fno-agents-daemon` | renders reign.html | 300 s |
+| `reign_eval` | `daemon` | `fno-agents-daemon` | writes missing eval parts for ended Claude reigns | 600 s |
 | `fleet_page` | `daemon` | `fno-agents-daemon` | renders fleet.html | 1800 s |
 | `attention` | `daemon` | `fno-agents-daemon` | selects attention rows into the status payload | 30 s |
 | `heal` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the PR auto-heal drive, gated on `auto_heal.enabled` | 600 s |
