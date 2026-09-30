@@ -12,7 +12,6 @@ use crate::attention::AttentionItem;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 
 /// How long the ladder waits for the resume to show up in the asker's
 /// transcript before it escalates to the crown.
@@ -647,6 +646,7 @@ pub fn real_runner_pub(argv: &[String]) -> (i32, String, String) {
 mod tests {
     use super::*;
     use crate::attention::AttentionItem;
+    use std::path::PathBuf;
 
     /// Four staged worlds, driven through tick_answers with a fake SinkIo.
     struct FakeIo {
