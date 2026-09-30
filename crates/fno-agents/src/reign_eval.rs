@@ -1006,8 +1006,12 @@ fn write_eval(fold: &Fold, value: &Value, dir: &Path) -> Result<(), String> {
         timeline.push_str(&format!("## Window {}\n\nStart: {}  \nEnd: {}  \nHours: {:.1}  \nTool calls: {}  \nErrors: {}\n\n", row["n"], row["start"], row["end"], row["hours"].as_f64().unwrap_or(0.0), row["tool_calls"], row["errors"]));
         timeline.push_str("### Timeline events\n\n| Time | Kind | Detail |\n|---|---|---|\n");
         for event in events.iter().filter(|event| {
-            let ts = event["ts"].as_str().unwrap_or("");
-            ts >= row["start"].as_str().unwrap_or("") && ts <= row["end"].as_str().unwrap_or("")
+            let Some(ts) = event["ts"].as_str().and_then(timestamp_epoch) else {
+                return false;
+            };
+            let start = row["start"].as_str().and_then(timestamp_epoch);
+            let end = row["end"].as_str().and_then(timestamp_epoch);
+            start.is_some_and(|start| ts >= start) && end.is_some_and(|end| ts <= end)
         }) {
             timeline.push_str(&format!(
                 "| {} | {} | {} |\n",
@@ -1067,7 +1071,12 @@ fn timeline_events(value: &Value) -> Vec<Value> {
             events.push(json!({"ts":event["ts"],"kind":kind,"detail":detail}));
         }
     }
-    events.sort_by(|left, right| left["ts"].as_str().cmp(&right["ts"].as_str()));
+    events.sort_by(|left, right| {
+        let left = left["ts"].as_str().and_then(timestamp_epoch);
+        let right = right["ts"].as_str().and_then(timestamp_epoch);
+        left.partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     events
 }
 
