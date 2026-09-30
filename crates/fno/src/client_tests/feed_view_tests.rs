@@ -365,7 +365,7 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
         .iter()
         .any(|a| matches!(a, feed_detail::FeedAction::Session(
             ChromeHit::Cmds(c)
-        ) if c == vec![Command::AttachAgent {
+        ) if *c == vec![Command::AttachAgent {
             id: "s-3".into(),
             placement: PanePlacement { portal: Some(0), ..Default::default() },
         }])));
@@ -533,11 +533,9 @@ fn the_header_names_the_input_state_the_panel_is_in() {
             "the focus key vanished at width {w}"
         );
         assert!(
-            unicode_width::UnicodeWidthStr::width(&feed_view::header_line(
-                false,
-                feed_view::FeedOrder::Grouped,
-                w
-            )) <= w
+            unicode_width::UnicodeWidthStr::width(
+                feed_view::header_line(false, feed_view::FeedOrder::Grouped, w).as_str(),
+            ) <= w
                 || w < 32,
             "header overflows at width {w}"
         );
@@ -703,13 +701,13 @@ fn the_header_keeps_its_key_at_every_draggable_width() {
         let unfocused = header_line(false, FeedOrder::Grouped, w);
         assert!(
             unfocused.starts_with(" E focus")
-                || unicode_width::UnicodeWidthStr::width(&unfocused) <= w,
+                || unicode_width::UnicodeWidthStr::width(unfocused.as_str()) <= w,
             "w={w} picked {unfocused:?}"
         );
         let focused = header_line(true, FeedOrder::Grouped, w);
         assert!(
             focused.starts_with(" esc release")
-                || unicode_width::UnicodeWidthStr::width(&focused) <= w,
+                || unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w,
             "w={w} picked {focused:?}"
         );
     }
@@ -1092,4 +1090,38 @@ fn a_dead_owner_says_it_is_gone() {
         .map(|(_, v)| v)
         .unwrap();
     assert_eq!(owner, "epic x-29a8 the epic");
+}
+
+// TEMPORARY: renders the new modal through the real compose path so the
+// user can judge it before merge. Deleted before merge.
+#[tokio::test]
+async fn zz_render_dump_for_visual_gate() {
+    let mut v = view_with_rows(vec![]);
+    v.term = (44, 120);
+    let q = crate::feed_overlay::FeedItem {
+        ts: "2026-09-29T18:21:26Z".into(),
+        kind: "question_asked".into(),
+        node: Some("x-182e".into()),
+        session_id: Some("8f3c48be-0366-40fb-a3c1-303e22dcbc0e".into()),
+        harness: Some("claude".into()),
+        title:
+            "Does this Settings > Theme render look right for importing and applying user themes?"
+                .into(),
+        r#ref: Some("q-1".into()),
+        actor: None,
+        model: Some("glm-5.3-flash".into()),
+        effort: Some("high".into()),
+        phase: None,
+        detail: None,
+        reason: Some("a theme import needs a ruling on the live preview".into()),
+        crown: None,
+        owner: Some("king jolly-finch (king-4d9b)".into()),
+        parent: None,
+        url: None,
+        cwd: None,
+    };
+    v.feed_detail = Some(feed_detail::modal(&v, q));
+    let text = crate::vt::frame_text(&v.compose());
+    println!("==== PROVENANCE MODAL (node x-182e sample row) ====");
+    println!("{text}");
 }
