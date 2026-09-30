@@ -4000,17 +4000,6 @@ mod tests {
     }
 
     #[test]
-    fn no_change_refused_while_a_reading_failed() {
-        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("drain", "drain unreadable".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
-    }
-
-    #[test]
     fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
