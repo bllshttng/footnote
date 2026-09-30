@@ -51,10 +51,11 @@ const XTERM_16: [(u8, u8, u8); 16] = [
     (0xff, 0xff, 0xff),
 ];
 
-/// Close to the common dark defaults (Tomorrow Night / One Dark family).
+/// Tomorrow Night's text on a near-black ground, the way the mux is read
+/// (and shot) in Ghostty's default dark window.
 pub const DARK: Theme = Theme {
     fg: (0xc5, 0xc8, 0xc6),
-    bg: (0x1d, 0x1f, 0x21),
+    bg: (0x10, 0x10, 0x10),
     name: "dark",
     ansi: XTERM_16,
 };
@@ -395,6 +396,8 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
     for r in 0..frame.rows as usize {
         let y = r as f64 * SVG_CELL_H;
         let mut c = 0usize;
+        // Box and block glyphs, drawn on the grid after the row's text.
+        let mut geometry = String::new();
         while c < cols {
             let start = c;
             let cell = &frame.cells[r * cols + c];
@@ -415,7 +418,13 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
                     if cell_colors(n, theme) != (fg, bg) || nflags != flags {
                         break;
                     }
-                    glyphs.push((n.c, 1));
+                    match cell_geometry(n.c, c as f64 * SVG_CELL_W, y, &hex(fg)) {
+                        Some(g) => {
+                            geometry.push_str(&g);
+                            glyphs.push((' ', 1));
+                        }
+                        None => glyphs.push((n.c, 1)),
+                    }
                 }
                 c += 1;
             }
@@ -447,9 +456,90 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
                 if flags & cell_flags::UNDERLINE != 0 { " text-decoration=\"underline\"" } else { "" },
             ));
         }
+        out.push_str(&geometry);
     }
     out.push_str("</svg>");
     out
+}
+
+/// A box-drawing or block glyph as shapes on its cell, so borders join from
+/// cell to cell. As font text they leave gaps: the line height is not the
+/// font's, and a fallback font draws them at another width.
+fn cell_geometry(ch: char, x: f64, y: f64, color: &str) -> Option<String> {
+    let (w, h) = (SVG_CELL_W, SVG_CELL_H);
+    let rect =
+        |dx: f64, dy: f64, rw: f64, rh: f64, opacity: f64| {
+            format!(
+            "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{color}\"{}/>",
+            x + dx,
+            y + dy,
+            rw,
+            rh,
+            if opacity < 1.0 { format!(" fill-opacity=\"{opacity}\"") } else { String::new() }
+        )
+        };
+    match ch {
+        '█' => return Some(rect(0.0, 0.0, w, h, 1.0)),
+        '▀' => return Some(rect(0.0, 0.0, w, h / 2.0, 1.0)),
+        '▄' => return Some(rect(0.0, h / 2.0, w, h / 2.0, 1.0)),
+        '▌' => return Some(rect(0.0, 0.0, w / 2.0, h, 1.0)),
+        '▐' => return Some(rect(w / 2.0, 0.0, w / 2.0, h, 1.0)),
+        '▔' => return Some(rect(0.0, 0.0, w, h / 8.0, 1.0)),
+        '▏' => return Some(rect(0.0, 0.0, w / 8.0, h, 1.0)),
+        '▕' => return Some(rect(w * 7.0 / 8.0, 0.0, w / 8.0, h, 1.0)),
+        '░' => return Some(rect(0.0, 0.0, w, h, 0.25)),
+        '▒' => return Some(rect(0.0, 0.0, w, h, 0.5)),
+        '▓' => return Some(rect(0.0, 0.0, w, h, 0.75)),
+        '▁'..='▇' => {
+            let eighths = (ch as u32 - '▁' as u32 + 1) as f64;
+            let bh = h * eighths / 8.0;
+            return Some(rect(0.0, h - bh, w, bh, 1.0));
+        }
+        _ => {}
+    }
+    // (left, right, up, down, heavy)
+    let (l, r, u, d, heavy) = match ch {
+        '─' | '╌' | '┄' | '┈' | '═' => (true, true, false, false, false),
+        '━' | '╍' | '┅' | '┉' => (true, true, false, false, true),
+        '│' | '╎' | '┆' | '┊' | '║' => (false, false, true, true, false),
+        '┃' | '╏' | '┇' | '┋' => (false, false, true, true, true),
+        '╴' => (true, false, false, false, false),
+        '╶' => (false, true, false, false, false),
+        '╵' => (false, false, true, false, false),
+        '╷' => (false, false, false, true, false),
+        '┌' | '╭' | '╔' => (false, true, false, true, false),
+        '┐' | '╮' | '╗' => (true, false, false, true, false),
+        '└' | '╰' | '╚' => (false, true, true, false, false),
+        '┘' | '╯' | '╝' => (true, false, true, false, false),
+        '┏' => (false, true, false, true, true),
+        '┓' => (true, false, false, true, true),
+        '┗' => (false, true, true, false, true),
+        '┛' => (true, false, true, false, true),
+        '├' | '╠' => (false, true, true, true, false),
+        '┤' | '╣' => (true, false, true, true, false),
+        '┬' | '╦' => (true, true, false, true, false),
+        '┴' | '╩' => (true, true, true, false, false),
+        '┼' | '╬' => (true, true, true, true, false),
+        _ => return None,
+    };
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let mut d_attr = String::new();
+    if l {
+        d_attr.push_str(&format!("M{x:.2} {cy:.2}H{cx:.2}"));
+    }
+    if r {
+        d_attr.push_str(&format!("M{cx:.2} {cy:.2}H{:.2}", x + w));
+    }
+    if u {
+        d_attr.push_str(&format!("M{cx:.2} {y:.2}V{cy:.2}"));
+    }
+    if d {
+        d_attr.push_str(&format!("M{cx:.2} {cy:.2}V{:.2}", y + h));
+    }
+    Some(format!(
+        "<path d=\"{d_attr}\" stroke=\"{color}\" stroke-width=\"{}\" stroke-linecap=\"square\" fill=\"none\"/>",
+        if heavy { 2 } else { 1 }
+    ))
 }
 
 fn xml_escape(c: char) -> String {
