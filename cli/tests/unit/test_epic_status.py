@@ -28,7 +28,7 @@ def _node(node_id: str, **overrides) -> dict:
         "id": node_id,
         "parent": None,
         "slug": node_id.replace("-", "") + "-slug",
-        "title": f"title {node_id}",
+        "title": "seed title",
         "type": "feature",
         "project": "fno",
         "cwd": None,
