@@ -128,9 +128,8 @@ async fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     let mut buf: Vec<u8> = Vec::new();
     row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
     assert!(buf.is_empty(), "an unannounced server gets no split");
-    assert!(
-        v.notice
-            .as_ref()
-            .is_some_and(|(s, _)| s.contains("restart the mux server"))
-    );
+    assert!(v
+        .notice
+        .as_ref()
+        .is_some_and(|(s, _)| s.contains("restart the mux server")));
 }
