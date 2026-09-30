@@ -5536,12 +5536,6 @@ _MUX_SEND_UNKNOWN = -2
 # `fno.agents.dispatch` stays the import path callers already use.
 from fno.agents.mail_ctx import _MailCtx, _build_mail_ctx  # noqa: E402
 
-# Wake spawns key on the target session uuid, not on a fresh agent name: spawn
-# dedup scopes NAME, so two senders waking one session must derive the same name
-# to collide on its flock. Prefixed because a bare 8-hex name is refused.
-_WAKE_NAME_PREFIX = "wake-"
-
-
 # Poll budget for the mux lane's content confirm (node, change 3),
 # matched to the claude control.sock lane's default (crates/fno-agents/src/
 # mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
@@ -6618,13 +6612,14 @@ def wake_and_deliver(
     ``claude -r`` by hand. ``claude -p`` is never reachable from here -- a
     one-shot cannot host the multi-turn session the recipient resumes into.
 
-    The name is derived from the uuid so concurrent wakes of one session collide
-    on the same flock: spawn dedup scopes NAME, so a fresh random name per wake
-    would defeat the serialization this depends on. It is prefixed rather than
-    bare hex because a bare 8-hex name is refused as an id/name collision. That
-    flock plus the same-name collision check is what serializes two senders --
-    the second wake finds the first's row live and is refused as
-    ``wake-already-in-flight``; a gone route file refuses and says wake-unrouted.
+    The revival name is the lineage row's OWN name whenever an exited claude
+    row exists for this uuid: dispatch_spawn then reads the spawn as an
+    in-place revival (Fix 3) and updates the row in place, so the board, mail
+    and user keep the name they knew instead of a ``wake-<shortid>`` alias.
+    Only a rowless session falls back to ``wake-<shortid>``. Both derivations
+    are deterministic, so two wakes still collide on one flock (the loser is
+    refused as ``wake-already-in-flight``); the rung-2 single-writer claim keys
+    on the session uuid, never on this name, and a gone route file is wake-unrouted.
 
     The single-writer claim lives in ``_claude_create_path`` (see there). Every
     revival passes the spawn gate, charged to the revived row's parent, never the sender.
@@ -6645,7 +6640,7 @@ def wake_and_deliver(
     except (RegistryVersionError, ValueError):
         return False, "registry-incomplete"
 
-    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    spawn_name = fork_lineage.wake_spawn_name(entry, session_uuid)
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
     from fno.agents.launch_provenance import launch_account_for_session
@@ -6826,10 +6821,10 @@ def wake_drain_agent(
     removes.
 
     A thin wrapper over ``wake_and_deliver``: waking to drain IS delivering a
-    waking prompt, so the concurrency guarantee comes for free. The name is
-    derived from the uuid (never the envelope msg-id), so two concurrent wakes
-    collide on one flock and the single-writer claim refuses the second - one
-    revival, not two writers on one transcript. Rides the revive-in-place
+    waking prompt, so the concurrency guarantee comes for free. The revival
+    name is deterministic (the row's own name when one exists, else wake-<id>),
+    so two concurrent wakes collide on one flock and the single-writer claim
+    refuses the second - one revival, not two writers on one transcript. Rides the revive-in-place
     substrate rather than a one-shot ``claude -p`` because only the persistent
     substrate holds that claim; a headless one-shot could not make concurrent
     wakes collapse. Returns ``wake_and_deliver``'s ``(delivered, reason)``.
