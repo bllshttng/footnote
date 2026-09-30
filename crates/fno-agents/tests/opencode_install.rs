@@ -82,8 +82,8 @@ fn scratch(name: &str) -> Scratch {
         "---\ndescription: \"footnote target - the spine\"\n---\nbody\n",
     );
     write_file(
-        &root.join("commands/pr.md"),
-        "---\ndescription: \"footnote pr - open the PR\"\n---\nbody\n",
+        &root.join("commands/ship.md"),
+        "---\ndescription: \"footnote ship - the delivery umbrella\"\n---\nbody\n",
     );
     write_file(
         &root.join("skills/think/SKILL.md"),
@@ -186,7 +186,7 @@ fn upgrade_removes_lost_writes_new_keeps_edited() {
     let s = installed("upgrade");
     let archer_before = mtime(&s.conf.join("agents/fno:archer.md"));
     // A lost verb footnote still owns: removed.
-    std::fs::remove_file(s.root.join("commands/pr.md")).unwrap();
+    std::fs::remove_file(s.root.join("commands/ship.md")).unwrap();
     write_file(
         &s.root.join("commands/review.md"),
         "---\ndescription: review it\n---\nbody\n",
@@ -195,7 +195,7 @@ fn upgrade_removes_lost_writes_new_keeps_edited() {
     write_file(&s.conf.join("commands/fno:target.md"), "// user edit\n");
     std::fs::remove_file(s.root.join("commands/target.md")).unwrap();
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
-    assert!(!s.conf.join("commands/fno:pr.md").exists());
+    assert!(!s.conf.join("commands/fno:ship.md").exists());
     assert!(s.conf.join("commands/fno:review.md").exists());
     assert!(receipt.removed >= 1);
     assert_eq!(
@@ -225,7 +225,7 @@ fn uninstall_keeps_edited_removes_owned_and_refuses_without_manifest() {
         read(&s.conf.join("commands/fno:target.md")),
         "// user edit\n"
     );
-    assert!(!s.conf.join("commands/fno:pr.md").exists());
+    assert!(!s.conf.join("commands/fno:ship.md").exists());
     assert!(!manifest_path(&s.conf).exists());
     // No manifest, no removal: the second uninstall refuses.
     let err = uninstall().expect_err("uninstall must refuse with no manifest");

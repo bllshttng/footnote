@@ -629,7 +629,8 @@ def _is_codex_code_payload(args: Sequence[str]) -> bool:
         if first and first[0] in _CODE_PAYLOAD_PREFIXES:
             return True
         if first and first[0] in _SHIP_PREFIXES:
-            if first[1].split()[:1] == ["pr"]:
+            tail = first[1].split() if len(first) > 1 else []
+            if tail[:1] == ["pr"]:
                 return True
     return False
 

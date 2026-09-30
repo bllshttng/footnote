@@ -88,7 +88,7 @@ candidate_fno do pr base-check --base "$BASE" || {
   rc=$?
   # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
   # The refusal opens nothing, but the create flow is draft-first: run the
-  # gather-and-draft steps of references/create.md first, then print the
+  # gather-and-draft steps of create.md first, then print the
   # refusal beside the drafted title and body and end
   # RESULT: BLOCKED step=base reason=<the base-check refusal> draft=.fno/pr-body.md
   [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
