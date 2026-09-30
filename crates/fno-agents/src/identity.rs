@@ -19,6 +19,23 @@ pub(crate) fn canonical_handle(session_id: &str) -> String {
     }
 }
 
+/// The agent handle this process resolves as, or None when the caller is no
+/// agent session: the ancestry prover's session id through the canonical
+/// handle. One read shared by the law door and the clear door, so the two
+/// never disagree about who is at the door.
+pub(crate) fn ambient_agent_handle() -> Option<String> {
+    let ident = crate::spawn_context::resolve_self_identity(
+        &|name| std::env::var(name).ok(),
+        None,
+        None,
+        &crate::paths::AgentsHome::from_env(),
+    );
+    let session_id = ident.session_id.as_deref()?;
+    ident.harness.as_deref()?;
+    let handle = canonical_handle(session_id);
+    (!handle.is_empty()).then_some(handle)
+}
+
 /// The retired last-eight address, read-only lookup compatibility only. Mail
 /// addressed before the 2026-08-10 flip back to first-8 (when last-8 was the
 /// address) still drains via this tier; it is never generated for new mail.
