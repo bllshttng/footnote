@@ -303,7 +303,12 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
                 .split_whitespace()
                 .any(|word| word == "--server")
     }) {
-        let Some(lease) = crate::process_owner::owner_lease(row.pid) else {
+        let crate::process_owner::OwnerRead::Owner(lease) =
+            crate::process_owner::owner_lease_for_server(
+                row.pid,
+                Path::new(row.command.split_whitespace().nth(2).unwrap_or("")),
+            )
+        else {
             continue;
         };
         let root = roots

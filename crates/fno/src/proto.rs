@@ -3363,6 +3363,43 @@ pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("pid")
 }
 
+/// The owner lease beside an owner-bound sandbox session socket.
+pub fn owner_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("owner")
+}
+
+/// Write a private owner lease with both process birth identities. The sidecar
+/// lets Rust sweepers read the lease on platforms that hide process env from
+/// `ps`.
+pub fn write_owner_sidecar(
+    socket: &Path,
+    owner_pid: u32,
+    owner_birth: u64,
+    owner_session: &str,
+) -> std::io::Result<()> {
+    let Some(server_birth) = pid_start_time(std::process::id()) else {
+        return Err(std::io::Error::other("server process birth is unreadable"));
+    };
+    let path = owner_sidecar_path(socket);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "server_pid": std::process::id(),
+        "server_birth": server_birth,
+        "owner_pid": owner_pid,
+        "owner_birth": owner_birth,
+        "owner_session": owner_session,
+    }))
+    .map_err(std::io::Error::other)?;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&bytes)
+}
+
 /// Process start time in this OS's own units: a per-host, per-boot quantity
 /// meaningful only compared for equality against a value captured for the
 /// SAME pid, never converted to wall-clock time. Lets a pid sidecar prove it
@@ -3451,15 +3488,16 @@ pub fn pid_confirmed_dead(pid: i32) -> bool {
     pid_is_zombie(pid)
 }
 
-/// Every file a session leaves beside its name: the socket, the wire-version
-/// sidecar, and the pid sidecar. The one list both removal and the operator's
+/// Every file a session leaves beside its name: the socket, wire-version and
+/// pid sidecars, and the optional owner lease. The one list both removal and the operator's
 /// manual recovery command are built from, so a new sidecar cannot join one
 /// and miss the other.
-pub fn session_files(socket: &Path) -> [PathBuf; 3] {
+pub fn session_files(socket: &Path) -> [PathBuf; 4] {
     [
         socket.to_path_buf(),
         version_sidecar_path(socket),
         pid_sidecar_path(socket),
+        owner_sidecar_path(socket),
     ]
 }
 

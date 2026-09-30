@@ -1402,9 +1402,13 @@ impl OwnerLease {
             .parse::<u64>()
             .ok()
             .filter(|birth| *birth > 0)?;
-        let session = std::env::var("FNO_OWNER_SESSION")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?;
+        let session = std::env::var("FNO_OWNER_SESSION").ok().filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })?;
         (pid > 1).then_some(Self {
             pid,
             birth,
@@ -1479,6 +1483,16 @@ pub fn run(socket: PathBuf) -> i32 {
     // in proto's write/read pair; best-effort like `.ver` above.
     if let Err(e) = crate::proto::write_pid_sidecar(&socket) {
         eprintln!("fno mux: warn: could not write pid sidecar: {e}");
+    }
+    if let Some(owner) = &owner {
+        if let Err(e) =
+            crate::proto::write_owner_sidecar(&socket, owner.pid, owner.birth, &owner.session)
+        {
+            eprintln!("fno mux: cannot record sandbox owner lease: {e}");
+            return 1;
+        }
+    } else {
+        let _ = std::fs::remove_file(crate::proto::owner_sidecar_path(&socket));
     }
 
     // Install signal ownership before constructing the Tokio runtime. Every

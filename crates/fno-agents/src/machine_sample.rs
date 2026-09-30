@@ -357,24 +357,33 @@ fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
             continue;
         };
         sockets.entry(socket.to_string()).or_default().push(row);
-        if let Some(lease) = crate::process_owner::owner_lease(row.pid) {
-            match crate::process_owner::owner_status(&lease) {
-                crate::process_owner::OwnerStatus::Dead => issues.push(json!({
-                    "kind": "dead_owner",
-                    "socket": socket,
-                    "pid": row.pid,
-                    "owner_session": lease.session,
-                    "command": row.command,
-                })),
-                crate::process_owner::OwnerStatus::Unknown => issues.push(json!({
-                    "kind": "owner_unknown",
-                    "socket": socket,
-                    "pid": row.pid,
-                    "owner_session": lease.session,
-                    "command": row.command,
-                })),
-                crate::process_owner::OwnerStatus::Alive => {}
+        match crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket)) {
+            crate::process_owner::OwnerRead::Owner(lease) => {
+                match crate::process_owner::owner_status(&lease) {
+                    crate::process_owner::OwnerStatus::Dead => issues.push(json!({
+                        "kind": "dead_owner",
+                        "socket": socket,
+                        "pid": row.pid,
+                        "owner_session": lease.session,
+                        "command": row.command,
+                    })),
+                    crate::process_owner::OwnerStatus::Unknown => issues.push(json!({
+                        "kind": "owner_unknown",
+                        "socket": socket,
+                        "pid": row.pid,
+                        "owner_session": lease.session,
+                        "command": row.command,
+                    })),
+                    crate::process_owner::OwnerStatus::Alive => {}
+                }
             }
+            crate::process_owner::OwnerRead::Unknown => issues.push(json!({
+                "kind": "owner_unknown",
+                "socket": socket,
+                "pid": row.pid,
+                "command": row.command,
+            })),
+            crate::process_owner::OwnerRead::Ownerless => {}
         }
     }
     for (socket, servers) in sockets.into_iter().filter(|(_, servers)| servers.len() > 1) {
@@ -383,7 +392,12 @@ fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
             "socket": socket,
             "servers": servers.iter().map(|row| json!({
                 "pid": row.pid,
-                "owner_session": crate::process_owner::owner_lease(row.pid).map(|lease| lease.session),
+                "owner_session": row.command.split_whitespace().nth(2).and_then(|socket| {
+                    match crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket)) {
+                        crate::process_owner::OwnerRead::Owner(lease) => Some(lease.session),
+                        _ => None,
+                    }
+                }),
                 "command": row.command,
             })).collect::<Vec<_>>(),
         }));

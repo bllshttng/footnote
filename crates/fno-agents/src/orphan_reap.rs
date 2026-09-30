@@ -303,7 +303,7 @@ fn reap_snapshot(ps: &str, apply: bool, min_elapsed: u64) -> Vec<ReapRow> {
     rows
 }
 
-fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String)> {
+fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String, PathBuf)> {
     let mut candidates = Vec::new();
     for line in ps_output.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -330,7 +330,8 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String)> {
         {
             continue;
         }
-        candidates.push((pid, elapsed_seconds, command));
+        let Some(socket) = words.next() else { continue };
+        candidates.push((pid, elapsed_seconds, command, PathBuf::from(socket)));
     }
     candidates
 }
@@ -340,41 +341,25 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String)> {
 /// partial lease is visible as a hold, never as kill authority.
 fn reap_owner_server_rows(ps_output: &str, apply: bool) -> Vec<ReapRow> {
     let mut rows = Vec::new();
-    for (pid, elapsed, command) in owner_server_rows(ps_output) {
+    for (pid, elapsed, command, socket) in owner_server_rows(ps_output) {
         if elapsed < OWNER_SERVER_MIN_AGE_SECS {
             continue;
         }
         let server_birth = crate::daemon::process_start_time(pid);
-        let environment = crate::process_owner::process_environment(pid);
-        let owner_marked = environment
-            .as_deref()
-            .is_some_and(|bytes| bytes.windows(10).any(|window| window == b"FNO_OWNER_"));
-        if !owner_marked {
-            if environment.is_none() {
+        let lease = match crate::process_owner::owner_lease_for_server(pid, &socket) {
+            crate::process_owner::OwnerRead::Owner(lease) => lease,
+            crate::process_owner::OwnerRead::Ownerless => continue,
+            crate::process_owner::OwnerRead::Unknown => {
                 rows.push(owner_reap_row(
                     pid,
                     elapsed,
                     command,
                     None,
                     false,
-                    "held: owner lease unreadable",
+                    "held: owner lease unreadable, incomplete, or identity-mismatched",
                 ));
+                continue;
             }
-            continue;
-        }
-        let Some(lease) = environment
-            .as_deref()
-            .and_then(crate::process_owner::lease_from_environment)
-        else {
-            rows.push(owner_reap_row(
-                pid,
-                elapsed,
-                command,
-                None,
-                false,
-                "held: owner lease incomplete or malformed",
-            ));
-            continue;
         };
         let owner_start = crate::daemon::process_start_time(lease.pid);
         let owner_is_alive = owner_start == Some(lease.birth);
@@ -627,6 +612,26 @@ mod tests {
         assert_eq!(lease.birth, 9001);
         assert_eq!(lease.session, "session-a");
         assert!(crate::process_owner::lease_from_environment(b"FNO_OWNER_PID=42\0").is_none());
+        let sidecar = serde_json::json!({
+            "server_pid": 501,
+            "server_birth": 8001,
+            "owner_pid": 42,
+            "owner_birth": 9001,
+            "owner_session": "session-a",
+        });
+        let lease = crate::process_owner::lease_from_sidecar(
+            &serde_json::to_vec(&sidecar).unwrap(),
+            501,
+            8001,
+        )
+        .unwrap();
+        assert_eq!(lease.session, "session-a");
+        assert!(crate::process_owner::lease_from_sidecar(
+            &serde_json::to_vec(&sidecar).unwrap(),
+            502,
+            8001,
+        )
+        .is_none());
         let servers = owner_server_rows(
             "PID PPID S ELAPSED %CPU RSS COMMAND\n\
              501 1 S 00:11:00 2.0 4096 /usr/bin/fno --server /tmp/repro.sock\n\

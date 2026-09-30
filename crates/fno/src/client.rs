@@ -567,11 +567,11 @@ fn stamp_sandbox_owner(cmd: &mut std::process::Command) {
     }
     let session = std::env::var("FNO_OWNER_SESSION")
         .ok()
-        .filter(|v| !v.trim().is_empty())
+        .filter(|v| valid_owner_session(v))
         .or_else(|| {
             std::env::var("CODEX_COMPANION_SESSION_ID")
                 .ok()
-                .filter(|v| !v.trim().is_empty())
+                .filter(|v| valid_owner_session(v))
         });
     let Some(session) = session else { return };
     let owner_pid = match std::env::var("FNO_OWNER_PID") {
@@ -594,6 +594,14 @@ fn stamp_sandbox_owner(cmd: &mut std::process::Command) {
     cmd.env("FNO_OWNER_PID", owner_pid.to_string())
         .env("FNO_OWNER_BIRTH", birth.to_string())
         .env("FNO_OWNER_SESSION", session);
+}
+
+fn valid_owner_session(session: &str) -> bool {
+    !session.is_empty()
+        && session.len() <= 128
+        && session
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Whether the interactive path must disable OSC 133 injection. Bounded +

@@ -444,9 +444,13 @@ pub fn sandbox_owner_from_env() -> Option<(u32, u64, String)> {
         .parse::<u64>()
         .ok()
         .filter(|birth| *birth > 0)?;
-    let session = std::env::var("FNO_OWNER_SESSION")
-        .ok()
-        .filter(|session| !session.trim().is_empty())?;
+    let session = std::env::var("FNO_OWNER_SESSION").ok().filter(|session| {
+        !session.is_empty()
+            && session.len() <= 128
+            && session
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    })?;
     Some((pid, birth, session))
 }
 
