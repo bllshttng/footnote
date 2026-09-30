@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_harness_overlay_answers_claude_scalar_answers_codex() {
+    fn overlay_rows() {
         let payload = json!({
             "kind": "overlay", "verb": "target",
             "defaults": {},
@@ -893,10 +893,7 @@ mod tests {
         // placement-rule lint reads as a path construction.
         let want = format!("agents.profiles.target.harness.{}", "claude");
         assert_eq!(out["effective"]["permission_mode"]["rung"], want);
-    }
 
-    #[test]
-    fn unknown_overlay_harness_refuses_by_name() {
         let out = overlay(json!({
             "profile": {"harness": {"codx": {"effort": "high"}}},
         }));
@@ -904,10 +901,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("profiles.target.harness.codx is not a known harness"));
-    }
 
-    #[test]
-    fn lane_field_in_overlay_refuses_by_name() {
         let out = overlay(json!({
             "defaults": {"harness": {"codex": {"model": "opus"}}},
         }));
@@ -915,10 +909,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("harness.codex.model is a lane field"));
-    }
 
-    #[test]
-    fn lane_args_win_over_overlay_bundle() {
         let out = overlay(json!({
             "defaults": {"harness": {"codex": {"args": ["--profile", "overlay"]}}},
             "lane": {"provider": "codex", "args": ["--profile", "lane"]},
@@ -931,10 +922,7 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("lanes[0].args"));
-    }
 
-    #[test]
-    fn argv_boundary_displaces_the_bundle_by_name() {
         let out = overlay(json!({
             "defaults": {"harness": {"codex": {"args": ["--profile", "fno"]}}},
             "harness": "codex",
@@ -948,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn model_vendor_warns_on_typed_mismatch() {
+    fn model_vendor_rows() {
         let out = resolve(json!({
             "kind": "model-vendor",
             "argv_tail": ["spawn", "--model", "glm-5.3", "-H", "claude"],
@@ -961,10 +949,7 @@ mod tests {
             .unwrap()
             .contains("implies vendor zai"));
         assert_eq!(out["event"]["outcome"], "warned");
-    }
 
-    #[test]
-    fn model_vendor_refuses_injected_mismatch() {
         let out = resolve(json!({
             "kind": "model-vendor",
             "argv_tail": ["spawn", "--model", "gpt-5.6", "-H", "claude"],
@@ -974,10 +959,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["verdict"], "refuse");
         assert_eq!(out["event"]["outcome"], "refused");
-    }
 
-    #[test]
-    fn model_vendor_typed_mismatch_warn_names_the_harness_flag() {
         // AC3: a typed -H beside a typed model proceeds with a warning whose
         // remedy is the harness flag that works, and the model prints as its
         // string, never Option debug.
@@ -994,10 +976,7 @@ mod tests {
         assert!(!msg.contains("-P openai"));
         assert!(!msg.contains("Some("));
         assert!(msg.contains("--model gpt-6-astra"));
-    }
 
-    #[test]
-    fn model_vendor_untyped_harness_refuses() {
         // AC5: a typed model with nothing typing the harness refuses before
         // launch, naming -H codex and the missing row.
         let out = resolve(json!({
@@ -1012,10 +991,7 @@ mod tests {
         assert!(msg.contains("refusing to spawn"));
         assert!(msg.contains("-H codex"));
         assert!(msg.contains("No routing.models row declares that model"));
-    }
 
-    #[test]
-    fn model_vendor_node_dispatch_refuses_mismatch() {
         // AC8a: --node dispatch whose resolved harness mismatches the typed
         // model's vendor refuses even though -H was on the argv (the
         // resolver put it there).
@@ -1028,10 +1004,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["verdict"], "refuse");
         assert!(out["message"].as_str().unwrap().contains("-H codex"));
-    }
 
-    #[test]
-    fn model_vendor_account_downgrade_stays_warn() {
         // AC8b: an explicit --account downgrades refusal to warn, as before.
         let out = resolve(json!({
             "kind": "model-vendor",
@@ -1042,10 +1015,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(out["verdict"], "warn");
-    }
 
-    #[test]
-    fn model_vendor_injected_opus_on_codex_names_claude() {
         // AC10b: an injected anthropic-voiced model on a codex spawn refuses
         // naming -H claude, never -P anthropic.
         let out = resolve(json!({
@@ -1060,10 +1030,22 @@ mod tests {
         let msg = out["message"].as_str().unwrap();
         assert!(msg.contains("-H claude"));
         assert!(!msg.contains("-P anthropic"));
+
+        // The checker's lane answer must NOT absorb the model inference, or
+        // an injected glm-on-claude model would agree with itself and never
+        // refuse.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["--model", "glm-5.3-flash[1m]"],
+            "harness": "claude",
+            "model_source": "config.agents.profiles.target",
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "refuse");
     }
 
     #[test]
-    fn fallback_rejects_an_unknown_harness_link() {
+    fn fallback_rows() {
         let out = resolve(json!({
             "kind": "fallback",
             "table": {"S": [{"harness": "cluade", "model": "m"}]},
@@ -1073,10 +1055,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not a known harness"));
-    }
 
-    #[test]
-    fn fallback_canonicalizes_provider_spelling() {
         let out = resolve(json!({
             "kind": "fallback",
             "table": {"default": [{"provider": "codex", "model": "m"}]},
@@ -1087,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_vendor_answers_route_provider_then_harness() {
+    fn vendor_rows() {
         let vendor = |payload: Value| {
             resolve(payload).unwrap()["vendor"]
                 .as_str()
@@ -1118,10 +1097,7 @@ mod tests {
             vendor(json!({"kind": "lane-vendor", "argv_tail": [], "harness": "opencode"})),
             None
         );
-    }
 
-    #[test]
-    fn lane_vendor_model_token_informs_the_answer_without_a_route_or_provider() {
         // The measured A/B matrix: a routeless glm spawn answered the claude
         // harness default (anthropic), minted a row under it, and died on the
         // default endpoint's first inference. The model spelling is the only
@@ -1166,21 +1142,6 @@ mod tests {
             })),
             Some("anthropic".into())
         );
-    }
-
-    #[test]
-    fn model_vendor_mismatch_check_stays_lane_inference_free() {
-        // The checker's lane answer must NOT absorb the model inference, or
-        // an injected glm-on-claude model would agree with itself and never
-        // refuse.
-        let out = resolve(json!({
-            "kind": "model-vendor",
-            "argv_tail": ["--model", "glm-5.3-flash[1m]"],
-            "harness": "claude",
-            "model_source": "config.agents.profiles.target",
-        }))
-        .unwrap();
-        assert_eq!(out["verdict"], "refuse");
     }
 
     #[test]
