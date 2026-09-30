@@ -92,8 +92,19 @@ impl Dispatcher for TerminatingDispatcher {
 }
 
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    fno_agents::event_store::journal_text(path, &[])
-        .lines()
+    // The child run pins FNO_AGENTS_HOME, so its store resolves under the
+    // fixture root; the reader derives the same pin or it falls back to the
+    // retired jsonl and reads nothing.
+    let _guard = fno_agents::claims::test_env_lock().lock().unwrap();
+    let prior = std::env::var_os("FNO_AGENTS_HOME");
+    let pin = path.parent().unwrap_or(path).join("agents");
+    std::env::set_var("FNO_AGENTS_HOME", &pin);
+    let text = fno_agents::event_store::journal_text(path, &[]);
+    match prior {
+        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+        None => std::env::remove_var("FNO_AGENTS_HOME"),
+    }
+    text.lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }
