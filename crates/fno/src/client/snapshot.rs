@@ -2,26 +2,23 @@
 //! [`View::compose`] and write it as html, svg or png, with no terminal,
 //! shell, scrollback or cursor in the picture.
 //!
-//! The default source is a staged demo fleet, so a public shot carries no real
-//! session text. `--server <name>` shoots a live server instead, through the
-//! same read-only observer attach the web bridge uses: `rows: 0, cols: 0`
-//! never resizes a PTY and the write half is dropped after the attach.
+//! `--server <name>` names the server. The shot goes through the read-only
+//! observer attach the web bridge uses: `rows: 0, cols: 0` never resizes a PTY
+//! and the write half is dropped after the attach. A public shot comes from
+//! `scripts/ops/mux-demo-snapshot.sh`, which builds a throwaway server with
+//! invented work and shoots it here, so no real session text can leak.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{section_key, LayoutView, SectionView, View};
+use super::{LayoutView, View};
 use crate::frame_html::{self, Theme};
-use crate::proto::{
-    self, AgentBadge, AgentRow, Cell, ClientMsg, Color, Frame, Reach, ServerMsg, SquadMeta,
-    TabMeta, BUILD_VERSION, PROTO_VERSION,
-};
-use crate::tree::Rect;
+use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSION};
 
 const USAGE: &str =
-    "usage: fno mux serve --snapshot --out <path> [--server <name>] [--squad <name>] \
+    "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
 [--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows>]";
 
 #[derive(Debug, PartialEq)]
@@ -34,8 +31,7 @@ pub enum Format {
 #[derive(Debug)]
 pub struct SnapshotArgs {
     pub out: PathBuf,
-    /// `None` shoots the staged demo fleet.
-    pub server: Option<String>,
+    pub server: String,
     pub squad: Option<String>,
     pub theme: Theme,
     pub format: Format,
@@ -105,6 +101,11 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
         }
     }
     let out = out.ok_or_else(|| format!("fno mux serve --snapshot: --out is required\n{USAGE}"))?;
+    let server = server.ok_or_else(|| {
+        "fno mux serve --snapshot: --server is required; for a public shot with no real \
+session text, run scripts/ops/mux-demo-snapshot.sh"
+            .to_string()
+    })?;
     // The extension names the format when the flag does not.
     let format = match format {
         Some(f) => f,
@@ -131,15 +132,7 @@ fn parse_size(v: &str) -> Option<(u16, u16)> {
 }
 
 pub fn run(args: SnapshotArgs) -> i32 {
-    let frame = match &args.server {
-        None => {
-            let store = isolated_store();
-            let frame = demo_frame(args.size.unwrap_or((34, 150)));
-            let _ = std::fs::remove_dir_all(store);
-            Ok(frame)
-        }
-        Some(server) => live_frame(server, args.squad.as_deref(), args.size),
-    };
+    let frame = live_frame(&args.server, args.squad.as_deref(), args.size);
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
             println!("{}", args.out.display());
@@ -213,189 +206,6 @@ fn find_chrome() -> Option<PathBuf> {
         .flat_map(|name| std::env::split_paths(&path).map(move |d| d.join(name)))
         .find(|p| p.is_file())
 }
-
-// ---------------------------------------------------------------------------
-// the staged demo fleet
-// ---------------------------------------------------------------------------
-
-const PANE_ID: u64 = 1;
-
-/// The staged fleet, composed at `(rows, cols)`. Every name and line here is
-/// invented, so nothing from a real session can reach a public page.
-///
-/// The sideline's saved widths and folds live in the user's view store, so
-/// the caller points the store at an empty dir first ([`isolated_store`]).
-fn demo_frame(term: (u16, u16)) -> Frame {
-    let squads = vec![
-        squad(1, "web", &["api", "checkout"]),
-        squad(2, "mobile", &["release"]),
-        squad(3, "docs", &["guides"]),
-    ];
-    let agents = vec![
-        agent(1, "archer", "claude", AgentBadge::Working, Some(PANE_ID)),
-        agent(1, "scout", "codex", AgentBadge::Working, None),
-        agent(1, "reviewer", "opencode", AgentBadge::Blocked, None),
-        agent(2, "builder", "claude", AgentBadge::Working, None),
-        agent(2, "tester", "pi", AgentBadge::Done, None),
-        agent(3, "scribe", "codex", AgentBadge::Working, None),
-    ];
-    let mut view = View::new(
-        term,
-        "demo".into(),
-        LayoutView {
-            squads: squads.clone(),
-            active_squad: 1,
-            panes: Vec::new(),
-            focus: PANE_ID,
-            area: (0, 0),
-            agents,
-            focus_node: None,
-        },
-    );
-    for s in &squads {
-        view.section_view
-            .insert(section_key(s), SectionView::Expanded);
-    }
-    let (rows, cols) = view.content_dims();
-    view.layout.panes = vec![(
-        PANE_ID,
-        Rect {
-            x: 0,
-            y: 0,
-            rows,
-            cols,
-        },
-    )];
-    view.layout.area = (rows, cols);
-    view.frames.insert(PANE_ID, demo_pane(rows, cols));
-    view.compose()
-}
-
-/// An empty view store, so the demo is identical on every machine. Called
-/// once, before any thread starts.
-fn isolated_store() -> PathBuf {
-    let store = std::env::temp_dir().join(format!("fno-snapshot-store-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&store);
-    std::env::set_var("FNO_AGENTS_HOME", &store);
-    store
-}
-
-fn squad(id: u64, name: &str, tabs: &[&str]) -> SquadMeta {
-    SquadMeta {
-        id,
-        name: name.into(),
-        canonical_cwd: format!("/code/{name}"),
-        tabs: tabs
-            .iter()
-            .enumerate()
-            .map(|(i, t)| TabMeta {
-                id: i as u64,
-                name: (*t).to_string(),
-                named: true,
-                panes: Vec::new(),
-            })
-            .collect(),
-        active_tab: 0,
-        panes: tabs.len(),
-    }
-}
-
-fn agent(squad: u64, name: &str, harness: &str, badge: AgentBadge, pane: Option<u64>) -> AgentRow {
-    AgentRow {
-        squad: Some(squad),
-        name: name.into(),
-        harness: Some(harness.into()),
-        model: None,
-        route: None,
-        pane_id: pane,
-        portal: None,
-        badge: Some(badge),
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        seen: false,
-        tab: None,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        pr_session_short: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
-        spawned_by_session: None,
-        lineage_kind: None,
-        spawned_by_name: None,
-        lineage_reason: None,
-        harness_session_id: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-        reach: Reach::Locate,
-    }
-}
-
-/// The focused pane: an agent mid-task, in plain lines with a few accents.
-fn demo_pane(rows: u16, cols: u16) -> Frame {
-    const GREEN: Color = Color::Indexed(2);
-    const CYAN: Color = Color::Indexed(6);
-    const DIMMED: Color = Color::Indexed(8);
-    let lines: [(&str, Color); 12] = [
-        ("> add rate limiting to the checkout api", CYAN),
-        ("", Color::Default),
-        ("  Reading src/checkout/handler.ts", DIMMED),
-        ("  Reading src/middleware/limits.ts", DIMMED),
-        ("", Color::Default),
-        (
-            "  The handler has no limit today. I will add a token bucket",
-            Color::Default,
-        ),
-        (
-            "  per api key, 60 requests a minute, and a 429 with Retry-After.",
-            Color::Default,
-        ),
-        ("", Color::Default),
-        ("  Edited src/middleware/limits.ts  +42 -3", GREEN),
-        ("  Edited src/checkout/handler.ts   +6 -1", GREEN),
-        ("", Color::Default),
-        ("  Running npm test -- limits ... 14 passed", GREEN),
-    ];
-    let mut cells = vec![Cell::default(); rows as usize * cols as usize];
-    for (r, (text, fg)) in lines.iter().enumerate().take(rows as usize) {
-        for (c, ch) in text.chars().enumerate().take(cols as usize) {
-            cells[r * cols as usize + c] = Cell {
-                c: ch,
-                fg: *fg,
-                bg: Color::Default,
-                flags: 0,
-            };
-        }
-    }
-    Frame {
-        rows,
-        cols,
-        cells,
-        cursor_row: 0,
-        cursor_col: 0,
-        cursor_visible: false,
-        scroll_offset: 0,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// the live source
-// ---------------------------------------------------------------------------
 
 /// Everything one observer attach delivers before it goes quiet.
 struct Observed {
@@ -540,45 +350,4 @@ async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
     let layout = layout.expect("loop exits with a layout");
     frames.retain(|id, _| layout.panes.iter().any(|(p, _)| p == id));
     Ok(Observed { layout, frames })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::cell_flags;
-
-    /// The default source is the staged fleet, and each theme paints it on
-    /// its own background: markup in pane text is escaped, and an inverse
-    /// cell becomes a rect in the theme's foreground (the terminal's swap).
-    #[test]
-    fn snapshot_demo_fleet_renders_in_both_themes() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::view_store::set_test_path(dir.path());
-        let mut frame = demo_frame((34, 150));
-        crate::view_store::clear_test_path();
-        let text = crate::vt::frame_text(&frame);
-        for name in ["archer", "reviewer", "checkout", "rate limiting"] {
-            assert!(text.contains(name), "{name} missing:\n{text}");
-        }
-        let last = frame.cells.len() - 1;
-        frame.cells[last] = Cell {
-            c: 'x',
-            fg: Color::Default,
-            bg: Color::Default,
-            flags: cell_flags::INVERSE,
-        };
-        for theme in [frame_html::DARK, frame_html::LIGHT] {
-            let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
-            let svg = frame_html::frame_svg(&frame, theme);
-            assert!(svg.contains(&format!("height=\"100%\" fill=\"{}\"", hex(theme.bg))));
-            assert!(
-                svg.contains(&format!("height=\"17\" fill=\"{}\"", hex(theme.fg))),
-                "inverse cell not swapped"
-            );
-            assert!(svg.contains("xml:space=\"preserve\""));
-            assert!(svg.contains("&gt; add rate limiting"), "prompt not escaped");
-            let html = frame_html::screen_html(&frame, theme);
-            assert!(html.contains(&format!("background:{}", hex(theme.bg))));
-        }
-    }
 }

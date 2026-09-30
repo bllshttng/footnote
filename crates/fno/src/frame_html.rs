@@ -457,7 +457,9 @@ fn xml_escape(c: char) -> String {
         '&' => "&amp;".into(),
         '<' => "&lt;".into(),
         '>' => "&gt;".into(),
-        '\0' => " ".into(),
+        // A browser page ignores xml:space and collapses a run of spaces, so
+        // textLength then stretches the few glyphs left across the run.
+        ' ' | '\0' => "\u{a0}".into(),
         other => other.to_string(),
     }
 }
@@ -487,6 +489,40 @@ pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A published shot fills with the chosen theme's background, keeps a
+    /// run of spaces as spaces a browser cannot collapse (a collapsed run
+    /// stretches its glyphs across the cells), escapes markup, and paints an
+    /// inverse cell as a rect in the theme's foreground.
+    #[test]
+    fn svg_paints_the_theme_and_keeps_the_grid() {
+        let mut cells: Vec<Cell> = "a <b>   c "
+            .chars()
+            .map(|c| Cell {
+                c,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            })
+            .collect();
+        cells.last_mut().unwrap().flags = cell_flags::INVERSE;
+        let frame = Frame {
+            rows: 1,
+            cols: cells.len() as u16,
+            cells,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            scroll_offset: 0,
+        };
+        for theme in [DARK, LIGHT] {
+            let svg = frame_svg(&frame, theme);
+            assert!(svg.contains(&format!("height=\"100%\" fill=\"{}\"", hex(theme.bg))));
+            assert!(svg.contains(&format!("height=\"17\" fill=\"{}\"", hex(theme.fg))));
+            assert!(svg.contains("a\u{a0}&lt;b&gt;\u{a0}\u{a0}\u{a0}c"), "{svg}");
+            assert!(screen_html(&frame, theme).contains(&format!("background:{}", hex(theme.bg))));
+        }
+    }
 
     fn cell(flags: u8) -> Cell {
         Cell {

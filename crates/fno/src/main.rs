@@ -1018,19 +1018,32 @@ mod tests {
         );
         // Its flags parse in client::snapshot; a bad value names the valid ones.
         let snap = |a: &[&str]| fno::client::snapshot::parse(&os(a));
-        let ok = snap(&["--snapshot", "--out", "x.png", "--theme", "light"]).unwrap();
-        assert!(ok.server.is_none() && ok.theme == fno::frame_html::LIGHT);
+        let ok = snap(&[
+            "--snapshot",
+            "--server",
+            "demo",
+            "--out",
+            "x.png",
+            "--theme",
+            "light",
+        ])
+        .unwrap();
+        assert!(ok.server == "demo" && ok.theme == fno::frame_html::LIGHT);
         assert!(matches!(ok.format, fno::client::snapshot::Format::Png));
         for (flag, value, named) in [
             ("--theme", "neon", "dark, light or macchiato"),
             ("--format", "gif", "html, svg or png"),
         ] {
-            let err = snap(&["--snapshot", "--out", "x", flag, value]).unwrap_err();
+            let err =
+                snap(&["--snapshot", "--server", "d", "--out", "x", flag, value]).unwrap_err();
             assert!(err.contains(named), "{err}");
         }
         assert!(snap(&["--snapshot"])
             .unwrap_err()
             .contains("--out is required"));
+        // No server: the refusal names the demo script, the one public source.
+        let err = snap(&["--snapshot", "--out", "x.svg"]).unwrap_err();
+        assert!(err.contains("mux-demo-snapshot.sh"), "{err}");
         assert_eq!(
             decide_role(&os(&["mux", "squad"]), false),
             Role::MuxRemoved("squad".into())
