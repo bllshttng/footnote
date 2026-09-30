@@ -223,15 +223,25 @@ def scoreboard_command(
     if by_provider:
         from fno.graph.store import GRAPH_JSON, _client_for
 
-        reply = _client_for(GRAPH_JSON).request(
-            "scoreboard_by_provider",
-            {
-                "entries": _nodes(),
-                "rows": rows,
-                "since_days": since,
-                "now": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        try:
+            reply = _client_for(GRAPH_JSON).request(
+                "scoreboard_by_provider",
+                {
+                    "entries": _nodes(),
+                    "rows": rows,
+                    "since_days": since,
+                    "now": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except RuntimeError as exc:
+            if "unknown store method" in str(exc) and "scoreboard_by_provider" in str(exc):
+                typer.echo(
+                    "warning: the answering keeper predates scoreboard_by_provider; "
+                    "redeploy fno-agents so the by-provider view can run",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            raise
         return _finish(reply["view"], lambda _v: sys.stdout.write(reply["text"]))
 
     if lanes:

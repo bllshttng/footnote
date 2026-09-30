@@ -735,11 +735,14 @@ def upsert_ledger_pr(
 
     A keeper that answers ``unknown store method`` is an OLD binary still
     holding the socket (a rebuild the running keeper never picked up). That
-    refusal degrades to a silent ``skipped-version-skew``: the close is
-    unaffected, and the next merge served by a current keeper runs the
-    whole-ledger fill, which backfills the axes this row would have carried.
-    Any OTHER keeper error propagates to the caller's warning.
+    refusal degrades LOUDLY: one stderr line names the stale keeper and the
+    rows it misses, the close is unaffected, and the next merge served by a
+    current keeper runs the whole-ledger fill, which backfills the axes this
+    row would have carried. Any OTHER keeper error propagates to the
+    caller's warning.
     """
+    import sys
+
     from fno.graph.store import GRAPH_JSON, _client_for
 
     try:
@@ -759,6 +762,12 @@ def upsert_ledger_pr(
         )["outcome"]
     except RuntimeError as exc:
         if "unknown store method" in str(exc) and "ledger_backstop" in str(exc):
+            print(
+                f"warning: ledger backstop skipped: the answering keeper predates "
+                f"ledger_backstop; rows for {node_id} (PR #{pr_number}) are missed "
+                f"until a current keeper serves a merge - redeploy fno-agents",
+                file=sys.stderr,
+            )
             return "skipped-version-skew"
         raise
 
