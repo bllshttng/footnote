@@ -13381,9 +13381,6 @@ async fn serve(
         // the orphan path the readers gate on.
         core.publish_client_count();
     };
-    // One `server_stopped` journal row: a daemon restart that closes
-    // nothing is exactly the silent case the feed must name.
-    core.emit_server_stopped(&flow);
     if flow == Flow::Shutdown {
         // Capture only from a safe restore state and current store generation.
         core.record_exit();
