@@ -72,17 +72,16 @@ def test_ac1_hp_new_review_activity_fires_review():
 # AC1-EDGE: latest activity == watermark -> noop
 # ---------------------------------------------------------------------------
 
-def test_ac1_edge_same_timestamp_is_noop():
-    """AC1-EDGE: latest_review_ts equal to watermark does not fire review."""
-    obs = _obs(latest_review_ts="2026-06-13T10:00:00Z")
-    wm = _watermark(last_review_ts="2026-06-13T10:00:00Z")
-    d = decide(obs, watermark=wm, reviewers=["codex"], merge_ready=False, now_iso=NOW)
-    assert d.kind == "noop"
-
-
-def test_ac1_edge_earlier_timestamp_is_noop():
-    """AC1-EDGE: latest_review_ts older than watermark does not fire review."""
-    obs = _obs(latest_review_ts="2026-06-12T10:00:00Z")
+@pytest.mark.parametrize(
+    "latest_ts",
+    [
+        "2026-06-13T10:00:00Z",  # equal to the watermark: not strictly newer
+        "2026-06-12T10:00:00Z",  # older than the watermark
+    ],
+)
+def test_ac1_edge_not_newer_timestamp_is_noop(latest_ts):
+    """AC1-EDGE: activity equal to or older than the watermark does not fire."""
+    obs = _obs(latest_review_ts=latest_ts)
     wm = _watermark(last_review_ts="2026-06-13T10:00:00Z")
     d = decide(obs, watermark=wm, reviewers=["codex"], merge_ready=False, now_iso=NOW)
     assert d.kind == "noop"
@@ -161,9 +160,16 @@ def test_boundary_node_with_completed_at_excluded():
     assert result == []
 
 
-def test_done_node_within_grace_window_discovered(tmp_path):
-    """AC1-EDGE / Wave 2: a node done-at-PR-green within max_age_days is still
-    watched (bridges the PR-green -> merge gap) when a clock is supplied."""
+@pytest.mark.parametrize(
+    "completed_at,expect",
+    [
+        ("2026-06-13T18:02:00Z", ["x-0010"]),  # inside the 14-day grace window
+        ("2026-05-01T00:00:00Z", []),  # outside the window: dropped
+    ],
+)
+def test_done_node_grace_window(tmp_path, completed_at, expect):
+    """AC1-EDGE / Wave 2: a done-at-PR-green node stays watched inside the
+    max_age_days grace window and drops outside it."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
@@ -171,26 +177,11 @@ def test_done_node_within_grace_window_discovered(tmp_path):
         "id": "x-0010",
         "pr_number": 11,
         "pr_url": "https://github.com/owner/repo/pull/11",
-        "completed_at": "2026-06-13T18:02:00Z",  # 1 day before NOW
+        "completed_at": completed_at,
         "cwd": str(repo_dir),
     }
     result = discover_open_prs([node], now_iso=NOW, max_age_days=14)
-    assert [c.node_id for c in result] == ["x-0010"]
-
-
-def test_done_node_outside_grace_window_excluded(tmp_path):
-    """AC1-EDGE / Wave 2: a node completed > max_age_days ago is dropped."""
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    (repo_dir / ".git").mkdir()
-    node = {
-        "id": "x-0011",
-        "pr_number": 12,
-        "pr_url": "https://github.com/owner/repo/pull/12",
-        "completed_at": "2026-05-01T00:00:00Z",  # > 14 days before NOW
-        "cwd": str(repo_dir),
-    }
-    assert discover_open_prs([node], now_iso=NOW, max_age_days=14) == []
+    assert [c.node_id for c in result] == expect
 
 
 def test_superseded_done_node_never_discovered(tmp_path):
@@ -276,39 +267,43 @@ def test_boundary_node_with_superseded_by_excluded():
 # Boundary: max-age exceeded -> "park"
 # ---------------------------------------------------------------------------
 
-def test_boundary_max_age_exceeded_parks():
-    """Boundary: PR older than max_age_days -> 'park', reason 'max-age'."""
-    obs = _obs(state="OPEN", opened_at="2026-05-01T00:00:00Z")
-    # NOW is 2026-06-14; difference > 14 days
+@pytest.mark.parametrize(
+    "opened_at,expect",
+    [
+        ("2026-05-01T00:00:00Z", "park"),  # NOW is 2026-06-14: over 14 days
+        ("2026-06-10T00:00:00Z", "noop"),  # within max_age_days
+    ],
+)
+def test_boundary_max_age_branches(opened_at, expect):
+    """Boundary: age parks past max_age_days and leaves a fresh PR alone."""
+    obs = _obs(state="OPEN", opened_at=opened_at)
     d = decide(obs, watermark={}, reviewers=[], merge_ready=False, now_iso=NOW, max_age_days=14)
-    assert d.kind == "park"
-    assert d.reason == "max-age"
-
-
-def test_boundary_within_max_age_not_parked():
-    """Boundary: PR within max_age_days is not parked by age."""
-    obs = _obs(state="OPEN", opened_at="2026-06-10T00:00:00Z")
-    d = decide(obs, watermark={}, reviewers=[], merge_ready=False, now_iso=NOW, max_age_days=14)
-    assert d.kind == "noop"
+    assert d.kind == expect
+    if expect == "park":
+        assert d.reason == "max-age"
 
 
 # ---------------------------------------------------------------------------
 # Boundary: zero reviewers
 # ---------------------------------------------------------------------------
 
-def test_boundary_zero_reviewers_new_activity_noop():
-    """Boundary: zero configured reviewers + new activity -> 'noop' (review not fired)."""
-    obs = _obs(latest_review_ts="2026-06-14T10:00:00Z")
-    wm = _watermark(last_review_ts="2026-06-13T00:00:00Z")
-    d = decide(obs, watermark=wm, reviewers=[], merge_ready=False, now_iso=NOW)
-    assert d.kind == "noop"
-
-
-def test_boundary_zero_reviewers_merged_fires_merge():
-    """Boundary: zero reviewers + MERGED + merge_ready -> 'merge'."""
-    obs = _obs(state="MERGED", merged=True)
-    d = decide(obs, watermark={}, reviewers=[], merge_ready=True, now_iso=NOW)
-    assert d.kind == "merge"
+@pytest.mark.parametrize(
+    "state,merge_ready,expect",
+    [
+        ("OPEN", False, "noop"),  # new reviewer activity, but nobody configured
+        ("MERGED", True, "merge"),  # zero reviewers still reaches the merge arm
+    ],
+)
+def test_boundary_zero_reviewers_branches(state, merge_ready, expect):
+    """Boundary: zero configured reviewers gate the review arm, not the merge arm."""
+    obs = _obs(state=state)
+    if state == "OPEN":
+        wm = _watermark(last_review_ts="2026-06-13T00:00:00Z")
+        obs = _obs(latest_review_ts="2026-06-14T10:00:00Z")
+        d = decide(obs, watermark=wm, reviewers=[], merge_ready=merge_ready, now_iso=NOW)
+    else:
+        d = decide(obs, watermark={}, reviewers=[], merge_ready=merge_ready, now_iso=NOW)
+    assert d.kind == expect
 
 
 # ---------------------------------------------------------------------------
