@@ -54,6 +54,7 @@ LINE='{"ts":"2026-09-07T00:00:00Z","type":"context_nudge","source":"hook","data"
 fresh="$tmp/fresh-repo"
 home="$tmp/home"
 mkdir -p "$fresh" "$home/.fno"
+export FNO_AGENTS_HOME="$home/.fno/agents"
 
 env -u EVENTS_FILE -u FNO_TEST_HERMETIC HOME="$home" STATE_DIR="$home/.fno" \
     FNO_EVENTS_PATH="$home/.fno/events.jsonl" bash -c '

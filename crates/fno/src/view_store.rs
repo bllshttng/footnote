@@ -173,6 +173,7 @@ struct StoreFile {
     /// until their first drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feed_width: Option<serde_json::Value>,
+    feed_order: Option<serde_json::Value>,
     /// The experimental backlog board in the sidebar menu. Default
     /// absent = off: the view is experimental, so the next toggle persists a
     /// clean value. Same contract as `confirm_lifecycle`.
@@ -364,6 +365,25 @@ pub fn load_feed_width() -> Option<u16> {
 pub fn save_feed_width(width: u16) {
     mutate(|file| {
         file.feed_width = serde_json::to_value(width).ok();
+    });
+}
+
+/// The activity feed's row order, as persisted. Serialized as its lowercase
+/// name; anything unreadable degrades to the shipped grouped order.
+pub fn load_feed_order() -> Option<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .feed_order
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Persist the feed's row order. Best-effort like every other write here.
+pub fn save_feed_order(order: &str) {
+    mutate(|file| {
+        file.feed_order = serde_json::to_value(order).ok();
     });
 }
 

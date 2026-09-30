@@ -8,13 +8,15 @@ use crate::census::ProcRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRoot {
     pub session_id: String,
     pub harness: String,
+    pub name: Option<String>,
     pub node: Option<String>,
-    pub pid: u32,
+    pub pids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,8 +88,8 @@ fn stage_for(
     test_pids: &HashSet<u32>,
     owned: &[&ProcRow],
 ) -> (Option<String>, Option<String>) {
-    let is_test =
-        test_pids.contains(&root.pid) || owned.iter().any(|row| test_pids.contains(&row.pid));
+    let is_test = root.pids.iter().any(|pid| test_pids.contains(pid))
+        || owned.iter().any(|row| test_pids.contains(&row.pid));
     if is_test {
         return (Some("test".into()), root.node.clone());
     }
@@ -109,7 +111,7 @@ pub fn attribute(
     let root_map: HashMap<u32, usize> = roots
         .iter()
         .enumerate()
-        .map(|(i, root)| (root.pid, i))
+        .flat_map(|(i, root)| root.pids.iter().copied().map(move |pid| (pid, i)))
         .collect();
     let mut owned: Vec<Vec<&ProcRow>> = (0..roots.len()).map(|_| Vec::new()).collect();
     let mut owners = HashMap::new();
@@ -136,12 +138,17 @@ pub fn attribute(
         let (footprint, footprint_unread) = footprint_mb(&session_pids);
         let mut row = json!({
             "session_id": root.session_id,
+            "name": root.name,
             "harness": root.harness,
             "node": node,
             "stage": stage,
             "procs": owned[index].len(),
             "rss_mb": owned[index].iter().map(|r| r.rss_kb).sum::<u64>() as f64 / 1024.0,
             "cpu_pct": owned[index].iter().map(|r| r.cpu_pct).sum::<f64>(),
+            "top_command": owned[index]
+                .iter()
+                .max_by(|a, b| a.cpu_pct.partial_cmp(&b.cpu_pct).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|process| process.command.clone()),
             "footprint_mb": footprint,
             "footprint_unread": footprint_unread,
         });
@@ -250,15 +257,19 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
             continue;
         };
         let Some(pid) = entry.pid else { continue };
-        roots.entry(session_id.clone()).or_insert(SessionRoot {
+        let root = roots.entry(session_id.clone()).or_insert(SessionRoot {
             session_id,
             harness: entry
                 .harness
                 .or(entry.provider)
                 .unwrap_or_else(|| "unknown".into()),
+            name: Some(entry.name),
             node: entry.node,
-            pid,
+            pids: Vec::new(),
         });
+        if !root.pids.contains(&pid) {
+            root.pids.push(pid);
+        }
     }
     if let Ok(roster) = crate::claude_roster::ClaudeRoster::load_default() {
         for worker in roster.workers_deduped() {
@@ -275,9 +286,32 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
                 .or_insert(SessionRoot {
                     session_id: worker.session_id.clone(),
                     harness: "claude".into(),
+                    name: None,
                     node: None,
-                    pid: root_pid,
+                    pids: vec![root_pid],
                 });
+        }
+    }
+    for row in table.iter().filter(|row| row.ppid == 1) {
+        let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
+            continue;
+        };
+        let crate::process_owner::OwnerRead::Owner(lease) =
+            crate::process_owner::owner_lease_for_server(row.pid, Path::new(&socket))
+        else {
+            continue;
+        };
+        let root = roots
+            .entry(lease.session.clone())
+            .or_insert_with(|| SessionRoot {
+                session_id: lease.session,
+                harness: "unknown".into(),
+                name: None,
+                node: None,
+                pids: Vec::new(),
+            });
+        if !root.pids.contains(&row.pid) {
+            root.pids.push(row.pid);
         }
     }
     roots.into_values().collect()
@@ -351,17 +385,19 @@ mod tests {
 
     #[test]
     fn attributes_roots_and_descendants_without_crossing_cycles() {
-        let table = vec![
+        let mut table = vec![
             row(100, 1, "session", 1024),
             row(201, 100, "cargo test", 2048),
             row(202, 201, "rustc", 1024),
             row(300, 1, "fseventsd", 28 * 1024 * 1024),
         ];
+        table[2].cpu_pct = 3.0;
         let roots = vec![SessionRoot {
             session_id: "a".into(),
             harness: "claude".into(),
+            name: Some("worker-a".into()),
             node: Some("x-a".into()),
-            pid: 100,
+            pids: vec![100],
         }];
         let out = attribute(
             &table,
@@ -375,6 +411,8 @@ mod tests {
         );
         assert_eq!(out.sessions.len(), 1);
         assert_eq!(out.sessions[0]["stage"], "blueprint");
+        assert_eq!(out.sessions[0]["name"], "worker-a");
+        assert_eq!(out.sessions[0]["top_command"], "rustc");
         assert_eq!(out.sessions[0]["buckets"]["cargo"]["procs"], 2);
         assert_eq!(out.top_rss[0]["name"], "fseventsd");
     }
