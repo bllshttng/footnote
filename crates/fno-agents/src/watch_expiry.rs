@@ -40,6 +40,7 @@ pub(crate) struct Watch {
     pub seq: i64,
     pub session_id: String,
     pub node: String,
+    pub blocker: String,
     pub task_id: Option<String>,
     pub reason: Option<String>,
     pub expires_at_ms: i64,
@@ -191,6 +192,11 @@ fn watches(evidence: &[Evidence]) -> Vec<Watch> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            blocker: data
+                .get("blocker")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
             task_id: data
                 .get("task_id")
                 .and_then(Value::as_str)
@@ -213,12 +219,19 @@ fn watches(evidence: &[Evidence]) -> Vec<Watch> {
     latest.into_values().collect()
 }
 
-fn current_node_claim(home: &AgentsHome, session_id: &str) -> Option<String> {
-    let registry = crate::state::load_registry(&home.registry_json()).ok()?;
+pub(crate) fn current_node_claim(
+    home: &AgentsHome,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let registry = crate::state::load_registry(&home.registry_json())
+        .map_err(|error| format!("registry read failed: {error}"))?;
     let row = registry
         .entries
         .iter()
-        .find(|row| row.harness_session_id.as_deref() == Some(session_id))?;
+        .find(|row| registry_session_id(row) == Some(session_id));
+    let Some(row) = row else {
+        return Ok(None);
+    };
     if matches!(
         row.status,
         crate::AgentStatus::Exited
@@ -226,44 +239,81 @@ fn current_node_claim(home: &AgentsHome, session_id: &str) -> Option<String> {
             | crate::AgentStatus::Failed
             | crate::AgentStatus::Orphaned
     ) {
-        return None;
+        return Ok(None);
     }
-    let records = crate::claims::list_strict(Some("node:"), None, false).ok()?;
-    let owned: Vec<_> = records
-        .into_iter()
+    let records = crate::claims::list_strict(Some("node:"), None, false)
+        .map_err(|error| format!("node claim read failed: {error}"))?;
+    let mut owned = Vec::new();
+    for record in records
+        .iter()
         .filter(|record| record.session_id.as_deref() == Some(session_id))
-        .filter(|record| {
-            crate::claims::status(&record.key, None).0 == crate::claims::ClaimState::Live
-        })
-        .filter_map(|record| record.key.strip_prefix("node:").map(str::to_string))
-        .collect();
-    (owned.len() == 1).then(|| owned[0].clone())
+    {
+        match crate::claims::status(&record.key, None).0 {
+            crate::claims::ClaimState::Live => {
+                if let Some(node) = record.key.strip_prefix("node:") {
+                    owned.push(node.to_string());
+                }
+            }
+            crate::claims::ClaimState::Corrupted => {
+                return Err(format!("node claim {} is unreadable", record.key));
+            }
+            crate::claims::ClaimState::Free
+            | crate::claims::ClaimState::Suspect
+            | crate::claims::ClaimState::Stale => {}
+        }
+    }
+    match owned.as_slice() {
+        [node] => Ok(Some(node.clone())),
+        [] => Ok(None),
+        _ => Err(format!(
+            "session {session_id} owns multiple live node claims: {}",
+            owned.join(", ")
+        )),
+    }
 }
 
-fn message(watch: &Watch) -> String {
+fn registry_session_id(entry: &crate::state::RegistryEntry) -> Option<&str> {
+    entry
+        .harness_session_id
+        .as_deref()
+        .or(entry.session_id.as_deref())
+}
+
+pub(crate) fn message(watch: &Watch) -> String {
     let task = watch.task_id.as_deref().unwrap_or("missing; do not guess");
+    let blocker = match watch.reason.as_deref() {
+        Some(blocker @ ("ci" | "review" | "merge_slot" | "local")) => blocker,
+        _ => watch.blocker.as_str(),
+    };
     format!(
-        "Automatic local-watch expiry notice from the fno daemon. Your local watch expired for node {} (reason: {}). Harness task id: {task}. Read the task output, then kill the task if it is still running or re-arm the watch with a bounded timeout.",
+        "Automatic watch-expiry notice from the fno daemon. Your {blocker} watch expired for node {} (reason: {}). Harness task id: {task}. Check the watcher output or status. If a local task is still running, kill it; then continue or re-arm a bounded watch.",
         watch.node,
-        watch.reason.as_deref().unwrap_or("local watch deadline expired")
+        watch.reason.as_deref().unwrap_or("watch deadline expired")
     )
 }
 
-fn run_pass(home: &AgentsHome) -> Result<(), String> {
+pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
     let now_ms = millis_now();
     let evidence = read_evidence(home, now_ms)?;
     let emitter =
         crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon");
     let mut runner: crate::burn_watch::Runner = &mut crate::burn_watch::run_command;
     let mut delivery_failures = 0usize;
+    let mut eligibility_failures = 0usize;
     let mut receipt_failures = 0usize;
     let mut first_error = None;
     for watch in watches(&evidence) {
         if !should_wake(&watch, now_ms, &evidence) {
             continue;
         }
-        let Some(node) = current_node_claim(home, &watch.session_id) else {
-            continue;
+        let node = match current_node_claim(home, &watch.session_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => continue,
+            Err(error) => {
+                eligibility_failures += 1;
+                first_error.get_or_insert(error);
+                continue;
+            }
         };
         if !watch.node.is_empty() && node != watch.node {
             continue;
@@ -294,11 +344,12 @@ fn run_pass(home: &AgentsHome) -> Result<(), String> {
                 "session_id": watch.session_id,
                 "node": claimed_watch.node,
                 "watch_event_id": watch.event_id,
+                "blocker": claimed_watch.blocker,
                 "task_id": watch.task_id,
                 "expires_at_ms": watch.expires_at_ms,
                 "delivered": delivered,
                 "via": via,
-                "reason": "local watch deadline expired"
+                "reason": watch.reason.as_deref().unwrap_or("watch deadline expired")
             }),
         ) {
             receipt_failures += 1;
@@ -310,9 +361,9 @@ fn run_pass(home: &AgentsHome) -> Result<(), String> {
             });
         }
     }
-    if delivery_failures > 0 || receipt_failures > 0 {
+    if eligibility_failures > 0 || delivery_failures > 0 || receipt_failures > 0 {
         return Err(format!(
-            "delivery failures={delivery_failures}, receipt failures={receipt_failures}; accepted wakes with missing receipts retry at least once and may redeliver; first error: {}",
+            "eligibility failures={eligibility_failures}, delivery failures={delivery_failures}, receipt failures={receipt_failures}; accepted wakes with missing receipts retry at least once and may redeliver; first error: {}",
             first_error.unwrap_or_else(|| "unknown watch-expiry failure".into())
         ));
     }

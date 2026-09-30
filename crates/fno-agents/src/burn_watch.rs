@@ -887,6 +887,7 @@ mod tests {
             seq: 1,
             session_id: "s-1".into(),
             node: "x-1".into(),
+            blocker: "local".into(),
             task_id: Some("task-7".into()),
             reason: Some("local build".into()),
             expires_at_ms: 100,
@@ -934,5 +935,93 @@ mod tests {
             data: serde_json::json!({"watch_event_id": "watch-1"}),
         };
         assert!(!crate::watch_expiry::should_wake(&watch, 103, &[receipt]));
+
+        let mut review_watch = watch.clone();
+        review_watch.reason = Some("review".into());
+        let review_message = crate::watch_expiry::message(&review_watch);
+        assert!(!review_message.contains("local watch expired"));
+        assert!(review_message.contains("Your review watch expired"));
+        assert!(review_message.contains("reason: review"));
+
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        let temp = tempfile::tempdir().unwrap();
+        let claims_root = temp.path().join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let home = crate::paths::AgentsHome::at(temp.path().join("agents"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let mut legacy_entry = crate::state::RegistryEntry::default();
+        legacy_entry.name = "legacy-watch-owner".into();
+        legacy_entry.session_id = Some("s-legacy".into());
+        legacy_entry.status = crate::AgentStatus::Live;
+        let mut registry = crate::state::Registry::default();
+        registry.entries.push(legacy_entry.clone());
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let acquired = crate::claims::acquire(
+            "node:x-legacy",
+            "target-session:s-legacy",
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                identity: Some(("s-legacy".into(), "codex".into())),
+                root: None,
+                events_dir: Some(temp.path().join("claim-events")),
+                ..Default::default()
+            },
+        );
+        let legacy_owner = crate::watch_expiry::current_node_claim(&home, "s-legacy");
+
+        let global_events = crate::daemon::global_events_path(&home);
+        std::fs::write(
+            &global_events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "type": "loop_check_watch_idle",
+                    "source": "hook",
+                    "data": {
+                        "session_id": "s-legacy",
+                        "node": "x-legacy",
+                        "blocker": "local",
+                        "reason": "local build",
+                        "task_id": "task-7",
+                        "expires_at_ms": 0,
+                        "lease_ms": 1000
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        std::fs::remove_file(home.registry_json()).unwrap();
+        std::fs::create_dir(home.registry_json()).unwrap();
+        let registry_error = crate::watch_expiry::run_pass(&home);
+        std::fs::remove_dir(home.registry_json()).unwrap();
+
+        legacy_entry.harness_session_id = Some("s-legacy".into());
+        registry.entries = vec![legacy_entry];
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let broken_claims_root = temp.path().join("claims-root-file");
+        std::fs::write(&broken_claims_root, "unreadable claims root").unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &broken_claims_root);
+        let claims_error = crate::watch_expiry::run_pass(&home);
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert_eq!(legacy_owner, Ok(Some("x-legacy".into())));
+        assert!(
+            registry_error.is_err(),
+            "registry read failure must surface"
+        );
+        assert!(claims_error.is_err(), "claim read failure must surface");
     }
 }

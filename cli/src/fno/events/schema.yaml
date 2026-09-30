@@ -3049,10 +3049,10 @@ event_types:
           type: string
 
   - name: loop_check_watch_expiry_wake
-    description: "The daemon delivered or durably queued one wake for an expired local watch, after confirming its session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
+    description: "The daemon delivered or durably queued one wake for an expired watch, after confirming its session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
     sources: [daemon]
     data:
-      required: [session_id, node, watch_event_id, task_id, expires_at_ms, delivered, via, reason]
+      required: [session_id, node, watch_event_id, blocker, task_id, expires_at_ms, delivered, via, reason]
       properties:
         session_id:
           type: string
@@ -3060,6 +3060,9 @@ event_types:
           type: string
         watch_event_id:
           type: string
+        blocker:
+          type: string
+          enum: [ci, review, merge_slot, local, unknown]
         task_id:
           type: [string, "null"]
         expires_at_ms:
