@@ -6,42 +6,6 @@
 
 use super::*;
 
-#[cfg(test)]
-thread_local! {
-    /// Test gate for the post-resume registry rebind: off in tests
-    /// unless a test opts in, so the existing restore tests never shell the
-    /// real fno-agents binary from apply.
-    static RESTORE_REBIND_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) struct RestoreRebindGuard;
-
-#[cfg(test)]
-impl RestoreRebindGuard {
-    pub(crate) fn enable() -> Self {
-        RESTORE_REBIND_ENABLED.with(|f| f.set(true));
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for RestoreRebindGuard {
-    fn drop(&mut self) {
-        RESTORE_REBIND_ENABLED.with(|f| f.set(false));
-    }
-}
-
-#[cfg(test)]
-fn rebind_enabled() -> bool {
-    RESTORE_REBIND_ENABLED.with(std::cell::Cell::get)
-}
-
-#[cfg(not(test))]
-fn rebind_enabled() -> bool {
-    true
-}
-
 /// One member's post-resume registry rebind: the restore walk just spawned
 /// its pane, and the registry row still names the dead one.
 struct RebindJob {
@@ -51,6 +15,15 @@ struct RebindJob {
     mux_session: String,
     pane: u64,
     pid: u32,
+}
+
+/// Whether the rebind may fire: the off-loop task needs the ambient runtime
+/// the core loop runs on. A loop-less context (a unit test driving
+/// `Core::handle` directly) has none, so it skips the rebind and replies
+/// inline - the same shape the restore tests asserted before this door
+/// existed.
+fn rebind_runtime_ready() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
 }
 
 impl super::Core {
@@ -221,7 +194,7 @@ impl super::Core {
             }
             // The native session id rides the rebind job; `member`
             // moves into resume_one below.
-            let rebind_session = (!dry_run && rebind_enabled())
+            let rebind_session = (!dry_run)
                 .then(|| member.harness_session_id.clone())
                 .flatten();
             let outcome =
@@ -285,7 +258,7 @@ impl super::Core {
             // Collect the rebind job BEFORE the row consumes the
             // member: a resumed member whose row carried a native session id
             // and a child pid rebinds off-loop; the dry run never does.
-            if !dry_run && rebind_enabled() && row.outcome == "resumed" {
+            if !dry_run && row.outcome == "resumed" {
                 if let (Some(harness), Some(sid)) = (
                     row.harness.as_deref(),
                     rebind_session.as_deref().filter(|s| !s.trim().is_empty()),
@@ -328,7 +301,7 @@ impl super::Core {
                 "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
             ));
         }
-        if rebind_jobs.is_empty() || !rebind_enabled() {
+        if rebind_jobs.is_empty() || !rebind_runtime_ready() {
             let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
             return;
         }

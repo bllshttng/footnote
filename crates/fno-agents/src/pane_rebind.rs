@@ -71,7 +71,7 @@ fn parse_args(args: &[String]) -> Result<RebindArgs<'_>, (i32, String)> {
                         .map_err(|_| (2, "--pid needs a number".to_string()))?,
                 )
             }
-            "--json" => {}
+            "--json" | "-J" => {}
             other => return Err((2, format!("unknown argument {other:?}"))),
         }
     }
