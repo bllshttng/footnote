@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_and_injects_parent_slug() {
+    fn slug_rows() {
         let dir = tmp_dir("slug");
         let plan = write_plan(&dir, "child.md", PLAN);
         let entries = vec![
@@ -534,10 +534,7 @@ mod tests {
         assert_eq!(s(&f, "parent"), "x-epic");
         assert_eq!(s(&f, "parent_slug"), "the-epic");
         assert_eq!(s(&f, "size"), "M");
-    }
 
-    #[test]
-    fn projects_parent_and_related_wikilinks() {
         let dir = tmp_dir("links");
         write_plan(
             &dir,
@@ -575,10 +572,7 @@ mod tests {
             list(&f, "related"),
             &["manual".to_string(), "note".to_string()]
         );
-    }
 
-    #[test]
-    fn projects_group_fragment_paths_through_base_files() {
         let dir = tmp_dir("group-fragment-links");
         write_plan(&dir, "parent.md", &child_doc("x-parent"));
         let child = write_plan(&dir, "child.md", &child_doc("x-child"));
@@ -589,10 +583,31 @@ mod tests {
 
         assert_eq!(project(entries, &["x-child"], &dir), 1);
         assert_eq!(s(&fields_of(&child), "parent_link"), "[[parent|x-parent]]");
+
+        let dir = tmp_dir("dangling");
+        let plan = write_plan(&dir, "child.md", PLAN);
+        let entries = vec![
+            json!({"id": "x-child", "slug": "the-child", "plan_path": plan.to_string_lossy(), "priority": "p1", "parent": "x-gone"}),
+        ];
+        assert_eq!(project(entries, &["x-child"], &dir), 1);
+        let f = fields_of(&plan);
+        assert_eq!(s(&f, "parent"), "x-gone");
+        assert!(!f.contains_key("parent_slug"));
+
+        let dir = tmp_dir("noplan");
+        let entries = vec![json!({"id": "x-a", "slug": "a", "plan_path": null, "priority": "p0"})];
+        assert_eq!(project(entries, &["x-a"], &dir), 0);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        let dir = tmp_dir("rel");
+        write_plan(&dir, "rel.md", PLAN);
+        let entries =
+            vec![json!({"id": "x-r", "slug": "r", "plan_path": "rel.md", "priority": "p0"})];
+        assert_eq!(project(entries, &["x-r"], &dir), 1);
     }
 
     #[test]
-    fn clears_stale_link_properties_when_target_docs_are_missing() {
+    fn link_rows() {
         let dir = tmp_dir("stale-links");
         let child = write_plan(
             &dir,
@@ -609,10 +624,7 @@ mod tests {
         let f = fields_of(&child);
         assert!(!f.contains_key("parent_link"));
         assert!(!f.contains_key("related_links"));
-    }
 
-    #[test]
-    fn keeps_projected_related_links_idempotent_in_block_form() {
         let dir = tmp_dir("block-links");
         let parent = write_plan(&dir, "parent.md", &child_doc("x-parent"));
         let related = write_plan(&dir, "20260802-related.md", &child_doc("x-related"));
@@ -653,10 +665,7 @@ mod tests {
 
         assert_eq!(project(entries, &["x-child"], &dir), 0);
         assert_eq!(std::fs::read_to_string(&child).unwrap(), block_form);
-    }
 
-    #[test]
-    fn projection_unescapes_doubled_apostrophes_in_single_quoted_lists() {
         let dir = tmp_dir("single-quoted-list");
         let child = write_plan(
             &dir,
@@ -673,31 +682,7 @@ mod tests {
             list(&f, "close_probes"),
             &[r#"grep -c 'cargo admission: taking over' "$(command -v fno-agents)""#.to_string()]
         );
-    }
 
-    #[test]
-    fn dangling_parent_omits_slug() {
-        let dir = tmp_dir("dangling");
-        let plan = write_plan(&dir, "child.md", PLAN);
-        let entries = vec![
-            json!({"id": "x-child", "slug": "the-child", "plan_path": plan.to_string_lossy(), "priority": "p1", "parent": "x-gone"}),
-        ];
-        assert_eq!(project(entries, &["x-child"], &dir), 1);
-        let f = fields_of(&plan);
-        assert_eq!(s(&f, "parent"), "x-gone");
-        assert!(!f.contains_key("parent_slug"));
-    }
-
-    #[test]
-    fn no_plan_path_skipped() {
-        let dir = tmp_dir("noplan");
-        let entries = vec![json!({"id": "x-a", "slug": "a", "plan_path": null, "priority": "p0"})];
-        assert_eq!(project(entries, &["x-a"], &dir), 0);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn missing_file_never_raises_isolates_per_node() {
         let dir = tmp_dir("isolated");
         let good = write_plan(&dir, "good.md", PLAN);
         let entries = vec![
@@ -706,25 +691,10 @@ mod tests {
         ];
         assert_eq!(project(entries, &["x-gone", "x-good"], &dir), 1);
         assert_eq!(s(&fields_of(&good), "priority"), "p0");
-    }
 
-    #[test]
-    fn relative_plan_path_absolutized_against_root() {
-        let dir = tmp_dir("rel");
-        write_plan(&dir, "rel.md", PLAN);
-        let entries =
-            vec![json!({"id": "x-r", "slug": "r", "plan_path": "rel.md", "priority": "p0"})];
-        assert_eq!(project(entries, &["x-r"], &dir), 1);
-    }
-
-    #[test]
-    fn empty_ids_no_op() {
         let dir = tmp_dir("empty");
         assert_eq!(project(vec![], &[], &dir), 0);
-    }
 
-    #[test]
-    fn idempotent_second_run_zero() {
         let dir = tmp_dir("idem");
         let plan = write_plan(&dir, "child.md", PLAN);
         let entries = vec![
@@ -735,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn epic_doc_gets_rollup_counters() {
+    fn rollup_rows() {
         let dir = tmp_dir("rollup");
         let epic_plan = write_plan(&dir, "epic.md", EPIC_PLAN);
         let entries = vec![
@@ -749,10 +719,7 @@ mod tests {
         assert_eq!(s(&f, "children_done"), "1");
         assert_eq!(s(&f, "progress"), "1/2");
         assert_eq!(project(entries, &["x-epic"], &dir), 0);
-    }
 
-    #[test]
-    fn child_transition_repaints_parent_epic() {
         let dir = tmp_dir("repaint");
         let epic_plan = write_plan(&dir, "epic.md", EPIC_PLAN);
         let child_plan = write_plan(&dir, "child.md", PLAN);
@@ -764,10 +731,7 @@ mod tests {
         let f = fields_of(&epic_plan);
         assert_eq!(s(&f, "children_done"), "1");
         assert_eq!(s(&f, "progress"), "1/1");
-    }
 
-    #[test]
-    fn leaf_doc_has_no_rollup_keys() {
         let dir = tmp_dir("leaf");
         let plan = write_plan(&dir, "child.md", PLAN);
         let entries = vec![
@@ -778,10 +742,7 @@ mod tests {
         assert_eq!(s(&f, "priority"), "p0");
         assert!(!f.contains_key("children_total"));
         assert!(!f.contains_key("progress"));
-    }
 
-    #[test]
-    fn wave_painted_on_children_and_epic() {
         let dir = tmp_dir("waves");
         let epic_doc = write_plan(&dir, "epic.md", EPIC_PLAN);
         let a = write_plan(&dir, "a.md", &child_doc("a"));
@@ -799,10 +760,7 @@ mod tests {
         assert_eq!(s(&fields_of(&b), "wave"), "1");
         assert_eq!(s(&fields_of(&d), "wave"), "2");
         assert_eq!(s(&fields_of(&epic_doc), "waves_total"), "3");
-    }
 
-    #[test]
-    fn edge_edit_restratifies_siblings() {
         let dir = tmp_dir("restrat");
         let epic_doc = write_plan(&dir, "epic.md", EPIC_PLAN);
         let a = write_plan(&dir, "a.md", &child_doc("a"));
@@ -822,10 +780,7 @@ mod tests {
         project(entries, &["x-d"], &dir);
         assert_eq!(s(&fields_of(&d), "wave"), "0");
         assert_eq!(s(&fields_of(&epic_doc), "waves_total"), "1");
-    }
 
-    #[test]
-    fn orphaning_child_clears_stale_wave() {
         let dir = tmp_dir("orphan");
         let mut seeded = child_doc("c");
         seeded.push_str("wave: 2\n");
@@ -843,10 +798,7 @@ mod tests {
         ];
         project(entries, &["x-c"], &dir);
         assert!(!fields_of(&child_doc_path).contains_key("wave"));
-    }
 
-    #[test]
-    fn epic_demotion_clears_stale_waves_total_and_rollup() {
         let dir = tmp_dir("demote");
         let epic_doc = write_plan(&dir, "epic.md", EPIC_PLAN);
         let entries = vec![
@@ -872,7 +824,7 @@ mod tests {
         "waves:\n  - wave: 1\n    mode: parallel\n  - wave: 2\n    mode: sequential\n";
 
     #[test]
-    fn projection_keeps_a_plans_authored_wave_list() {
+    fn wave_rows() {
         let dir = tmp_dir("authored");
         let plan = write_plan(
             &dir,
@@ -886,10 +838,65 @@ mod tests {
         let text = std::fs::read_to_string(&plan).unwrap();
         assert!(text.contains("wave: 1") && text.contains("wave: 2"));
         assert_eq!(s(&fields_of(&plan), "priority"), "p0");
+
+        let dir = tmp_dir("heal");
+        let epic_doc = write_plan(
+            &dir,
+            "epic.md",
+            &EPIC_PLAN.replace("---\n\n", "waves: 3\n---\n\n"),
+        );
+        let entries = vec![
+            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
+            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
+        ];
+        project(entries, &["x-epic"], &dir);
+        let f = fields_of(&epic_doc);
+        assert!(!f.contains_key("waves"));
+        assert_eq!(s(&f, "waves_total"), "1");
+
+        let dir = tmp_dir("heal2");
+        let plan = write_plan(
+            &dir,
+            "child.md",
+            &PLAN.replace("---\n\n", "waves: 7\n---\n\n"),
+        );
+        let entries = vec![
+            json!({"id": "x-c", "slug": "c", "type": "feature", "plan_path": plan.to_string_lossy(), "priority": "p0", "status": "ready"}),
+        ];
+        assert_eq!(project(entries, &["x-c"], &dir), 1);
+        assert_eq!(s(&fields_of(&plan), "waves"), "7");
+
+        let dir = tmp_dir("heal3");
+        let epic_doc = write_plan(
+            &dir,
+            "epic.md",
+            &EPIC_PLAN.replace("---\n\n", "waves: tbd\n---\n\n"),
+        );
+        let entries = vec![
+            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
+            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
+        ];
+        project(entries, &["x-epic"], &dir);
+        assert_eq!(s(&fields_of(&epic_doc), "waves"), "tbd");
+
+        let dir = tmp_dir("epiclist");
+        let epic_doc = write_plan(
+            &dir,
+            "epic.md",
+            &EPIC_PLAN.replace("---\n\n", &format!("{WAVES_BLOCK}---\n\n")),
+        );
+        let entries = vec![
+            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
+            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
+        ];
+        assert_eq!(project(entries, &["x-epic"], &dir), 1);
+        let text = std::fs::read_to_string(&epic_doc).unwrap();
+        assert!(text.contains("wave: 1") && text.contains("wave: 2"));
+        assert_eq!(s(&fields_of(&epic_doc), "waves_total"), "1");
     }
 
     #[test]
-    fn mirror_type_scoped_to_the_named_node_not_the_fanout() {
+    fn mirror_rows() {
         let dir = tmp_dir("scope");
         let me = write_plan(
             &dir,
@@ -919,10 +926,66 @@ mod tests {
         assert_eq!(rewritten, 2);
         assert_eq!(s(&fields_of(&me), "type"), "epic");
         assert_eq!(s(&fields_of(&sib), "type"), "bug");
-    }
 
-    #[test]
-    fn sibling_repaint_keeps_the_doc_band() {
+        let dir = tmp_dir("mirror");
+        let plan = write_plan(&dir, "plan.md", PLAN);
+        let node = json!({"priority": "p1", "type": "feature", "blocked_by": ["x-1", "x-2"], "project": "fno"});
+        assert!(direct(&plan, node.clone()));
+        let f = fields_of(&plan);
+        assert_eq!(s(&f, "priority"), "p1");
+        assert_eq!(list(&f, "blocked_by"), ["x-1", "x-2"]);
+        assert!(!direct(&plan, node));
+
+        let dir = tmp_dir("noneskip");
+        let plan = write_plan(&dir, "plan.md", PLAN);
+        let node = json!({"priority": null, "blocked_by": ["x-9"], "project": null});
+        assert!(direct(&plan, node));
+        let f = fields_of(&plan);
+        assert_eq!(s(&f, "priority"), "p2"); // None never overwrites the doc value
+        assert!(!f.contains_key("project"));
+        assert_eq!(list(&f, "blocked_by"), ["x-9"]);
+
+        let dir = tmp_dir("clearlist");
+        let plan = write_plan(
+            &dir,
+            "plan.md",
+            &PLAN.replace("size: M", "size: M\nblocked_by: [x-old]"),
+        );
+        assert!(direct(&plan, one("blocked_by", json!([]))));
+        assert_eq!(list(&fields_of(&plan), "blocked_by"), [] as [&str; 0]);
+
+        let dir = tmp_dir("band");
+        let plan = write_plan(
+            &dir,
+            "plan.md",
+            &PLAN.replace("size: M", "size: M\ndifficulty: high"),
+        );
+        assert!(!direct(&plan, one("difficulty", Value::Null)));
+        assert_eq!(s(&fields_of(&plan), "difficulty"), "high");
+
+        let dir = tmp_dir("cleardiff");
+        let plan = write_plan(
+            &dir,
+            "plan.md",
+            &PLAN.replace("size: M", "size: M\ndifficulty: high"),
+        );
+        assert!(direct_full(&plan, json!({}), &[], false, &["difficulty"]));
+        assert!(!fields_of(&plan).contains_key("difficulty"));
+
+        let dir = tmp_dir("repaint");
+        let plan = write_plan(
+            &dir,
+            "plan.md",
+            &PLAN.replace("size: M", "size: M\ndifficulty: medium"),
+        );
+        assert!(direct(
+            &plan,
+            json!({"difficulty": "low", "priority": "p1"})
+        ));
+        let f = fields_of(&plan);
+        assert_eq!(s(&f, "difficulty"), "medium");
+        assert_eq!(s(&f, "priority"), "p1");
+
         let dir = tmp_dir("band");
         let me = write_plan(
             &dir,
@@ -937,10 +1000,13 @@ mod tests {
         ];
         project(entries, &["x-sib"], &dir);
         assert_eq!(s(&fields_of(&me), "difficulty"), "medium");
-    }
 
-    #[test]
-    fn difficulty_opt_in_scoped_to_the_named_node() {
+        let dir = tmp_dir("missing");
+        assert!(!direct(
+            &dir.join("does-not-exist.md"),
+            one("priority", "p0")
+        ));
+
         let dir = tmp_dir("diffopt");
         let me = write_plan(
             &dir,
@@ -970,73 +1036,6 @@ mod tests {
         assert_eq!(rewritten, 2);
         assert_eq!(s(&fields_of(&me), "difficulty"), "low");
         assert_eq!(s(&fields_of(&sib), "difficulty"), "high");
-    }
-
-    #[test]
-    fn stale_scalar_waves_healed_on_an_epic() {
-        let dir = tmp_dir("heal");
-        let epic_doc = write_plan(
-            &dir,
-            "epic.md",
-            &EPIC_PLAN.replace("---\n\n", "waves: 3\n---\n\n"),
-        );
-        let entries = vec![
-            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
-            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
-        ];
-        project(entries, &["x-epic"], &dir);
-        let f = fields_of(&epic_doc);
-        assert!(!f.contains_key("waves"));
-        assert_eq!(s(&f, "waves_total"), "1");
-    }
-
-    #[test]
-    fn heal_never_touches_a_non_epics_authored_scalar_waves() {
-        let dir = tmp_dir("heal2");
-        let plan = write_plan(
-            &dir,
-            "child.md",
-            &PLAN.replace("---\n\n", "waves: 7\n---\n\n"),
-        );
-        let entries = vec![
-            json!({"id": "x-c", "slug": "c", "type": "feature", "plan_path": plan.to_string_lossy(), "priority": "p0", "status": "ready"}),
-        ];
-        assert_eq!(project(entries, &["x-c"], &dir), 1);
-        assert_eq!(s(&fields_of(&plan), "waves"), "7");
-    }
-
-    #[test]
-    fn heal_never_touches_a_non_numeric_scalar_on_an_epic() {
-        let dir = tmp_dir("heal3");
-        let epic_doc = write_plan(
-            &dir,
-            "epic.md",
-            &EPIC_PLAN.replace("---\n\n", "waves: tbd\n---\n\n"),
-        );
-        let entries = vec![
-            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
-            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
-        ];
-        project(entries, &["x-epic"], &dir);
-        assert_eq!(s(&fields_of(&epic_doc), "waves"), "tbd");
-    }
-
-    #[test]
-    fn projection_keeps_an_epics_authored_wave_list() {
-        let dir = tmp_dir("epiclist");
-        let epic_doc = write_plan(
-            &dir,
-            "epic.md",
-            &EPIC_PLAN.replace("---\n\n", &format!("{WAVES_BLOCK}---\n\n")),
-        );
-        let entries = vec![
-            json!({"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": epic_doc.to_string_lossy(), "status": "ready"}),
-            json!({"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": null, "blocked_by": []}),
-        ];
-        assert_eq!(project(entries, &["x-epic"], &dir), 1);
-        let text = std::fs::read_to_string(&epic_doc).unwrap();
-        assert!(text.contains("wave: 1") && text.contains("wave: 2"));
-        assert_eq!(s(&fields_of(&epic_doc), "waves_total"), "1");
     }
 
     // ---- project_node direct cases (from test_project_mirror.py) ----
@@ -1077,93 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_projects_fields_and_is_idempotent() {
-        let dir = tmp_dir("mirror");
-        let plan = write_plan(&dir, "plan.md", PLAN);
-        let node = json!({"priority": "p1", "type": "feature", "blocked_by": ["x-1", "x-2"], "project": "fno"});
-        assert!(direct(&plan, node.clone()));
-        let f = fields_of(&plan);
-        assert_eq!(s(&f, "priority"), "p1");
-        assert_eq!(list(&f, "blocked_by"), ["x-1", "x-2"]);
-        assert!(!direct(&plan, node));
-    }
-
-    #[test]
-    fn none_scalar_never_overwrites() {
-        let dir = tmp_dir("noneskip");
-        let plan = write_plan(&dir, "plan.md", PLAN);
-        let node = json!({"priority": null, "blocked_by": ["x-9"], "project": null});
-        assert!(direct(&plan, node));
-        let f = fields_of(&plan);
-        assert_eq!(s(&f, "priority"), "p2"); // None never overwrites the doc value
-        assert!(!f.contains_key("project"));
-        assert_eq!(list(&f, "blocked_by"), ["x-9"]);
-    }
-
-    #[test]
-    fn empty_blocked_by_clears_stale_mirror() {
-        let dir = tmp_dir("clearlist");
-        let plan = write_plan(
-            &dir,
-            "plan.md",
-            &PLAN.replace("size: M", "size: M\nblocked_by: [x-old]"),
-        );
-        assert!(direct(&plan, one("blocked_by", json!([]))));
-        assert_eq!(list(&fields_of(&plan), "blocked_by"), [] as [&str; 0]);
-    }
-
-    #[test]
-    fn none_difficulty_never_deletes_the_doc_band() {
-        let dir = tmp_dir("band");
-        let plan = write_plan(
-            &dir,
-            "plan.md",
-            &PLAN.replace("size: M", "size: M\ndifficulty: high"),
-        );
-        assert!(!direct(&plan, one("difficulty", Value::Null)));
-        assert_eq!(s(&fields_of(&plan), "difficulty"), "high");
-    }
-
-    #[test]
-    fn explicit_clear_keys_removes_the_doc_band() {
-        let dir = tmp_dir("cleardiff");
-        let plan = write_plan(
-            &dir,
-            "plan.md",
-            &PLAN.replace("size: M", "size: M\ndifficulty: high"),
-        );
-        assert!(direct_full(&plan, json!({}), &[], false, &["difficulty"]));
-        assert!(!fields_of(&plan).contains_key("difficulty"));
-    }
-
-    #[test]
-    fn repaint_keeps_the_doc_band() {
-        let dir = tmp_dir("repaint");
-        let plan = write_plan(
-            &dir,
-            "plan.md",
-            &PLAN.replace("size: M", "size: M\ndifficulty: medium"),
-        );
-        assert!(direct(
-            &plan,
-            json!({"difficulty": "low", "priority": "p1"})
-        ));
-        let f = fields_of(&plan);
-        assert_eq!(s(&f, "difficulty"), "medium");
-        assert_eq!(s(&f, "priority"), "p1");
-    }
-
-    #[test]
-    fn missing_plan_path_warns_no_raise() {
-        let dir = tmp_dir("missing");
-        assert!(!direct(
-            &dir.join("does-not-exist.md"),
-            one("priority", "p0")
-        ));
-    }
-
-    #[test]
-    fn unowned_keys_untouched() {
+    fn status_rows() {
         let dir = tmp_dir("unowned");
         let plan = write_plan(&dir, "plan.md", PLAN);
         direct(&plan, one("priority", "p3"));
@@ -1179,10 +1092,7 @@ mod tests {
         assert!(std::fs::read_to_string(&plan)
             .unwrap()
             .contains("kill_criteria"));
-    }
 
-    #[test]
-    fn status_claim_leaves_plan_status_alone() {
         for doc_status in ["ready", "design"] {
             for graph_status in ["claimed", "in_progress"] {
                 let dir = tmp_dir("claim");
@@ -1195,10 +1105,7 @@ mod tests {
                 assert_eq!(s(&fields_of(&plan), "status"), doc_status);
             }
         }
-    }
 
-    #[test]
-    fn force_off_terminal_never_writes_in_progress() {
         let dir = tmp_dir("force");
         let plan = write_plan(
             &dir,
@@ -1216,10 +1123,7 @@ mod tests {
             &[]
         ));
         assert_eq!(s(&fields_of(&plan), "status"), "design");
-    }
 
-    #[test]
-    fn status_projects_done_stamps_done_at() {
         let dir = tmp_dir("doneat");
         let plan = write_plan(
             &dir,
@@ -1231,10 +1135,7 @@ mod tests {
         assert!(!first.is_empty());
         assert!(!direct(&plan, one("status", "done")));
         assert_eq!(s(&fields_of(&plan), "done_at"), first);
-    }
 
-    #[test]
-    fn status_backward_projection_refused() {
         let dir = tmp_dir("backward");
         let plan = write_plan(
             &dir,
@@ -1243,10 +1144,7 @@ mod tests {
         );
         assert!(!direct(&plan, one("status", "claimed")));
         assert_eq!(s(&fields_of(&plan), "status"), "shipped");
-    }
 
-    #[test]
-    fn status_no_write_for_gated_states() {
         let dir = tmp_dir("gated");
         let plan = write_plan(&dir, "plan.md", PLAN);
         for gated in ["blocked", "deferred"] {
@@ -1256,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_size_and_parent() {
+    fn scalar_rows() {
         let dir = tmp_dir("sizeparent");
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("size: M", "size: S"));
         assert!(direct(
@@ -1267,10 +1165,7 @@ mod tests {
         assert_eq!(s(&f, "size"), "M");
         assert_eq!(s(&f, "parent"), "x-parent");
         assert_eq!(s(&f, "parent_slug"), "epic-slug");
-    }
 
-    #[test]
-    fn null_parent_writes_neither_key() {
         let dir = tmp_dir("nullparent");
         let plan = write_plan(&dir, "plan.md", PLAN);
         assert!(direct(&plan, json!({"parent": Value::Null, "size": "L"})));
@@ -1278,10 +1173,7 @@ mod tests {
         assert!(!f.contains_key("parent"));
         assert!(!f.contains_key("parent_slug"));
         assert_eq!(s(&f, "size"), "L");
-    }
 
-    #[test]
-    fn cleared_nullable_mirror_removes_stale_frontmatter() {
         let dir = tmp_dir("cleared");
         let seeded = PLAN.replace("size: M", "size: M\nparent: x-old\nparent_slug: old-epic");
         let plan = write_plan(&dir, "plan.md", &seeded);
@@ -1293,10 +1185,7 @@ mod tests {
         assert!(!f.contains_key("parent"));
         assert!(!f.contains_key("parent_slug"));
         assert!(!f.contains_key("size"));
-    }
 
-    #[test]
-    fn non_clearable_none_never_deletes() {
         let dir = tmp_dir("nonclearable");
         let plan = write_plan(
             &dir,
@@ -1305,10 +1194,7 @@ mod tests {
         );
         assert!(!direct(&plan, one("priority", Value::Null)));
         assert_eq!(s(&fields_of(&plan), "priority"), "p1");
-    }
 
-    #[test]
-    fn tags_mirror_reaches_doc_and_empty_clears() {
         let dir = tmp_dir("tags");
         let plan = write_plan(&dir, "plan.md", PLAN);
         assert!(direct(&plan, one("tags", json!(["mux"]))));
@@ -1323,16 +1209,13 @@ mod tests {
     }
 
     #[test]
-    fn type_never_rewritten_by_projection() {
+    fn type_rows() {
         let dir = tmp_dir("notype");
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("type: feature", "type: bug"));
         let before = std::fs::read_to_string(&plan).unwrap();
         assert!(!direct(&plan, one("type", "feature")));
         assert_eq!(std::fs::read_to_string(&plan).unwrap(), before);
-    }
 
-    #[test]
-    fn type_untouched_while_other_keys_project() {
         let dir = tmp_dir("typekeep");
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("type: feature", "type: bug"));
         assert!(direct(
@@ -1344,18 +1227,12 @@ mod tests {
         assert_eq!(s(&f, "priority"), "p1");
         assert_eq!(list(&f, "blocked_by"), ["x-1"]);
         assert_eq!(s(&f, "size"), "L");
-    }
 
-    #[test]
-    fn type_absent_from_doc_is_not_added() {
         let dir = tmp_dir("noadd");
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("type: feature\n", ""));
         assert!(!direct(&plan, one("type", "epic")));
         assert!(!fields_of(&plan).contains_key("type"));
-    }
 
-    #[test]
-    fn mirror_type_writes_an_operator_supplied_type() {
         let dir = tmp_dir("optintype");
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("type: feature", "type: bug"));
         assert!(direct_full(
@@ -1366,10 +1243,7 @@ mod tests {
             &[]
         ));
         assert_eq!(s(&fields_of(&plan), "type"), "epic");
-    }
 
-    #[test]
-    fn finalized_plan_stays_valid_and_ready() {
         let dir = tmp_dir("finalized");
         let text = "---\nnode: x-node\nstatus: ready\ncreated: 2026-07-08\ndifficulty: medium\nsize: M\ntype: feature\ndone_probes:\n  - fno x --json | grep -oE 'scope: [a-z]+'\n---\n\n# A plan\n\nbody text\n";
         let plan = write_plan(&dir, "plan.md", text);

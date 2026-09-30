@@ -115,6 +115,20 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 .ltitle { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .lmeta { color: #6f7a8f; font-size: 11px; }
 .lrow.blocked .ltitle { color: #f08a8a; }
+.lrow.lchild { padding-left: 34px; }
+.lrow.lchild .ltitle { font-weight: 500; font-size: 12.5px; }
+.vote-pill { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid #2b3a55; color: #9fc1ee; cursor: pointer; background: none; }
+.vote-pill.z { color: #5a6478; border-color: #232b3a; }
+.ktag { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid; }
+.k-epic { color: #f0c674; border-color: #4a3a12; }
+.k-feature { color: #9fc1ee; border-color: #24406b; }
+.k-bug { color: #f08a8a; border-color: #5a2b2b; }
+.k-task { color: #9cdcaa; border-color: #2b4a35; }
+.k-other { color: #9aa4b6; border-color: #232b3a; }
+.actwhy { color: #f0c674; font-size: 11px; flex-basis: 100%; overflow-wrap: anywhere; }
+.planline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 3px 0; }
+.planline code { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c99b45; overflow-wrap: anywhere; }
+.planline a { color: #7ea3d8; }
 @media (max-width: 720px) { #panel { width: auto; left: 0; }
 }
 </style>
@@ -135,6 +149,7 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
   <label>status <select id="f-status" multiple size="1"><option value="">any</option></select></label>
   <label>priority <select id="f-priority" multiple size="1"><option value="">any</option></select></label>
   <label>size <select id="f-size" multiple size="1"><option value="">any</option></select></label>
+  <label>kind <select id="f-kind" multiple size="1"><option value="">any</option></select></label>
   <label>lead <select id="f-king" multiple size="1"><option value="">any</option></select></label>
   <label>find <input id="f-q" type="search" size="14" placeholder="id, slug or title"></label>
   <label><input id="f-all" type="checkbox"> all projects</label>
@@ -172,16 +187,106 @@ function mergeBoard(last, next, now) {
 // What a session row can do from this page: the attach or resume command to
 // copy, or null when the row renders dim with the reason the model sent.
 // The page copies; it never launches.
+// The upvote command for one node: operator vote, evidence the operator
+// names. The snapshot page copies it; the served page posts the same argv.
+function voteText(id) {
+  return "fno backlog encounter " + id + " --operator --evidence \"REPLACE: what it cost\"";
+}
+// Copy a raw string over plain http or file://, where the clipboard API may
+// be absent: fall back to selecting the text in a hidden helper and saying
+// so, the same degradation the command rows use.
+function copyText(text, btn) {
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => { btn.textContent = "copied"; }, () => copyBySelect(text, btn));
+  } else {
+    copyBySelect(text, btn);
+  }
+}
+function copyBySelect(text, btn) {
+  const inp = document.createElement("textarea");
+  inp.value = text;
+  document.body.appendChild(inp);
+  inp.select();
+  btn.textContent = "selected; copy by hand";
+  inp.remove();
+}
 function sessionCommand(s) {
   if (s.action === "attach" && s.agent) return "fno agents attach " + s.agent;
   if (s.action === "resume" && s.session_id) return "fno agents resume " + s.session_id;
   return null;
+}
+// The snapshot's filter predicate over one embedded card, mirroring the
+// model's keeps_query so a filter keeps the same rows the served board
+// keeps; the details haystack rides the embedded node map.
+function cardKeeps(card, nodes, state) {
+  const inSet = (set, have) => !set || !set.length || set.includes(have);
+  if (!inSet(state.project, card.project)) return false;
+  if (!inSet(state.status, card.status)) return false;
+  if (!inSet(state.priority, card.priority)) return false;
+  if (!inSet(state.size, card.size)) return false;
+  if (!inSet(state.kind, card.kind)) return false;
+  if (state.tag && state.tag.length && !(card.tags || []).some((t) => state.tag.includes(t))) return false;
+  if (state.king && state.king.length &&
+      !(card.king && state.king.includes(card.king.name))) return false;
+  if (state.epic && state.epic.length &&
+      !(state.epic.includes(card.id) || state.epic.includes(card.parent))) return false;
+  if (state.q) {
+    const needle = state.q.toLowerCase();
+    const details = (nodes[card.id] || {}).details;
+    const hay = [card.id, card.slug, card.title, typeof details === "string" ? details : JSON.stringify(details)].join(" ").toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  return true;
+}
+// One card's lane under the three lanes modes, from the embedded cards
+// alone. The epic rule mirrors the model: a card sits in its own lane when
+// other cards parent to it; an open parent's lane otherwise; "no epic" last.
+// The list's inline children: a card whose parent sits beside it renders
+// directly under that parent, indented one step. Cards whose parent lives
+// in another cell keep their own top-level row.
+function nestChildren(cards) {
+  const present = new Set(cards.map((c) => c.id));
+  const kids = new Map();
+  for (const c of cards) {
+    if (c.parent && present.has(c.parent)) {
+      if (!kids.has(c.parent)) kids.set(c.parent, []);
+      kids.get(c.parent).push(c);
+    }
+  }
+  const out = [];
+  for (const c of cards) {
+    if (c.parent && kids.has(c.parent)) continue;
+    out.push({ card: c, depth: 0 });
+    for (const k of kids.get(c.id) || []) out.push({ card: k, depth: 1 });
+  }
+  return out;
+}
+function laneKeyOf(card, lanesBy, parents, byId) {
+  if (lanesBy === "none") return { key: "all", title: "all" };
+  if (lanesBy === "epic") {
+    if (parents.has(card.id)) return { key: card.id, title: card.title };
+    const parent = card.parent && byId.get(card.parent);
+    if (parent && !parent.completed_at) return { key: parent.id, title: parent.title };
+    return { key: "", title: "no epic" };
+  }
+  return { key: card.project || "", title: card.project || "unscoped" };
 }
 (() => {
   const nav = document.querySelector("nav.fno-nav");
   const base = nav && nav.dataset.base ? nav.dataset.base : "/";
   const initial = new URLSearchParams(location.search);
   const t = initial.get("t") || "";
+  // The snapshot payload, when the page was written by `fno board-render`:
+  // the page then runs entirely from the embedded data, no fetch, no poll,
+  // no write controls. A malformed payload says so instead of a blank page.
+  const snapEl = document.getElementById("fno-snapshot");
+  let snap = null;
+  if (snapEl) {
+    try { snap = JSON.parse(snapEl.textContent); }
+    catch (e) { snap = { failed: "the embedded snapshot is not valid JSON: " + e }; }
+    snapEl.remove();
+  }
+  const SNAPSHOT = !!snap && !snap.failed;
   const state = {
     lanes: initial.get("lanes") || "project",
     view: initial.get("view") || "kanban",
@@ -210,14 +315,102 @@ function sessionCommand(s) {
   const mainEl = document.getElementById("main");
   const gridEl = document.getElementById("board");
   const controls = document.getElementById("controls");
-  const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king"];
+  const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king", "kind"];
+  // The effective write controls: the bridge's flag ANDs with snapshot mode,
+  // which has no server to POST to.
+  const canWrite = writable && !SNAPSHOT;
+  // The snapshot engine: rebuild the whole board answer from the embedded
+  // cards under the current state, then draw. The pure half (cardKeeps,
+  // laneKeyOf) is lifted under node; this half touches board/draw only.
+  function refreshSnapshot() {
+    const cards = snap.cards || [];
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    const parents = new Set();
+    for (const c of cards) if (c.parent) parents.add(c.parent);
+    const kept = cards.filter((c) => cardKeeps(c, snap.nodes || {}, state));
+    // Lanes: first-seen order over kept cards, project lanes sorted with the
+    // unscoped lane last, epic lanes by the epic card's own order, "none"
+    // one lane.
+    const laneSeq = [];
+    const groups = new Map();
+    for (const c of kept) {
+      const k = laneKeyOf(c, state.lanes, parents, byId);
+      if (!groups.has(k.key)) {
+        laneSeq.push(k);
+        groups.set(k.key, []);
+      }
+      groups.get(k.key).push(c);
+    }
+    let lanes = laneSeq.map(({key, title}) => ({key, title, cells: [], total: 0}));
+    // Column order rides the payload; cards slot into their column cell in
+    // model order. Done sorts newest-first by completed_at, everything else
+    // by the card's own order.
+    const columns = snap.columns || [];
+    for (const col of columns) {
+      for (const lane of lanes) {
+        lane.cells.push({ column: col, total: 0, cards: [] });
+      }
+    }
+    const laneIdx = new Map(lanes.map((l, i) => [l.key, i]));
+    for (const c of kept) {
+      const k = laneKeyOf(c, state.lanes, parents, byId);
+      const li = laneIdx.get(k.key);
+      const col = columns.indexOf(c.column);
+      if (li === undefined || col < 0) continue;
+      const cell = lanes[li].cells[col];
+      cell.cards.push(c);
+      cell.total += 1;
+      lanes[li].total += 1;
+    }
+    for (const lane of lanes) {
+      lane.cells.forEach((cell, ci) => {
+        if (columns[ci] === "Done") {
+          cell.cards.sort((a, b) => String(b.completed_at || "").localeCompare(String(a.completed_at || "")));
+        } else {
+          cell.cards.sort((a, b) => (a.order || 0) - (b.order || 0));
+        }
+      });
+    }
+    // Project lanes: named lanes first (sorted), unscoped last.
+    if (state.lanes === "project") {
+      lanes.sort((a, b) => {
+        if (!a.key !== !b.key) return a.key ? -1 : 1;
+        return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+      });
+    } else if (state.lanes === "epic") {
+      lanes.sort((a, b) => (a.key === "" ? 1 : 0) - (b.key === "" ? 1 : 0) || (a.key === "all" ? 0 : ((byId.get(a.key) || {}).order || Infinity) - ((byId.get(b.key) || {}).order || Infinity)));
+    }
+    // Stats over the kept set: open/status tiles/totals recompute; flow is
+    // a payload fact shown as-is.
+    const statusTotals = new Map();
+    for (const c of cards) {
+      if (c.status) statusTotals.set(c.status, (statusTotals.get(c.status) || 0) + 1);
+    }
+    const colTotals = new Map();
+    for (const c of kept) colTotals.set(c.column, (colTotals.get(c.column) || 0) + 1);
+    const stats = {
+      open: columns.filter((col) => col !== "Done").map((col) => ({ column: col, total: colTotals.get(col) || 0 })),
+      statuses: [...statusTotals.entries()].sort().map(([status, total]) => ({ status, total })),
+      totals: columns.map((col) => ({ column: col, total: colTotals.get(col) || 0 })),
+      flow: snap.flow || { available: false, reason: "unavailable in a snapshot" },
+    };
+    return {
+      backend: snap.backend || "snapshot",
+      scope: snap.scope || "",
+      errors: [],
+      lanes: lanes,
+      stats: stats,
+      facets: snap.facets || {},
+      unavailable: [],
+    };
+  }
   // The one filter-to-query mapping, shared by the fetch URL and the page
   // URL, so a shared link always reopens the board it was cut from. The
   // default lanes=project rides the model's own default and is omitted.
   function filterParams(p) {
     if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
     if (state.view && state.view !== "kanban") p.set("view", state.view);
-    for (const k of FILTER_KEYS) for (const v of state[k]) p.append(k, v);
+    for (const k of FILTER_KEYS) for (const v of state[k]) p.append(k === "kind" ? "type" : k, v);
     if (state.q) p.set("q", state.q);
     if (state.all) p.set("all", "1");
     return p;
@@ -230,6 +423,7 @@ function sessionCommand(s) {
   // The filter state lives in the page URL, so a view survives a reload and
   // can be shared. Unknown keys the model ignores are simply kept.
   function syncUrl() {
+    if (SNAPSHOT) return;
     const p = filterParams(new URLSearchParams());
     if (t) p.set("t", t);
     if (openId) p.set("node", openId);
@@ -280,6 +474,7 @@ function sessionCommand(s) {
     fillSelect("f-status", (f.statuses || []).map((v) => ({ v: v, l: v })), state.status);
     fillSelect("f-priority", (f.priorities || []).map((v) => ({ v: v, l: v })), state.priority);
     fillSelect("f-size", (f.sizes || []).map((v) => ({ v: v, l: v })), state.size);
+    fillSelect("f-kind", (f.kinds || []).map((v) => ({ v: v, l: v })), state.kind);
     fillSelect("f-king", (f.kings || []).map((v) => ({ v: v, l: v })), state.king);
     document.getElementById("f-q").value = state.q;
     document.getElementById("f-all").checked = state.all;
@@ -449,6 +644,8 @@ function sessionCommand(s) {
       m.textContent = meta.join(" · ");
       b.appendChild(m);
     }
+    addKindTag(b, card.kind);
+    addVotePill(b, card);
     if (card.blocked) {
       const chip = document.createElement("span");
       chip.className = "chip";
@@ -525,16 +722,18 @@ function sessionCommand(s) {
     });
     const rows = document.createElement("div");
     rows.className = "lrows";
-    for (const card of (lane.cells || []).flatMap((c) => c.cards || [])) {
-      rows.appendChild(listRow(card));
+    for (const cell of lane.cells || []) {
+      for (const { card, depth } of nestChildren(cell.cards || [])) {
+        rows.appendChild(listRow(card, depth));
+      }
     }
     sec.append(head, rows);
     return sec;
   }
-  function listRow(card) {
+  function listRow(card, depth) {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "lrow" + (card.blocked ? " blocked" : "");
+    b.className = "lrow" + (card.blocked ? " blocked" : "") + (depth ? " lchild" : "");
     const id = document.createElement("span");
     id.className = "lid";
     id.textContent = card.id;
@@ -552,8 +751,36 @@ function sessionCommand(s) {
     m.className = "lmeta";
     m.textContent = meta.join(" · ");
     b.appendChild(m);
+    addKindTag(b, card.kind);
+    addVotePill(b, card);
     b.addEventListener("click", () => openNode(card.id));
     return b;
+  }
+  // One kind tag: a chip naming the row's type, distinct per kind so epic,
+  // feature, bug and task read apart at a glance.
+  function addKindTag(box, kind) {
+    if (!kind) return;
+    const el = document.createElement("span");
+    el.className = "ktag k-" + String(kind).replace(/[^a-z0-9]/gi, "").toLowerCase();
+    el.textContent = String(kind);
+    box.appendChild(el);
+  }
+  // One vote pill: the encounter count with the agent/operator split in the
+  // title. Click opens the node; the panel carries the upvote action. A
+  // span, not a button: cards and rows are already buttons, and nesting one
+  // is invalid HTML.
+  function addVotePill(box, card) {
+    const n = card.encounters || 0;
+    const o = card.encounters_operator || 0;
+    const el = document.createElement("span");
+    el.className = "vote-pill" + (n ? "" : " z");
+    el.textContent = "▲ " + n;
+    el.title = (n - o) + " agent, " + o + " operator";
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openNode(card.id);
+    });
+    box.appendChild(el);
   }
   // Status count tiles: each shows what selecting that status would show.
   // Active tiles mirror the status multi-select.
@@ -600,8 +827,11 @@ function sessionCommand(s) {
   }
   // One backlog act: POST the JSON body, then show the verb's own last
   // line (or the refusal body). Every act control disables for the flight;
-  // on a landed write the board and the open node re-read.
+  // on a landed write the board and the open node re-read. The answer
+  // outlives that re-read: openNode re-renders the panel and would wipe the
+  // note the same tick, which read as "the launch did nothing".
   let acting = false;
+  let lastAct = null;
   async function act(body) {
     if (acting) return;
     acting = true;
@@ -614,7 +844,8 @@ function sessionCommand(s) {
         body: JSON.stringify(body),
       });
     } catch (e) {
-      showActLine("bridge unreachable: " + (e && e.message ? e.message : e));
+      lastAct = { id: body.id, text: "bridge unreachable: " + (e && e.message ? e.message : e) };
+      showActLine(lastAct.text);
       acting = false;
       return;
     }
@@ -625,12 +856,14 @@ function sessionCommand(s) {
       ok = resp.ok && v.ok !== false;
       notice = v.notice || text;
     } catch { }
-    showActLine((resp.ok ? "" : resp.status + ": ") + notice);
+    lastAct = { id: body.id, text: (resp.ok ? "" : resp.status + ": ") + notice };
+    showActLine(lastAct.text);
     acting = false;
-    for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = false;
     if (ok) {
       fetchBoard();
       openNode(body.id);
+    } else {
+      for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = false;
     }
   }
   function showActLine(text) {
@@ -645,6 +878,15 @@ function sessionCommand(s) {
     openId = id;
     syncUrl();
     panel.hidden = false;
+    if (SNAPSHOT) {
+      const view = (snap.nodes || {})[id];
+      if (!view) {
+        panelBody.textContent = "not in this snapshot: " + id;
+        return;
+      }
+      renderPanel(view);
+      return;
+    }
     panelBody.textContent = "loading " + id;
     let resp;
     try {
@@ -706,6 +948,9 @@ function sessionCommand(s) {
     const note = document.createElement("div");
     note.id = "actnote";
     note.className = "actnote";
+    // The last answer for THIS node survives the re-render that just drew
+    // the group.
+    if (lastAct && lastAct.id === card.id && lastAct.text) note.textContent = lastAct.text;
     g.appendChild(note);
     const unavail = (feature) => (view.unavailable || []).find((u) => u.feature === feature);
     const fieldUn = unavail("field edits");
@@ -719,6 +964,15 @@ function sessionCommand(s) {
       labelEl.className = "albl";
       row.appendChild(labelEl);
       return [row, labelEl];
+    };
+    // A refused control states its reason as visible text, never only a
+    // tooltip: a disabled button that says nothing reads as "does nothing".
+    const addWhy = (group, reason) => {
+      if (!reason) return;
+      const why = document.createElement("div");
+      why.className = "actwhy";
+      why.textContent = reason;
+      group.appendChild(why);
     };
     const addSelect = (label, field, value, options, un) => {
       const [row, labelEl] = rowFor(label);
@@ -749,6 +1003,7 @@ function sessionCommand(s) {
       if (un) {
         sel.disabled = true;
         labelEl.title = un.reason;
+        addWhy(g, un.reason);
       }
       g.appendChild(row);
     };
@@ -765,6 +1020,7 @@ function sessionCommand(s) {
       tinput.disabled = true;
       tsave.disabled = true;
       tlabel.title = fieldUn.reason;
+      addWhy(g, fieldUn.reason);
     }
     trow.append(tinput, tsave);
     g.appendChild(trow);
@@ -784,6 +1040,7 @@ function sessionCommand(s) {
       lrow.appendChild(b);
       llabel.title = moveUn ? moveUn.reason : "";
     }
+    if (moveUn) addWhy(g, moveUn.reason);
     g.appendChild(lrow);
     const [brow, blabel] = rowFor("launch");
     for (const kind of ["blueprint", "target"]) {
@@ -794,10 +1051,32 @@ function sessionCommand(s) {
       if (busy) {
         b.disabled = true;
         blabel.title = "already being worked; open its session instead";
+        addWhy(g, "launch: " + card.id + " is already being worked; open its session instead");
       }
       brow.appendChild(b);
     }
     g.appendChild(brow);
+    // The encounter act: the operator's demand signal, with evidence the
+    // operator names. Empty evidence refuses client-side with the same
+    // wording the server would refuse with.
+    const [erow, elabel] = rowFor("upvote");
+    const einput = document.createElement("input");
+    einput.className = "ainput";
+    einput.placeholder = "what it cost (evidence)";
+    const evote = document.createElement("button");
+    evote.textContent = "upvote";
+    evote.setAttribute("data-act", "1");
+    evote.addEventListener("click", () => {
+      const evidence = einput.value.trim();
+      if (!evidence) {
+        showActLine("evidence is required; name what the node cost");
+        return;
+      }
+      act({ act: "encounter", id: card.id, evidence: evidence });
+      einput.value = "";
+    });
+    erow.append(einput, evote);
+    g.appendChild(erow);
     panelBody.appendChild(g);
   }
   // The node panel, top to bottom: id and title, unavailable notes, the
@@ -842,10 +1121,69 @@ function sessionCommand(s) {
     addFieldRow(grid, "created_at", view.created_at);
     addFieldRow(grid, "completed_at", view.completed_at);
     addFieldRow(grid, "cwd", view.cwd);
-    addFieldRow(grid, "king", king);
+    addFieldRow(grid, "lead", king);
     addFieldRow(grid, "plan_path", view.plan_path);
     panelBody.appendChild(g);
-    if (writable) renderActs(view);
+    // Demand: the encounter count with the agent/operator split, and the
+    // upvote action — a POST on the served board, the command to copy on a
+    // snapshot page (no server to POST to).
+    const en = (card.encounters || 0), eo = (card.encounters_operator || 0);
+    const dg = document.createElement("div");
+    dg.className = "pgroup";
+    const dgh = document.createElement("h3");
+    dgh.textContent = "demand";
+    dg.appendChild(dgh);
+    const dline = document.createElement("div");
+    dline.className = "planline";
+    const dspan = document.createElement("span");
+    dspan.textContent = en + " encounters (" + (en - eo) + " agent, " + eo + " operator)";
+    dline.appendChild(dspan);
+    const dbtn = document.createElement("button");
+    dbtn.type = "button";
+    dbtn.className = "copybtn";
+    dbtn.textContent = SNAPSHOT ? "copy upvote" : "copy command";
+    dbtn.addEventListener("click", () => copyText(voteText(card.id), dbtn));
+    dline.appendChild(dbtn);
+    dg.appendChild(dline);
+    if (view.origin) {
+      const oline = document.createElement("div");
+      oline.className = "planline";
+      const ospan = document.createElement("span");
+      ospan.textContent = "origin: " + view.origin + (view.origin_evidence ? " · " + view.origin_evidence : "");
+      oline.appendChild(ospan);
+      dg.appendChild(oline);
+    }
+    panelBody.appendChild(dg);
+    // The plan row: Copy path always; Open in Obsidian when the writer
+    // computed a deep link.
+    if (view.plan_path) {
+      const pg = document.createElement("div");
+      pg.className = "pgroup";
+      const pgh = document.createElement("h3");
+      pgh.textContent = "plan";
+      pg.appendChild(pgh);
+      const line = document.createElement("div");
+      line.className = "planline";
+      const code = document.createElement("code");
+      code.textContent = view.plan_path;
+      line.appendChild(code);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "copybtn";
+      copy.textContent = "copy";
+      copy.addEventListener("click", () => copyText(view.plan_path, copy));
+      line.appendChild(copy);
+      if (view.obsidian) {
+        const a = document.createElement("a");
+        a.className = "linkbtn";
+        a.href = view.obsidian;
+        a.textContent = "Open in Obsidian ↗";
+        line.appendChild(a);
+      }
+      pg.appendChild(line);
+      panelBody.appendChild(pg);
+    }
+    if (canWrite) renderActs(view);
     if (view.details !== null && view.details !== undefined) {
       const dg = document.createElement("div");
       dg.className = "pgroup";
@@ -1052,6 +1390,11 @@ function sessionCommand(s) {
   }
   async function fetchBoard() {
     if (dead) return;
+    if (SNAPSHOT) {
+      board = refreshSnapshot();
+      draw();
+      return;
+    }
     let resp;
     try {
       resp = await fetch(base + "backlog/model.json?" + modelQs(), { cache: "no-store" });
@@ -1127,11 +1470,16 @@ function sessionCommand(s) {
     if (ev.key === "Escape") closePanel();
   });
   document.getElementById("panelclose").addEventListener("click", closePanel);
-  pollTimer = setInterval(() => {
-    if (!document.hidden) fetchBoard();
-  }, 10000);
+  if (!SNAPSHOT) {
+    pollTimer = setInterval(() => {
+      if (!document.hidden) fetchBoard();
+    }, 10000);
+  }
   syncControls();
   fetchBoard();
+  if (SNAPSHOT && snap.failed) {
+    showNoteLine(snap.failed);
+  }
   if (openId) openNode(openId);
 })();
 </script>

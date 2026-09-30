@@ -44,7 +44,7 @@ const PAGE: &str = include_str!("web_page.html");
 /// The backlog board page, vendored like PAGE. It draws the read model
 /// ([`crate::backlog_model`]) through `/backlog/model.json` and
 /// `/backlog/node.json` and computes nothing the model already answered.
-const BACKLOG_PAGE: &str = include_str!("web_backlog.html");
+pub(crate) const BACKLOG_PAGE: &str = include_str!("web_backlog.html");
 /// The browser drives nothing, so anything it sends is dropped - but cap it so
 /// a hostile client cannot OOM the bridge with one giant frame.
 const INBOUND_WS_CAP: usize = 64 * 1024;
@@ -132,9 +132,6 @@ struct AppState {
     /// project-isolated bridge cannot overwrite the global page.
     rundown_republish: bool,
     fleet_html: PathBuf,
-    /// The mux session this bridge attaches to; a backlog launch names it to
-    /// the spawn door.
-    session: Arc<str>,
     /// True when the bound address is loopback, so the backlog page may act.
     /// Computed from the bound address, never from `--bind` text.
     writable: bool,
@@ -745,7 +742,6 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         rundown_html,
         rundown_republish,
         fleet_html: fleet_html_path(),
-        session: args.session.into(),
         writable,
         model: Default::default(),
         shutdown: shutdown_rx,
@@ -1196,16 +1192,28 @@ enum Act {
     Target {
         id: String,
     },
+    /// One encounter: the demand signal, POSTed with the operator's own
+    /// evidence. The verb refuses a repeat voter, so the page forwards the
+    /// verb's own answer.
+    Encounter {
+        id: String,
+        evidence: String,
+    },
 }
 
 impl Act {
     fn id(&self) -> &str {
-        match self {
-            Act::Field { id, .. }
-            | Act::Rank { id, .. }
-            | Act::Blueprint { id }
-            | Act::Target { id } => id,
-        }
+        act_id(self)
+    }
+}
+
+fn act_id(act: &Act) -> &str {
+    match act {
+        Act::Field { id, .. }
+        | Act::Rank { id, .. }
+        | Act::Blueprint { id }
+        | Act::Target { id }
+        | Act::Encounter { id, .. } => id,
     }
 }
 
@@ -1276,6 +1284,23 @@ fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (Statu
                 plan: matches!(act, Act::Blueprint { .. }),
             })
         }
+        Act::Encounter { evidence, .. } => {
+            let trimmed = evidence.trim();
+            if trimmed.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "encounter: evidence is required; name what the node cost".into(),
+                ));
+            }
+            Ok(Planned::Verb(vec![
+                "backlog".into(),
+                "encounter".into(),
+                id.to_string(),
+                "--operator".into(),
+                "--evidence".into(),
+                trimmed.to_string(),
+            ]))
+        }
     }
 }
 
@@ -1283,13 +1308,11 @@ fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (Statu
 /// the shared shell-out; a launch runs the mux's own dispatch door and
 /// carries its notice back. The launch arm's ok fact is `true`: the door
 /// reports refusals through its notice text.
-async fn run_planned(st: &AppState, id: &str, planned: Planned) -> (bool, String) {
+async fn run_planned(_st: &AppState, id: &str, planned: Planned) -> (bool, String) {
     match planned {
         Planned::Verb(argv) => crate::backlog_write::run_verb(&argv, None).await,
         Planned::Dispatch { plan } => {
-            let notice =
-                crate::server::agent_launch::run_dispatch_one(&st.session, Some(id), None, plan)
-                    .await;
+            let notice = crate::server::agent_launch::run_dispatch_one(Some(id), None, plan).await;
             (true, notice)
         }
     }
@@ -1794,7 +1817,6 @@ mod tests {
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2206,7 +2228,6 @@ console.log("evictedRowCount: 18 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2335,6 +2356,80 @@ console.log("backlog page helpers: 12 cases ok");
                     "the shipped backlog helpers did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)
+                );
+            }
+        }
+    }
+
+    /// The snapshot engine's pure half holds its contracts when run for
+    /// real: lift cardKeeps / laneKeyOf / voteText from the shipped page and
+    /// run the cases under node, the same rule as the board helpers.
+    #[test]
+    fn snapshot_page_helpers_hold_under_node() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("FAIL " + what + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want)); process.exit(1); }
+};
+const any = { project: "p", status: "ready", priority: "p2", size: "M", kind: "bug", tags: ["t1"], king: { name: "k" }, parent: "e1", id: "x-1", slug: "s", title: "T" };
+const nodes = { "x-1": { details: "needle in details" } };
+const off = { project: [], status: [], priority: [], size: [], kind: [], tag: [], king: [], epic: [], q: "" };
+eq(cardKeeps(any, nodes, off), true, "no filters keep");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { status: ["idea"] })), false, "status filter drops");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["bug"] })), true, "kind filter keeps");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["epic"] })), false, "kind filter drops");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { epic: ["e1"] })), true, "own id keeps an epic filter");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "NEEDLE" })), true, "q is case-insensitive over details");
+eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "absent" })), false, "q drops");
+const parents = new Set(["e1"]);
+const byId = new Map([["e1", { id: "e1", title: "Epic", completed_at: null }], ["x-1", any]]);
+eq(laneKeyOf(byId.get("e1"), "epic", parents, byId), { key: "e1", title: "Epic" }, "an epic sits in its own lane");
+eq(laneKeyOf(any, "epic", parents, byId), { key: "e1", title: "Epic" }, "a child rides its open parent's lane");
+byId.get("e1").completed_at = "2026-01-01";
+eq(laneKeyOf(any, "epic", parents, byId), { key: "", title: "no epic" }, "a done parent's child has no epic lane");
+eq(laneKeyOf(any, "none", parents, byId), { key: "all", title: "all" }, "none is one lane");
+eq(laneKeyOf(Object.assign({}, any, { project: "" }), "project", parents, byId), { key: "", title: "unscoped" }, "unscoped project lane");
+eq(voteText("x-9"), 'fno backlog encounter x-9 --operator --evidence "REPLACE: what it cost"', "vote command");
+const nestIn = [
+  { id: "p1", title: "Parent" },
+  { id: "c1", title: "Kid", parent: "p1" },
+  { id: "l1", title: "Loose" },
+];
+const nested = nestChildren(nestIn);
+eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent");
+eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
+eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
+console.log("snapshot page helpers: 16 cases ok");
+"#;
+        let src = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
+            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
+            lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
+            lift_js_fn(BACKLOG_PAGE, "voteText"),
+            asserts
+        );
+        let path =
+            std::env::temp_dir().join(format!("fno-snapshot-helpers-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped snapshot helpers: {e}"
+                );
+                println!(
+                    "SKIPPED snapshot_page_helpers_hold_under_node: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                assert!(
+                    stdout.contains("snapshot page helpers: 16 cases ok"),
+                    "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
                 );
             }
         }
@@ -2490,7 +2585,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: false,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2572,7 +2666,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: fleet_path,
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2954,7 +3047,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -3047,7 +3139,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,

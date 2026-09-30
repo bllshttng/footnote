@@ -702,16 +702,6 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     print(f"Appended entry #{len(data['entries'])} to {tasks_path}", file=sys.stderr)
 
 
-# Terminal reasons that mark a NON-delivery ledger row (a failed/aborted
-# attempt). A resumed node can carry one of these from an earlier attempt whose
-# shipping successor later lost its ledger write; the merged PR must never be
-# stamped onto such a row (it would corrupt ship attribution keyed on
-# termination_reason). upsert_ledger_pr stamps only a delivery-eligible row.
-_NON_DELIVERY_TERMINALS = frozenset(
-    {"Budget", "NoProgress", "Interrupted", "Aborted", "NoWork"}
-)
-
-
 def ledger_project_for(node: dict | None) -> str | None:
     """The project key the plan-fidelity gate joins on: the checkout's remote
     slug, exactly what the register path stamps and the gate reads. The node's
@@ -734,82 +724,52 @@ def upsert_ledger_pr(
 ) -> str:
     """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
 
-    Reconcile-side backstop for the transcript-gone tail: the
-    merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
-    ``project`` is the REMOTE slug the plan-fidelity gate joins on and
-    ``plan_path`` the bound plan, so the created row is visible to that join;
-    the node's ``project`` field is a different key and leaves it unjoined.
-    Under the SAME ``/tmp/fno-ledger.lock`` flock the register path uses:
+    One keeper request into the Rust port
+    (crates/fno-agents/src/ledger_axes.rs), which owns the three branches
+    (``created`` / ``stamped`` / ``already-present``) and the whole-ledger
+    axis fill, under the same ``/tmp/fno-ledger.lock`` the append path
+    holds. The stamp rule survives the port: a merged PR never lands on a
+    Budget/NoProgress/Interrupted/Aborted/NoWork row, and a ``created``
+    backstop is dropped by :func:`append_to_tasks_json`'s collapse rule if a
+    full finalize row later lands for the node.
 
-    - existing execution row with ``pr_number`` null -> stamp pr_number/pr_url
-      WITHOUT touching its full-fidelity fields -> returns ``"stamped"``
-    - existing execution row with a ``pr_number``     -> no-op -> ``"already-present"``
-    - no row for the node                             -> minimal backstop row
-      (``backstop: true``, ``termination_reason: reconcile-backstop``) -> ``"created"``
-
-    A ``"created"`` backstop is dropped by :func:`append_to_tasks_json`'s collapse
-    rule if a full finalize row later lands for the node.
+    A keeper that answers ``unknown store method`` is an OLD binary still
+    holding the socket (a rebuild the running keeper never picked up). That
+    refusal degrades LOUDLY: one stderr line names the stale keeper and the
+    rows it misses, the close is unaffected, and the next merge served by a
+    current keeper runs the whole-ledger fill, which backfills the axes this
+    row would have carried. Any OTHER keeper error propagates to the
+    caller's warning.
     """
-    ledger_path = _paths.ledger_json()
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = Path("/tmp/fno-ledger.lock")
+    import sys
 
-    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    from fno.graph.store import GRAPH_JSON, _client_for
+
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-
-        data = _load_ledger_data(ledger_path)
-
-        rows = [
-            e for e in data["entries"]
-            if e.get("type") == "execution" and e.get("graph_node_id") == node_id
-        ]
-        # Already correctly attributed to THIS merge.
-        if any(e.get("pr_number") == pr_number for e in rows):
-            return "already-present"
-        # Stamp a DELIVERY row that finalized without resolving its PR - never a
-        # failed attempt. A resumed node can carry an earlier Budget/NoProgress
-        # row plus the real (ledger-lost) delivery; stamping the merged PR onto
-        # the failed attempt would mis-key ship metrics, so those rows are
-        # excluded and the delivery gets a fresh backstop instead.
-        row = next(
-            (
-                e for e in rows
-                if not e.get("pr_number")
-                and e.get("termination_reason") not in _NON_DELIVERY_TERMINALS
-            ),
-            None,
-        )
-        if row is not None:
-            # Stamp the PR only; the finalize record's cost/phases/completed
-            # stay untouched (AC2-EDGE: the stamp adds the PR, never clobbers).
-            row["pr_number"] = pr_number
-            if pr_url:
-                row["pr_url"] = pr_url
-            outcome = "stamped"
-        else:
-            data["entries"].append({
-                "type": "execution",
-                "status": "done",
-                "graph_node_id": node_id,
+        return _client_for(GRAPH_JSON).request(
+            "ledger_backstop",
+            {
+                "ledger_path": str(_paths.ledger_json()),
+                "registry_path": str(_paths.agents_registry_path()),
+                "node_id": node_id,
                 "pr_number": pr_number,
                 "pr_url": pr_url,
                 "project": project,
+                "merged_at": merged_at,
                 "plan_path": plan_path,
-                "completed": _utc_iso(merged_at),
-                "backstop": True,
-                "termination_reason": "reconcile-backstop",
-                "session_id": None,
-                "sessions": sessions_or_unresolved(*(node_sessions or ())),
-            })
-            outcome = "created"
-
-        _write_ledger_data(ledger_path, data)
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-
-    return outcome
+                "node_sessions": list(node_sessions or []),
+            },
+        )["outcome"]
+    except RuntimeError as exc:
+        if "unknown store method" in str(exc) and "ledger_backstop" in str(exc):
+            print(
+                f"warning: ledger backstop skipped: the answering keeper predates "
+                f"ledger_backstop; rows for {node_id} (PR #{pr_number}) are missed "
+                f"until a current keeper serves a merge - redeploy fno-agents",
+                file=sys.stderr,
+            )
+            return "skipped-version-skew"
+        raise
 
 
 def harvest_ledger_sessions(nodes_by_id: dict, *, dry_run: bool) -> tuple[int, int]:
