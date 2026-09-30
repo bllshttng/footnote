@@ -250,15 +250,19 @@ fn build(
         }));
     }
     // Unattributed buckets sorted last, then by harness, then spend desc.
+    fn spend_of(v: &Value) -> f64 {
+        v["spend_usd"].as_f64().unwrap_or(0.0)
+    }
+    fn axis_of<'a>(v: &'a Value, k: &str) -> &'a str {
+        v[k].as_str().unwrap_or_default()
+    }
     out_rows.sort_by(|x, y| {
-        let s = |v: &Value| v["spend_usd"].as_f64().unwrap_or(0.0);
-        let g = |v: &Value, k: &str| v[k].as_str().unwrap_or_default();
-        (g(x, "harness") == UNATTRIBUTED)
-            .cmp(&(g(y, "harness") == UNATTRIBUTED))
-            .then_with(|| g(x, "harness").cmp(g(y, "harness")))
-            .then_with(|| s(y).total_cmp(&s(x)))
-            .then_with(|| g(x, "model").cmp(g(y, "model")))
-            .then_with(|| g(x, "provider").cmp(g(y, "provider")))
+        (axis_of(x, "harness") == UNATTRIBUTED)
+            .cmp(&(axis_of(y, "harness") == UNATTRIBUTED))
+            .then_with(|| axis_of(x, "harness").cmp(axis_of(y, "harness")))
+            .then_with(|| spend_of(y).total_cmp(&spend_of(x)))
+            .then_with(|| axis_of(x, "model").cmp(axis_of(y, "model")))
+            .then_with(|| axis_of(x, "provider").cmp(axis_of(y, "provider")))
     });
 
     Ok(json!({
