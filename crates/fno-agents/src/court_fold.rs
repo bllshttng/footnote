@@ -152,8 +152,10 @@ pub(crate) fn compile_forced(
         for root_id in &members {
             match entry_by_id(root_id) {
                 None => {
-                    return Err(format!(
-                        "crown scope {root_id:?} is not an epic in the graph"
+                    return Err(crate::territory::member_not_found(
+                        root_id,
+                        entries,
+                        format!("crown scope {root_id:?} is not an epic in the graph"),
                     ))
                 }
                 Some(entry) if s_str(entry, "type") != Some("epic") => {
@@ -962,7 +964,26 @@ mod tests {
         );
         assert_eq!(fold["status"], "unresolved");
         assert!(fold["reason"].as_str().unwrap().contains("ghost"));
+        assert!(fold["reason"]
+            .as_str()
+            .unwrap()
+            .contains("is not an epic in the graph"));
         assert!(fold.get("nodes").is_none());
+        let empty = fold_one(
+            "ghost",
+            Some(2),
+            &[],
+            &no_projects(),
+            &workers,
+            true,
+            &no_owners(),
+            0,
+        );
+        let reason = empty["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("returned 0 nodes") && reason.contains("unknown, not absent"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -1363,6 +1384,20 @@ mod tests {
         let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1]["id"], "x-1");
+        let writer = crate::backlog::open(&graph).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = std::time::Instant::now();
+        let fold = court_fold(
+            &graph,
+            &cwd,
+            None,
+            &dir.path().join("registry.json"),
+            &crowns,
+        )
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(fold["scope_nodes"]["e-1"]["total"], 2);
+        writer.execute_batch("ROLLBACK;").unwrap();
     }
 
     /// An ok fold carries its scope's epic load and the configured cap;

@@ -44,6 +44,12 @@ We do not plan to add sandboxing in the foreseeable future. Container abstractio
 
 If you are evaluating an footnote plan from an untrusted source, treat it as code review, not as configuration. Read the plan content, not just the title.
 
+## The effect guard for hooked tool calls
+
+For Claude-hosted workers whose PreToolUse hooks run footnote's plugin, there is a second layer between the tool list and the destination. The effect guard (`fno-agents hook effect-guard` and the Bash chain's last guard) classifies each hooked tool call into an effect class. Reads, searches, and local edits map to no effect and are never blocked by it. Sends and posts map to `external.communication`, publishes and deploys to `external.publication`, remote deletes to `infrastructure.destructive` (denied outright), and payments to `financial.payment` (denied outright). An approval-requiring class is refused unless an approved, unexpired decision by a principal named in `config.approvals.authorized_principals` matches it. The refusal names the request digest and the `fno inbox approvals decide <digest> --as <principal> --approve` line, and the worker can retry the call unchanged once approved.
+
+What the guard does not cover: an effect hidden inside a script or a raw `curl` (the Bash rows match leading command tokens). It also does not cover a harness whose PreToolUse hooks footnote does not wire (codex, opencode, pi, agy). The merge effect stays with `authorized-merge` and git-protection. The tool list remains the outer boundary. The effect guard narrows what a hooked tool call can do inside it.
+
 ## Future considerations
 
 Two horizon items are tracked in the backlog with explicit "do not scope" tags:

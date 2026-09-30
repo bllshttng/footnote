@@ -2,6 +2,24 @@ use super::super::intent::detect_intent_full;
 use super::*;
 
 #[test]
+fn extract_assistant_text_joins_string_array_and_top_level() {
+    let s = serde_json::json!({"message": {"content": "hi"}});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&s), "hi");
+    let arr = serde_json::json!({"message": {"content": [
+        {"type": "text", "text": "a"},
+        {"type": "tool_use", "name": "x"},
+        {"type": "text", "text": "b"}
+    ]}});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&arr), "a b");
+    let top = serde_json::json!({"role": "assistant", "content": "top-level"});
+    assert_eq!(crate::loopcheck::extract_assistant_text(&top), "top-level");
+    assert_eq!(
+        crate::loopcheck::extract_assistant_text(&serde_json::json!({})),
+        ""
+    );
+}
+
+#[test]
 fn detect_intent_promise() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("t.jsonl");

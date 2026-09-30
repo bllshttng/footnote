@@ -11,6 +11,29 @@ from typing import Iterable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
+def _store_is_live(connection: sqlite3.Connection, tables: set[str]) -> bool:
+    """True once the native one-time setup has stamped the store.
+
+    Mirrors backlog's schema_needs_ensure: schema 4 plus open setup 1. Past
+    that point no later open folds parked blob rows, so seeds must go
+    through the live write path.
+    """
+    if "graph_meta" not in tables:
+        return False
+    versions = dict(
+        connection.execute(
+            "SELECT key, value FROM graph_meta"
+            " WHERE key IN ('schema_version', 'open_setup_version')"
+        )
+    )
+    try:
+        schema = int(versions.get("schema_version", "0"))
+        setup = int(versions.get("open_setup_version", "0"))
+    except ValueError:
+        return False
+    return schema >= 4 and setup >= 1
+
+
 def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list[dict]:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,7 +61,7 @@ def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list
         for table in ("nodes", "nodes_raw")
         if table in tables
     )
-    if stored == 0:
+    if stored == 0 and not _store_is_live(connection, tables):
         connection.execute(
             "CREATE TABLE IF NOT EXISTS entries ("
             "id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, row TEXT NOT NULL)"
