@@ -109,12 +109,13 @@ pub(super) async fn route(
     if view.yard.is_some() {
         return Some(yard_keys(view, bytes, sock_w).await);
     }
-    // The feed panel is chrome and consumes no keys UNTIL the
-    // operator focuses it with `E`, or opens a row's provenance. Both are
-    // explicit, and both release back to the pane on Esc, so the property
+    // The feed panel is chrome and consumes no keys UNTIL the operator
+    // focuses it (`E`, or a click inside the panel). Both are explicit, and
+    // both release back to the pane on Esc or a pane click, so the property
     // this slot protects - typing reaches the focused pane - holds by
     // default and is set aside only on request.
-    if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
+    if view.feed_detail_of.is_some() || view.input_owner() == super::region_focus::RegionOwner::Feed
+    {
         return Some(super::feed_view::feed_keys(view, bytes, sock_w).await);
     }
     if view.create.is_some() {
@@ -154,15 +155,18 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
-    if view.backlog_board.is_some() {
-        // the experimental backlog board consumes keys while open; its
-        // inputs, pickers, and facets ride inside it. Prefix chords still
-        // resolve first (which-key parity): the board's folder sees
-        // only the plain-byte chunks. The board sits BELOW every other
-        // modal: a chord can open one over it (composer, selector,
-        // answers, yard, connections, ...), and a visible child modal owns
-        // the keyboard - or its keys would die in the board's folder
-        // behind it.
+    if view.backlog_board.is_some()
+        && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
+    {
+        // the experimental backlog board consumes keys while it OWNS the
+        // keyboard (open, or clicked); its inputs, pickers, and facets ride
+        // inside it. A windowed board that lost the keyboard to a pane click
+        // stays visible but takes nothing. Prefix chords still resolve first
+        // (which-key parity): the board's folder sees only the plain-byte
+        // chunks. The board sits BELOW every other modal: a chord can open
+        // one over it (composer, selector, answers, yard, connections, ...),
+        // and a visible child modal owns the keyboard - or its keys would
+        // die in the board's folder behind it.
         return Some(backlog_board::route_board_keys(view, scanner, bytes, sock_w).await);
     }
     None
@@ -184,9 +188,17 @@ pub(super) async fn flush_released_chord(
                 .await
                 .map(|_| ());
         }
-    } else if view.backlog_board.is_some() {
+    } else if view.backlog_board.is_some()
+        && view.input_owner() == super::region_focus::RegionOwner::Board
+    {
         if let crate::keys::Event::Forward(chunk) = &event {
             return backlog_board::board_keys(view, chunk, sock_w)
+                .await
+                .map(|_| ());
+        }
+    } else if view.feed.is_some() && view.input_owner() == super::region_focus::RegionOwner::Feed {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return super::feed_view::feed_keys(view, chunk, sock_w)
                 .await
                 .map(|_| ());
         }

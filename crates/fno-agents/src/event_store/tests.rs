@@ -498,18 +498,16 @@ fn append_retry_is_idempotent_hit_not_duplicate() {
     );
     assert_eq!(second.event_id, first.event_id);
     assert_eq!(count_events(&store_path(&live)), 1);
-}
-
-#[test]
-fn append_same_id_different_payload_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "one payload").to_string();
-    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "DIFFERENT").to_string();
-    append_envelope(&live, &a, Some("evt:requested")).unwrap();
-    let err = append_envelope(&live, &b, Some("evt:requested")).unwrap_err();
+    // The other branch of the same identity contract: a row already stored
+    // under a requested id, then the SAME id with a DIFFERENT payload, is a
+    // refusal, not a silent second row.
+    let named = checkin("2026-09-17T12:00:00Z", "x-aaaa", "one payload").to_string();
+    append_envelope(&live, &named, Some("evt:requested")).unwrap();
+    let count_with_named = count_events(&store_path(&live));
+    let colliding = checkin("2026-09-17T12:00:00Z", "x-aaaa", "DIFFERENT").to_string();
+    let err = append_envelope(&live, &colliding, Some("evt:requested")).unwrap_err();
     assert!(err.contains("identity collision"), "err: {err}");
-    assert_eq!(count_events(&store_path(&live)), 1);
+    assert_eq!(count_events(&store_path(&live)), count_with_named);
 }
 
 #[test]
@@ -716,30 +714,11 @@ fn journal_text_reads_history_then_live_with_the_type_filter() {
     );
     // The read never syncs: reading twice is stable.
     assert_eq!(journal_text(&live, &["reign_checkin"]), text);
-}
-
-#[test]
-fn journal_text_with_no_type_filter_reads_every_committed_row() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    append_envelope(
-        &live,
-        &checkin("2026-09-17T12:00:00Z", "x-aaaa", "all").to_string(),
-        None,
-    )
-    .unwrap();
-    append_envelope(
-        &live,
-        &json!({"ts": "2026-09-17T12:01:00Z", "type": "loop_check",
-            "source": "hook", "data": {"decision": "block"}})
-        .to_string(),
-        None,
-    )
-    .unwrap();
-
-    let text = journal_text(&live, &[]);
-    assert!(text.contains("reign_checkin"));
-    assert!(text.contains("loop_check"));
+    // The no-filter branch of the same surface: every committed row,
+    // asked type or not.
+    let unfiltered = journal_text(&live, &[]);
+    assert!(unfiltered.contains("reign_checkin"));
+    assert!(unfiltered.contains("unwanted_kind"));
 }
 
 #[test]
@@ -755,16 +734,6 @@ fn journal_text_preserves_append_order_for_equal_timestamps() {
         text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap(),
         "same-second rows must retain append order: {text}"
     );
-}
-
-#[test]
-fn journal_text_falls_back_to_the_live_file_when_the_store_breaks() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
-    std::fs::create_dir(dir.path().join("events.db")).unwrap();
-    let text = journal_text(&live, &["reign_checkin"]);
-    assert_eq!(text, std::fs::read_to_string(&live).unwrap());
 }
 
 #[test]

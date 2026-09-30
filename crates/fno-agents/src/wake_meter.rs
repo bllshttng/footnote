@@ -12,6 +12,18 @@ use std::path::Path;
 /// constant, the same stance as `DEFAULT_BLUEPRINT_CEILING`: no config key.
 const WAKE_RATIO_CEILING: u64 = 3;
 
+pub(crate) fn wake_class(provenance: crate::provenance::Provenance) -> Option<bool> {
+    use crate::provenance::{HarnessKind, Provenance};
+    match provenance {
+        Provenance::Relay(_)
+        | Provenance::Harness(HarnessKind::LoopWakeup)
+        | Provenance::Harness(HarnessKind::StopHook)
+        | Provenance::Keepalive => Some(true),
+        Provenance::Operator | Provenance::Unknown => Some(false),
+        Provenance::Harness(_) => None,
+    }
+}
+
 pub(crate) fn wake_meter(transcript: &Path, since_epoch: Option<f64>) -> Result<Value, String> {
     let raw =
         std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
@@ -25,17 +37,12 @@ pub(crate) fn wake_meter(transcript: &Path, since_epoch: Option<f64>) -> Result<
         if turn.text.is_empty() {
             continue;
         }
-        use crate::provenance::{HarnessKind, Provenance};
         let prov =
             crate::provenance::classify_turn(&turn.obj, &crate::provenance::BusIndex::empty(), "");
-        match prov {
-            Provenance::Relay(_)
-            | Provenance::Harness(HarnessKind::LoopWakeup)
-            | Provenance::Harness(HarnessKind::StopHook)
-            | Provenance::Keepalive => machine += 1,
-            Provenance::Operator | Provenance::Unknown => user += 1,
-            // skill bodies, command echoes, compaction preamble: neither side
-            Provenance::Harness(_) => {}
+        match wake_class(prov) {
+            Some(true) => machine += 1,
+            Some(false) => user += 1,
+            None => {}
         }
         if turn.text.contains("<task-notification>") {
             for (id, n) in parse_task_tokens(&turn.text) {
@@ -117,7 +124,9 @@ mod tests {
 
     fn notification(id: &str, tokens: u64, ts: &str) -> String {
         row(
-            &format!("<task-notification><task-id>{id}</task-id><subagent_tokens>{tokens}</subagent_tokens></task-notification>"),
+            &format!(
+                "<task-notification><task-id>{id}</task-id><subagent_tokens>{tokens}</subagent_tokens></task-notification>"
+            ),
             ts,
             false,
         )

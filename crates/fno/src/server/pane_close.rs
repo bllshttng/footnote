@@ -21,7 +21,100 @@ enum CloseCause {
     Operator,
 }
 
+/// The `pane_closed` journal row, pure so tests can assert the
+/// envelope. Cause is the enum's word, never the free text alone; identity
+/// fields ride null when no registry row binds the pane.
+fn pane_closed_row(
+    mux_session: &str,
+    pane: u64,
+    squad: u64,
+    cause: &str,
+    reason: &str,
+    name: Option<&str>,
+    harness_session: Option<&str>,
+    harness: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ts": crate::review_invocation::review_invocation_timestamp(),
+        "type": "pane_closed",
+        "source": "daemon",
+        "data": {
+            "mux_session": mux_session,
+            "pane": pane,
+            "squad": squad,
+            "cause": cause,
+            "reason": reason,
+            "name": name,
+            "harness_session": harness_session,
+            "harness": harness,
+        }
+    })
+}
+
+/// The `server_stopped` journal row, pure so tests can assert the
+/// envelope. One row per serve lifetime; a daemon-restart bounce that closes
+/// nothing still names itself here.
+fn server_stopped_row(mux_session: &str, cause: &str, panes: usize) -> serde_json::Value {
+    serde_json::json!({
+        "ts": crate::review_invocation::review_invocation_timestamp(),
+        "type": "server_stopped",
+        "source": "daemon",
+        "data": {
+            "mux_session": mux_session,
+            "cause": cause,
+            "panes": panes,
+        }
+    })
+}
+
 impl Core {
+    /// Emit [`pane_closed_row`] for a close that removed a real pane, with
+    /// the pane's identity bound the same way `witness_row` binds typing.
+    /// Best-effort: a failed append never blocks the close.
+    fn emit_pane_closed(&self, pid: u64, sid: u64, cause: &str, reason: &str) {
+        let bound = super::agent_rows_join::bind_agent_to_pane(
+            &self.agents,
+            &self.session_name,
+            pid,
+            &self.attached,
+            &|a| self.worker_pane_for_agent(a),
+        )
+        .map(|i| &self.agents[i]);
+        let name = self.panes.get(&pid).and_then(|e| e.name.clone());
+        let event = pane_closed_row(
+            &self.session_name,
+            pid,
+            sid,
+            cause,
+            reason,
+            name.as_deref(),
+            bound.and_then(|a| a.harness_session_id.as_deref()),
+            bound.and_then(|a| a.harness.as_deref()),
+        );
+        if crate::pane_send_audit::append_agents_event(
+            &crate::pane_send_audit::pane_send_audit_events_path(),
+            &event,
+        )
+        .is_err()
+        {
+            eprintln!("fno mux: pane_closed emit failed");
+        }
+    }
+
+    /// Emit [`server_stopped_row`] at the serve exit. Best-effort like
+    /// [`Self::emit_pane_closed`].
+    pub(super) fn emit_server_stopped(&self, cause: &str) {
+        let event = server_stopped_row(&self.session_name, cause, self.panes.len());
+        if crate::pane_send_audit::append_agents_event(
+            &crate::pane_send_audit::pane_send_audit_events_path(),
+            &event,
+        )
+        .is_err()
+        {
+            eprintln!("fno mux: server_stopped emit failed");
+        }
+    }
+
     /// Close one pane whose child exited on its own: the death path. A live
     /// viewer seat always swaps to the parked screen (the portal outlives
     /// its viewer: the window stays, the channel goes quiet), and a spawn
@@ -98,6 +191,12 @@ impl Core {
                     if let Some(portal) = seat_portal.and_then(|idx| self.portals.get_mut(&idx)) {
                         portal.seat = screen_pid;
                     }
+                    self.emit_pane_closed(
+                        pid,
+                        sid,
+                        "viewer_died",
+                        &format!("{reason} (seat parked)"),
+                    );
                     self.reap_pane(pid);
                     self.push_layout(true);
                     if let Some(idx) = seat_portal {
@@ -128,6 +227,15 @@ impl Core {
             }
             self.portals.remove(&idx);
         }
+        self.emit_pane_closed(
+            pid,
+            sid,
+            match cause {
+                CloseCause::ViewerDied => "viewer_died",
+                CloseCause::Operator => "operator",
+            },
+            reason,
+        );
         self.reap_pane(pid);
         let ident = self.squad_identity(sid);
         let tid = self
@@ -231,5 +339,53 @@ impl Core {
         self.reanchor_views();
         self.push_layout(true);
         Flow::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The envelope carries the cause word and the reason verbatim, and the
+    /// schema's required fields are present.
+    #[test]
+    fn pane_closed_row_carries_cause_and_reason() {
+        let row = pane_closed_row(
+            "main",
+            7,
+            1,
+            "operator",
+            "closed by operator",
+            Some("w1"),
+            Some("sess-a"),
+            Some("codex"),
+        );
+        assert_eq!(row["type"], "pane_closed");
+        assert_eq!(row["source"], "daemon");
+        let data = &row["data"];
+        assert_eq!(data["mux_session"], "main");
+        assert_eq!(data["pane"], 7);
+        assert_eq!(data["squad"], 1);
+        assert_eq!(data["cause"], "operator");
+        assert_eq!(data["reason"], "closed by operator");
+        assert_eq!(data["name"], "w1");
+        assert_eq!(data["harness_session"], "sess-a");
+        assert_eq!(data["harness"], "codex");
+        let bare = pane_closed_row(
+            "main",
+            9,
+            2,
+            "viewer_died",
+            "child exited",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(bare["data"]["cause"], "viewer_died");
+        assert!(bare["data"]["name"].is_null());
+        let stop = server_stopped_row("main", "shutdown", 3);
+        assert_eq!(stop["type"], "server_stopped");
+        assert_eq!(stop["data"]["cause"], "shutdown");
+        assert_eq!(stop["data"]["panes"], 3);
     }
 }
