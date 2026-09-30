@@ -5,6 +5,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from fno.approvals.models import (
     AdapterCapability,
     ApprovalRequest,
@@ -175,6 +177,7 @@ def _adapter() -> AdapterCapability:
     return AdapterCapability(adapter_id="ad", adapter_version="1")
 
 
+@pytest.mark.dev_build
 def test_ac7_denied_effect_class_refused(tmp_path: Path) -> None:
     store = _store(tmp_path)
     result = request_effect_approval(
@@ -191,6 +194,7 @@ def test_ac7_denied_effect_class_refused(tmp_path: Path) -> None:
     assert result.reason is CoordinatorRefusalReason.DENIED_EFFECT
 
 
+@pytest.mark.dev_build
 def test_ac7_unapproved_effect_is_blocked_not_dispatched(tmp_path: Path) -> None:
     store = _store(tmp_path)
     result = request_effect_approval(
@@ -207,6 +211,7 @@ def test_ac7_unapproved_effect_is_blocked_not_dispatched(tmp_path: Path) -> None
     assert result.reason is CoordinatorRefusalReason.BLOCKED_MISSING_APPROVAL
 
 
+@pytest.mark.dev_build
 def test_ac7_approved_effect_may_dispatch(tmp_path: Path) -> None:
     store = _store(tmp_path)
     effect = _effect()

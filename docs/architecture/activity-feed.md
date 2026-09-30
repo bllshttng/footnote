@@ -103,6 +103,8 @@ The deep link is this view's footer ACTION, not the gesture that opened it. Insp
 
 Enter resolves from the same evidence the footer named. For a row seated in a pane it sends `FocusPane`. Pane ids allocate from zero, so pane 0 is a real seat and the check is an equality against the `Option`. For a live paneless row it sends `AttachAgent` on portal 0. For a `session_reaped` row it hands over the receipt's verbatim resume line. A removal is a normal outcome with a recovery path, not an error.
 
+For a `node_created` row with a node id, the footer offers `b: blueprint`. Pressing `b` opens the node-bound launch composer with `/fno:blueprint <id>`. When the row has a recorded cwd, the composer selects that project. If it is absent, choose the project in the composer. The harness, model and placement choices remain available, and the composer shows the normal launch receipt. Other row kinds and id-less creation rows do not offer this action.
+
 ## Deploy rule
 
 The feed reads the graph for lifecycle. No writer is added.

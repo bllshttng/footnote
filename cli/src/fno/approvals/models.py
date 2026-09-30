@@ -17,7 +17,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Any, NoReturn, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -35,11 +35,9 @@ __all__ = [
     "AdapterCapability",
     "Authority",
     "DecisionKind",
-    "DENIED_EFFECT_CLASSES",
     "EffectAttempt",
     "EffectDisposition",
     "EffectState",
-    "INERT_EFFECT_CLASSES",
     "PrepareResult",
     "ReconciliationRead",
     "Refusal",
@@ -95,39 +93,34 @@ class EffectDisposition(str, Enum):
     DENY = "deny"
 
 
-#: Refused until a later explicit policy and adapter contract exist.
-DENIED_EFFECT_CLASSES: frozenset[str] = frozenset(
-    {
-        "financial.payment",
-        "financial.commitment",
-        "signature.contract",
-        "employment.action",
-        "infrastructure.destructive",
-    }
-)
-
-#: No external consequence, so no effect approval. Independent policy may still
-#: declare a consequential destination, which is why these are classes and not
-#: an escape hatch keyed on the caller.
-INERT_EFFECT_CLASSES: frozenset[str] = frozenset(
-    {
-        "internal.draft",
-        "internal.research",
-    }
-)
+def _unavailable_refusal(detail: str) -> NoReturn:
+    raise RefusedError(
+        Refusal(
+            reason=RefusalReason.STORE_UNAVAILABLE,
+            detail=detail,
+            fields=("effect_class",),
+            recovery="Check the fno-agents binary (`fno doctor`), then retry the effect.",
+        )
+    )
 
 
 def classify_effect(effect_class: str) -> EffectDisposition:
-    """Classify an effect class. Function-agnostic: only the class is read.
-
-    Unrecognised classes require approval rather than sliding through, so a new
-    effect class is safe by default instead of silently exempt.
+    """Classify an effect class: only the class is read. The table is Rust
+    state (crates/fno-agents/src/effect_gate.rs); unknown classes require
+    approval, so a new effect class is safe by default.
     """
-    if effect_class in DENIED_EFFECT_CLASSES:
-        return EffectDisposition.DENY
-    if effect_class in INERT_EFFECT_CLASSES:
-        return EffectDisposition.ALLOW
-    return EffectDisposition.REQUIRE_APPROVAL
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        out = verb_call(
+            "authorized-merge", {"op": "effect-classify", "effect_class": effect_class}
+        )
+    except VerbUnavailable as exc:
+        _unavailable_refusal(f"the effect classifier is unavailable ({exc})")
+    disposition = out.get("disposition")
+    if disposition not in ("allow", "require_approval", "deny"):
+        _unavailable_refusal(f"unreadable classifier receipt: {out!r}")
+    return EffectDisposition(disposition)
 
 
 class RefusalReason(str, Enum):
@@ -140,6 +133,7 @@ class RefusalReason(str, Enum):
     REPLAY = "replay"
     CONFLICTING_BINDING = "conflicting_binding"
     DENIED_EFFECT_CLASS = "denied_effect_class"
+    STORE_UNAVAILABLE = "store_unavailable"
     UNSAFE_RETRY = "unsafe_retry"
     TERMINAL_STATE = "terminal_state"
     NOT_DISPATCHER = "not_dispatcher"
