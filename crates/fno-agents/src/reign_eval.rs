@@ -6,7 +6,7 @@ use crate::session_activity::{Activity, ActivityFold};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,22 +190,6 @@ fn fno_verb(target: &str) -> Option<(String, Option<String>)> {
         captures.get(1)?.as_str().to_string(),
         captures.get(2).map(|m| m.as_str().to_string()),
     ))
-}
-
-fn events_for_session(home: &AgentsHome, session: &str) -> Result<Vec<Value>, String> {
-    let report = crate::king_history::scan_scopes(&[home.events_jsonl()], None)?;
-    let events = report
-        .get("events")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "reign check-in scan returned no event list".to_string())?;
-    Ok(events
-        .iter()
-        .filter(|row| {
-            row.get("type").and_then(Value::as_str) == Some(crate::king_history::REIGN_CHECKIN)
-                && row.pointer("/data/session_id").and_then(Value::as_str) == Some(session)
-        })
-        .cloned()
-        .collect())
 }
 
 fn bus_index() -> BusIndex {
@@ -672,35 +656,39 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     let home = AgentsHome::from_env();
-    let sessions = if let Some(session) = parsed.session.as_deref() {
-        vec![session.to_string()]
-    } else {
-        let report =
-            match crate::king_history::scan_scopes(&[home.events_jsonl()], parsed.crown.as_deref())
-            {
-                Ok(report) => report,
-                Err(error) => {
-                    eprintln!("fno-agents intel --windows: {error}");
-                    return 3;
-                }
-            };
-        report
-            .get("events")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|row| {
-                row.pointer("/data/session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .fold(Vec::<String>::new(), |mut sessions, session| {
-                if !sessions.contains(&session) {
-                    sessions.push(session);
-                }
-                sessions
-            })
+    let report =
+        match crate::king_history::scan_scopes(&[home.events_jsonl()], parsed.crown.as_deref()) {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("fno-agents intel --windows: {error}");
+                return 3;
+            }
+        };
+    let Some(events) = report.get("events").and_then(Value::as_array) else {
+        eprintln!("fno-agents intel --windows: reign check-in scan returned no event list");
+        return 3;
     };
+    let mut sessions = Vec::new();
+    let mut seen_sessions = HashSet::new();
+    let mut checkins_by_session = HashMap::<String, Vec<Value>>::new();
+    for row in events {
+        if row.get("type").and_then(Value::as_str) != Some(crate::king_history::REIGN_CHECKIN) {
+            continue;
+        }
+        let Some(session) = row.pointer("/data/session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        checkins_by_session
+            .entry(session.to_string())
+            .or_default()
+            .push(row.clone());
+        if seen_sessions.insert(session.to_string()) {
+            sessions.push(session.to_string());
+        }
+    }
+    if let Some(session) = parsed.session {
+        sessions = vec![session];
+    }
     let mut reports = Vec::new();
     let bus = bus_index();
     for session in sessions {
@@ -729,13 +717,10 @@ pub fn run(args: &[String]) -> i32 {
                 return 2;
             }
         };
-        let checkins = match events_for_session(&home, &session) {
-            Ok(checkins) => checkins,
-            Err(error) => {
-                eprintln!("fno-agents intel --windows: {error}");
-                return 3;
-            }
-        };
+        let checkins = checkins_by_session
+            .get(&session)
+            .cloned()
+            .unwrap_or_default();
         let write_dir = match parsed.write.as_ref() {
             None => None,
             Some(Some(dir)) => Some(dir.clone()),
