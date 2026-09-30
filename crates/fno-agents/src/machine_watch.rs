@@ -398,6 +398,25 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             let guard = state.lock().unwrap_or_else(|e| e.into_inner());
             process_baseline(&guard.recent_processes, Instant::now())
         };
+        if let Err(error) = crate::machine_sample::maybe_capture_process_snapshot(
+            &home,
+            sample.procs.len(),
+            baseline,
+            || {
+                let output = std::process::Command::new("ps")
+                    .args(["-Ao", "pid,ppid,rss,etime,command"])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "ps exited unsuccessfully",
+                    ));
+                }
+                Ok(output.stdout)
+            },
+        ) {
+            tracing::warn!(%error, "machine process snapshot failed");
+        }
         let (verdict, _) = decide(&sample, busy_band, LOAD_PER_CORE_BAND, baseline);
         sample.verdict = Some(verdict.clone());
         let journal = crate::loop_runtime::Journal::new_raw(
