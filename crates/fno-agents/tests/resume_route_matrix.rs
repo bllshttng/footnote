@@ -81,7 +81,25 @@ impl Fixture {
     }
 
     fn events(&self) -> String {
-        fno_agents::event_store::journal_text(&self.root.path().join("events.jsonl"), &[])
+        // The children pin FNO_AGENTS_HOME=<home>, so the store beside their
+        // journal routes to the state-layout place under home's parent. This
+        // process carries no pin, so store_path beside the journal would
+        // name a different file and read as an empty store.
+        let root = self.home.parent().unwrap();
+        let store = fno_agents::state_layout::place(
+            &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+            "events.db",
+        );
+        fno_agents::event_store::query_events(
+            &store,
+            &fno_agents::event_store::EventQuery::default(),
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| serde_json::from_str::<serde_json::Value>(&row.line).ok())
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 
     fn write_registry_entries(&self, entries: &[Value]) {

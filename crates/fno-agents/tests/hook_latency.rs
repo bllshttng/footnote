@@ -1244,43 +1244,39 @@ fn assert_bash_pretooluse_dispatch_order() {
         .unwrap_or_default()
         .contains("[fno pipe guard]"));
 
-    let rows = std::fs::read_to_string(&events).expect("Python guard events");
-    let python_guards: Vec<String> = rows
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
-        .collect();
-    let native_rows = fno_agents::event_store::query_events(
+    // Post-cutover both transports commit guard_decision rows into the one
+    // store, so the two registration orders read as interleaved
+    // subsequences of a single stream, never as two exact lists.
+    let guard_rows = fno_agents::event_store::query_events(
         &events,
         &fno_agents::event_store::EventQuery::of_types(&["guard_decision"]),
     )
-    .expect("native guard decisions");
-    let native_guards: Vec<String> = native_rows
+    .expect("guard decisions");
+    let guards: Vec<String> = guard_rows
         .iter()
         .filter_map(|row| serde_json::from_str::<Value>(&row.line).ok())
         .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
         .collect();
-    assert_eq!(
-        python_guards,
-        vec![
+    assert_subsequence(
+        &[
             "bg-process-guard".to_string(),
             "git-protection".to_string(),
-            "recursive-grep-guard".to_string()
+            "recursive-grep-guard".to_string(),
         ],
-        "Python guards retain their registration order"
+        &guards,
+        "Python guards retain their registration order",
     );
-    assert_eq!(
-        native_guards,
-        vec![
+    assert_subsequence(
+        &[
             "bin-install-guard".to_string(),
             "pipe-guard".to_string(),
             "test-run-guard".to_string(),
-            "effect-guard".to_string()
+            "effect-guard".to_string(),
         ],
-        "native guards retain their registration order"
+        &guards,
+        "native guards retain their registration order",
     );
-    let mut guards = python_guards;
-    guards.extend(native_guards);
+    let mut guards = guards;
     guards.sort();
     let mut expected: Vec<String> = [
         "bg-process-guard",
@@ -1296,6 +1292,19 @@ fn assert_bash_pretooluse_dispatch_order() {
     .collect();
     expected.sort();
     assert_eq!(guards, expected, "every guard must run once");
+}
+
+/// Every expected guard appears in `stream` in the given order; other
+/// guards may interleave freely (one store carries both transports now).
+fn assert_subsequence(order: &[String], stream: &[String], msg: &str) {
+    let mut cursor = stream.iter();
+    for expected in order {
+        assert!(
+            cursor.any(|guard| guard == expected),
+            "{msg}: expected {expected} after its predecessor; stream=[{}]",
+            stream.join(", ")
+        );
+    }
 }
 
 /// Edit from an uncrowned session: allow (the common case). AC-guard row.
