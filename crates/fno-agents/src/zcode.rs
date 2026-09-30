@@ -85,11 +85,9 @@ pub fn parse_turn_output(
 }
 
 fn tail_text(stderr_tail: &str) -> String {
-    stderr_tail
-        .chars()
-        .rev()
-        .take(TURN_STDERR_TAIL_CAP)
-        .collect()
+    let chars: Vec<char> = stderr_tail.chars().collect();
+    let start = chars.len().saturating_sub(TURN_STDERR_TAIL_CAP);
+    chars[start..].iter().collect()
 }
 
 use crate::provider::CreateContext;
@@ -217,6 +215,8 @@ mod tests {
             from_name: None,
             session_id: None,
             yolo: true,
+            reasoning_effort: None,
+            append_system_prompt: None,
         };
         let argv = ZcodeProvider.create_argv(&ctx);
         assert_eq!(argv[0], "zcode");

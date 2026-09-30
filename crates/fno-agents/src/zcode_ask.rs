@@ -64,9 +64,12 @@ fn build_argv(
         "--model",
     ];
     for flag in harness_args {
-        if FORBIDDEN.contains(&flag.as_str()) {
+        // Match the bare token too, so --mode=plan trips the same refusal as
+        // a bare --mode: the owner check is on the axis, not the spelling.
+        let bare = flag.split('=').next().unwrap_or(flag);
+        if FORBIDDEN.contains(&bare) {
             return Err(format!(
-                "zcode headless owns {flag}; passthrough may not set it"
+                "zcode headless owns {bare}; passthrough may not set it"
             ));
         }
     }
@@ -80,7 +83,6 @@ fn build_argv(
         prompt.to_string(),
         "--mode".to_string(),
         mode,
-        "--output-format".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
@@ -505,7 +507,7 @@ mod tests {
 
     #[test]
     fn passthrough_args_ride_last() {
-        let argv = build_argv(None, "seed", &["--verbose".to_string()]).unwrap();
+        let argv = build_argv(None, "seed", None, true, &["--verbose".to_string()]).unwrap();
         assert_eq!(argv.last().map(String::as_str), Some("--verbose"));
     }
 
