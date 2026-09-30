@@ -6,11 +6,13 @@ DISTINCT project.id (x-071c narrowed the seed to this sole key), and
 slot-release-on-failure so one lane's spawn failure never aborts the fleet
 (Failure Modes: Errors).
 
-`_lane_fill_selection` runs for real against the dev binary with an isolated
-`tmp_path` claims root, so the lane slots are genuinely held and the release
-path is exercised. `_ensure_lane_worktree` / `_spawn_worker` are monkeypatched
-(no real git / spawn). Slot assertions go through the binary's own claim verbs
-over the same root; there is no python lanes library anymore.
+The fill selection is faked with the rows each test prepares, but the fake
+walks the door's own moves: slot acquisition rides the dev binary's
+`claim lane-acquire` over an isolated `tmp_path` claims root, so the slots are
+genuinely held and the release path is exercised. `_ensure_lane_worktree` /
+`_spawn_worker` are monkeypatched (no real git / spawn). Slot assertions go
+through the binary's own claim verbs over the same root; there is no python
+lanes library anymore.
 """
 
 from __future__ import annotations
@@ -108,11 +110,43 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     monkeypatch.setattr(advance, "_canonical_root", lambda: canonical)
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
 
+    # The fill door is the dispatcher's input seam since the native port
+    # (main fed these rows through _ready_nodes, which dispatch_lanes no
+    # longer calls). These tests pin the dispatcher's per-lane behavior, not
+    # the fill's own selection - that contract lives in the rust
+    # advance_fill tests - so the fake walks the prepared rows through the
+    # door's own moves: one real slot acquired per pick over the same pinned
+    # claims root (peers' held slots consume the cap), and the door's stop
+    # vocabulary.
     def fake_selection(max_lanes, project, *, mission=None, claims_root=None):
-        selected, report = advance._lane_fill_selection(
-            max_lanes, project, mission=mission, claims_root=tmp_path / "claims"
-        )
-        return selected[:max_lanes], report
+        report = {
+            "requested": max_lanes,
+            "filled": 0,
+            "stop": "no-candidate",
+            "excluded": [],
+        }
+        if max_lanes < 1:
+            return [], report
+        binary = resolve_binary()
+        assert binary is not None, "dev binary required for slot acquisition"
+        env = {**os.environ}
+        if claims_root is not None:
+            env["FNO_CLAIMS_ROOT"] = str(claims_root)
+        selected: list[dict] = []
+        for node in ready_rows:
+            proc = subprocess.run(
+                [str(binary), "claim", "lane-acquire", "--lane", node["id"],
+                 "--max-lanes", str(max_lanes), "--json"],
+                env=env, capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                report["stop"] = "cap-full"
+                break
+            selected.append(dict(node))
+            report["filled"] = len(selected)
+        if len(selected) >= max_lanes:
+            report["stop"] = "filled"
+        return selected, report
 
     monkeypatch.setattr(advance, "_lane_fill_selection", fake_selection)
 
