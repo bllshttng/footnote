@@ -36,13 +36,20 @@ def cmd_note(
         help="Write it, mail nobody: the acknowledgment when the verb would refuse.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the state receipt as JSON."),
+    replace: bool = typer.Option(
+        False,
+        "--replace",
+        help="Overwrite even when the current state was written by another session. Without it that replace refuses (exit 3) and names the append recipe.",
+    ),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Record progress on a node by REPLACING its current state.
 
     The prior state lands in permanent history. Read it with
-    `fno backlog notes history <id>`. Nobody bound refuses BEFORE
-    the write: exit 3. No send confirmed: exit 4. ``--quiet`` writes anyway.
+    `fno backlog notes history <id>`. A state another session wrote refuses
+    unless --replace (exit 3, the append recipe is in the refusal). Nobody
+    bound refuses BEFORE the write: exit 3. No send confirmed: exit 4.
+    ``--quiet`` writes anyway; it never bypasses the cross-session guard.
     """
     from fno.decide import (
         UnmeasuredClaimError,
@@ -70,6 +77,8 @@ def cmd_note(
             argv += ["--body-file", str(body_file)]
         argv += [a for a in (task_id, text) if a]
         argv += extra
+        if replace:
+            argv.append("--replace")
         proc = subprocess.run(argv, check=False)
         raise typer.Exit(code=proc.returncode)
 
@@ -125,6 +134,7 @@ def cmd_note(
         session_id=session_id,
         graph_path=graph_path,
         reads=read_rows,
+        replace=replace,
     )
     if code != 0:
         # 1 = budget refusal, 3 = a stale revision conflict; the child
@@ -219,6 +229,7 @@ def _write_state(
     session_id: Optional[str],
     graph_path,
     reads=None,
+    replace: bool = False,
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -236,6 +247,8 @@ def _write_state(
         argv.extend(["--self-session", session_id])
     if quiet:
         argv.append("--quiet")
+    if replace:
+        argv.append("--replace")
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
     if proc.returncode != 0:
         import sys
