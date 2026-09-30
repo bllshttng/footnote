@@ -1016,6 +1016,8 @@ mod tests {
             "x",
             "mux_pane_counters",
             "operator_decision",
+            // The hook emits this in Python; Rust only stages fixtures of it.
+            "loop_check_watch_idle",
         ];
         let test_only: BTreeSet<&str> = TEST_ONLY_EMIT_KINDS.iter().copied().collect();
 
