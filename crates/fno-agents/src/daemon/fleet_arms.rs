@@ -53,12 +53,15 @@ pub(super) struct FleetArms {
 
 impl FleetArms {
     pub(super) fn new(opts: &DaemonOptions) -> Self {
+        let now = Instant::now();
         Self {
             scrape_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             terminal_stop_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             worktree_sweep_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             orphan_sweep_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_orphan_sweep: Instant::now(),
+            last_orphan_sweep: now
+                .checked_sub(crate::orphan_reap::ORPHAN_SWEEP_SECS)
+                .unwrap_or(now),
             liveness_sweep_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_liveness_sweep: Instant::now(),
             machine_watch: crate::machine_watch::Arm::default(),

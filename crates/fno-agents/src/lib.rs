@@ -294,6 +294,7 @@ pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
+pub mod process_owner;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;
@@ -1410,6 +1411,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
     // the footprint verb killed on the daemon's behalf.
     "orphan_test_binary_reaped",
+    "orphan_owner_server_reaped",
     // Late bind (daemon-emitted, task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row

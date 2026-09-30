@@ -3456,34 +3456,10 @@ pub fn pid_confirmed_dead(pid: i32) -> bool {
     pid_is_zombie(pid)
 }
 
-/// Every file a session leaves beside its name: the socket, the wire-version
-/// sidecar, and the pid sidecar. The one list both removal and the operator's
-/// manual recovery command are built from, so a new sidecar cannot join one
-/// and miss the other.
-pub fn session_files(socket: &Path) -> [PathBuf; 3] {
-    [
-        socket.to_path_buf(),
-        version_sidecar_path(socket),
-        pid_sidecar_path(socket),
-    ]
-}
-
-/// Remove every file a session leaves beside its name. Shared by the server's
-/// SocketGuard, kill-server's recovery ladder, and bind_or_probe's stale
-/// takeover so the three cannot drift apart about what a dead session
-/// leaves behind. A file that is already gone is fine (the guard may have
-/// run first); the first other failure is returned so a caller mid-recovery
-/// can report it.
-pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
-    for path in session_files(socket) {
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e);
-            }
-        }
-    }
-    Ok(())
-}
+mod owner_sidecar;
+pub use owner_sidecar::{owner_sidecar_path, write_owner_sidecar};
+mod session_files;
+pub use session_files::{remove_session_files, session_files};
 
 // The startup-marker family lives in the child module below, named by the
 // question it answers; the file-budget gate keeps this over-budget file
