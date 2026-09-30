@@ -1092,6 +1092,26 @@ mod tests {
             "recovered watch history stays readable"
         );
 
+        // The error-path sections below need a due watch to reach the claims
+        // read; the passes above consumed the replayed watches' receipts.
+        let errorpath_emitter =
+            crate::events::EventEmitter::new(global_events.clone(), "daemon");
+        errorpath_emitter
+            .emit(
+                "loop_check_watch_idle",
+                &serde_json::json!({
+                    "session_id": "s-fresh",
+                    "node": "x-fresh",
+                    "blocker": "ci",
+                    "expires_at_ms": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64
+                        - 1_000,
+                }),
+            )
+            .unwrap();
+
         std::fs::remove_file(home.registry_json()).unwrap();
         std::fs::create_dir(home.registry_json()).unwrap();
         let registry_error = crate::watch_expiry::run_pass(&home);
