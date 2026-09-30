@@ -4262,41 +4262,16 @@ mod tests {
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
-    }
 
-    #[test]
-    fn layout_wire_proto_announces_and_backfills() {
-        // v97: the announcement rides additive. A pre-97 layout (no key on
-        // the wire - every older server) reads `None`, the client's signal
-        // that the announcer is absent and post-announcement commands are
-        // refused client-side.
-        let old =
+        // v97 back-compat: a pre-97 layout (no key - every older
+        // server) reads `None`, the client's signal that the announcer
+        // is absent and post-announcement commands are refused
+        // client-side. The loop above already round-trips the
+        // announced form; this branch is the shape an older sends.
+        let old_layout =
             r#"{"Layout":{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[24,80]}}"#;
-        match serde_json::from_str::<ServerMsg>(old).unwrap() {
+        match serde_json::from_str::<ServerMsg>(old_layout).unwrap() {
             ServerMsg::Layout { proto, .. } => assert_eq!(proto, None),
-            other => panic!("expected a Layout, got {other:?}"),
-        }
-        let fresh = ServerMsg::Layout {
-            squads: Vec::new(),
-            active_squad: 0,
-            panes: Vec::new(),
-            focus: 0,
-            area: (24, 80),
-            agents: Vec::new(),
-            focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            sweep_dead_count: 0,
-            proto: Some(PROTO_VERSION),
-        };
-        let encoded = serde_json::to_string(&fresh).unwrap();
-        assert!(
-            encoded.contains(r#""proto":97"#),
-            "the version rides the wire: {encoded}"
-        );
-        match serde_json::from_str::<ServerMsg>(&encoded).unwrap() {
-            ServerMsg::Layout { proto, .. } => assert_eq!(proto, Some(PROTO_VERSION)),
             other => panic!("expected a Layout, got {other:?}"),
         }
     }

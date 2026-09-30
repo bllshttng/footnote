@@ -15,19 +15,3 @@ pub(super) fn server_has_splitdir(server_proto: Option<u32>) -> bool {
 pub(super) fn split_skew_notice() -> String {
     "this mux server is older than directional splits; restart the mux server to use them".into()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn server_has_splitdir_edges() {
-        // Only an announced v96+ server admits the command; an
-        // unannounced (pre-v97) server counts as unable, since the
-        // announcement began one generation after the command.
-        assert!(!server_has_splitdir(None));
-        assert!(!server_has_splitdir(Some(95)));
-        assert!(server_has_splitdir(Some(96)));
-        assert!(server_has_splitdir(Some(97)));
-    }
-}

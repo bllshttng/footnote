@@ -3,8 +3,8 @@
 //! the file-budget gate. Helpers stay in the parent and arrive via super::*.
 use super::*;
 
-#[test]
-fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
+#[tokio::test]
+async fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     // AC3-HP: right-pressing a tab cell opens the menu pinned to that tab's
     // stable id, with close tab last after a rule.
     let mut v = view_with_agents(vec![]);
@@ -104,19 +104,18 @@ fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, &text).unwrap();
     assert!(text.contains("Split Up"), "the grid renders");
-}
 
-#[tokio::test]
-async fn tab_menu_split_refuses_when_the_server_never_announced() {
-    // A pre-v97 server (the v95 build among them) drops the client on
-    // the unknown SplitDir variant: the cell refuses by notice and sends
-    // nothing. The happy path with an announced server is covered by
-    // tab_menu_join_and_split_target_the_viewed_tab in the parent.
-    let mut v = view_with_agents(vec![]);
-    let ((tr, tc), _) = tab_and_new_tab_cells(&v);
-    v.layout.squads[0].active_tab = 0;
+    // The skew branch of the same family: against a server that never
+    // announced (pre-v97 layout; the v95 build among them cannot parse
+    // SplitDir and the unknown variant ended the client's session),
+    // the Split cell refuses by notice and sends nothing. The edges
+    // pin the threshold: v96 is the command's birth, not the
+    // announcement's.
+    assert!(!server_has_splitdir(None));
+    assert!(!server_has_splitdir(Some(95)));
+    assert!(server_has_splitdir(Some(96)));
+    assert!(server_has_splitdir(Some(97)));
     v.server_proto = None;
-    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     let sel = v
         .row_menu
         .as_ref()
@@ -129,8 +128,9 @@ async fn tab_menu_split_refuses_when_the_server_never_announced() {
     let mut buf: Vec<u8> = Vec::new();
     row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
     assert!(buf.is_empty(), "an unannounced server gets no split");
-    assert!(v
-        .notice
-        .as_ref()
-        .is_some_and(|(s, _)| s.contains("restart the mux server")));
+    assert!(
+        v.notice
+            .as_ref()
+            .is_some_and(|(s, _)| s.contains("restart the mux server"))
+    );
 }
