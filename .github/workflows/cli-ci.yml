@@ -460,8 +460,23 @@ jobs:
         # warning away from the real ceiling.
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true; for f in /tmp/sigterm-capture-*.log; do [ -f "$f" ] && { cat "$f"; rm -f "$f"; }; done' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true; for f in /tmp/sigterm-capture-*.log; do [ -f "$f" ] && { cat "$f"; rm -f "$f"; }; done; [ -f /tmp/shard-resources.log ] && cat /tmp/shard-resources.log && rm -f /tmp/shard-resources.log; kill "$SAMPLER" || true' EXIT
           : "$start"
+          # Resource-pressure sampler beside the SIGTERM capture: the shard
+          # has died to an inbound TERM mid-run with pytest green, and the
+          # remaining hypothesis class is the runner VM itself (memory or
+          # disk pressure making the runner service stop). Numbers only, no
+          # env, no argv. The cap self-test parses integers off the trap
+          # line, so the sampler stays out of it.
+          ( while :; do
+              printf '%s ' "$(date -u +%FT%TZ)"
+              free -m 2>/dev/null | awk '/Mem:/ {printf "mem_used_mb=%s mem_avail_mb=%s ", $3, $7}'
+              df -m /tmp / 2>/dev/null | awk 'NR>1 {printf "fs=%s avail_mb=%s ", $6, $4}'
+              printf '\n'
+              sleep 30
+            done ) >> /tmp/shard-resources.log 2>/dev/null &
+          SAMPLER=$!
+          disown "$SAMPLER"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/13
 
   slow-e2e:
