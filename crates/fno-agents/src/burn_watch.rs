@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_expiry_wakes_and_projects_current_watch() {
+    fn a_refused_mail_falls_back_to_the_resume() {
         let mut calls: Vec<Vec<String>> = Vec::new();
         let mut runner: Runner = &mut |argv: &[String], _cwd: &str| {
             calls.push(argv.to_vec());
