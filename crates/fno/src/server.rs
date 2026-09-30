@@ -3162,11 +3162,19 @@ impl Core {
         // footnote-paper theme: the OSC 11 answer resolves `auto` to light,
         // and the custom theme keeps the dark prompt band the stock light
         // theme loses. `--settings` is per-session; settings.json is never
-        // touched. Appended last: claude's parser takes flags after any
-        // positional, and the spawn argv is never a shell string.
-        if argv_runs_claude(&spawn_argv) && crate::theme::is_light(&theme) {
+        // touched. Skipped when the argv already names a settings file - a
+        // duplicate flag would let the theme blob win and drop the user's
+        // file (parsers take the last occurrence). Appended last: claude's
+        // parser takes flags after any positional, and the spawn argv is
+        // never a shell string.
+        if argv_runs_claude(&spawn_argv)
+            && crate::theme::is_light(&theme)
+            && !spawn_argv
+                .iter()
+                .any(|a| a == "--settings" || a.starts_with("--settings="))
+        {
             spawn_argv.push("--settings".to_string());
-            spawn_argv.push("{\"theme\":\"custom:footnote:footnote-paper\"}".to_string());
+            spawn_argv.push("{\"theme\":\"custom:fno:footnote-paper\"}".to_string());
         }
         // Every spawned pane takes the keeper road in production, worker or
         // not; unit fixtures keep today's split (short-lived fixtures can

@@ -507,9 +507,11 @@ pub fn color_hex(c: Color) -> Option<String> {
 }
 
 /// Whether the theme's ground is light: the same signal [`terminal16_slot`]
-/// tables were tuned against and the spawn path's `COLORFGBG` encodes.
+/// tables were tuned against and the spawn path's `COLORFGBG` encodes. All
+/// three channels must clear the midpoint, so a saturated warm ground never
+/// reads light on its red channel alone.
 pub fn is_light(t: &Theme) -> bool {
-    matches!(t.base, Color::Rgb(r, _, _) if r > 127)
+    matches!(t.base, Color::Rgb(r, g, b) if r > 127 && g > 127 && b > 127)
 }
 
 /// The OSC sequences that paint the terminal ground under a footnote theme:
