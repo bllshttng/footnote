@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use crate::claude_ask::py_repr;
 use crate::claude_ask::AskOutcome;
+use crate::paths::AgentsHome;
 use crate::state::{load_registry, update_registry, RegistryEntry};
 
 /// The ask/create turn's ceiling when the caller passes none. A seed turn of
@@ -47,6 +48,15 @@ impl AskOutcome {
 /// fno-owned flag; the identity and posture flags are REFUSED so passthrough
 /// can never swap the session id or demote the posture (grok's fence, same
 /// reason).
+/// The turn's `--mode` value: an explicit row-mapped mode wins unless yolo
+/// was asked for; yolo is zcode's own headless default and bypass carrier.
+fn resolve_mode(permission_mode: Option<&str>, yolo: bool) -> String {
+    match permission_mode.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) if !yolo => m.to_string(),
+        _ => "yolo".to_string(),
+    }
+}
+
 fn build_argv(
     session: Option<&str>,
     prompt: &str,
@@ -73,10 +83,7 @@ fn build_argv(
             ));
         }
     }
-    let mode = match permission_mode.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(m) if !yolo => m.to_string(),
-        _ => "yolo".to_string(),
-    };
+    let mode = resolve_mode(permission_mode, yolo);
     let mut argv = vec![
         "zcode".to_string(),
         "-p".to_string(),
@@ -144,7 +151,11 @@ fn run_turn(
     let stdout_pipe = child.stdout.take().expect("stdout piped");
     let stderr_pipe = child.stderr.take().expect("stderr piped");
 
-    // stdout: tee every line as it arrives (live view), capture for parse.
+    // stdout: tee every line as it arrives (live view); capture only a
+    // bounded tail for the parser. Identity rides every event line and the
+    // reply rides the final result line, so the tail carries both and a
+    // long turn's stream never grows the resident set.
+    const CAPTURED_TAIL_CAP: usize = 2 * 1024 * 1024;
     let tee_stdout = tee.clone();
     let stdout_handle = std::thread::spawn(move || {
         let mut captured = String::new();
@@ -156,6 +167,13 @@ fn run_turn(
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     captured.push_str(&line);
+                    if captured.len() > CAPTURED_TAIL_CAP {
+                        let mut split = captured.len() - CAPTURED_TAIL_CAP;
+                        while !captured.is_char_boundary(split) {
+                            split += 1;
+                        }
+                        captured.drain(..split);
+                    }
                     if let Ok(mut guard) = tee_stdout.lock() {
                         if guard.write_all(line.as_bytes()).is_ok() {
                             let _ = guard.flush();
@@ -241,6 +259,7 @@ pub fn dispatch_zcode_once(
     }
 
     let prompt = if message.is_empty() { "hello" } else { message };
+    let mode = resolve_mode(permission_mode, yolo);
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -360,12 +379,12 @@ pub fn dispatch_zcode_once(
             ("name", name.into()),
             ("provider", "zcode".into()),
             ("session_id", session_id.clone().into()),
-            ("posture", "yolo".into()),
+            ("posture", mode.clone().into()),
         ],
     );
     let reply = turn.reply.unwrap_or_else(|| {
         format!(
-            "session_id={session_id} posture=yolo log={}",
+            "session_id={session_id} posture={mode} log={}",
             log_path.display()
         )
     });
@@ -461,8 +480,6 @@ pub fn maybe_run_zcode_ask(
         }
     }
 }
-
-use crate::paths::AgentsHome;
 
 fn emit_event(events_path: &Path, kind: &str, fields: &[(&str, serde_json::Value)]) {
     crate::claude_ask::emit_event(events_path, kind, fields);
