@@ -64,5 +64,16 @@
     "pause": "1-minute load 359 on 12 cores at 16:43Z; both runs paused at 16:45:48Z on the fleet lead's order; harbor has no drain, so 4 claude-code trials and 1 opencode attempt in flight stopped with no result and run again on resume; every written result stands",
     "load": "from 16:40Z a sampler records the load average once a minute; the results print load beside each timeout and stall, and each rate again without results that ran above load 50; no load record exists before 16:40Z",
     "run_1": "the opencode lane finishes through the top-up script in one pass; the zcode lane runs next; then the top-up runs its 3 passes over the claude and opencode lanes"
+  },
+  "amendment_6": {
+    "declared_at": "2026-09-30T22:54:00Z",
+    "scope": "a new machine; no grade or rule changes",
+    "machine": "the user's Intel iMac (x86_64, 128 GB); task images are linux/amd64 and the first machine (arm64) emulated them",
+    "pilot": "every result from the arm64 Mac, Run 0 and Run 1, is a pilot; reported apart; fires no decision rule",
+    "restart": "both runs restart clean on the iMac: Run 0 smokes first, then the same seeded arm order; Run 1 the same seeded lane order, then the top-up",
+    "concurrency": "Run 0 runs min(4, floor(physical cores / 2)) trials at once; Run 1 one attempt at a time beside it",
+    "scripts": "run scripts live in evals/harness-fit/run/; evals/harness-fit/setup-imac.sh installs Docker, Harbor, the harness CLIs and the key; the zcode adapter stays out of the repo, so zcode reads unavailable unless its files are copied in",
+    "account": "same z.ai account and key; the 1302 rule stays",
+    "dollars": "the pilot spend counts against the 200 USD ceiling"
   }
 }
