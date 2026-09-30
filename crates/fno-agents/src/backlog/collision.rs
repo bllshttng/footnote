@@ -279,11 +279,7 @@ fn is_pending_for_collision(entry: &Value) -> bool {
     if entry.get("type").and_then(Value::as_str) == Some("roadmap") {
         return false;
     }
-    if entry
-        .get("completed_at")
-        .map(crate::backlog_ready::truthy)
-        .unwrap_or(false)
-    {
+    if crate::backlog_ready::truthy(entry.get("completed_at")) {
         return false;
     }
     let status = entry

@@ -460,9 +460,21 @@ pub fn schedule_shadow(
     };
 
     let mut degraded: Vec<String> = Vec::new();
-    let mut used_domains = live_lane_domains(claims_root);
+    let mut used_domains = match live_lane_domains(claims_root) {
+        Ok(domains) => domains,
+        Err(_) => {
+            degraded.push("lanes".to_string());
+            BTreeSet::new()
+        }
+    };
     let graph = super::settings::graph_path();
-    let mut inflight = live_worked_entries(claims_root, &graph);
+    let mut inflight = match live_worked_entries(claims_root, &graph) {
+        Ok(rows) => rows,
+        Err(_) => {
+            degraded.push("collision".to_string());
+            Vec::new()
+        }
+    };
     let occupied_slots = crate::lanes::active_lane_count(claims_root);
     let thresholds = Thresholds::default();
 
@@ -551,7 +563,7 @@ pub fn run_lane_fill(args: &[String]) -> i32 {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let repo_root = crate::backlog::create_cli::repo_root(&cwd);
-    match super::advance_fill::select_lane_fill(
+    match select_lane_fill(
         opts.max_lanes,
         opts.project.as_deref(),
         opts.mission.as_deref(),
@@ -595,7 +607,7 @@ pub fn run_schedule_shadow(args: &[String]) -> i32 {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let repo_root = crate::backlog::create_cli::repo_root(&cwd);
-    let receipt = super::advance_fill::schedule_shadow(
+    let receipt = schedule_shadow(
         opts.max_lanes,
         opts.project.as_deref(),
         opts.mission.as_deref(),
