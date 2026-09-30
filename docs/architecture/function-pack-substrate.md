@@ -161,14 +161,7 @@ The company-conformance pack adds internal support, sales, and recurring-operati
 
 ## Boundary model (recorded design stance)
 
-The founder-approval boundary is the agent's tool list, not gates at every
-dispatch seam. A packaged agent that holds only `Read`, `Write`, `Edit`, `Glob`,
-and `Grep` cannot publish or delegate, on any reachable path: a direct
-`@fno:<agent>` invocation runs the same bounded frontmatter the orchestrator
-runs, exactly as a Codex subagent is bounded by its inherited `sandbox_mode`
-rather than by per-spawn gates. The orchestrator's activation and
-role-resolution gates are for the *composed* launch (a reviewed campaign
-bundle); an individual agent invoked directly can still only produce a draft.
+The founder-approval boundary is layered. The outer layer is the agent's tool list, not gates at every dispatch seam. A packaged agent that holds only `Read`, `Write`, `Edit`, `Glob`, and `Grep` cannot publish or delegate on any reachable path. A direct `@fno:<agent>` invocation runs the same bounded frontmatter the orchestrator runs. A Codex subagent is likewise bounded by its inherited `sandbox_mode`, not by per-spawn gates. The orchestrator's activation and role-resolution gates are for the *composed* launch, a reviewed campaign bundle. An individual agent invoked directly can still only produce a draft. Inside the tool list sits the effect guard. For Claude-hosted workers whose PreToolUse hooks run footnote's plugin, each hooked tool call is classified into an effect class (`crates/fno-agents/src/effect_gate.rs`). An approval-requiring class is refused until a principal named in `config.approvals.authorized_principals` approves that exact request digest. Sends and posts are `external.communication`, publishes and deploys are `external.publication`, remote deletes and payments are denied outright. What it does not cover: effects hidden inside a script or a raw `curl`, and harnesses footnote does not hook (codex, opencode, pi). Merges stay with `authorized-merge` and git-protection. The exact coverage statement lives in `docs/security-posture.md`, under "The effect guard for hooked tool calls".
 
 `growth-launch` is a Claude-plugin surface: it dispatches the role subagents
 through Claude's Task tool. The Codex agent TOMLs for these agents are

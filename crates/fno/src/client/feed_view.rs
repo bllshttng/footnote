@@ -934,6 +934,24 @@ pub(crate) async fn feed_keys(
                 ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
                     view.feed_detail_of = None;
                 }
+                ModalKey::Byte(b'b') => {
+                    let launch = view.feed_detail_of.as_ref().and_then(|item| {
+                        feed_detail::plan_node(item).map(|node| (node.to_owned(), item.cwd.clone()))
+                    });
+                    if let Some((node, cwd)) = launch {
+                        if super::sideline::show_composer(view, sock_w).await? {
+                            view.feed_detail_of = None;
+                            if let Err(err) = super::agent_launcher::open_with(
+                                view,
+                                format!("/fno:blueprint {node}"),
+                                cwd.as_deref(),
+                                node,
+                            ) {
+                                view.set_notice(err);
+                            }
+                        }
+                    }
+                }
                 ModalKey::Enter => {
                     // The deep link is the view's ACTION, never its opening
                     // gesture: inspecting attaches and resumes nothing.

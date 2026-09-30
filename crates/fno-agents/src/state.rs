@@ -2525,8 +2525,8 @@ where
     Ok(out)
 }
 
-/// Rename a row's LABEL in one transaction, the Rust port of Python's
-/// `rename_agent` (`cli/src/fno/agents/registry.py:2632`). Label-only: the
+/// Rename a row's LABEL in one transaction, the verb's only implementation.
+/// Label-only: the
 /// harness identity `(harness, harness_session_id, short_id)` is the lock, so a
 /// rename never crosses into the worker's own harness - claude and codex keep
 /// their native session names. The old label lands in `aliases` and keeps
@@ -2568,48 +2568,9 @@ pub fn rename_agent_displacing(
             return Err("registry node must be non-empty when provided".to_string());
         }
     }
-    // Resolve BEFORE the lock. The resolution reads the same file the
-    // transaction re-reads under the lock, and the identity re-check inside the
-    // closure is what makes a mid-flight change a typed refusal rather than a
-    // rename of the wrong row (Python's "changed before rename"). The tiers
-    // mirror Python's `resolve_agent_in` exactly: a FULL session id (any of
-    // harness/related/predecessor, case-insensitive per the shared tier helper)
-    // wins outright; otherwise name, alias, transport short id, canonical
-    // handle (first-8) and legacy suffix (last-8) are unioned and the union
-    // must be unique.
-    use crate::identity::session_handle_tier;
+    // Resolve before the lock, then re-check the row identity inside it.
     let snapshot = load_registry(path).map_err(|e| e.to_string())?;
-    let session_tier = |e: &RegistryEntry| {
-        [
-            e.harness_session_id.as_deref(),
-            e.related_session_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .chain(e.predecessor_session_ids.iter().map(String::as_str))
-        .find_map(|session_id| session_handle_tier(token, session_id))
-    };
-    let label_tier = |e: &RegistryEntry| {
-        e.name == token
-            || (!e.short_id.is_empty() && e.short_id == token)
-            || e.aliases.iter().any(|a| a == token)
-            || session_tier(e).is_some()
-    };
-    let by_full: Vec<&RegistryEntry> = snapshot
-        .entries
-        .iter()
-        .filter(|e| session_tier(e) == Some(0))
-        .collect();
-    let matches: Vec<&RegistryEntry> = if by_full.is_empty() {
-        snapshot.entries.iter().filter(|e| label_tier(e)).collect()
-    } else {
-        by_full
-    };
-    let source = match matches.as_slice() {
-        [one] => one,
-        [] => return Err(format!("no such agent: {token}")),
-        _ => return Err(format!("{token} is ambiguous - use its full session id")),
-    };
+    let source = resolve_rename_source(&snapshot.entries, token)?;
     let identity = (
         source.harness.clone(),
         source.harness_session_id.clone(),
@@ -2729,6 +2690,43 @@ pub fn rename_agent_displacing(
     Ok((old_name, new_name.to_string()))
 }
 
+pub(crate) fn resolve_rename_source<'a>(
+    entries: &'a [RegistryEntry],
+    token: &str,
+) -> Result<&'a RegistryEntry, String> {
+    use crate::identity::session_handle_tier;
+    let session_tier = |entry: &RegistryEntry| {
+        [
+            entry.harness_session_id.as_deref(),
+            entry.related_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(entry.predecessor_session_ids.iter().map(String::as_str))
+        .find_map(|session_id| session_handle_tier(token, session_id))
+    };
+    let label_tier = |entry: &RegistryEntry| {
+        entry.name == token
+            || (!entry.short_id.is_empty() && entry.short_id == token)
+            || entry.aliases.iter().any(|alias| alias == token)
+            || session_tier(entry).is_some()
+    };
+    let by_full: Vec<&RegistryEntry> = entries
+        .iter()
+        .filter(|entry| session_tier(entry) == Some(0))
+        .collect();
+    let matches: Vec<&RegistryEntry> = if by_full.is_empty() {
+        entries.iter().filter(|entry| label_tier(entry)).collect()
+    } else {
+        by_full
+    };
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("no such agent: {token}")),
+        _ => Err(format!("{token} is ambiguous - use its full session id")),
+    }
+}
+
 /// Move `label` off `entries[idx]` inside the caller's transaction: the alias
 /// goes, and a row whose NAME is the label takes a spare one - its first
 /// non-colliding alias, else its short id - so the label answers for one row
@@ -2787,49 +2785,6 @@ pub fn is_valid_registry_label(name: &str) -> bool {
             .chars()
             .enumerate()
             .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (i > 0 && c == '\''))
-}
-
-/// The `agent.rename` RPC handler, beside the transaction it serves (the
-/// daemon module is shrink-only). Grammar is refused BEFORE any lock: a
-/// hostile token must never reach a write. `rename_agent` owns resolution,
-/// the identity lock, the duplicate refusal and the alias append; the harness
-/// session is untouched by construction.
-pub(crate) fn rename_response(
-    registry_path: &Path,
-    req: &crate::protocol::Request,
-) -> crate::protocol::Response {
-    use crate::protocol::{ErrorCode, Response};
-    let token = match req.params.get("name").and_then(|v| v.as_str()) {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidParams,
-                "rename needs a <name> (current label, short id, or full session id)",
-            )
-        }
-    };
-    let Some(new_name) = req.params.get("new_name").and_then(|v| v.as_str()) else {
-        return Response::err(
-            req.id,
-            ErrorCode::InvalidParams,
-            "rename needs --name <new-label>",
-        );
-    };
-    if !is_valid_registry_label(new_name) {
-        return Response::err(
-            req.id,
-            ErrorCode::InvalidParams,
-            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
-        );
-    }
-    match rename_agent(registry_path, token, new_name, None) {
-        Ok((old, new)) => Response::ok(
-            req.id,
-            serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
-        ),
-        Err(msg) => Response::err(req.id, ErrorCode::Internal, msg),
-    }
 }
 
 /// Removal accounting at the write choke point: every row the
