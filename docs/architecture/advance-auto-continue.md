@@ -2,7 +2,7 @@
 
 Moved from `cli/src/fno/backlog/advance.py` under the file-budget gate's remedy (long prose lives in docs, modules ship code). Content unchanged.
 
-When a backlog node's PR merges, a merge-detector, via `fno backlog reconcile` or the /fno:ship pr merged skill, calls this verb after the node-close write commits. If auto-continue is armed for the project and no live walk owns it, advance dispatches a fresh background `/target` worker (with the merge posture from `config.auto_merge.grant`, default `none`) for the next now-unblocked node, so a merge-gated epic walks itself group-by-group across merges with no manual re-invocation.
+When a backlog node's PR merges, a merge-detector calls this verb after the node-close write commits. The detector is `fno backlog reconcile` or the /fno:ship pr merged skill. If auto-continue is armed for the project and no live walk owns it, advance dispatches a fresh background `/target` worker for the next now-unblocked node. The merge posture comes from `config.auto_merge.grant`, default `none`. A merge-gated epic walks itself group-by-group across merges with no manual re-invocation.
 
 ## Locked decisions this module embodies
 

@@ -12,7 +12,7 @@ metadata:
 
 # Ship
 
-**One verb for delivering anything.** `/ship <type>` drives a deliverable to its finish line, dispatching on the *deliverable type* the way `/target` dispatches on task type. `pr` only names the code branch; `/ship` names the whole family.
+**One verb for delivering anything.** `/ship <type>` drives a deliverable to its finish line, dispatching on the *deliverable type* the way `/target` dispatches on task type. `pr` only names the code branch. `/ship` names the whole family.
 
 | Type | Finish line (the mechanical "green") | What runs |
 |------|--------------------------------------|-----------|
@@ -31,7 +31,7 @@ One owner decides every merge. `fno do pr merge` asks it, and so do `fno do pr v
 
 ## Self-contained
 
-Both mode bodies are local to this folder: the PR lifecycle router in [pr.md](references/pr.md) (with `create.md`, `check.md`, `merged.md`, and `scripts/` beside it) and the doc deliverable in [doc.md](references/doc.md), each loaded via Read. The former top-level `/fno:pr` skill retired into `references/pr.md` on 2026-09-30; `/fno:ship pr` is the one spelling and no alias survives.
+Both mode bodies are local to this folder. The PR lifecycle router is [pr.md](references/pr.md), with `create.md`, `check.md`, `merged.md`, and `scripts/` beside it. The doc deliverable is [doc.md](references/doc.md). Each loads via Read. The former top-level `/fno:pr` skill retired into `references/pr.md` on 2026-09-30. `/fno:ship pr` is the one spelling and no alias survives.
 
 ## Step 1: Resolve the type (ALWAYS announce it)
 
@@ -45,7 +45,7 @@ This is a **router**, not a monolith. Parse the first argument token:
     doc    ship a research brief to output_dir and grade it
   ```
 
-- **`pr`** -> the PR lifecycle. Print `running ship pr (PR lifecycle)`. The remaining tokens are the pr mode + its arguments. Load [pr.md](references/pr.md) and execute it in this same context; it resolves the mode (`create` / `check` / `merged`) and runs the matching body here.
+- **`pr`** -> the PR lifecycle. Print `running ship pr (PR lifecycle)`. The remaining tokens are the pr mode + its arguments. Load [pr.md](references/pr.md) and execute it in this same context. It resolves the mode (`create` / `check` / `merged`) and runs the matching body here.
 - **`doc`** or **`artifact`** -> the research-doc deliverable. Print `running ship doc (research brief + grade)`. Load [doc.md](references/doc.md) and execute it in full in this context. The remaining tokens are doc's arguments.
 - **`budget`** or **`community`** -> NOT a ship type. Print and stop with a non-zero result:
 

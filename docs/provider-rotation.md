@@ -1728,7 +1728,4 @@ asymmetry:
   `effective: unresolved` when the implementer family is unknown or no
   different-family capacity exists - the review cannot silently pass.
 
-`fno do review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints
-the verdict JSON and exits `3` when unsatisfied, so a direct CLI caller is
-blocked the same way the `/fno:ship pr check` skill is (no skill-only guard). See
-`skills/ship/references/check.md` Step 0c.
+`fno do review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints the verdict JSON and exits `3` when unsatisfied. A direct CLI caller is blocked the same way the `/fno:ship pr check` skill is (no skill-only guard). See `skills/ship/references/check.md` Step 0c.

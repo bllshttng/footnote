@@ -52,12 +52,8 @@ so the sentinel must survive until the merge actually lands.
 
 The sentinel is consumed in one of two ways:
 
-1. **`/fno:ship pr check`** - when it polls for external review and detects a merged PR,
-   it runs `post-merge-pass.sh` before returning control to target.
-2. **Stop hook fallback** - the COMPLETE branch in `hooks/target-stop-hook.sh`
-   checks for `.fno/.memory-pass-pending` and runs `post-merge-pass.sh`
-   if present. This catches the case where `pr-merge.sh` wrote the sentinel
-   but `/fno:ship pr check` had already exited.
+1. **`/fno:ship pr check`** polls for external review. On a merged PR it runs `post-merge-pass.sh` before returning control to target.
+2. **Stop hook fallback** - the COMPLETE branch in `hooks/target-stop-hook.sh` checks for `.fno/.memory-pass-pending` and runs `post-merge-pass.sh` if present. This catches the case where `pr-merge.sh` wrote the sentinel but `/fno:ship pr check` had already exited.
 
 `post-merge-pass.sh` queries the PR's state and `mergedAt` first:
 

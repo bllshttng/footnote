@@ -1,6 +1,6 @@
 # ship pr
 
-The `pr` mode of `/fno:ship` routes to the right stage of getting a change reviewed and landed. (The former top-level `/fno:pr` skill retired into this file on 2026-09-30; `/fno:ship pr` is the only spelling.)
+The `pr` mode of `/fno:ship` routes to the right stage of getting a change reviewed and landed. (The former top-level `/fno:pr` skill retired into this file on 2026-09-30. `/fno:ship pr` is the only spelling.)
 
 | Mode | What runs | Where it runs |
 |------|-----------|---------------|
@@ -126,11 +126,11 @@ The verdict leg defaults to the newest head-pinned attestation for HEAD. It refu
 
 ## Step 3: check mode (poll for external review)
 
-Load [check.md](check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
+Load [check.md](check.md) and execute it in full, in this context. That body is the canonical review-polling flow. Determine the configured reviewers. Wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
 
 ## Step 4: merged mode (the post-merge ritual)
 
-Load [merged.md](merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply`, harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
+Load [merged.md](merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual. It resolves the per-project inbox path from settings. If the setting is missing, it fails loud. It closes and stamps the backlog node via `fno backlog reconcile`, then projects stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply`. It harvests retro / carveout items, writes prose follow-ups to the project's vault inbox, and files triage-worthy work as backlog nodes. It offers a backfill / handoff slot before close. It runs in the router's own main context.
 
 ## Known Limitations and Deferred Work
 

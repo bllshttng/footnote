@@ -88,9 +88,7 @@ a headless one-shot - skip this section and go to Step 4.
 
 ### 3a. Warm-window triage of this PR's deferral-born nodes
 
-`deferred=N` in the judgment line is the count of this PR's open deferral-born
-nodes (the ones `/fno:ship pr create` filed from this PR's "Out of scope" section). If
-`N=0`, skip. Otherwise list and decide each:
+`deferred=N` in the judgment line is the count of this PR's open deferral-born nodes (the ones `/fno:ship pr create` filed from this PR's "Out of scope" section). If `N=0`, skip. Otherwise list and decide each:
 
 ```bash
 fno backlog find 'deferred from PR #<n>'

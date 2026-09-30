@@ -68,7 +68,7 @@ footnote/
 
 ## Commands
 
-Five advertised verbs (table below): `target`, `think`, `review`, `ship`, `fix`. Full set in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified per harness (bare `/execute` resolves elsewhere). Claude/opencode use `/fno:verb`; Codex uses `$fno:verb` (`/` is reserved for harness commands). See [docs/harness-command-matrix.md](docs/harness-command-matrix.md).
+Five advertised verbs (table below): `target`, `think`, `review`, `ship`, `fix`. Full set in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified per harness (bare `/execute` resolves elsewhere). Claude/opencode use `/fno:verb`. Codex uses `$fno:verb` (`/` is reserved for harness commands). See [docs/harness-command-matrix.md](docs/harness-command-matrix.md).
 
 | Command (claude/opencode `/fno:`, codex `$fno:`) | Purpose |
 |---|---|
@@ -128,7 +128,7 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Ship vocabulary
 
-`/ship` is the deliverable umbrella (`/ship pr` is the PR lifecycle; `/ship doc` ships a research brief). The former top-level `/fno:pr` verb retired into the ship skill on 2026-09-30. The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneUnreviewed` (green, unreviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno do pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
+`/ship` is the deliverable umbrella (`/ship pr` is the PR lifecycle, and `/ship doc` ships a research brief). The former top-level `/fno:pr` verb retired into the ship skill on 2026-09-30. The **ship phase** is the `/target` step that creates the PR. The **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneUnreviewed` (green, unreviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno do pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
 
 ### Plan completion stamp
 
@@ -169,7 +169,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider. Never infer the axis from a value. Defined in [axis-vocabulary](docs/architecture/axis-vocabulary.md).
 - **[Stage table](docs/architecture/role-based-model-routing.md)** (per-stage axis) - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch. `dispatch.harness` is deprecated. `route`=vendor/model (`--route`) beside `provider`=harness (`provider` is the config key name, not the axis. It holds a harness value.)
 - **Curated CLI menu** - `fno --help` shows ~8 verbs (mux, version included). Most are hidden but invocable via `fno help --all` and per-group `help <group> --all`. `fno doctor lint menu-caps` gates root namespace (cap 12) and advertised surface (10 top-level/12 per sub-app). Group actions are arguments not leaves.
-- **Post-merge ritual** - `/fno:ship pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
+- **Post-merge ritual** - `/fno:ship pr merged` runs reconcile + retro. Follow-ups go to `config.post_merge.parking_lot_path`.
 - **Target self-handoff** - `/target` can hand the execute phase to a fresh-context successor, generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review), two memory-pass checkpoints, stuck terminals write postmortems. See [memory-system](docs/architecture/memory-system.md) and [self-improvement-loops](docs/architecture/self-improvement-loops.md) (the loop map: triggers, config keys, where output lands).
 

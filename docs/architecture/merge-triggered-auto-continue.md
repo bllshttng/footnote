@@ -79,7 +79,7 @@ A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar w
 ## Triggers
 
 - **`fno backlog reconcile`** (fired detached by the SessionStart hook `hooks/reconcile-session-start.sh`): after it closes each drifted, web/app-merged node, it calls `advance(closed_node_id=<id>, project=<project>)`. This is the dominant path because the operator merges on the web. Non-fatal: a failed advance never fails the reconcile sweep.
-- **`/fno:ship pr merged`**: after it closes the node + harvests retro, it calls `fno backlog advance`. This covers the case where the node was already closed before `/fno:ship pr merged` ran (reconcile then no-ops, so its own advance never fires).
+- **`/fno:ship pr merged`**: after it closes the node + harvests retro, it calls `fno backlog advance`. This covers the already-closed case. The node was closed before `/fno:ship pr merged` ran. Reconcile then no-ops, and its own advance never fires.
 
 Both triggers observing one merge dispatch the successor at most once: the `dispatch:<id>` reservation (and the worker's `node:<id>` claim) dedups them (AC1-FR).
 
@@ -141,7 +141,7 @@ Do not reuse the defer horizon here - it answers the opposite question.
 
 - **Unblocked == ready.** `_direct_dependents` reads the graph fresh (after the close commits under `locked_mutate_graph`), so `recompute_statuses` already reflects the merge: a dependent whose only open blocker was the closed node reads `ready`. The filter is `status == "ready"` + cross-project + direct edge - no hand-written unblock predicate. Plan-less (`idea`) dependents are not auto-dispatched.
 - **Root from the work map, never guessed.** The dependent's `--cwd` is `project_root_from_settings(dep.project)` (exposed standalone as `fno backlog project-root <project>`). An unmapped project is refused by name (`advance_skipped{unmapped-project, detail=<project>}`), never launched against a guessed cwd.
-- **At most one worker.** Reuses the same `dispatch:<id>` TTL reservation + `node:<id>` liveness gate, so a successor seen by both `advance()` and `advance_dependents()` - or by reconcile and the explicit `backlog advance --closed` (both fire in `/fno:ship pr merged`) - dispatches exactly once. One decision event per dependent; strictly non-fatal.
+- **At most one worker.** Reuses the same `dispatch:<id>` TTL reservation + `node:<id>` liveness gate. A successor seen by both `advance()` and `advance_dependents()` dispatches exactly once. The same holds for reconcile and the explicit `backlog advance --closed` (both fire in `/fno:ship pr merged`). One decision event per dependent, and strictly non-fatal.
 
 Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/execute` session-project invariant): a `/execute` wave in a foreign project is spawned (unblocked) or deferred via `fno backlog carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/execute/references/session-project-invariant.md`.
 

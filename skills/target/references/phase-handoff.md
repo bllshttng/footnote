@@ -126,8 +126,7 @@ EOF
 ```
 
 Artifacts are written to `.fno/artifacts/handoff/{phase}-{session_id}.md`.
-The `handoff/` subdirectory namespaces away from gate-attestation artifacts owned
-by /review, /fno:ship pr create, /fno:ship pr check, etc.
+The `handoff/` subdirectory namespaces away from gate-attestation artifacts owned by /review, /fno:ship pr create, /fno:ship pr check, etc.
 
 **Concurrency safety:** two target runs in different worktrees use different
 `session_id` values so artifact files never collide even when they share the

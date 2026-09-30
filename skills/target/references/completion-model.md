@@ -24,7 +24,7 @@ The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is on
 
 - PR exists for HEAD commit and CI is green. When `no_ship: true`, this is skipped.
 - Every bot in `config.review.required_bots` has at least one completed review pass. The loop-check **code default is empty `[]`** (`DEFAULT_REQUIRED_BOTS` in `loopcheck.rs`) - a fresh install carries no review gate and never hangs on an unconfigured bot; a maintainer sets the list explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. When `no_external: true` in the manifest, the review reads are skipped (step 2). (Note: the Python config layer reports a different absent-key default - see carveout for that layer split.)
-- No unaddressed blocking inline finding (codex P1 / gemini critical|high on `/pulls/N/comments`). A finding is addressed when its thread has a non-bot reply AND (a fix commit landed after it OR the reply carries `wontfix:`). `/fno:ship pr check` Step 8a is the matching writer.
+- No unaddressed blocking inline finding (codex P1 / gemini critical|high on `/pulls/N/comments`). A finding counts as addressed only with a non-bot reply on its thread. A fix commit must land after it, or the reply carries `wontfix:`. `/fno:ship pr check` Step 8a is the matching writer.
 - CI is green on the PR. When `ci.declared_none: true` in settings, the CI read is skipped (the project declared CI is not applicable).
 - A promise with an unsatisfied read blocks with the failing read named (missing bot or finding path:line); the loop continues until the world catches up.
 

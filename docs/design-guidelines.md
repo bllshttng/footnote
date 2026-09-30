@@ -379,8 +379,7 @@ think -> plan -> execute -> review -> ship
 | **Review** | `/review sigma` | Review changes against guidelines |
 | **Ship** | `/fno:ship pr create` | Create PR from commits |
 
-Each phase is independent - you can enter at any point. Have a plan already?
-Skip think and plan. Just need a PR? Use `/fno:ship pr create`.
+Each phase is independent - you can enter at any point. Have a plan already? Skip think and plan. Just need a PR? Use `/fno:ship pr create`.
 
 ### Execution Tiers
 

@@ -35,7 +35,7 @@ The ship review runs the fno review lane in this session, BEFORE `/fno:ship pr c
 - **default (always):** the fno review lane is the reviewer, on every harness. Blocking findings enter the fix, commit, and re-review loop inside the round budget (`review.max_rounds`, default 2). A clean round or a spent budget can precede the push. A rebase with an unchanged code delta carries the attestation. A docs-only payload or explicit `self_review_required = false` opt-out keeps its exemption.
 - **sigma configured:** impossible as of its retirement - `fno do target init` refuses a config still naming sigma with the default lane named as the replacement, so no run reaches this branch. There is no post-ship panel run to defer to.
 
-If a review you run does spawn agents (a peer review), do NOT emit `<promise>` while they are still running: wait until all of them have returned, Critical and High findings are addressed (fixed or verified as false positives), and the report verdict is ready. Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed. If both that review and external review (`/fno:ship pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
+If a review you run does spawn agents (a peer review), do NOT emit `<promise>` while they are still running. Wait until all of them have returned. Critical and High findings must be addressed (fixed or verified as false positives), and the report verdict must be ready. Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed. If both that review and external review (`/fno:ship pr check`) flag the same issue, that is confirmation - fix it once, both gates benefit.
 
 While the PR's CI is still polling, read posted optional bot reviews at first-post rather than deferring every read to green - the first-post review watch and its once-at-green backstop are specified in the "Watch for posted optional reviews" / "Drain a posted optional review" paragraphs of [SKILL.md](../SKILL.md). Same story on both surfaces: a real finding folds into the fix round in flight instead of adding a post-green round.
 
@@ -107,4 +107,4 @@ Log: "Direction check passed ({score}%). Continuing." Reset `alignment.drift_det
 
 See [state-schema.md](state-schema.md) for full alignment tracking fields.
 
-**Critical for Phase 6:** If `no_ship: true`, skip this phase entirely. Set `artifact_shipped: skipped` and `pr_number: null`. Also set `external_review_passed: skipped` (no PR to review). Otherwise, MUST capture `pr_number` from output. If null, STOP and retry `/fno:ship pr create`.
+**Critical for Phase 6:** `no_ship: true` means skip this phase entirely. Set `artifact_shipped: skipped` and `pr_number: null`. Also set `external_review_passed: skipped` (no PR to review). Otherwise, MUST capture `pr_number` from output. If null, STOP and retry `/fno:ship pr create`.
