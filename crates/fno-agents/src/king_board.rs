@@ -3152,10 +3152,19 @@ mod tests {
         let _guard = HOME_LOCK.lock().unwrap();
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
-        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "FNO_HOME", "HOME"]);
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "FNO_CONFIG",
+            "FNO_HOME",
+            "HOME",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[work.workspaces]\n").unwrap();
+        std::env::set_var("FNO_CONFIG", &config);
         std::env::set_var("HOME", dir.path());
         std::env::set_var("FNO_HOME", dir.path());
         crate::paths::pin_test_claims_root(dir.path());

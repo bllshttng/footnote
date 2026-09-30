@@ -836,7 +836,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             } else {
                 None
             };
-            json!({
+            let mut row = json!({
                 "scope": territory.key,
                 "membership": membership,
                 "rung": territory.rung,
@@ -845,8 +845,11 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
                 "mission": if territory.rung == 2 { territory.members.first() } else { None },
                 "live": live_count,
                 "cap": cap,
-                "reason": reason,
-            })
+            });
+            if let Some(reason) = reason {
+                row["reason"] = json!(reason);
+            }
+            row
         })
         .collect()
 }
