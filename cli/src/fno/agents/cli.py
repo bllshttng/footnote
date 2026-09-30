@@ -1071,7 +1071,9 @@ def _refusal_watch(func):
                 from fno.agents.events import emit_spawn_refused
 
                 emit_spawn_refused(
-                    argv=list(sys.argv[1:]), exit_code=int(code), reason=reason
+                    argv=list(sys.argv[1:]),
+                    exit_code=code if isinstance(code, int) else 2,
+                    reason=reason,
                 )
             raise
         finally:

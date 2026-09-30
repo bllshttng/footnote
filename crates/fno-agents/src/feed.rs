@@ -1472,8 +1472,8 @@ mod tests {
             row.parent.as_deref(),
             Some("49a80492-388e-44a3-bd91-017be26bcaa0")
         );
-        // x-db50: a pre-birth refusal used to write nothing, so the feed
-        // showed nothing for a launch the operator watched refuse.
+        // A pre-birth refusal used to write nothing, so the feed showed
+        // nothing for a launch the operator watched refuse.
         let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"python","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
         let p = project("", &[], &[], refused, "");
         let row = p

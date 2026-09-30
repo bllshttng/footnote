@@ -1346,9 +1346,9 @@ pub fn run_gate(
     decide_gate(config_cwd, registry_path, input)
         .map_err(|r| {
             let home = crate::paths::AgentsHome::from_env();
-            // Every gate refusal leaves a feed-visible row (x-db50): a
-            // refused launch previously wrote nothing, so the feed showed
-            // nothing for a launch the operator watched refuse.
+            // Every gate refusal leaves a feed-visible row: a refused
+            // launch previously wrote nothing, so the feed showed nothing
+            // for a launch the operator watched refuse.
             let _ = crate::events::EventEmitter::new(home.events_jsonl(), "spawn-gate").emit(
                 "agent_spawn_refused",
                 &serde_json::json!({

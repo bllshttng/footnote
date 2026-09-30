@@ -3925,8 +3925,10 @@ impl Launcher {
         }
         // The lifecycle line wraps inside the sheet instead of clipping at
         // the width: a refusal reason cut mid-sentence hid its own remedy.
+        // One row is the floor: a too-short terminal still shows the line's
+        // head, as the single clipped row always did.
         let footer_y = usize::from(keybar_y + 1);
-        let footer_rows = body_h.saturating_sub(footer_y);
+        let footer_rows = body_h.saturating_sub(footer_y).max(1);
         for (i, (_, line)) in wrap_message(&self.footer(), inner_w)
             .into_iter()
             .take(footer_rows)
