@@ -708,9 +708,10 @@ pub fn run(args: &[String]) -> i32 {
             );
             return 3;
         };
-        let cwd = crate::provenance::first_cwd_row(&transcript)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
+            eprintln!("fno-agents intel --windows: transcript has no first cwd row");
+            return 3;
+        };
         let ceiling = match crate::king_verdict_inputs::compaction_ceiling(&cwd) {
             Ok(ceiling) => ceiling,
             Err(error) => {
@@ -725,11 +726,17 @@ pub fn run(args: &[String]) -> i32 {
                 return 3;
             }
         };
-        let write_dir = parsed.write.as_ref().map(|write| {
-            write
-                .clone()
-                .unwrap_or_else(|| default_eval_dir_for(&session, &checkins, &cwd))
-        });
+        let write_dir = match parsed.write.as_ref() {
+            None => None,
+            Some(Some(dir)) => Some(dir.clone()),
+            Some(None) => match default_eval_dir_for(&session, &checkins, &cwd) {
+                Ok(dir) => Some(dir),
+                Err(error) => {
+                    eprintln!("fno-agents intel --windows: {error}");
+                    return 2;
+                }
+            },
+        };
         let mut fold = match fold_transcript(
             &session,
             &transcript,
@@ -800,11 +807,7 @@ fn print_text(report: &Value) {
     );
 }
 
-fn default_eval_dir(fold: &Fold, cwd: &Path) -> PathBuf {
-    default_eval_dir_for(&fold.session, &fold.checkins, cwd)
-}
-
-fn default_eval_dir_for(session: &str, checkins: &[Value], cwd: &Path) -> PathBuf {
+fn default_eval_dir_for(session: &str, checkins: &[Value], cwd: &Path) -> Result<PathBuf, String> {
     let scope = checkins
         .first()
         .and_then(|row| row.pointer("/data/scope"))
@@ -816,12 +819,17 @@ fn default_eval_dir_for(session: &str, checkins: &[Value], cwd: &Path) -> PathBu
         .next()
         .filter(|part| !part.is_empty())
         .unwrap_or(first_scope);
-    let plans = crate::plans_path::plans_content_dir(cwd).unwrap_or_else(|| cwd.join("plans"));
-    plans
+    let plans = crate::plans_path::plans_content_dir(cwd).ok_or_else(|| {
+        format!(
+            "plans directory could not be resolved from {}",
+            cwd.display()
+        )
+    })?;
+    Ok(plans
         .join("..")
         .join("evals")
         .join("kings")
-        .join(format!("king-{tag}-{}", &session[..session.len().min(8)]))
+        .join(format!("king-{tag}-{}", &session[..session.len().min(8)])))
 }
 
 fn write_if_missing(path: &Path, contents: &str) -> Result<(), String> {
@@ -1130,15 +1138,22 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     else {
         return (0, Some("no_eval_root".into()), "eval root not found".into());
     };
-    let cwd = crate::provenance::first_cwd_row(&transcript)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
+        return (
+            0,
+            Some("transcript_cwd_missing".into()),
+            "transcript has no first cwd row".into(),
+        );
+    };
     let session_checkins = checkins
         .iter()
         .filter(|row| row.pointer("/data/session_id").and_then(Value::as_str) == Some(session))
         .cloned()
         .collect::<Vec<_>>();
-    let root = default_eval_dir_for(session, &session_checkins, &cwd);
+    let root = match default_eval_dir_for(session, &session_checkins, &cwd) {
+        Ok(root) => root,
+        Err(error) => return (0, Some("plans_directory_missing".into()), error),
+    };
     let result = std::process::Command::new(
         std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno-agents")),
     )
