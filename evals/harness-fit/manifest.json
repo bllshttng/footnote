@@ -54,5 +54,12 @@
     "provider_cap": "a Run 1 spawn refused before the worker starts reads unavailable; a top-up pass reruns missing graded attempts up to 3 per task, at most 3 passes; each refusal stays counted by reason",
     "started_attempts": "a started attempt or trial is never rerun; it is scored as it stands",
     "stalls": "a Run 1 worker that exhausts its 45m budget (spawn exit 12 opencode, 124 claude) started; the runner files it unavailable with no grade; this study scores it as a stall, an attempt with no accepted change, and prints each rate with and without stalls"
+  },
+  "amendment_5": {
+    "declared_at": "2026-09-30T14:13:25Z",
+    "scope": "work a machine restart killed in flight; no grade or rule changes",
+    "restart": "machine boot 2026-09-30T12:21:17Z; last Harbor log write 10:43:47Z; last Run 1 row 09:43:11Z",
+    "run_0": "a trial that wrote no result is run again by harbor jobs resume; a trial that wrote a result stands; unrun arms run in the same seeded order",
+    "run_1": "the opencode lane finishes through the top-up script in one pass; the zcode lane runs next; then the top-up runs its 3 passes over the claude and opencode lanes"
   }
 }

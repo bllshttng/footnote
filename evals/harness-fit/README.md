@@ -77,6 +77,14 @@ Two infrastructure stops hit the runs while they were in flight. This amendment 
 - Run 1 rate limits. z.ai can kill a running worker with "Rate limit reached for requests". That row is an infrastructure exclusion, the same as Run 0's 1302 rule, and the top-up refills its slot. run-1.md also prints each lane's rate with those rows scored as failures.
 - opencode identity. The observe door compared the requested `zai-coding-plan/glm-5.3-flash` with the stored modelID `glm-5.3-flash`. So every opencode row read `substituted`. It also left reasoning tokens out of output. The fix joins `providerID/modelID` and adds reasoning. The run keeps its binary. So run-1.md re-reads each opencode row from the store by session id, under the fixed rule.
 
+## Amendment 5 (2026-09-30, a machine restart, before any results commit)
+
+The machine restarted at 12:21:17Z on 2026-09-30. Harbor last wrote its log at 10:43:47Z. The Run 1 runner wrote its last row at 09:43:11Z. Both drivers died with work in flight. This amendment changes no grade and no rule.
+
+- Run 0. Four claude-code trials were in flight and wrote no result: video-processing, protein-assembly, path-tracing and compile-compcert. Nothing exists to score, so `harbor jobs resume` runs each one again. The six trials that wrote a result stand. The opencode and Terminus 2 arms then run in the same seeded order.
+- Run 1. The opencode lane had reached task 6 of 10. At most one attempt was in flight, and it wrote no row. The lane finishes through the top-up script in one pass. The zcode lane runs next. Then the top-up runs its 3 passes over the claude and opencode lanes.
+- A trial or attempt that a restart kills again gets the same treatment. run-0.md and run-1.md count each one by reason.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
