@@ -1855,7 +1855,10 @@ mod tests {
         std::fs::create_dir_all(home.join(".fno")).unwrap();
         let saved_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
-        let _root = crate::paths::DeclaredRoot::declare("stop-finalize-terminal");
+        // The test already holds the env lock; declare() would take it a
+        // second time and self-deadlock the non-reentrant mutex (CI parity
+        // hang, 5 runs). declare_held exists for exactly this caller.
+        let _root = crate::paths::DeclaredRoot::declare_held("stop-finalize-terminal");
         let repo = _root.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let manifest = repo.join("target-state.md");
