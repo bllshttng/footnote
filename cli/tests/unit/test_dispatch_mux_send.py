@@ -113,7 +113,13 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     assert "peer mail" not in paste
 
 
-def test_read_receipt_identity_mismatch_refuses_before_typing(monkeypatch, capsys):
+def test_read_receipt_identity_gate_matches_on_uuid_not_the_name(monkeypatch, capsys):
+    """Identity is the session uuid, never the name.
+
+    A receipt whose uuid differs from the addressed row refuses before typing
+    (the old pinned refusal); a receipt whose uuid MATCHES but whose pane
+    label lags a rename delivers.
+    """
     calls: list[dict] = []
     entry = _entry()
     entry.name = "worker"
@@ -123,29 +129,52 @@ def test_read_receipt_identity_mismatch_refuses_before_typing(monkeypatch, capsy
     )
     _detector(monkeypatch, [])
 
+    real_run = dispatch.subprocess.run
+
     def run(argv, **kwargs):
         calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if "mail-envelope" in argv:
+            return real_run(argv, **kwargs)
         if argv[1:4] == ["mux", "pane", "read"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout='{"pane_id":7,"text":"$ ","pane_name":"caller",'
-                '"registry_fno_id":"caller-session"}',
+                stdout=receipt,
                 stderr="",
             )
         if argv[1:4] == ["mux", "pane", "ls"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout='[{"pane_id":7,"name":"worker","fno_id":"worker-session"}]',
+                stdout=pane_ls,
                 stderr="",
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    # Both differ: refuse before typing.
+    receipt = (
+        '{"pane_id":7,"text":"$ ","pane_name":"caller",'
+        '"registry_fno_id":"caller-session"}'
+    )
+    pane_ls = '[{"pane_id":7,"name":"worker","fno_id":"worker-session"}]'
+    calls.clear()
     monkeypatch.setattr(dispatch.subprocess, "run", run)
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
     assert dispatch._mux_pane_send(entry, "status?", guarded=False) is False
     assert not any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
     assert "identity mismatch" in capsys.readouterr().err
+
+    # Only the name differs: the renamed worker (bob, ex-kestrel-heir)
+    # still receives, because the uuid names the same live session.
+    receipt = (
+        '{"pane_id":7,"text":"$ ","pane_name":"kestrel-heir",'
+        '"registry_fno_id":"worker-session"}'
+    )
+    pane_ls = '[{"pane_id":7,"name":"kestrel-heir","fno_id":"worker-session"}]'
+    calls.clear()
+    capsys.readouterr()
+
+    assert dispatch._mux_pane_send(entry, "status?", guarded=False) is True
+    assert any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
 
 
 def test_read_receipt_without_text_refuses_before_typing(monkeypatch, capsys):

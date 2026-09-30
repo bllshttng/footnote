@@ -35,6 +35,10 @@ pub struct FeedRow {
     /// `crown_vacated` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
+    /// The node's project directory. Present on `node_created` rows so a
+    /// launch opened from the fleet feed starts in the node's repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub session_id: Option<String>,
     pub harness: Option<String>,
     pub title: String,
@@ -321,6 +325,7 @@ pub fn project(
                 ts: created,
                 kind: "node_created".into(),
                 node: Some(node_id.to_string()),
+                cwd: s_field(entry, "cwd"),
                 session_id: s_field(entry, "source_session_id").filter(|s| is_session_handle(s)),
                 harness: s_field(entry, "source_harness"),
                 model: s_field(entry, "source_model"),
@@ -1013,6 +1018,7 @@ mod tests {
             "pr_number": 1395,
             "pr_url": "https://github.com/bllshttng/footnote/pull/1395",
             "created_at": "2026-09-01T08:00:00Z",
+            "cwd": "/workspace/node-project",
             "source_session_id": "s-do",
             "source_harness": "claude",
             "source_model": "claude-opus-5",
@@ -1361,6 +1367,21 @@ mod tests {
         assert_eq!(created.effort.as_deref(), Some("high"));
         assert_eq!(created.parent.as_deref(), Some("s-parent"));
         assert_eq!(created.crown.as_deref(), Some("L2 e-0001"));
+        let wire = serde_json::to_value(created).unwrap();
+        assert_eq!(
+            wire.get("cwd").and_then(Value::as_str),
+            Some("/workspace/node-project")
+        );
+        let mut cwdless_entry = graph_fixture().remove(0);
+        cwdless_entry.as_object_mut().unwrap().remove("cwd");
+        let cwdless = project("", &[cwdless_entry], &[], "", "");
+        let cwdless_created = cwdless
+            .rows
+            .iter()
+            .find(|r| r.kind == "node_created")
+            .expect("cwd-less graph row still projects");
+        let cwdless_wire = serde_json::to_value(cwdless_created).unwrap();
+        assert!(cwdless_wire.get("cwd").is_none());
         let started = p.rows.iter().find(|r| r.kind == "node_started").unwrap();
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));

@@ -832,7 +832,7 @@ fn r_refusal_rate() -> Result<Value, String> {
     crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
-/// The caller's own claude transcript, shared by the refusal and wake
+/// The caller's own claude transcript, shared by the check-in transcript
 /// readers. Only claude sessions keep a per-session transcript file today
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
 /// claude session whose transcript cannot be found) reads as an ordinary
@@ -840,7 +840,7 @@ fn r_refusal_rate() -> Result<Value, String> {
 pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
-        return Err("the wake and refusal readers need a claude transcript; \
+        return Err("the check-in transcript readers need a claude transcript; \
              this session's harness is not claude"
             .into());
     }
@@ -1256,8 +1256,15 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
+    take("repeated_asks", crate::repeated_asks::reading());
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
+    take("self_hold", {
+        crate::claims::resolve_identity()
+            .0
+            .ok_or_else(|| "current session identity is unavailable".to_string())
+            .and_then(|session| crate::mail_hold::self_status(&session))
+    });
     take("parked", r_parked());
     readings
 }
@@ -1380,6 +1387,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             cp.value.get("attention").cloned().unwrap_or(json!([])),
         );
     }
+    if let Some(hold) = get("self_hold").filter(|r| r.ok) {
+        data.insert("self_hold".into(), hold.value.clone());
+    }
     let failed: Vec<&Reading> = readings.iter().filter(|r| !r.ok).collect();
     data.insert("coverage".into(), json!(readings.len() - failed.len()));
     data.insert(
@@ -1405,40 +1415,26 @@ fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
     }
 }
 
-/// The `loop` row before `previous_row`'s. Needed only to tell a rising
-/// refusal rate from a single noisy tick - two consecutive rises, not one.
-fn second_previous_loop_row(ctx: &Ctx) -> Option<Value> {
-    let payload = crate::king_history::scan(&ctx.events_paths, &ctx.scope).ok()?;
-    payload["events"]
-        .as_array()?
-        .iter()
-        .filter(|r| s_str(r, "source") == Some("loop"))
-        .nth(1)
-        .cloned()
-}
-
-fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
-    previous_data?.get("refusal_rate")?.as_f64()
-}
-
 /// Sets `refusal_rate_rising`: true only when the current rate exceeds the
 /// last beat's, and that beat's exceeded the one before it. A single high
-/// tick is noise; two consecutive rises is the handoff signal.
+/// tick is noise; two consecutive rises is the handoff signal. The priors
+/// come from [`crate::refusal_trend`], whose baseline advances with every
+/// measured beat, journalled or not. A missing pair reads unmeasured, never
+/// rising.
 fn mark_refusal_rate_trend(
     data: &mut Map<String, Value>,
-    previous_data: Option<&Value>,
-    second_previous_data: Option<&Value>,
+    previous_rate: Option<f64>,
+    second_previous_rate: Option<f64>,
 ) {
     let current = data.get("refusal_rate").and_then(Value::as_f64);
-    let rising = match (
-        current,
-        refusal_rate_of(previous_data),
-        refusal_rate_of(second_previous_data),
-    ) {
+    let rising = match (current, previous_rate, second_previous_rate) {
         (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
         _ => false,
     };
     data.insert("refusal_rate_rising".into(), json!(rising));
+    let unmeasured =
+        current.is_some() && (previous_rate.is_none() || second_previous_rate.is_none());
+    data.insert("refusal_rate_trend_unmeasured".into(), json!(unmeasured));
 }
 
 fn derive_change(
@@ -1475,6 +1471,18 @@ fn derive_change(
                 .collect()
         })
         .unwrap_or_default();
+    let self_hold = data.get("self_hold");
+    if self_hold
+        .and_then(|hold| hold.get("clock_live"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || self_hold
+            .and_then(|hold| hold.get("delivery_policy"))
+            .and_then(Value::as_str)
+            == Some("bus-only")
+    {
+        attention.push("DND on".into());
+    }
     if data
         .get("refusal_rate_rising")
         .and_then(Value::as_bool)
@@ -1727,6 +1735,7 @@ fn render_lines(
     lines.extend(crate::king_answers::answered_lines(readings));
 
     lines.extend(crate::king_answers::held_lines(readings));
+    lines.extend(crate::repeated_asks::lines(readings));
 
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
@@ -1786,19 +1795,26 @@ fn render_lines(
             let rows = territory.as_array().cloned().unwrap_or_default();
             lines.push(format!("territory: {} scopes", rows.len()));
             for row in rows.iter().take(MAX_COURT_ROWS) {
-                let kingless = if row.get("kingless").and_then(Value::as_bool) == Some(true) {
-                    " kingless"
-                } else {
-                    ""
-                };
                 lines.push(format!(
-                    "  {} rung {} mission {} live {}/{}{}",
+                    "  {} rung {} mission {} live {}/{}{}{}",
                     dash(row.get("scope")),
                     dash(row.get("rung")),
                     dash(row.get("mission")),
                     dash(row.get("live")),
                     dash(row.get("cap")),
-                    kingless,
+                    row["kingless"]
+                        .as_bool()
+                        .filter(|v| *v)
+                        .map(|_| " kingless")
+                        .unwrap_or(""),
+                    if row["membership"] == "unknown" {
+                        row["reason"]
+                            .as_str()
+                            .map(|r| format!(" unreadable ({r})"))
+                            .unwrap_or_else(|| " unreadable".to_string())
+                    } else {
+                        String::new()
+                    },
                 ));
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
@@ -1900,12 +1916,18 @@ fn render_lines(
                 dash(rr.get("total")),
                 dash(rr.get("window")),
             );
-            if data
+            let rising = data
                 .get("refusal_rate_rising")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let unmeasured = data
+                .get("refusal_rate_trend_unmeasured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if rising {
                 text.push_str(" - RISING (handoff signal)");
+            } else if unmeasured {
+                text.push_str(" - UNMEASURED (needs two prior beats)");
             }
             lines.push(text);
         }
@@ -1979,6 +2001,32 @@ fn render_lines(
                 for entry in attention {
                     lines.push(format!("  {entry}"));
                 }
+            }
+        }
+    }
+    match failed("self_hold") {
+        Some(r) => lines.push(format!("READER FAILED self_hold: {}", r.error)),
+        None => {
+            let hold = by_name("self_hold")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let clock_live = hold
+                .get("clock_live")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let clock = match (clock_live, hold.get("clock_until").and_then(Value::as_str)) {
+                (true, Some(until)) => format!("clock active until {until}"),
+                (true, None) => "clock active".into(),
+                (false, Some(until)) => format!("clock inactive (until {until})"),
+                (false, None) => "clock inactive".into(),
+            };
+            let policy = hold
+                .get("delivery_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
+            if clock_live || policy == "bus-only" {
+                lines.push("attention: DND on".into());
             }
         }
     }
@@ -2473,9 +2521,15 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let second_previous = second_previous_loop_row(&ctx);
-    let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
-    mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
+    let trend_dir = home.refusal_trend_dir();
+    let (previous_rate, second_previous_rate) =
+        crate::refusal_trend::priors(&trend_dir, &ctx.scope);
+    mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
+    // The baseline advances on the measurement the beat just printed,
+    // whether or not the full row journals below.
+    if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
+        crate::refusal_trend::record(&trend_dir, &ctx.scope, &ts, rate);
+    }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
@@ -2620,6 +2674,23 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+pub(crate) fn title_rename_command(
+    harness: &str,
+    label: &str,
+    title: Option<&str>,
+) -> Option<String> {
+    if title == Some(label) {
+        return None;
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
+    let capabilities = contract.capabilities(harness).ok()?;
+    capabilities
+        .native_verbs
+        .iter()
+        .any(|verb| verb == "/rename")
+        .then(|| format!("/rename {label}"))
+}
+
 fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
     let home = crate::paths::AgentsHome::from_env();
     let registry = crate::state::load_registry(&home.registry_json())
@@ -2657,10 +2728,9 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         return Err("the live crown holder is not this session".into());
     }
     let label = row.name.as_str();
-    if row.harness_title.as_deref() == Some(label) {
+    let Some(command) = title_rename_command(harness, label, row.harness_title.as_deref()) else {
         return Ok(());
-    }
-    let command = format!("/rename {label}");
+    };
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut child = std::process::Command::new(executable)
         .args([
@@ -2738,14 +2808,9 @@ mod tests {
     fn open_pr_total_sums_all_pages() {
         let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
         let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
-        assert_eq!(open_pr_total(&[first, second]), 107);
-    }
-
-    #[test]
-    fn open_pr_total_ignores_non_array_pages() {
         assert_eq!(
-            open_pr_total(&[json!({"unexpected": true}), json!([1, 2])]),
-            2
+            open_pr_total(&[first, second, json!({"unexpected": true}), json!([1, 2])]),
+            109
         );
     }
 
@@ -3234,23 +3299,22 @@ mod tests {
     /// AC14-ERR: a failed owner read renders unmeasured with the reason.
     #[test]
     fn the_scope_line_reads_unmeasured_with_the_reason() {
-        let readings = sample_readings(
+        let mut readings = sample_readings(
             board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
                    "owned_reason": "territory: registry unreadable (x)", "rows": []}),
             cap_ok(),
             workers_none(),
         );
+        readings
+            .iter_mut()
+            .find(|reading| reading.name == "territory")
+            .unwrap()
+            .value = json!([{"scope":"x-aaaa","membership":"unknown","reason":"the graph read returned 0 nodes","rung":2,"mission":"x-aaaa","live":null,"cap":4}]);
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.contains("owned unmeasured"))
-            .unwrap();
-        assert_eq!(
-            line,
-            "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes"
-        );
+        assert!(lines.iter().any(|l| l == "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes")
+            && lines.iter().any(|l| l == "  x-aaaa rung 2 mission x-aaaa live -/4 unreadable (the graph read returned 0 nodes)"));
     }
 
     /// AC15-EDGE: a previous beat row that carries active_nodes but no
@@ -3410,6 +3474,10 @@ mod tests {
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": null}),
+            ),
             Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
     }
@@ -3658,25 +3726,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(20)));
+        assert_eq!(data.get("coverage"), Some(&json!(21)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
-    }
-
-    // AC1: the printed body carries a refusal_rate line with the real
-    // refused/total/window counts, and the same rate lands in the
-    // journaled data.
-    #[test]
-    fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.starts_with("refusal_rate:"))
-            .unwrap();
-        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     // The subagents reading: the workers line carries the fleet's active
@@ -3748,7 +3800,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(20)), "20 of 21 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3842,42 +3894,94 @@ mod tests {
         assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
-    // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
-    // or a flat/falling rate, does not.
+    // AC2: the handoff signal reads the true beat-to-beat direction. Two
+    // consecutive rises trip it; one rise, flat, or falling does not; and the
+    // baseline advances with every measured beat, so beats whose row never
+    // journaled can never pin the comparison to a stale pair.
     #[test]
-    fn refusal_rate_rising_only_after_two_consecutive_increases() {
+    fn refusal_rate_trend_reads_the_true_direction_across_unjournalled_beats() {
+        // Two rises: 0.05 -> 0.10 -> 0.20 trips the signal.
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate".into(), json!(0.20));
-        let row = |rate: f64| Some(json!({"refusal_rate": rate}));
-
-        // Two rises: 0.05 -> 0.10 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(false))
+        );
 
         // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.10).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.10));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
         // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.30).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.30), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
-        // Missing history reads as not-rising, never a false positive.
+        // Missing history reads unmeasured, never a false positive.
         mark_refusal_rate_trend(&mut data, None, None);
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(true))
+        );
+
+        // The filed defect: a falling series of unjournalled beats. Each
+        // beat's record advances the baseline, so the label follows the
+        // true direction instead of the same stale pair.
+        let dir = tempfile::tempdir().unwrap();
+        let trend = dir.path();
+        for (n, current) in [0.175, 0.165, 0.150].iter().enumerate() {
+            let (p1, p2) = crate::refusal_trend::priors(trend, "x-bbbb");
+            let mut data: Map<String, Value> = Map::new();
+            data.insert("refusal_rate".into(), json!(current));
+            mark_refusal_rate_trend(&mut data, p1, p2);
+            assert_eq!(
+                data.get("refusal_rate_rising"),
+                Some(&json!(false)),
+                "beat {n}: a falling series must not read RISING"
+            );
+            crate::refusal_trend::record(
+                trend,
+                "x-bbbb",
+                &format!("2026-09-15T10:0{n}:00Z"),
+                *current,
+            );
+        }
     }
 
+    // AC1+AC2: the printed line carries the real refused/total/window counts
+    // and exactly one trend verdict - RISING on two consecutive rises,
+    // UNMEASURED on a missing prior pair - and the same rate lands in the
+    // journaled data.
     #[test]
-    fn refusal_rate_rising_line_carries_the_handoff_suffix() {
+    fn refusal_rate_line_carries_the_handoff_or_unmeasured_suffix() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let line = lines
             .iter()
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
-        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - RISING (handoff signal)"
+        );
+
+        // A missing prior pair is stated on the line, never silently blank.
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("refusal_rate_trend_unmeasured".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
+        );
     }
 
     // A rising refusal rate outranks silence the same way control-plane
@@ -3906,22 +4010,11 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
+            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
         assert_eq!(data.get("readers_failed"), Some(&json!(["board"])));
-    }
-
-    #[test]
-    fn no_change_refused_while_a_reading_failed() {
-        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("drain", "drain unreadable".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }
 
     #[test]
@@ -4071,7 +4164,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4203,23 +4296,54 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
+            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
     }
 
-    // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
+    // The self-hold line exposes both inputs, and either one raises attention.
     #[test]
-    fn a_quiet_control_plane_reads_ok() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+    fn self_hold_attention_reads_clock_and_registry_together() {
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
-            data.get("control_plane_attention"),
-            Some(&json!([])),
-            "empty attention"
+            derive_change(None, &data, ""),
+            "first canonical beat for this scope"
         );
-        let change = derive_change(None, &data, "");
-        assert_eq!(change, "first canonical beat for this scope");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy none"));
         assert!(lines.iter().any(|l| l == "control plane: ok"));
+
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": "bus-only"}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy bus-only"));
+        assert!(lines.iter().any(|l| l == "attention: DND on"));
+
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": true, "clock_until": "2030-01-01T00:00:00Z", "delivery_policy": null}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines.iter().any(
+            |l| l == "self_hold: clock active until 2030-01-01T00:00:00Z; delivery_policy none"
+        ));
     }
 
     #[test]

@@ -84,6 +84,7 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import (
+    build_heir_owner,
     calling_agent_row,
     crown_validation_error,
     journal_spawn_crown,
@@ -1816,6 +1817,8 @@ def _claude_create_path(
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None, heir=name,
+                heir_owner=build_heir_owner(
+                    new_entry.harness, new_entry.harness_session_id, new_entry.cwd),
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True
@@ -5847,14 +5850,11 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
         row = matches[0]
-        actual_name = row.get("name")
         actual_fno_id = row.get("fno_id")
-        if actual_name != expected_name or (
-            expected_fno_id is not None and actual_fno_id != expected_fno_id
-        ):
+        if expected_fno_id is not None and actual_fno_id != expected_fno_id:
             print(
                 f"mux pane {pane} identity mismatch: addressed {expected_name} "
-                f"({expected_fno_id or '-'}) pane hosts {actual_name or '<unknown>'} "
+                f"({expected_fno_id or '-'}) pane hosts {row.get('name') or '<unknown>'} "
                 f"({actual_fno_id or '-'})",
                 file=sys.stderr,
             )

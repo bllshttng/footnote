@@ -684,6 +684,14 @@ def emit_crown_vacated(
     )
 
 
+def build_heir_owner(harness, session_id, cwd) -> Optional[dict]:
+    # None when the heir has no session id: an unaddressable heir re-creates
+    # the orphan the reown exists to prevent.
+    if not session_id:
+        return None
+    return {"kind": "session", "harness": harness, "session_id": session_id, "cwd": cwd}
+
+
 def settle_spawn_crown(
     rows: list,
     *,
@@ -691,6 +699,7 @@ def settle_spawn_crown(
     plan: dict,
     exclude_name: Optional[str] = None,
     heir: Optional[str] = None,
+    heir_owner: Optional[dict] = None,
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
@@ -701,7 +710,9 @@ def settle_spawn_crown(
     ``(rows, outcome, vacated)``: outcome is
     ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
     dropping the crown fields when declined), and ``vacated`` lists
-    ``(row_before_clear, cause)`` to journal once the write commits.
+    ``(row, cause)`` to journal once the write commits - cause ``succession``
+    for a vacated holder, ``reowned`` for a court child whose
+    ``spawn_provenance.owner`` moved to ``heir_owner`` in this same write.
     """
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
@@ -716,10 +727,18 @@ def settle_spawn_crown(
         marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
         marks += [(i, "succession") for i in answer["vacate_rows"]]
         vacated = [(rows[i], cause) for i, cause in marks]
+        reown_indexes = [int(i) for i in answer.get("reown_rows", [])]
+        [rows[i] for i in reown_indexes]  # an out-of-range index declines, like the marks
     except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
         return rows, "declined", []
     for index, _ in marks:
         rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
+    if heir_owner is not None:
+        for index in reown_indexes:
+            provenance = dict(rows[index].spawn_provenance or {})
+            provenance["owner"] = dict(heir_owner)
+            rows[index] = replace(rows[index], spawn_provenance=provenance)
+            vacated.append((rows[index], "reowned"))
     return rows, outcome, vacated
 
 
@@ -840,17 +859,20 @@ def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
 
 
 def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
-    """Journal one committed spawn write: a vacate line per cleared holder plus
-    the grant line. A declined launch moved no crown and writes nothing."""
+    """Journal one committed spawn write: a vacate line per cleared holder, one
+    reown line per court child that followed the crown, plus the grant line."""
+    from fno.agents import events
+
     for row, cause in vacated:
+        if cause == "reowned":
+            events.emit("agent_court_reowned", scope=scope, successor=name, child=row.name)
+            continue
         emit_crown_vacated(
             scope=scope, level=row.crown_level, holder=row.name,
             holder_session=row.harness_session_id, grantor=row.crown_grantor,
             cause=cause, successor=name if cause == "succession" else None,
         )
     if outcome in ("granted", "succeeded"):
-        from fno.agents import events
-
         events.emit(
             "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
             vacated_scope=None, vacated_level=None, stranded_subordinates=[],

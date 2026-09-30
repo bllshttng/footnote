@@ -80,6 +80,7 @@ mod test_keeper_cleanup;
 #[cfg(test)]
 pub(crate) mod test_owner;
 pub mod theme;
+pub mod theme_import;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;
 pub mod tree;

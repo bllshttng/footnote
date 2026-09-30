@@ -124,6 +124,7 @@ pub(crate) enum FeedAction {
 /// target `i` (flat index) - only Entry rows contribute targets, and exactly
 /// those rows push here, so the alignment holds by construction.
 pub(crate) struct FeedDetailModal {
+    pub(crate) item: FeedItem,
     pub(crate) popup: Popup,
     pub(crate) actions: Vec<FeedAction>,
     pub(crate) values: Vec<String>,
@@ -136,6 +137,7 @@ pub(crate) struct FeedDetailModal {
 pub(crate) fn modal(view: &View, item: FeedItem) -> FeedDetailModal {
     let (popup, actions, values) = build(&view.layout.agents, view.layout.active_squad, &item);
     FeedDetailModal {
+        item,
         popup,
         actions,
         values,
@@ -311,7 +313,11 @@ pub(crate) fn build(
         values.push((*detail).to_string());
     }
 
-    let footer = if actions.is_empty() {
+    // The footer names every gesture the modal answers, including the
+    // created-node composer key the line-built view advertised.
+    let footer = if plan_node(item).is_some() {
+        "enter open · b blueprint · y copy · esc close"
+    } else if actions.is_empty() {
         "y copy · esc close"
     } else {
         "enter open · y copy · esc close"
@@ -387,6 +393,18 @@ pub(crate) async fn execute_selected(
         FeedAction::Resume(detail) => view.set_notice(detail.clone()),
     }
     Ok(())
+}
+
+/// The created node a `b` can blueprint, when this row is a node_created
+/// event carrying an id.
+pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
+    if item.kind != "node_created" {
+        return None;
+    }
+    item.node
+        .as_deref()
+        .map(str::trim)
+        .filter(|node| !node.is_empty())
 }
 
 /// `y` on the modal: the selected value, whole, to the clipboard - local

@@ -20,6 +20,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         ts: "2026-09-02T18:27:06Z".into(),
         kind: "pr_created".into(),
         node: node.map(str::to_string),
+        cwd: None,
         session_id: sid.map(str::to_string),
         harness: None,
         title: "PR 1395".into(),
@@ -42,6 +43,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         ts: "2026-09-06T10:00:00Z".into(),
         kind: "session_reaped".into(),
         node: None,
+        cwd: None,
         session_id: Some(sid.into()),
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
@@ -250,6 +252,33 @@ fn hit_on_a_row_without_session_id_is_none() {
             .iter()
             .any(|a| matches!(a, feed_detail::FeedAction::Session(_))),
         "no session, no session action"
+}
+
+#[tokio::test]
+async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() {
+    let v = view_with_rows(vec![]);
+    let mut item = feed_item(None, None);
+    item.kind = "node_created".into();
+    let (_, actions, _) = feed_detail::build(&v.layout.agents, 0, &item);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, feed_detail::FeedAction::Node(_))),
+        "a node-less created row offers no node action"
+    );
+
+    let mut v = v;
+    v.feed_detail = Some(feed_detail::modal(&v, item));
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        v.launcher.is_none(),
+        "missing node id cannot prefill the composer"
+    );
+    assert!(v.feed_detail.is_some(), "an ineligible detail stays open");
+}
     );
 }
 
@@ -787,12 +816,20 @@ fn a_node_created_modal_hides_its_unrecorded_fields() {
 // on a real View and read the COMPOSED frame. A field that never reaches the
 // screen is the defect this view exists to prevent, so the assertion is on
 // painted text.
-#[test]
-fn the_composed_frame_paints_every_field_and_its_action() {
+#[tokio::test]
+async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer() {
     let mut v = view_with_rows(vec![]);
     v.term = (44, 120);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    v.feed_detail = Some(feed_detail::modal(&v, item.clone()));
+    let ordinary_text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !ordinary_text.contains("b: blueprint"),
+        "non-created rows have no blueprint action"
+    );
+    item.kind = "node_created".into();
+    item.cwd = Some("/workspace/node-project".into());
     item.harness = Some("claude".into());
     item.model = Some("glm-5.3-flash".into());
     v.feed_detail = Some(feed_detail::modal(&v, item));
@@ -815,9 +852,28 @@ fn the_composed_frame_paints_every_field_and_its_action() {
         !text.contains("NOT RECORDED"),
         "an absent field paints nothing"
     );
-    // The footer names the gestures before they are pressed.
+    // The footer names the gestures before they are pressed, including the
+    // created-node composer key.
     assert!(text.contains("enter open"), "footer missing");
     assert!(text.contains("y copy"), "copy affordance missing");
+    assert!(text.contains("b blueprint"), "blueprint key missing");
+
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    let launch = v.launcher.as_ref().expect("blueprint key opens composer");
+    assert_eq!(launch.draft.message, "/fno:blueprint x-9223");
+    assert_eq!(launch.draft.node.as_deref(), Some("x-9223"));
+    assert_eq!(
+        launch
+            .draft
+            .projects
+            .get(launch.draft.project_idx)
+            .map(String::as_str),
+        Some("/workspace/node-project")
+    );
+    assert!(v.feed_detail.is_none(), "composer replaces feed detail");
 }
 
 // (x-9cbf) The parent field spends the derived NAME when the edge resolves

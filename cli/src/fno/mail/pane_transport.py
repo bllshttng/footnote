@@ -207,7 +207,8 @@ def _identity_receipt_refusal(
         return f"pane {pane_id} identity receipt names the wrong pane", None
     actual_name = payload.get("pane_name")
     actual_fno_id = payload.get("registry_fno_id")
-    if actual_name != expected_name or actual_fno_id != expected_fno_id:
+    # The uuid is the identity; the label may lag a rename.
+    if actual_fno_id != expected_fno_id:
         return (
             f"pane {pane_id} identity mismatch: addressed {expected_name} "
             f"({expected_fno_id}) pane hosts {actual_name or '<unknown>'} "

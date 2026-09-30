@@ -2013,11 +2013,23 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         let crown_title = crown_scope
             .as_ref()
             .and_then(|scope| crown_titles.get(scope.trim()).cloned());
+        // Succession re-homes the court: the CURRENT owner edge (the row's
+        // spawn_provenance.owner) outranks the birth edge for every sideline
+        // join - the lead label and the nest parent. The FILE keeps the birth
+        // edge as history; this projection reads who the row obeys now.
         let spawned_by_session = row
-            .get("spawned_by_session")
+            .get("spawn_provenance")
+            .and_then(|p| p.get("owner"))
+            .and_then(|o| o.get("session_id"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or_else(|| {
+                row.get("spawned_by_session")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         let lineage_kind = row
             .get("lineage_kind")
             .and_then(|v| v.as_str())
@@ -2811,6 +2823,24 @@ mod tests {
                               "received_at":"2020-01-01T00:00:00Z"}}"#);
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].badge, Some(AgentBadge::Done));
+    }
+
+    #[test]
+    fn derive_rows_reads_the_owner_edge_over_the_birth_edge() {
+        // Succession re-homes the court. The FILE keeps the birth
+        // edge (the abdicated king) as history; the sideline joins the
+        // CURRENT owner, so the lead label names the heir.
+        let raw = reg(r#"{"name":"kestrel-heir","cwd":"/w","status":"live",
+                 "harness_session_id":"01a0ee3f-heir"},
+               {"name":"xfcb4-w5","cwd":"/w","status":"live",
+                 "spawned_by_session":"bf388b2e-king",
+                 "spawn_provenance":{"origin":{"kind":"session"},
+                   "owner":{"kind":"session","harness":"codex",
+                            "session_id":"01a0ee3f-heir","cwd":"/w"}}}"#);
+        let rows = merge_rows(derive_rows(&raw, NOW).unwrap(), &[]);
+        let kid = rows.iter().find(|r| r.name == "xfcb4-w5").unwrap();
+        assert_eq!(kid.spawned_by_session.as_deref(), Some("01a0ee3f-heir"));
+        assert_eq!(kid.spawned_by_name.as_deref(), Some("kestrel-heir"));
     }
 
     #[test]

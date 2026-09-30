@@ -154,6 +154,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PROBE_FNO` | rs | Names the fno porcelain the isolated live journey drives; the default is the PATH `fno`, and the override exists so a probe run can exercise a specific checkout. |
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
+| `FNO_PR_BASE_LINEAGE_OK` | rs | Set to `stale-acknowledged` by an operator who has judged a stale-base lineage refusal: the base-lineage probe records a gate-escape event and clears instead of refusing. |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
 | `FNO_PR_STATUS_TTL` | rs | unclear: crates/fno-agents/src/pr_status/cache.rs:32 |
 | `FNO_PY` | rs | Overrides the resolved fno-py console script path (tests and nonstandard installs); empty falls through to the resolver legs. |
@@ -197,6 +198,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_TEST_LIVE_CARGO_CWDS` | rs | Test seam: colon-separated cwd paths that stand in for a live `lsof` scan of running cargo processes, so cargo_build_dirs tests can drive the tree-to-shard mapping without a real cargo process. |
 | `FNO_TEST_MARKER_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:97 |
 | `FNO_TEST_MODE` | py | unclear: cli/src/fno/setup/doctor.py:229 |
+| `FNO_TEST_NEVER_WAIT_AFTER_SECS` | rs | Test seam: seconds a cargo admission waiter uses before printing the CI-first push reminder (default 180), so lifecycle tests assert the nudge without waiting three minutes. |
 | `FNO_TEST_OWNED_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:109 |
 | `FNO_TEST_OWNER_BIRTH` | rs | unclear: crates/fno-agents/src/test_run.rs:145 |
 | `FNO_TEST_OWNER_PID` | rs | unclear: crates/fno-agents/src/test_run.rs:144 |
@@ -267,8 +269,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `UV_CACHE_DIR` | rs | Authoritative uv cache directory: the cache root a bounded codex worker is granted as a writable root; set but missing grants nothing (no fallback, uv reads exactly this variable). |
 | `WORKTREE_STATUS_REGISTRY` | py | unclear: cli/src/fno/agents/registry.py:2525 |
 | `XDG_CACHE_HOME` | rs | unclear: crates/fno/src/bootstrap.rs:1395 |
+| `XDG_CONFIG_HOME` | rs | Relocates OpenCode's config dir ($XDG_CONFIG_HOME/opencode) ahead of the ~/.config/opencode default; unset reads the default. |
 | `XDG_DATA_HOME` | rs | Relocates uv's tools dir where the fno-py console script is resolved; unset reads the default ~/.local/share/uv layout. |
 | `XDG_RUNTIME_DIR` | py | unclear: cli/src/fno/mcp/sidecar.py:100 |
 | `XDG_STATE_HOME` | py | unclear: cli/src/fno/mcp/client.py:118 |
-| `XDG_CONFIG_HOME` | rs | Relocates OpenCode's config dir ($XDG_CONFIG_HOME/opencode) ahead of the ~/.config/opencode default; unset reads the default. |
 | `ZDOTDIR` | rs | unclear: crates/fno/src/pty.rs:1770 |

@@ -1042,14 +1042,36 @@ pub(crate) async fn feed_keys(
                         m.popup.follow_sel(trows);
                     }
                 }
+                // The node_created modal's composer gesture, carried over
+                // from the line-built view: b opens the agent composer
+                // pre-filled with the node-bound blueprint command.
+                ModalKey::Byte(b'b') => {
+                    let launch = view.feed_detail.as_ref().and_then(|m| {
+                        feed_detail::plan_node(&m.item)
+                            .map(|node| (node.to_owned(), m.item.cwd.clone()))
+                    });
+                    if let Some((node, cwd)) = launch {
+                        if super::sideline::show_composer(view, sock_w).await? {
+                            view.feed_detail = None;
+                            if let Err(err) = super::agent_launcher::open_with(
+                                view,
+                                format!("/fno:blueprint {node}"),
+                                cwd.as_deref(),
+                                node,
+                            ) {
+                                view.set_notice(err);
+                            }
+                        }
+                    }
+                }
+                // The selected row's action, never the modal's dismissal:
+                // inspecting stays open so the next field is one arrow away.
                 ModalKey::Down => {
                     if let Some(m) = view.feed_detail.as_mut() {
                         m.popup.nav(crate::popup::NavDir::Down);
                         m.popup.follow_sel(trows);
                     }
                 }
-                // The selected row's action, never the modal's dismissal:
-                // inspecting stays open so the next field is one arrow away.
                 ModalKey::Enter => feed_detail::execute_selected(view, sock_w).await?,
                 ModalKey::Byte(b'y') => feed_detail::copy_selected(view),
                 _ => {}

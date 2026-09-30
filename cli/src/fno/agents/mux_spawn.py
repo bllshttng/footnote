@@ -78,6 +78,7 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import (
+    build_heir_owner,
     calling_agent_row,
     crown_validation_error,
     journal_spawn_crown,
@@ -4483,6 +4484,7 @@ def dispatch_spawn_pane(
                 assert crown_plan is not None  # set by the pre-launch call above
                 rows, crown_outcome, crown_cleared = settle_spawn_crown(
                     rows, scope=crown_scope, plan=crown_plan, heir=name,
+                    heir_owner=build_heir_owner(provider, stored_session_uuid, str(cwd)),
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True
