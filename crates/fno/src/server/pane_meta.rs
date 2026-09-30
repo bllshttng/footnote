@@ -187,19 +187,21 @@ mod tests {
     // the layout layer falls back to the spawn-captured name when this
     // returns None.
     #[test]
-    fn registry_name_beats_the_spawn_captured_self() {
+    fn registry_name_reads_the_hosting_row() {
+        // A rename rewrites the registry row; the pane's FNO_AGENT_SELF
+        // env is frozen at spawn. The chrome reads the row (live row
+        // first); the layout layer falls back to the spawn-captured name
+        // when this returns None. An unhosted pane reads None.
         let agents = vec![
             agent("kestrel-heir", Some(("mux0", 7)), true),
             agent("bob", Some(("mux0", 7)), false),
         ];
-        let got = pane_registry_name(&agents, "mux0", 7);
-        assert_eq!(got.as_deref(), Some("bob"));
-    }
-
-    #[test]
-    fn pane_registry_name_is_none_for_an_unhosted_pane() {
-        let agents = vec![agent("other", Some(("mux0", 9)), false)];
-        assert_eq!(pane_registry_name(&agents, "mux0", 7), None);
+        assert_eq!(
+            pane_registry_name(&agents, "mux0", 7).as_deref(),
+            Some("bob")
+        );
+        let other = vec![agent("other", Some(("mux0", 9)), false)];
+        assert_eq!(pane_registry_name(&other, "mux0", 7), None);
     }
 
     fn agent(name: &str, mux: Option<(&str, u64)>, exited: bool) -> RegistryAgent {

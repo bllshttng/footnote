@@ -26,7 +26,7 @@ fn counter_core(bytes: &[u8]) -> (Core, u64) {
 }
 
 #[test]
-fn pane_counters_count_fed_bytes_bursts_and_cpu() {
+fn pane_counters_count_fed_bytes_and_hidden_panes_never_composite() {
     let (core, pid) = counter_core(b"hello");
     let c = &core.panes[&pid].stats;
     assert_eq!(c.bytes_in.load(Ordering::Relaxed), 5);
@@ -35,6 +35,13 @@ fn pane_counters_count_fed_bytes_bursts_and_cpu() {
         c.cpu_ns.load(Ordering::Relaxed) > 0,
         "feeding one burst must attribute nonzero handling time"
     );
+    // No client is attached, so broadcast_pane's visible-gate returns
+    // before vt.frame(): the counter set must show fed-but-never-
+    // composited, the exact reading that separates feeding from display.
+    let (core, pid) = counter_core(b"data");
+    let c = &core.panes[&pid].stats;
+    assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
+    assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
 }
 
 #[test]
@@ -64,17 +71,6 @@ fn watcherless_pane_stamps_last_output_on_every_burst() {
         core.panes[&pid].last_output > registered,
         "a second burst must advance the registration stamp"
     );
-}
-
-#[test]
-fn hidden_pane_is_fed_but_never_composites() {
-    // No client is attached, so broadcast_pane's visible-gate returns
-    // before vt.frame(): the counter set must show fed-but-never-
-    // composited, the exact reading that separates feeding from display.
-    let (core, pid) = counter_core(b"data");
-    let c = &core.panes[&pid].stats;
-    assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
-    assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
 }
 
 #[test]

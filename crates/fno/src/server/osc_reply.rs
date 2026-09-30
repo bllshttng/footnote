@@ -130,37 +130,31 @@ mod tests {
     }
 
     #[test]
-    fn a_ground_query_gets_the_theme_base() {
-        let r = replies(b"\x1b]11;?\x1b\\", &paper());
-        assert_eq!(r, b"\x1b]11;rgb:f7f7/f7f7/f7f7\x1b\\".to_vec());
-    }
-
-    #[test]
-    fn bel_terminated_queries_answer_too() {
-        let r = replies(b"\x1b]10;?\x07", &paper());
-        assert_eq!(r, b"\x1b]10;rgb:1414/1414/1414\x1b\\".to_vec());
-    }
-
-    #[test]
-    fn palette_queries_answer_each_slot_and_sets_are_ignored() {
-        let r = replies(b"\x1b]4;1;?;2;?\x1b\\", &paper());
+    fn osc_query_answers_track_the_active_theme() {
+        let t = paper();
+        // ST-terminated ground query answers the theme base.
         assert_eq!(
-            r,
+            replies(b"\x1b]11;?\x1b\\", &t),
+            b"\x1b]11;rgb:f7f7/f7f7/f7f7\x1b\\".to_vec()
+        );
+        // BEL-terminated fg query answers the theme fg.
+        assert_eq!(
+            replies(b"\x1b]10;?\x07", &t),
+            b"\x1b]10;rgb:1414/1414/1414\x1b\\".to_vec()
+        );
+        // Palette queries answer every interleaved slot; sets and other OSC
+        // numbers answer nothing.
+        assert_eq!(
+            replies(b"\x1b]4;1;?;2;?\x1b\\", &t),
             b"\x1b]4;1;rgb:9696/5353/5151\x1b\\\x1b]4;2;rgb:4646/7777/4848\x1b\\".to_vec()
         );
-        assert!(replies(b"\x1b]4;0;#ff0000\x1b\\", &paper()).is_empty());
-        assert!(replies(b"\x1b]0;title\x07", &paper()).is_empty());
-    }
-
-    #[test]
-    fn chunks_without_a_complete_query_stay_silent() {
-        assert!(replies(b"\x1b]11;?", &paper()).is_empty());
-        assert!(replies(b"text only", &paper()).is_empty());
-    }
-
-    #[test]
-    fn colorfgbg_tracks_the_ground() {
-        assert_eq!(colorfgbg(&paper()), "0;15");
+        assert!(replies(b"\x1b]4;0;#ff0000\x1b\\", &t).is_empty());
+        assert!(replies(b"\x1b]0;title\x07", &t).is_empty());
+        // A chunk without a complete query stays silent.
+        assert!(replies(b"\x1b]11;?", &t).is_empty());
+        assert!(replies(b"text only", &t).is_empty());
+        // The spawn-time ground signal tracks the same ladder.
+        assert_eq!(colorfgbg(&t), "0;15");
         let (dark, _) = Theme::from_name("footnote-superscript");
         assert_eq!(colorfgbg(&dark), "15;0");
     }

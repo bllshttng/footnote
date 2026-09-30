@@ -612,17 +612,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_theme_falls_back_with_a_notice() {
+    fn from_name_ladder_warns_unknown_and_defaults_silently() {
         let (t, warn) = Theme::from_name("solarized-light");
         assert_eq!(t.name, "footnote-superscript");
         let w = warn.expect("unknown theme must warn");
         assert!(w.0.contains("solarized-light"), "{}, got {w:?}", w.0);
         assert!(w.0.contains("footnote-superscript"));
-    }
-
-    #[test]
-    fn empty_name_is_the_default_silently() {
-        // An unset config key reads as "" and means "no preference", not a typo.
+        // An unset config key reads as "" and means "no preference", not a
+        // typo: the default lands silently.
         let (t, warn) = Theme::from_name("");
         assert_eq!(t.name, "footnote-superscript");
         assert!(warn.is_none(), "no preference is not a warning");
@@ -949,7 +946,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_theme_files_generate_from_the_token_tables() {
+    fn committed_terminal_theme_files_match_the_token_tables() {
+        // The asset files are generated from the SAME DARK/LIGHT tables
+        // terminal16_slot reads; this pins them so the two can never drift.
+
         let (t, _) = Theme::from_name("footnote-superscript");
         let ghostty = terminal_theme_file(&t, "ghostty").expect("ghostty file");
         assert!(
@@ -966,12 +966,6 @@ mod tests {
         assert!(terminal_theme_file(&t, "alacritty").is_none());
         let (term, _) = Theme::from_name("terminal");
         assert!(terminal_theme_file(&term, "ghostty").is_none());
-    }
-
-    #[test]
-    fn committed_terminal_theme_files_match_the_token_tables() {
-        // The asset files are generated from the SAME DARK/LIGHT tables
-        // terminal16_slot reads; this pins them so the two can never drift.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/terminal");
         for name in ["footnote-superscript", "footnote-paper"] {
             let (t, _) = Theme::from_name(name);
