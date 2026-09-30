@@ -834,6 +834,7 @@ pub(crate) fn decide_with_payload(
         ref reason,
         ref timeout,
         ref pr,
+        ref task_id,
     } = intent
     {
         let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
@@ -846,12 +847,19 @@ pub(crate) fn decide_with_payload(
         let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
         if can_idle && renewed {
             let (blocker, pr_number) = watch_target(reason, pr.as_deref());
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
             emit(
                 "loop_check_watch_idle",
                 serde_json::json!({
                     "session_id": session_id,
                     "pr": pr_number,
                     "blocker": blocker,
+                    "task_id": task_id,
+                    "expires_at_ms": watch_lease::watch_expiry_ms(timeout.as_deref(), now_ms),
                     "declared_timeout": timeout.clone().unwrap_or_default(),
                     "reason": reason,
                     "lease_ms": window_ms

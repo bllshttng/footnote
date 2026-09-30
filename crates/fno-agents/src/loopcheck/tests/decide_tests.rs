@@ -1437,6 +1437,9 @@ fn watch_idle_window_defaults_clamps_and_slacks() {
         watch_window_ms(Some("soon")),
         30 * 60_000 + watch_lease::WATCH_SLACK_MS
     );
+    // The event deadline uses the normalized watch duration, not claim slack.
+    assert_eq!(watch_lease::watch_expiry_ms(Some("30m"), 1_000), 1_801_000);
+    assert_eq!(watch_lease::watch_expiry_ms(Some("1m"), 1_000), 301_000);
 }
 
 #[test]

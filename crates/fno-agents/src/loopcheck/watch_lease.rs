@@ -11,10 +11,19 @@ pub(super) const WATCH_SLACK_MS: i64 = 12 * 60_000;
 /// (never trust the tag for an unbounded hold) plus slack. Defaults to 30m when
 /// the tag omits or mangles `timeout`, giving the ~40m default lease.
 pub(super) fn watch_window_ms(timeout: Option<&str>) -> i64 {
-    let declared = timeout
+    watch_timeout_ms(timeout) + WATCH_SLACK_MS
+}
+
+/// The actual watch lifetime, separate from the longer claim lease window.
+pub(super) fn watch_timeout_ms(timeout: Option<&str>) -> i64 {
+    timeout
         .and_then(crate::claims::parse_ttl_ms)
-        .unwrap_or(30 * 60_000);
-    declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
+        .unwrap_or(30 * 60_000)
+        .clamp(5 * 60_000, 2 * 3_600_000)
+}
+
+pub(super) fn watch_expiry_ms(timeout: Option<&str>, now_ms: i64) -> i64 {
+    now_ms.saturating_add(watch_timeout_ms(timeout))
 }
 
 /// What a `<watching>` tag says the session waits on: the blocker class the
@@ -45,7 +54,8 @@ turn with the tag. A PR wait: background Bash `fno do pr wait <N> --until settle
 --timeout=30m` (REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, \
 which spends the shared GraphQL quota; a review wait is `--until review`), then `<watching \
 reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">`. A local run (a test suite, a build, a review \
-fork) is its own background task, then `<watching reason=\"local\" timeout=\"30m\">` with no \
+fork) is its own background task; include its actual harness task id \
+(e.g. task-123) in `<watching reason=\"local\" task_id=\"task-123\" timeout=\"30m\">` with no \
 pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
 instead of re-waking every tick.";
 
@@ -519,8 +529,10 @@ mod tests {
                 reason: "local".into(),
                 pr: None,
                 timeout: Some("30m".into()),
+                task_id: Some("task-123".into()),
             }
         );
+        assert!(CONTINUE_WORKING.contains("include its actual harness task id"));
         // AC2-ERR: the PR form stays taught, PR zero never is.
         assert!(CONTINUE_WORKING.contains("reason=\"ci|review\" pr=\"<N>\""));
         assert!(!CONTINUE_WORKING.contains("pr=\"0\""));

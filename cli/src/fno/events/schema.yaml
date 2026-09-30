@@ -4444,7 +4444,7 @@ event_types:
     description: "Emitted when a loop-check fire idles a session non-terminally after the agent declared a <watching> tag. The idle renews the claim lease over the watch window and reads no PR state; the session parks until its harness-tracked watcher fires."
     sources: [hook]
     data:
-      required: [session_id, pr, blocker, lease_ms]
+      required: [session_id, pr, blocker, lease_ms, task_id, expires_at_ms]
       properties:
         session_id:
           type: string
@@ -4456,6 +4456,12 @@ event_types:
           type: string
           enum: [ci, review, merge_slot, local, unknown]
           description: "The blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), 'local' (a run on this machine: a test suite, a build, a review fork), or 'unknown' (any other reason; the idle verifies nothing)."
+        task_id:
+          type: [string, "null"]
+          description: "Harness task identifier from the <watching> tag, or null when the tag does not name one. Missing ids remain visible and are never guessed."
+        expires_at_ms:
+          type: integer
+          description: "Absolute Unix expiry time in milliseconds for the declared watch timeout, normalized to [5m,2h]; excludes claim-lease slack."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
