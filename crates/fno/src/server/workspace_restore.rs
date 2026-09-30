@@ -6,6 +6,53 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// Test gate for the post-resume registry rebind (x-85c3): off in tests
+    /// unless a test opts in, so the existing restore tests never shell the
+    /// real fno-agents binary from apply.
+    static RESTORE_REBIND_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct RestoreRebindGuard;
+
+#[cfg(test)]
+impl RestoreRebindGuard {
+    pub(crate) fn enable() -> Self {
+        RESTORE_REBIND_ENABLED.with(|f| f.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RestoreRebindGuard {
+    fn drop(&mut self) {
+        RESTORE_REBIND_ENABLED.with(|f| f.set(false));
+    }
+}
+
+#[cfg(test)]
+fn rebind_enabled() -> bool {
+    RESTORE_REBIND_ENABLED.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn rebind_enabled() -> bool {
+    true
+}
+
+/// One member's post-resume registry rebind: the restore walk just spawned
+/// its pane, and the registry row still names the dead one.
+struct RebindJob {
+    member: String,
+    harness: String,
+    session: String,
+    mux_session: String,
+    pane: u64,
+    pid: u32,
+}
+
 impl super::Core {
     /// `fno mux workspace restore`, phase 1: split the run. A dry
     /// run never resolves plans (it reports classifications and spawns
@@ -73,6 +120,13 @@ impl super::Core {
     ) {
         use self::portal_reach::RESTORE_CLIENT;
         let candidates = self.restore_candidates(harness.as_deref());
+        // (x-85c3) One rebind job per resumed member whose registry row
+        // carried a native session id: the pane is running, and the row it
+        // left behind names the DEAD pane, so mail, pane send, and
+        // `fno agents resume` refuse it until this lands. The jobs run
+        // off-loop after the walk (the tail of this fn); the dry run
+        // reports nothing and spawns nothing.
+        let mut rebind_jobs: Vec<RebindJob> = Vec::new();
         // A worker NAME the store holds more than once (distinct sessions,
         // one display name - a supported state) refuses up front instead of
         // reaching resume_one: the second twin would find the first one's
@@ -165,6 +219,11 @@ impl super::Core {
                 )
                 .ok();
             }
+            // The native session id rides the rebind job (x-85c3); `member`
+            // moves into resume_one below.
+            let rebind_session = (!dry_run && rebind_enabled())
+                .then(|| member.harness_session_id.clone())
+                .flatten();
             let outcome =
                 self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
             self.staged_resume_argv = None;
@@ -223,6 +282,28 @@ impl super::Core {
                     notice: None,
                 },
             };
+            // (x-85c3) Collect the rebind job BEFORE the row consumes the
+            // member: a resumed member whose row carried a native session id
+            // and a child pid rebinds off-loop; the dry run never does.
+            if !dry_run && rebind_enabled() && row.outcome == "resumed" {
+                if let (Some(harness), Some(sid)) = (
+                    row.harness.as_deref(),
+                    rebind_session.as_deref().filter(|s| !s.trim().is_empty()),
+                ) {
+                    if let Some(pane) = row.pane {
+                        if let Some(pid) = self.panes.get(&pane).and_then(|p| p.pty.child_pid()) {
+                            rebind_jobs.push(RebindJob {
+                                member: row.member.clone(),
+                                harness: harness.to_string(),
+                                session: sid.to_string(),
+                                mux_session: self.session_name.clone(),
+                                pane,
+                                pid,
+                            });
+                        }
+                    }
+                }
+            }
             rows.push(row);
         }
         rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
@@ -247,6 +328,57 @@ impl super::Core {
                 "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
             ));
         }
-        let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
+        if rebind_jobs.is_empty() || !rebind_enabled() {
+            let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
+            return;
+        }
+        // Off-loop rebind (x-85c3): each job shells `fno-agents pane-rebind`
+        // bounded, and the reply waits for every receipt so the verb's own
+        // report carries it. The pane is running either way, so a failed
+        // rebind degrades to its named notice on the row, never a refusal.
+        tokio::spawn(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for job in rebind_jobs {
+                set.spawn(async move {
+                    let notice = match agent_actions::run_pane_rebind(
+                        &job.harness,
+                        &job.session,
+                        &job.mux_session,
+                        job.pane,
+                        job.pid,
+                    )
+                    .await
+                    {
+                        Ok(line) => line,
+                        Err(reason) => format!("registry row rebind failed: {reason}"),
+                    };
+                    (job.member, notice)
+                });
+            }
+            let mut notices: HashMap<String, String> = HashMap::new();
+            while let Some(joined) = set.join_next().await {
+                if let Ok((member, notice)) = joined {
+                    notices.insert(member, notice);
+                }
+            }
+            for row in rows.iter_mut() {
+                if let Some(n) = notices.get(&row.member) {
+                    // The codex resume form can land on its paused-goal
+                    // prompt instead of a live turn; the receipt names it
+                    // because the verb cannot answer it from here.
+                    let dialog = match row.harness.as_deref() {
+                        Some("codex") => {
+                            "; codex may show its resume prompt in the pane - answer it there"
+                        }
+                        _ => "",
+                    };
+                    row.notice = Some(match row.notice.take() {
+                        Some(prev) => format!("{prev}; {n}{dialog}"),
+                        None => format!("{n}{dialog}"),
+                    });
+                }
+            }
+            let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
+        });
     }
 }

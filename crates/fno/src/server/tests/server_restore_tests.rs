@@ -2216,3 +2216,113 @@ fn focusing_a_held_claude_pane_runs_the_revive_plan_even_when_the_session_is_liv
         core.reap_pane(pid);
     }
 }
+
+#[tokio::test]
+async fn workspace_restore_rebinds_the_resumed_members_registry_row() {
+    // (x-85c3) A resumed member whose registry row carried a native session
+    // id rebinds off-loop: the row names the new pane, carries the child
+    // pid, and the receipt row's notice says so. The rebind runs against a
+    // fake fno-agents binary; the gate keeps every other test inert.
+    let _gate = crate::server::workspace_restore::RestoreRebindGuard::enable();
+    static REBIND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = REBIND_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-codex-one"]);
+    let tmp = std::env::temp_dir().join(format!("fno-x-85c3-rebind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let argv_log = tmp.join("argv.log");
+    let receipt = r#"{"rebound":"t-codex-one","mux":{"session":"test","pane_id":3991},"pid":4242,"status":"live"}"#;
+    std::fs::write(
+        tmp.join("fake-agents.sh"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf '{receipt}\\n'\n",
+            argv_log.display()
+        ),
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            tmp.join("fake-agents.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let prev_bin = std::env::var_os("FNO_AGENTS_BIN");
+    std::env::set_var("FNO_AGENTS_BIN", tmp.join("fake-agents.sh"));
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-ws-restore-rebind");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        Tab {
+            name: None,
+            id: 70,
+            root: Node::Leaf(shell),
+            focus: shell,
+        },
+    );
+    core.agents = vec![RegistryAgent {
+        harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+        harness: Some("codex".into()),
+        name: "t-codex-one".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        exited: true,
+        liveness: agents_view::Liveness::Dead,
+        ..Default::default()
+    }];
+    core.squad_members.insert(
+        7u64,
+        vec![stored_worker(
+            "t-codex-one",
+            "codex",
+            "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+            cwd.to_string_lossy().as_ref(),
+        )],
+    );
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.handle(CoreMsg::WorkspaceRestoreApply {
+        dry_run: false,
+        harness: None,
+        plans: HashMap::new(),
+        reply: tx,
+    });
+    let rows = match rx.await.expect("a reply") {
+        ServerMsg::WorkspaceRestored { rows } => rows,
+        other => panic!("expected WorkspaceRestored, got {other:?}"),
+    };
+    assert_eq!(rows.len(), 1, "the worker resumed");
+    assert_eq!(rows[0].outcome, "resumed", "{:?}", rows[0]);
+    let notice = rows[0].notice.as_deref().expect("the rebind notice");
+    assert!(
+        notice.contains("rebound") && notice.contains("pane 3991"),
+        "the receipt names the rebind: {notice}"
+    );
+    let argv = std::fs::read_to_string(&argv_log).unwrap();
+    assert!(
+        argv.contains("pane-rebind")
+            && argv.contains("01a027ad-fe00-7c12-a116-9ee37c6bdfec")
+            && argv.contains("--pane"),
+        "the verb was asked to rebind: {argv}"
+    );
+
+    let resumed_pane = rows[0].pane.expect("resumed row names its pane");
+    core.reap_pane(resumed_pane);
+    let _ = std::fs::remove_dir_all(&tmp);
+    match prev_bin {
+        Some(v) => std::env::set_var("FNO_AGENTS_BIN", v),
+        None => std::env::remove_var("FNO_AGENTS_BIN"),
+    }
+}
