@@ -352,12 +352,15 @@ fn a_note_names_the_state_it_replaced() {
         "{stdout}"
     );
     // Second note: the receipt names revision 1, its size and its author.
+    // The writer differs from the prior author, so --replace marks the
+    // take-over deliberate.
     let (code, stdout, stderr) = note_captured(
         &[
             "t-1",
             "probe",
             "--self-session",
             "sess-bbbb2222",
+            "--replace",
             "--json",
             "--quiet",
             &g[0],
@@ -385,6 +388,7 @@ fn a_note_names_the_state_it_replaced() {
             "probe",
             "--self-session",
             "sess-cccc3333",
+            "--replace",
             "--quiet",
             &g[0],
             &g[1],
@@ -518,12 +522,15 @@ fn a_repeat_note_names_encounter_once_until_one_exists() {
     assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
 
     // A different session never gets the hint, whatever the prior author.
+    // --replace names the cross-session take-over deliberate; the hint is
+    // about the encounter verb, not authorship.
     let (code, stdout, stderr) = note_captured(
         &[
             "t-1",
             "fourth",
             "--self-session",
             "sess-bbbb2222",
+            "--replace",
             "--quiet",
             &g[0],
             &g[1],
@@ -532,4 +539,192 @@ fn a_repeat_note_names_encounter_once_until_one_exists() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
+}
+
+/// The cross-session guard: a note over a revision another session wrote
+/// refuses (exit 3) before anything is written, names the explicit door and
+/// the history readback, and --quiet does not bypass it.
+#[test]
+fn a_cross_session_note_refuses_before_the_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut row = fixture("c-1", "in_progress");
+    row["current_state"] = json!({
+        "body": "candor original finding text",
+        "revision": 1,
+        "updated_at": "2026-09-30T20:00:00+00:00",
+        "source_session_id": "sess-candor",
+        "source_harness": "claude",
+    });
+    write_graph(&graph, &[row]);
+    let g = graph_arg(&graph);
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "c-1",
+            "vellum replacement",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("note refused"), "{stderr}");
+    assert!(
+        stderr.contains("--replace"),
+        "names the explicit door: {stderr}"
+    );
+    assert!(
+        stderr.contains("notes history c-1"),
+        "names the history readback: {stderr}"
+    );
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("c-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(1));
+    assert_eq!(
+        row[node_state::STATE_KEY]["body"],
+        json!("candor original finding text")
+    );
+    // A refusal is not a replacement: nothing entered the journal either.
+    // count() reads 0 for a journal that was never created.
+    let total = fno_agents::backlog::note_history::count(&graph, Some("c-1"));
+    assert_eq!(total, 0, "the refusal must not journal");
+}
+
+/// --replace is the explicit door: the write lands at the next revision and
+/// the exact prior revision stays readable in history.
+#[test]
+fn an_explicit_replace_writes_and_keeps_the_prior_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut row = fixture("c-1", "in_progress");
+    row["current_state"] = json!({
+        "body": "candor original finding text",
+        "revision": 1,
+        "updated_at": "2026-09-30T20:00:00+00:00",
+        "source_session_id": "sess-candor",
+        "source_harness": "claude",
+    });
+    write_graph(&graph, &[row]);
+    let g = graph_arg(&graph);
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "c-1",
+            "vellum replacement",
+            "--json",
+            "--quiet",
+            "--replace",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("c-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(2));
+    assert_eq!(
+        row[node_state::STATE_KEY]["body"],
+        json!("vellum replacement")
+    );
+    let (records, total) =
+        fno_agents::backlog::note_history::read(&graph, Some("c-1"), 0, 50).unwrap();
+    assert_eq!(total, 1, "the prior revision is journaled");
+    assert_eq!(records[0]["reason"], json!("state_replaced"));
+    assert_eq!(records[0]["prior_revision"], json!(1));
+    assert_eq!(
+        fno_agents::backlog::note_history::record_body(&records[0]["original"]),
+        "candor original finding text"
+    );
+}
+
+/// The same session replacing its own state never needs --replace.
+#[test]
+fn the_same_session_replaces_its_own_state_without_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut row = fixture("c-1", "in_progress");
+    row["current_state"] = json!({
+        "body": "mine already",
+        "revision": 1,
+        "updated_at": "2026-09-30T20:00:00+00:00",
+        "source_session_id": "sess-candor",
+        "source_harness": "claude",
+    });
+    write_graph(&graph, &[row]);
+    let g = graph_arg(&graph);
+    let (code, _, stderr) = note_captured(
+        &[
+            "c-1",
+            "my update",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-candor",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("c-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(row[node_state::STATE_KEY]["body"], json!("my update"));
+}
+
+/// A writer with no identity over an authored state cannot prove it wrote
+/// the prior revision, so the guard holds for it too.
+#[test]
+fn an_unidentified_writer_over_an_authored_state_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut row = fixture("c-1", "in_progress");
+    row["current_state"] = json!({
+        "body": "candor original finding text",
+        "revision": 1,
+        "updated_at": "2026-09-30T20:00:00+00:00",
+        "source_session_id": "sess-candor",
+        "source_harness": "claude",
+    });
+    write_graph(&graph, &[row]);
+    let g = graph_arg(&graph);
+    let (code, _, stderr) = note_captured(
+        &[
+            "c-1",
+            "anonymous overwrite",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("c-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        row[node_state::STATE_KEY]["body"],
+        json!("candor original finding text")
+    );
 }
