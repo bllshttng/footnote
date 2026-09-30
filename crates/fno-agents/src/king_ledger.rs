@@ -231,7 +231,13 @@ fn bar_and_legend(fold: &Value) -> String {
     format!("<div class=\"bar\" role=\"img\" aria-label=\"{aria}\">{segs}</div><ul class=\"legend\">{legend}</ul>")
 }
 
-fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>, needs: &NeedsUser) -> String {
+fn crown_card(
+    crown: &Value,
+    titles: &BTreeMap<String, &Value>,
+    needs: &NeedsUser,
+    workers: &Result<crate::ledger_workers::Workers, String>,
+    generated: &str,
+) -> String {
     let level = crown.get("level").and_then(|l| l.as_i64());
     let card_cls = if level == Some(1) {
         "crown root"
@@ -297,6 +303,12 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>, needs: &NeedsUse
         out.push_str(&format!("<p class=\"holder\">{}</p>", esc(reason)));
     }
     out.push_str(&needs_user_block(scope_txt, needs));
+    if let Err(reason) = workers {
+        out.push_str(&format!(
+            "<p class=\"holder\">workers not read: {}</p>",
+            esc(reason)
+        ));
+    }
     if s_str(&fold, "status") == Some("unresolved") {
         out.push_str(&format!(
             "<p class=\"holder\">scope fold: unresolved - {}</p>",
@@ -324,7 +336,16 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>, needs: &NeedsUse
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|n| active_row(n, titles))
+            .map(|n| {
+                let mut row = active_row(n, titles);
+                if let Ok(workers) = workers {
+                    let graph = s_str(n, "id").and_then(|id| titles.get(id).copied());
+                    row.push_str(&crate::ledger_workers::node_rows(
+                        n, graph, workers, generated,
+                    ));
+                }
+                row
+            })
             .collect();
         out.push_str(&format!(
             "<div class=\"tscroll\"><table><caption>Active territory</caption>\
@@ -917,13 +938,14 @@ fn read_court(path: &Path, stdin: &mut dyn std::io::Read) -> Result<String, Stri
 
 /// The whole page. Four verdict states; an unreadable registry and an empty
 /// court are measurements, never a blank or falsely healthy page.
-pub fn render(
+pub(crate) fn render(
     court: &Value,
     entries: &[Value],
     generated: &str,
     reload_s: i64,
     split_read: &Result<crate::crown_split::CrownSplits, String>,
     board: Option<&Value>,
+    workers: &Result<crate::ledger_workers::Workers, String>,
 ) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
@@ -936,12 +958,12 @@ pub fn render(
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>Rundown</title>\
          <link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Fraunces:wght@500;700&family=JetBrains+Mono:wght@400;600&family=Public+Sans:wght@400;600&display=swap\">\
-         <style>{CSS}{NEEDS_CSS}</style></head><body><div class=\"wrap\">\
+         <style>{CSS}{NEEDS_CSS}{}</style></head><body><div class=\"wrap\">\
          <header class=\"masthead\">\
          <span class=\"eyebrow\">fno agents org · {gen} · <span class=\"age\" data-generated=\"{gen}\"></span></span>\
          <h1>Rundown</h1>\
          <p class=\"dek\">Who leads which team, what each team still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
-         </header>"
+         </header>", crate::ledger_workers::CSS
     );
     out.push_str(&verdict_card(court, &summary, split_read));
     let needs = needs_user(board);
@@ -972,7 +994,7 @@ pub fn render(
                     out.push_str("<div class=\"grid\">");
                     grid_open = true;
                 }
-                out.push_str(&crown_card(c, &titles, &needs));
+                out.push_str(&crown_card(c, &titles, &needs, workers, generated));
             }
             if grid_open {
                 out.push_str("</div>");
@@ -1141,6 +1163,7 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
         cwd: std::env::current_dir().ok(),
         ..Default::default()
     });
+    let workers = crate::ledger_workers::read();
     if let Err(e) = write_atomic(
         &out_path,
         &render(
@@ -1150,6 +1173,7 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
             reload,
             &split_read,
             Some(&board),
+            &workers,
         ),
     ) {
         eprintln!("fno-agents reign-ledger: {e}");
@@ -1172,6 +1196,7 @@ mod tests {
             60,
             &Ok(crate::crown_split::CrownSplits::default()),
             None,
+            &Ok(Default::default()),
         )
     }
 
@@ -1204,6 +1229,55 @@ mod tests {
         let page = page(court, vec![]);
         assert_eq!(page.matches("<article class=\"crown").count(), 2);
         assert!(page.contains("e-1") && page.contains("king"));
+        let rows = vec![
+            json!({"name":"t-x-1-glm", "node":"x-1", "harness":"claude", "harness_session_id":"current", "model":"opus", "model_basis":"observed", "status":"writing", "status_basis":"transcript", "context_used_pct":26, "context_used_tokens":258687, "context_window_tokens":1000000, "context_measured_at":"2026-09-12T00:00:00Z", "progress":"awaiting-operator", "progress_basis":"report", "last_message":"RESULT: BLOCKED need a ruling <script>"}),
+            json!({"name":"proof-x-39dc-h3", "harness":"codex", "status":"quiet"}),
+            json!({"name":"lead-hidden", "node":"x-1", "crown":{"scope":"e-1"}, "status":"writing"}),
+        ];
+        let workers = Ok(crate::ledger_workers::by_node(&rows));
+        let mut crown = base_crown();
+        crown["scope_nodes"]["nodes"] =
+            json!([{"id":"x-1", "status":"in_progress"}, {"id":"x-39dc", "status":"in_progress"}]);
+        let entries = vec![
+            json!({"id":"x-1", "sessions":[{"session_id":"current", "harness":"claude"}, {"session_id":"former", "harness":"claude", "phase":"execute", "observed_model":"sonnet", "ended_at":"yesterday"}]}),
+        ];
+        let html = render(
+            &base_court(json!([crown.clone()])),
+            &entries,
+            "2026-09-12T00:00:00Z",
+            60,
+            &split_ok(),
+            None,
+            &workers,
+        );
+        assert_eq!(html.matches("<details class=\"worker\"").count(), 2);
+        assert!(
+            html.contains("t-x-1-glm")
+                && html.contains("claude")
+                && html.contains("opus (observed)")
+                && html.contains("writing (transcript)")
+        );
+        assert!(html.contains("proof-x-39dc-h3") && !html.contains("lead-hidden"));
+        assert!(html.contains("26% used") && html.contains("258,687 of 1,000,000"));
+        assert!(html.contains("Needs-you: RESULT: BLOCKED need a ruling &lt;script&gt;"));
+        assert!(
+            html.contains("former sessions")
+                && html.contains("former")
+                && html.contains("yesterday")
+        );
+        let failure = render(
+            &base_court(json!([crown])),
+            &entries,
+            "2026-09-12T00:00:00Z",
+            60,
+            &split_ok(),
+            None,
+            &Err("fno exited 1".into()),
+        );
+        assert!(failure.contains("workers not read: fno exited 1"));
+        assert!(crate::ledger_workers::parse_roster(1, "[]", "failure").is_err());
+        assert!(crate::ledger_workers::parse_roster(0, "{}", "").is_err());
+        assert!(crate::ledger_workers::parse_roster(0, "[{}]", "").is_err());
     }
 
     #[test]
@@ -1433,6 +1507,7 @@ mod tests {
             60,
             &splits,
             None,
+            &Ok(Default::default()),
         );
         assert!(page.contains("The court disagrees with itself."));
         assert!(page.contains(
@@ -1457,6 +1532,7 @@ mod tests {
             60,
             &splits,
             None,
+            &Ok(Default::default()),
         );
         assert!(page.contains("The court agrees with itself."));
         assert!(page.contains(
@@ -1473,6 +1549,7 @@ mod tests {
             60,
             &Err("crown split read failed: boom".to_string()),
             None,
+            &Ok(Default::default()),
         );
         assert!(page.contains(
             "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">double ruled</span></div>"
@@ -1567,6 +1644,7 @@ mod tests {
             60,
             &split_ok(),
             Some(&board),
+            &Ok(Default::default()),
         );
         assert!(page.contains("needs the user"), "{page}");
         assert!(page.contains("rule on the merge gate"), "{page}");
@@ -1581,6 +1659,7 @@ mod tests {
             60,
             &split_ok(),
             Some(&blind),
+            &Ok(Default::default()),
         );
         assert!(
             page.contains("not read: operator_question not read: too many rows"),
@@ -1811,7 +1890,13 @@ mod tests {
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok", "name": "Barnaby II"},
         });
-        let card = crown_card(&crown, &BTreeMap::new(), &(BTreeMap::new(), None));
+        let card = crown_card(
+            &crown,
+            &BTreeMap::new(),
+            &(BTreeMap::new(), None),
+            &Ok(Default::default()),
+            "",
+        );
         assert!(
             card.contains("held by <b>Barnaby II</b> (king-fno-g7)"),
             "{card}"
@@ -1825,7 +1910,13 @@ mod tests {
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok"},
         });
-        let card = crown_card(&crown, &BTreeMap::new(), &(BTreeMap::new(), None));
+        let card = crown_card(
+            &crown,
+            &BTreeMap::new(),
+            &(BTreeMap::new(), None),
+            &Ok(Default::default()),
+            "",
+        );
         assert!(card.contains("held by <b>king-fno-g7</b>"), "{card}");
         assert!(!card.contains("Barnaby"), "{card}");
     }
