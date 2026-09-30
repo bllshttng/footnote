@@ -82,7 +82,9 @@ Writers emit only the new names. Readers accept the old ones for one release thr
 4. It fills the entity tables from every referencing column. Legacy session ids get a row with no harness.
 5. It copies every table, keeping rowids so the search index stays valid. It unquotes the JSON-quoted session `at` values and folds them into `started_at`. It moves the two provenance keys out of `extras`, and each `cost_sessions` list that `node_costs` can hold. An edge listed on a missing node has no reader and is dropped. An edge whose far end is missing is parked.
 6. It drops the `_v3` tables, creates the triggers, and rebuilds the search index.
-7. It runs `PRAGMA foreign_key_check`. A violation rolls everything back, and the error names the row and the snapshot. Otherwise it stamps `schema_version = 5` as the store setup version. The table shape remains schema 4. It writes the counts to `graph_meta.schema_v4_report` and commits.
+7. It runs `PRAGMA foreign_key_check`. A violation rolls everything back, and the error names the row and the snapshot. Otherwise it stamps `schema_version = 4`, writes the counts to `graph_meta.schema_v4_report`, and commits.
+
+The normal open path separately stamps `open_setup_version = 1` after migrations, table ensures, and imports succeed. This marker tracks one-time setup, independently of the table schema version.
 
 ## Rollback
 

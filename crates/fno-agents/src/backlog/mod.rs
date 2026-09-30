@@ -60,10 +60,11 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The store setup version. Schema 4 (see schema_v4.rs) is the shape every
-/// table is born in; version 5 marks stores whose one-time setup is complete.
-pub const SCHEMA_VERSION: &str = "5";
-const SCHEMA_VERSION_NUMBER: u32 = 5;
+/// Schema 4 (see schema_v4.rs) is the shape every table is born in.
+pub const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION_NUMBER: u32 = 4;
+const OPEN_SETUP_VERSION: &str = "1";
+const OPEN_SETUP_VERSION_NUMBER: u32 = 1;
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -307,20 +308,36 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     retire_graph_json(&connection, graph)?;
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
-    stamp_meta(&connection, "schema_version", SCHEMA_VERSION)?;
+    stamp_meta(&connection, "open_setup_version", OPEN_SETUP_VERSION)?;
     Ok(connection)
 }
 
 fn schema_needs_ensure(connection: &Connection) -> Result<bool, String> {
-    match meta(connection, "schema_version") {
-        Ok(Some(version)) => match version.parse::<u32>() {
-            Ok(version) => Ok(version < SCHEMA_VERSION_NUMBER),
-            Err(_) => Ok(true),
+    let versions = connection.query_row(
+        "SELECT
+             (SELECT value FROM graph_meta WHERE key = 'schema_version'),
+             (SELECT value FROM graph_meta WHERE key = 'open_setup_version')",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
         },
-        Ok(None) => Ok(true),
-        Err(error) if error.contains("no such table") => Ok(true),
-        Err(error) => Err(error),
-    }
+    );
+    let (schema, setup) = match versions {
+        Ok(versions) => versions,
+        Err(error) if error.to_string().contains("no such table") => return Ok(true),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(version_is_below(schema, SCHEMA_VERSION_NUMBER)
+        || version_is_below(setup, OPEN_SETUP_VERSION_NUMBER))
+}
+
+fn version_is_below(version: Option<String>, expected: u32) -> bool {
+    version
+        .and_then(|value| value.parse::<u32>().ok())
+        .map_or(true, |version| version < expected)
 }
 
 fn read_connection(graph: &Path) -> Result<Connection, String> {
@@ -1560,7 +1577,8 @@ mod tests {
                  INSERT INTO entries VALUES ('ab-old', 0, '{\"id\": \"ab-old\",
                      \"slug\": \"old\", \"title\": \"Old\", \"type\": \"feature\",
                      \"status\": \"done\", \"priority\": \"p2\", \"domain\": \"code\",
-                     \"created_at\": \"2026-09-01T00:00:00+00:00\"}');",
+                     \"created_at\": \"2026-09-01T00:00:00+00:00\"}');
+                 DELETE FROM graph_meta WHERE key = 'open_setup_version';",
             )
             .unwrap();
         drop(connection);
