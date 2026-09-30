@@ -152,6 +152,7 @@ fn run_rows(args: &[OsString]) -> i32 {
             "--query-json" => mode = Some("query"),
             "--status-stream" => mode = Some("status"),
             "--answered-questions" => mode = Some("answered"),
+            "--next-answer" => mode = Some("next-answer"),
             _ => {}
         }
     }
@@ -180,7 +181,10 @@ fn run_rows(args: &[OsString]) -> i32 {
             .and_then(|query| read_projection(&journal, mode, &query));
         return match result {
             Ok(value) => {
-                println!("{value}");
+                println!(
+                    "{}",
+                    serde_json::json!({"projection":format!("--{}",match mode {"query"=>"query-json","status"=>"status-stream","answered"=>"answered-questions",_=>"next-answer"}),"rows":value})
+                );
                 0
             }
             Err(e) => {
@@ -239,6 +243,9 @@ fn read_projection(
     mode: &str,
     input: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    if mode == "next-answer" {
+        return next_answer(input);
+    }
     use crate::event_store::{query_events, recovery_envelope, EventQuery};
     let store = crate::event_store::store_path(journal);
     if mode == "status" && !store.exists() {
@@ -418,13 +425,80 @@ fn answer_records(rows: Vec<(i64, bool, serde_json::Value)>) -> serde_json::Valu
             continue;
         }
         let origin = ask.map(|a| a.2["data"].clone()).unwrap_or_default();
-        answers.push(serde_json::json!({"id":id,"asker":origin["asker"],"question":origin["question"].as_str().unwrap_or(""),"answer":answer,"closed_ts":value["ts"].as_str().unwrap_or(""),"closed_by":data["closed_by"].as_str().unwrap_or("")}));
+        answers.push(serde_json::json!({"id":id,"asker":origin["asker"],"question":origin["question"].as_str().unwrap_or(""),"answer":answer,"closed_ts":value["ts"].as_str().unwrap_or(""),"closed_by":data["closed_by"].as_str().unwrap_or(""),"answer_seq":seq}));
     }
     answers.sort_by(|a, b| {
         (a["closed_ts"].as_str(), a["id"].as_str())
             .cmp(&(b["closed_ts"].as_str(), b["id"].as_str()))
     });
     serde_json::json!(answers)
+}
+
+fn next_answer(input: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let parse = |ts: &str| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()
+            .map(|dt| (dt.timestamp(), dt.timestamp_subsec_nanos()))
+    };
+    let cursor = input["cursor"].as_str().unwrap_or("");
+    let saved: Option<serde_json::Value> = serde_json::from_str(cursor).ok();
+    let ts = saved
+        .as_ref()
+        .and_then(|v| v["ts"].as_str())
+        .unwrap_or(cursor);
+    let floor = if ts.is_empty() {
+        (i64::MIN, 0)
+    } else {
+        parse(ts).ok_or("unreadable answer cursor")?
+    };
+    let saved_key = saved.as_ref().map(|v| {
+        (
+            floor,
+            v["id"].as_str().unwrap_or("").to_string(),
+            v["seq"].as_i64().unwrap_or(0),
+        )
+    });
+    let addresses = input["addresses"]
+        .as_array()
+        .ok_or("answer addresses missing")?;
+    let records = input["records"]
+        .as_array()
+        .ok_or("answer records missing")?;
+    let mut candidates = Vec::new();
+    for (i, record) in records.iter().enumerate() {
+        if !addresses.iter().any(|v| v == &record["asker"]) {
+            continue;
+        }
+        let Some(ts) = record["closed_ts"].as_str() else {
+            continue;
+        };
+        let Some(ms) = parse(ts) else {
+            continue;
+        };
+        let id = record["id"].as_str().ok_or("answer identity missing")?;
+        let seq = record["answer_seq"].as_i64().unwrap_or(i as i64 + 1);
+        let key = (ms, id.to_string(), seq);
+        // Legacy cursors cannot distinguish peers at their saved timestamp.
+        // New cursors retain identity so subsequent equal-time answers survive.
+        if saved_key
+            .as_ref()
+            .map_or(ms <= floor, |saved| &key <= saved)
+        {
+            continue;
+        }
+        candidates.push((key, record));
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    let Some(((_, id, seq), record)) = candidates.first() else {
+        return Ok(serde_json::json!({"prompt":null,"cursor":""}));
+    };
+    let prompt = format!(
+        "Answer to your question {id} \"{}\": {}.",
+        record["question"].as_str().unwrap_or(""),
+        record["answer"].as_str().unwrap_or("")
+    );
+    let cursor = serde_json::json!({"ts":record["closed_ts"],"id":id,"seq":seq}).to_string();
+    Ok(serde_json::json!({"prompt":prompt,"cursor":cursor}))
 }
 
 /// Ingest every uncommitted generation of the journal into the store, the

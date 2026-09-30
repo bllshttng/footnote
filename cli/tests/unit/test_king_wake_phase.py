@@ -473,7 +473,7 @@ def test_an_answered_king_escalation_wakes_with_the_answer_as_the_prompt(tmp_pat
     import json as _json
 
     payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
-    assert payload["answered_cursor"] == "2026-08-29T11:00:00Z"
+    assert _json.loads(payload["answered_cursor"])["ts"] == "2026-08-29T11:00:00Z"
 
 
 def test_an_answered_codex_escalation_matches_the_manifest_session_handle(tmp_path):
@@ -582,13 +582,13 @@ def test_two_answers_between_ticks_deliver_one_per_tick_in_order(tmp_path):
         asker="king-x",
         answer="first ruling",
         closed_ts=datetime(2026, 8, 29, 11, 0, 0, tzinfo=timezone.utc).isoformat(),
-        qid="q-older",
+        qid="q-a",
     )
     newer = _answered(
         asker="king-x",
         answer="second ruling",
-        closed_ts=datetime(2026, 8, 29, 11, 5, 0, tzinfo=timezone.utc).isoformat(),
-        qid="q-newer",
+        closed_ts=datetime(2026, 8, 29, 11, 0, 0, tzinfo=timezone.utc).isoformat(),
+        qid="q-b",
     )
     _run(
         tmp_path,
@@ -2158,10 +2158,11 @@ def _two_crown_setup(root):
             harness_session_id="11111111-2222-3333-4444-555555555555",
             force=True,
         )
-    rows = lambda: [
-        SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
-        SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
-    ]
+    def rows():
+        return [
+            SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
+        ]
     return crowns, rows
 
 
@@ -2225,7 +2226,7 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
     # The rotation starts on targets[offset]; the quiet (board-lane) crown
     # must be evaluated first so its degraded read precedes the stop.
     offset = int(NOW.timestamp() // 900) % 2
-    quiet, loud = crowns[offset], crowns[1 - offset]
+    loud = crowns[1 - offset]
     short_ids = {"king-a": "aa11bb22", "king-b": "cc22dd33"}
     loud_addresses = {loud["holder"], short_ids[loud["holder"]], loud["scope"]}
     rec = _Recorder()
@@ -2395,7 +2396,6 @@ def test_a_graph_cut_poll_serves_a_later_crown_without_blocking(tmp_path, monkey
     # signal. Later crowns poll the same future with timeout=0: once the read
     # lands, one of them picks it up, the note appears once, and the pass
     # never blocks on the read a second time.
-    import threading
     import time
 
     from fno.pr_watch import _king_wake as wake_mod

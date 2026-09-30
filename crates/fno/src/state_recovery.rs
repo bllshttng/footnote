@@ -43,6 +43,17 @@ struct MissingRow {
     source: String,
 }
 
+pub(super) struct Sidecar {
+    source: PathBuf,
+    bytes: Vec<u8>,
+}
+
+fn read_sidecar(path: &Path) -> Result<Sidecar, String> {
+    let source = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = std::fs::read(&source).map_err(|e| e.to_string())?;
+    Ok(Sidecar { source, bytes })
+}
+
 #[derive(Serialize)]
 pub(super) struct Audit {
     pub root: PathBuf,
@@ -64,8 +75,11 @@ fn quoted(name: &str) -> String {
 }
 
 fn ro(path: &Path) -> Result<Connection, String> {
-    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let c = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
     c.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     Ok(c)
@@ -197,29 +211,6 @@ fn tables(c: &Connection, family: &str) -> Result<Vec<(String, Vec<String>, Vec<
     Ok(out)
 }
 
-fn scan(
-    c: &Connection,
-    table: &str,
-    cols: &[String],
-    mut visit: impl FnMut(Vec<Value>) -> Result<(), String>,
-) -> Result<(), String> {
-    let sql = format!(
-        "SELECT {} FROM {}",
-        cols.iter().map(|n| quoted(n)).collect::<Vec<_>>().join(","),
-        quoted(table)
-    );
-    let mut s = c.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = s.query([]).map_err(|e| e.to_string())?;
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        let values = (0..cols.len())
-            .map(|i| row.get(i))
-            .collect::<Result<Vec<Value>, _>>()
-            .map_err(|e| e.to_string())?;
-        visit(values)?;
-    }
-    Ok(())
-}
-
 pub(super) fn audit(root: &Path) -> Result<Audit, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let backup = root.join("backups/state-root-migration");
@@ -242,6 +233,7 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
         zero_missing: false,
         missing: BTreeMap::new(),
     };
+    let mut verified_sources: BTreeMap<PathBuf, (String, u64, u64)> = BTreeMap::new();
     for family in FAMILIES {
         let live = root.join("db").join(format!("{family}.db"));
         let c = match ro(&live) {
@@ -251,7 +243,6 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
                 continue;
             }
         };
-        c.execute_batch("BEGIN").map_err(|e| e.to_string())?;
         let specs = match tables(&c, family) {
             Ok(t) => t,
             Err(e) => {
@@ -261,16 +252,7 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
         };
         integrity(&c).map_err(|e| format!("{}: {e}", live.display()))?;
         for (table, cols, pk) in specs {
-            let mut live_rows = BTreeMap::new();
-            let mut hashes = BTreeMap::new();
-            scan(&c, &table, &cols, |v| {
-                let key = signature(&pk.iter().map(|i| v[*i].clone()).collect::<Vec<_>>());
-                if table == "events" {
-                    hashes.insert(value_key(&v[1]), key.clone());
-                }
-                live_rows.insert(key, signature(&v));
-                Ok(())
-            })?;
+            let mut hashes: BTreeMap<String, (String, String)> = BTreeMap::new();
             for stamp in &stamps {
                 if !stamp.is_dir() {
                     result
@@ -283,7 +265,13 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
                     continue;
                 }
                 let inspected = (|| -> Result<serde_json::Value, String> {
-                    let digest = source_hash(&source)?;
+                    if !verified_sources.contains_key(&source) {
+                        let meta = std::fs::metadata(&source).map_err(|e| e.to_string())?;
+                        verified_sources.insert(
+                            source.clone(),
+                            (source_hash(&source)?, meta.dev(), meta.ino()),
+                        );
+                    }
                     let src = ro(&source)?;
                     src.execute_batch("BEGIN").map_err(|e| e.to_string())?;
                     if !tables(&src, family)?
@@ -292,39 +280,85 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
                     {
                         return Err("owning schema differs from live".into());
                     }
-                    integrity(&src)?;
-                    let mut count = 0usize;
-                    let mut missing = 0usize;
-                    scan(&src, &table, &cols, |v| {
-                        count += 1;
-                        let identity =
-                            signature(&pk.iter().map(|i| v[*i].clone()).collect::<Vec<_>>());
-                        let key = format!("{family}/{table}/{identity}");
-                        let payload = signature(&v);
-                        if let Some(existing) = live_rows.get(&identity) {
-                            if table == "events" && existing != &payload {
+                    if !result
+                        .records
+                        .iter()
+                        .any(|r| r["source"] == serde_json::to_value(&source).unwrap())
+                    {
+                        integrity(&src)?;
+                    }
+                    let uri = format!(
+                        "file:{}?mode=ro",
+                        live.to_str()
+                            .ok_or("invalid live path")?
+                            .replace('%', "%25")
+                            .replace('?', "%3F")
+                            .replace('#', "%23")
+                    );
+                    src.execute("ATTACH DATABASE ?1 AS published", [uri])
+                        .map_err(|e| e.to_string())?;
+                    let table_sql = quoted(&table);
+                    let join = pk
+                        .iter()
+                        .map(|i| format!("s.{} IS d.{}", quoted(&cols[*i]), quoted(&cols[*i])))
+                        .collect::<Vec<_>>()
+                        .join(" AND ");
+                    if table == "events" {
+                        let differs = cols
+                            .iter()
+                            .map(|name| format!("s.{} IS NOT d.{}", quoted(name), quoted(name)))
+                            .collect::<Vec<_>>()
+                            .join(" OR ");
+                        let sql=format!("SELECT s.event_id FROM main.events s JOIN published.events d ON s.event_id=d.event_id WHERE {differs} LIMIT 1");
+                        match src.query_row(&sql, [], |r| r.get::<_, String>(0)) {
+                            Ok(id) => {
                                 return Err(format!(
-                                    "identity payload conflict {key} between {} and {}",
+                                    "identity payload conflict {id} between {} and {}",
                                     source.display(),
                                     live.display()
-                                ));
+                                ))
                             }
-                            return Ok(());
+                            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                            Err(e) => return Err(e.to_string()),
                         }
+                        match src.query_row("SELECT s.event_id,d.event_id FROM main.events s JOIN published.events d ON s.row_hash=d.row_hash WHERE s.event_id<>d.event_id LIMIT 1",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))) {
+                            Ok((id,other))=>return Err(format!("row_hash conflict {id} with {other}, sources {} and {}",source.display(),live.display())),
+                            Err(rusqlite::Error::QueryReturnedNoRows)=>{},Err(e)=>return Err(e.to_string()),
+                        }
+                    }
+                    let count: i64 = src
+                        .query_row(&format!("SELECT count(*) FROM main.{table_sql}"), [], |r| {
+                            r.get(0)
+                        })
+                        .map_err(|e| e.to_string())?;
+                    let select = cols
+                        .iter()
+                        .map(|name| format!("s.{}", quoted(name)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let sql=format!("SELECT {select} FROM main.{table_sql} s WHERE NOT EXISTS(SELECT 1 FROM published.{table_sql} d WHERE {join})");
+                    let mut stmt = src.prepare(&sql).map_err(|e| e.to_string())?;
+                    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+                    let mut missing = 0usize;
+                    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                        let values = (0..cols.len())
+                            .map(|i| row.get(i))
+                            .collect::<Result<Vec<Value>, _>>()
+                            .map_err(|e| e.to_string())?;
+                        let identity =
+                            signature(&pk.iter().map(|i| values[*i].clone()).collect::<Vec<_>>());
+                        let key = format!("{family}/{table}/{identity}");
+                        let payload = signature(&values);
                         if table == "events" {
-                            if let Some(other) = hashes.get(&value_key(&v[1])) {
+                            let hash = value_key(&values[1]);
+                            if let Some((other, locator)) = hashes.get(&hash) {
                                 if other != &identity {
-                                    return Err(format!(
-                                        "row_hash conflict {key} with {other}, source {}",
-                                        source.display()
-                                    ));
+                                    return Err(format!("row_hash conflict {key} with {other}, sources {locator} and {}",source.display()));
                                 }
                             }
+                            hashes.insert(hash, (identity.clone(), source.display().to_string()));
                         }
                         missing += 1;
-                        if table == "events" {
-                            hashes.insert(value_key(&v[1]), identity.clone());
-                        }
                         if let Some(earlier) = result.missing.get(&key) {
                             if signature(&earlier.values) != payload {
                                 return Err(format!(
@@ -340,24 +374,20 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
                                     family: family.to_string(),
                                     table: table.clone(),
                                     columns: cols.clone(),
-                                    values: v,
+                                    values,
                                     identity,
                                     source: source.display().to_string(),
                                 },
                             );
                         }
-                        Ok(())
-                    })?;
-                    if source_hash(&source)? != digest {
-                        return Err("source changed during audit".into());
                     }
-                    let meta = std::fs::metadata(&source).map_err(|e| e.to_string())?;
+                    let (digest, dev, ino) = verified_sources.get(&source).unwrap();
                     Ok(
-                        serde_json::json!({"stamp":stamp.file_name(),"family":family,"table":table,"source":source,"live":live,"source_sha256":digest,"dev":meta.dev(),"ino":meta.ino(),"rows":count,"missing":missing,"status":"audited"}),
+                        serde_json::json!({"stamp":stamp.file_name(),"family":family,"table":table,"source":source,"live":live,"source_sha256":digest,"dev":dev,"ino":ino,"rows":count,"missing":missing,"status":"audited"}),
                     )
                 })();
                 match inspected {
-                    Ok(rec) => result.records.push(rec),
+                    Ok(record) => result.records.push(record),
                     Err(e) => result
                         .errors
                         .push(format!("{} {table}: {e}", source.display())),
@@ -365,15 +395,23 @@ pub(super) fn audit(root: &Path) -> Result<Audit, String> {
             }
         }
     }
+    for (source, (digest, dev, ino)) in verified_sources {
+        match (source_hash(&source), std::fs::metadata(&source)) {
+            (Ok(now), Ok(meta)) if now == digest && meta.dev() == dev && meta.ino() == ino => {}
+            _ => result
+                .errors
+                .push(format!("{}: source changed during audit", source.display())),
+        }
+    }
     for row in result.missing.values() {
         *result.missing_by_family.get_mut(&row.family).unwrap() += 1;
     }
+    result.missing_identities=result.missing.iter().map(|(key,row)|serde_json::json!({"key":key,"family":row.family,"table":row.table,"event_id":if row.table=="events" {match &row.values[0] {Value::Text(id)=>Some(id.as_str()),_=>None}} else {None},"identity_hash":row.identity,"payload_hash":signature(&row.values),"source":row.source})).collect();
     let identities: Vec<_> = result
         .missing
         .iter()
-        .map(|(k, v)| (k, signature(&v.values)))
+        .map(|(key, row)| (key, signature(&row.values)))
         .collect();
-    result.missing_identities = result.missing.iter().map(|(key,row)| serde_json::json!({"key":key,"family":row.family,"table":row.table,"event_id":if row.table=="events" {match &row.values[0] {Value::Text(id)=>Some(id.as_str()),_=>None}} else {None},"identity_hash":row.identity,"payload_hash":signature(&row.values),"source":row.source})).collect();
     let packet=serde_json::to_vec(&serde_json::json!({"root":result.root,"records":result.records,"identities":identities,"errors":result.errors,"binary_sha256":result.binary_sha256,"replay_policy":"history-only-v1"})).map_err(|e|e.to_string())?;
     result.packet_digest = format!("{:x}", Sha256::digest(packet));
     result.zero_missing = result.missing.is_empty() && result.errors.is_empty();
@@ -415,8 +453,10 @@ impl Drop for Lock {
 pub(super) fn apply(
     root: &Path,
     expected: &str,
-    sidecars: &[PathBuf],
+    sidecars: &[Sidecar],
 ) -> Result<serde_json::Value, String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let root = canonical_root.as_path();
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("packet changed: digest must be 64 hexadecimal characters".into());
     }
@@ -525,13 +565,58 @@ pub(super) fn apply(
         }
         drop(backup);
         integrity(&dst)?;
+        let schema_version: i64 = dst
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut counts = BTreeMap::new();
+        let mut statement = dst
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .map_err(|e| e.to_string())?;
+        let names = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        for table in names {
+            let count: i64 = dst
+                .query_row(
+                    &format!("SELECT count(*) FROM {}", quoted(&table)),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let seq: bool = dst
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='seq')",
+                    [&table],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let high_water: Option<i64> = if seq {
+                dst.query_row(
+                    &format!("SELECT max(seq) FROM {}", quoted(&table)),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                None
+            };
+            counts.insert(
+                table,
+                serde_json::json!({"rows":count,"seq_high_water":high_water}),
+            );
+        }
         drop(dst);
         let m = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-        snapshots.push(serde_json::json!({"family":family,"source":std::fs::canonicalize(&path).map_err(|e|e.to_string())?,"dev":m.dev(),"ino":m.ino(),"snapshot":target,"sha256":source_hash(&target)?,"integrity":"ok"}));
+        snapshots.push(serde_json::json!({"family":family,"source":std::fs::canonicalize(&path).map_err(|e|e.to_string())?,"dev":m.dev(),"ino":m.ino(),"snapshot":target,"sha256":source_hash(&target)?,"integrity":"ok","created_at":chrono::Utc::now().to_rfc3339(),"schema_version":schema_version,"tables":counts}));
     }
-    for (i, path) in sidecars.iter().enumerate() {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("required sidecar {}: {e}", path.display()))?;
+    for (i, sidecar) in sidecars.iter().enumerate() {
+        let path = &sidecar.source;
+        let bytes = &sidecar.bytes;
         let target = dir.join(format!("sidecar-{i}"));
         if target.exists() {
             let old = prior_snapshots
@@ -544,8 +629,8 @@ pub(super) fn apply(
             snapshots.push(old.clone());
             continue;
         }
-        std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-        snapshots.push(serde_json::json!({"source":path,"snapshot":target,"sha256":format!("{:x}",Sha256::digest(&bytes))}));
+        std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
+        snapshots.push(serde_json::json!({"source":path,"snapshot":target,"sha256":format!("{:x}",Sha256::digest(bytes))}));
     }
     std::fs::write(
         dir.join("snapshots.json"),
@@ -671,7 +756,7 @@ pub(super) fn run(args: &[OsString]) -> i32 {
             .is_some_and(|p| std::fs::canonicalize(p).ok() == std::fs::canonicalize(&root).ok());
         match digest {
             None => Err("--packet-digest is required for apply".into()),
-            Some(expected) if copy && !is_live => copy_root(&root,live.as_deref()).and_then(|()|apply(&root,&expected,&sidecars)),
+            Some(expected) if copy && !is_live => copy_root(&root,live.as_deref()).and_then(|()|sidecars.iter().map(|path|read_sidecar(path)).collect::<Result<Vec<_>,_>>()).and_then(|sidecars|apply(&root,&expected,&sidecars)),
             Some(expected) => match (approval,packet) {
                 (Some(id),Some(path)) => approved_sidecars(&root,&expected,&id,&path).and_then(|sidecars|apply(&root,&expected,&sidecars)),
                 _ => Err("live apply is held. Obtain an exact user-approved packet and verified deployed consumer coverage".into()),
@@ -729,7 +814,7 @@ fn approved_sidecars(
     digest: &str,
     id: &str,
     path: &Path,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<Sidecar>, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let proof: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -773,10 +858,11 @@ fn approved_sidecars(
         .ok_or("missing sidecar inventory")?
     {
         let path = PathBuf::from(sidecar["path"].as_str().ok_or("sidecar path missing")?);
-        if sidecar["sha256"] != source_hash(&path)? {
+        let captured = read_sidecar(&path)?;
+        if sidecar["sha256"] != format!("{:x}", Sha256::digest(&captured.bytes)) {
             return Err(format!("consumer sidecar changed: {}", path.display()));
         }
-        sidecars.push(path);
+        sidecars.push(captured);
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let result = std::process::Command::new(exe)

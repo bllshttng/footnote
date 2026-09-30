@@ -276,8 +276,13 @@ pub fn tick_pages(
                 .ok()
                 .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
                 .and_then(|rows| {
-                    rows.into_iter()
-                        .find(|r| r["source"].as_str() == page.path.to_str())
+                    rows.into_iter().find(|r| {
+                        r["source"].as_str().is_some_and(|source| {
+                            std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source))
+                                == std::fs::canonicalize(&page.path)
+                                    .unwrap_or_else(|_| page.path.clone())
+                        })
+                    })
                 });
             let Some(baseline) = baseline else { continue };
             let Some(snapshot) = baseline["snapshot"].as_str() else {

@@ -68,7 +68,9 @@ def native_rows(
     include_rejected: bool = False,
     legacy_fallback: bool = False,
     timeout: float = 30,
-) -> Optional[list[str]]:
+    projection: Optional[str] = None,
+    query: Optional[dict[str, Any]] = None,
+) -> Any:
     """One native read pass: import, then committed envelope lines.
 
     The whole reader contract lives in the binary; this is the transport.
@@ -87,8 +89,11 @@ def native_rows(
         cmd.append("--include-rejected")
     if legacy_fallback:
         cmd.append("--legacy-fallback")
+    if projection:
+        cmd.append(projection)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, input=json.dumps(query) if query is not None else None,
+                              capture_output=True, text=True, timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -151,14 +156,10 @@ def query_rows(
 
 def read_projection(events_path: Path, mode: str, query: dict[str, Any]) -> Any:
     """Transport for native read folds. A failed read never becomes empty."""
-    try:
-        proc = subprocess.run(
-            [resolve_native_bin(), "doctor", "event", "rows", "--events", str(events_path), mode],
-            input=json.dumps(query), capture_output=True, text=True, timeout=30, check=True,
-        )
-        return json.loads(proc.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        raise EventStoreUnavailable(f"event projection unavailable for {events_path}: {exc}") from exc
+    result = native_rows(events_path, projection=mode, query=query)
+    if not isinstance(result, dict) or result.get("projection") != mode or "rows" not in result:
+        raise EventStoreUnavailable(f"native event projection {mode} unavailable for {events_path}")
+    return result["rows"]
 
 
 def gc_ephemeral(
