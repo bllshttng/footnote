@@ -3661,22 +3661,6 @@ mod tests {
         assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
-    // AC1: the printed body carries a refusal_rate line with the real
-    // refused/total/window counts, and the same rate lands in the
-    // journaled data.
-    #[test]
-    fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.starts_with("refusal_rate:"))
-            .unwrap();
-        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
-    }
-
     // The subagents reading: the workers line carries the fleet's active
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
@@ -3896,17 +3880,25 @@ mod tests {
         }
     }
 
+    // AC1+AC2: the printed line carries the real refused/total/window counts
+    // and exactly one trend verdict - RISING on two consecutive rises,
+    // UNMEASURED on a missing prior pair - and the same rate lands in the
+    // journaled data.
     #[test]
     fn refusal_rate_line_carries_the_handoff_or_unmeasured_suffix() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let line = lines
             .iter()
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
-        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - RISING (handoff signal)"
+        );
 
         // A missing prior pair is stated on the line, never silently blank.
         let mut data = build_data(&readings, "x-bbbb");
@@ -3916,9 +3908,9 @@ mod tests {
             .iter()
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
-        assert!(
-            line.ends_with(" - UNMEASURED (needs two prior beats)"),
-            "line: {line}"
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
         );
     }
 
