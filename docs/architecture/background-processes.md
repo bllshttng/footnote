@@ -69,6 +69,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `notify_watch` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the state-change signals arm | 300 s |
 | `stop_hook` | `hook:target-stop-hook` | the target stop hook | one row per stop-hook fire | event-driven |
 | `reap` | `daemon` | `fno-agents-daemon` | reaps rows, processes, claims and worktrees of merged PRs | 60 s |
+| `orphan_reap` | `daemon` | `fno-agents-daemon` | reaps confirmed orphaned test binaries and mux servers whose owner process died | 300 s |
 | `retire` | `daemon` | `fno-agents-daemon` | retires finished work | 300 s |
 | `machine_watch` | `daemon` | `fno-agents-daemon` | watches sustained machine footprint | 300 s |
 | `arm_watch` | `daemon` | `fno-agents-daemon` | pages the operator when arms stay broken past the threshold | 300 s |
