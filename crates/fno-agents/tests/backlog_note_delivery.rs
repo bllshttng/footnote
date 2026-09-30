@@ -321,8 +321,11 @@ fn ac7_terminal_node_note_is_history_only() {
     assert!(receipt["replaced"].is_null());
 }
 
+/// The cross-session surface: the receipt names the state a take-over
+/// replaced, the guard holds a foreign note (or clear) before anything is
+/// written, the same session walks through free, and --replace is the door.
 #[test]
-fn a_note_names_the_state_it_replaced() {
+fn a_note_names_the_state_it_replaced_and_holds_authorship() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("t-1", "ready")]);
@@ -402,14 +405,124 @@ fn a_note_names_the_state_it_replaced() {
         "{stdout}"
     );
     assert!(stdout.contains("fno backlog notes history t-1"), "{stdout}");
-    // AC6: the replaced body reads back whole from history.
-    let (records, _) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
+    // AC6: the replaced body reads back whole from history, and the
+    // journal is why: one state_replaced record per take-over, each
+    // carrying the exact outgoing revision.
+    let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
     assert!(
         records
             .iter()
             .any(|r| r["original"]["body"] == json!("first line\nsecond line")),
         "the two-line body must read back whole"
     );
+    assert_eq!(total, 2);
+    assert_eq!(records[0]["reason"], json!("state_replaced"));
+    assert_eq!(records[0]["prior_revision"], json!(1));
+    assert_eq!(records[1]["prior_revision"], json!(2));
+    // The guard: a note over a revision this session cannot prove it wrote
+    // refuses before anything is written, and --quiet does not bypass it.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "vellum replacement",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("note refused"), "{stderr}");
+    assert!(
+        stderr.contains("--replace"),
+        "names the explicit door: {stderr}"
+    );
+    assert!(
+        stderr.contains("notes history t-1"),
+        "names the history readback: {stderr}"
+    );
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("t-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(3));
+    assert_eq!(node_state::history_page(&graph, "t-1", 0, 10).unwrap().1, 2);
+    // The same session replaces its own state without the flag.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "own update",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-cccc3333",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // An unidentified writer over an authored state is held too.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "anonymous overwrite",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    // The clear route holds under the same guard; --clear --replace is the
+    // door, and the emptied state lands in history.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "--clear",
+            "--stdin",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "--clear",
+            "--stdin",
+            "--replace",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "the explicit door clears: stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("t-1"))
+        .unwrap()
+        .clone();
+    assert!(row[node_state::STATE_KEY].is_null(), "state cleared");
+    let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
+    assert_eq!(total, 4, "the clear journaled the outgoing state");
+    assert_eq!(records[3]["reason"], json!("state_cleared"));
 }
 
 #[test]
@@ -539,253 +652,4 @@ fn a_repeat_note_names_encounter_once_until_one_exists() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
-}
-
-/// The cross-session guard: a note over a revision another session wrote
-/// refuses (exit 3) before anything is written, names the explicit door and
-/// the history readback, and --quiet does not bypass it.
-#[test]
-fn a_cross_session_note_refuses_before_the_write() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    let mut row = fixture("c-1", "in_progress");
-    row["current_state"] = json!({
-        "body": "candor original finding text",
-        "revision": 1,
-        "updated_at": "2026-09-30T20:00:00+00:00",
-        "source_session_id": "sess-candor",
-        "source_harness": "claude",
-    });
-    write_graph(&graph, &[row]);
-    let g = graph_arg(&graph);
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "c-1",
-            "vellum replacement",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
-    assert!(stderr.contains("note refused"), "{stderr}");
-    assert!(
-        stderr.contains("--replace"),
-        "names the explicit door: {stderr}"
-    );
-    assert!(
-        stderr.contains("notes history c-1"),
-        "names the history readback: {stderr}"
-    );
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("c-1"))
-        .unwrap()
-        .clone();
-    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(1));
-    assert_eq!(
-        row[node_state::STATE_KEY]["body"],
-        json!("candor original finding text")
-    );
-    // A refusal is not a replacement: nothing entered the journal either.
-    // count() reads 0 for a journal that was never created.
-    let total = fno_agents::backlog::note_history::count(&graph, Some("c-1"));
-    assert_eq!(total, 0, "the refusal must not journal");
-}
-
-/// --replace is the explicit door: the write lands at the next revision and
-/// the exact prior revision stays readable in history.
-#[test]
-fn an_explicit_replace_writes_and_keeps_the_prior_readable() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    let mut row = fixture("c-1", "in_progress");
-    row["current_state"] = json!({
-        "body": "candor original finding text",
-        "revision": 1,
-        "updated_at": "2026-09-30T20:00:00+00:00",
-        "source_session_id": "sess-candor",
-        "source_harness": "claude",
-    });
-    write_graph(&graph, &[row]);
-    let g = graph_arg(&graph);
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "c-1",
-            "vellum replacement",
-            "--json",
-            "--quiet",
-            "--replace",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("c-1"))
-        .unwrap()
-        .clone();
-    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(2));
-    assert_eq!(
-        row[node_state::STATE_KEY]["body"],
-        json!("vellum replacement")
-    );
-    let (records, total) =
-        fno_agents::backlog::note_history::read(&graph, Some("c-1"), 0, 50).unwrap();
-    assert_eq!(total, 1, "the prior revision is journaled");
-    assert_eq!(records[0]["reason"], json!("state_replaced"));
-    assert_eq!(records[0]["prior_revision"], json!(1));
-    assert_eq!(
-        fno_agents::backlog::note_history::record_body(&records[0]["original"]),
-        "candor original finding text"
-    );
-}
-
-/// The same session replacing its own state never needs --replace.
-#[test]
-fn the_same_session_replaces_its_own_state_without_replace() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    let mut row = fixture("c-1", "in_progress");
-    row["current_state"] = json!({
-        "body": "mine already",
-        "revision": 1,
-        "updated_at": "2026-09-30T20:00:00+00:00",
-        "source_session_id": "sess-candor",
-        "source_harness": "claude",
-    });
-    write_graph(&graph, &[row]);
-    let g = graph_arg(&graph);
-    let (code, _, stderr) = note_captured(
-        &[
-            "c-1",
-            "my update",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-candor",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("c-1"))
-        .unwrap()
-        .clone();
-    assert_eq!(row[node_state::STATE_KEY]["body"], json!("my update"));
-}
-
-/// The clear action is a cross-session replacement too: it empties the
-/// state another session wrote, so the guard holds without --replace.
-#[test]
-fn a_cross_session_clear_refuses_without_replace() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    let mut row = fixture("c-1", "in_progress");
-    row["current_state"] = json!({
-        "body": "candor original finding text",
-        "revision": 1,
-        "updated_at": "2026-09-30T20:00:00+00:00",
-        "source_session_id": "sess-candor",
-        "source_harness": "claude",
-    });
-    write_graph(&graph, &[row]);
-    let g = graph_arg(&graph);
-    let (code, _, stderr) = note_captured(
-        &[
-            "c-1",
-            "--clear",
-            "--stdin",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 3, "stderr: {stderr}");
-    let (code, _, stderr) = note_captured(
-        &[
-            "c-1",
-            "--clear",
-            "--stdin",
-            "--replace",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "the explicit door clears: stderr: {stderr}");
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("c-1"))
-        .unwrap()
-        .clone();
-    assert!(row[node_state::STATE_KEY].is_null(), "state cleared");
-    // The emptied state stays readable in history.
-    let (records, total) =
-        fno_agents::backlog::note_history::read(&graph, Some("c-1"), 0, 50).unwrap();
-    assert_eq!(total, 1, "the clear journaled the outgoing state");
-    assert_eq!(records[0]["reason"], json!("state_cleared"));
-}
-
-/// A writer with no identity over an authored state cannot prove it wrote
-/// the prior revision, so the guard holds for it too.
-#[test]
-fn an_unidentified_writer_over_an_authored_state_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    let mut row = fixture("c-1", "in_progress");
-    row["current_state"] = json!({
-        "body": "candor original finding text",
-        "revision": 1,
-        "updated_at": "2026-09-30T20:00:00+00:00",
-        "source_session_id": "sess-candor",
-        "source_harness": "claude",
-    });
-    write_graph(&graph, &[row]);
-    let g = graph_arg(&graph);
-    let (code, _, stderr) = note_captured(
-        &[
-            "c-1",
-            "anonymous overwrite",
-            "--json",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 3, "stderr: {stderr}");
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("c-1"))
-        .unwrap()
-        .clone();
-    assert_eq!(
-        row[node_state::STATE_KEY]["body"],
-        json!("candor original finding text")
-    );
 }
