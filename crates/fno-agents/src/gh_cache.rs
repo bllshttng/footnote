@@ -11,14 +11,14 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
-fn rows_root(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn rows_root(cwd: &Path) -> Option<PathBuf> {
     let env = std::env::var("FNO_GH_FACTS_DIR")
         .ok()
         .filter(|v| !v.is_empty());
@@ -40,7 +40,7 @@ fn row_path(root: &Path, kind: &str, slug: &str, pr: Option<u64>) -> Option<Path
     Some(root.join(kind).join(name))
 }
 
-fn read_row(
+pub(crate) fn read_row(
     root: &Path,
     kind: &str,
     slug: &str,
@@ -68,7 +68,7 @@ fn read_row(
     json!({"row": row})
 }
 
-fn write_row(root: &Path, kind: &str, slug: &str, pr: Option<u64>, row: &Value) -> bool {
+pub(crate) fn write_row(root: &Path, kind: &str, slug: &str, pr: Option<u64>, row: &Value) -> bool {
     let Some(path) = row_path(root, kind, slug, pr) else {
         return false;
     };
