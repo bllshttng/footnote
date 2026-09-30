@@ -1481,9 +1481,10 @@ fn synthesize_and_adopt(
     }
     // 2. Target manifest.
     if let Ok(Some(id)) = find_manifest_for_session(session_id) {
-        let fno_id = (!id.fno_id.is_empty()).then(|| id.fno_id.clone());
+        // The manifest run id is not the row's id: the registry write mints
+        // the row its own, so no fno_id evidence rides the receipt.
         let value = persist_manifest_identity(&id, home)?;
-        return Ok((value, fno_id, AdoptSource::Manifest));
+        return Ok((value, None, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
     match heal_token(session_id, &registry_path, cross_project, None) {
