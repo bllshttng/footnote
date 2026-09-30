@@ -567,7 +567,9 @@ fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
     let (mut core, _pane, _s) = fresh("retire-guard-stale", "sess-guard-two", true);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-two".into(), reply_tx);
-    assert!(matches!(flow, Flow::Continue));
+    // The contract is the reply, not the flow: a single-member session may
+    // empty and end (Shutdown) when its one pane retires.
+    assert!(matches!(flow, Flow::Continue | Flow::Shutdown));
     let reply = reply_rx.try_recv().expect("the handler replied");
     let ServerMsg::SessionRetired {
         retired,

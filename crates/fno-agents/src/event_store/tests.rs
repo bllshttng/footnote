@@ -498,12 +498,16 @@ fn append_retry_is_idempotent_hit_not_duplicate() {
     );
     assert_eq!(second.event_id, first.event_id);
     assert_eq!(count_events(&store_path(&live)), 1);
-    // The other branch of the same identity contract: the same id with a
-    // DIFFERENT payload is a refusal, not a silent second row.
-    let other = checkin("2026-09-17T12:00:00Z", "x-aaaa", "DIFFERENT").to_string();
-    let err = append_envelope(&live, &other, Some("evt:requested")).unwrap_err();
+    // The other branch of the same identity contract: a row already stored
+    // under a requested id, then the SAME id with a DIFFERENT payload, is a
+    // refusal, not a silent second row.
+    let named = checkin("2026-09-17T12:00:00Z", "x-aaaa", "one payload").to_string();
+    append_envelope(&live, &named, Some("evt:requested")).unwrap();
+    let count_with_named = count_events(&store_path(&live));
+    let colliding = checkin("2026-09-17T12:00:00Z", "x-aaaa", "DIFFERENT").to_string();
+    let err = append_envelope(&live, &colliding, Some("evt:requested")).unwrap_err();
     assert!(err.contains("identity collision"), "err: {err}");
-    assert_eq!(count_events(&store_path(&live)), 1);
+    assert_eq!(count_events(&store_path(&live)), count_with_named);
 }
 
 #[test]
