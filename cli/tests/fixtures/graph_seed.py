@@ -84,7 +84,9 @@ def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list
 
     client = _client_for(path)
     version, current, digests = _read_snapshot(client)
-    # Fixture status is setup data, not a plan-policy evaluation.
+    # plan_rungs stays absent: a supplied rung map, even empty, makes the
+    # keeper re-derive status and demote every pending seed to idea. The
+    # fixture seeds stored statuses verbatim.
     _commit_rows(client, version, digests, current, rows, None, 1)
     return rows
 
