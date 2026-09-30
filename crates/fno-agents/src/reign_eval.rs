@@ -943,10 +943,11 @@ fn write_eval(fold: &Fold, value: &Value, dir: &Path) -> Result<(), String> {
     metrics.push_str(&format!("\n## Fold\n\n```json\n{}\n```\n", value));
     write_if_missing(&dir.join("part1-metrics.md"), &metrics)?;
     let mut timeline = format!("# Part 2: timeline\n\n{source}\n");
+    let events = timeline_events(value);
     for row in &windows {
         timeline.push_str(&format!("## Window {}\n\nStart: {}  \nEnd: {}  \nHours: {:.1}  \nTool calls: {}  \nErrors: {}\n\n", row["n"], row["start"], row["end"], row["hours"].as_f64().unwrap_or(0.0), row["tool_calls"], row["errors"]));
         timeline.push_str("### Timeline events\n\n| Time | Kind | Detail |\n|---|---|---|\n");
-        for event in timeline_events(value).into_iter().filter(|event| {
+        for event in events.iter().filter(|event| {
             let ts = event["ts"].as_str().unwrap_or("");
             ts >= row["start"].as_str().unwrap_or("") && ts <= row["end"].as_str().unwrap_or("")
         }) {
