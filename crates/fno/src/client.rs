@@ -49,6 +49,7 @@ use row_menu::{build_row_menu, build_tab_menu};
 // shrink-only under the file-budget gate.
 mod launch;
 mod placement_pickers;
+pub mod snapshot;
 
 use self::placement_pickers::{
     attach_place_keys, portal_pick_keys, AttachPlace, PortalPick, PortalPickDecision,
