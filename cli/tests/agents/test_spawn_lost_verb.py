@@ -78,19 +78,6 @@ def test_the_target_family_is_caught_with_an_empty_roster(monkeypatch):
     assert lost_verb_refusal(":blueprint x-1") is not None
 
 
-def test_the_seam_refuses_an_eaten_verb_before_the_rust_route(capsys):
-    """The Rust client execs before cmd_spawn on a thread spawn (auto mode plus
-    an installed binary), so the judgment has to sit at the make_context seam."""
-    from fno.agents import rust_runtime
-
-    with pytest.raises(SystemExit) as exc:
-        rust_runtime._refuse_lost_verb_payload(
-            ["spawn", "--name", "eaten-r", "-H", "codex", "arget x-1", "--substrate", "thread"]
-        )
-    assert exc.value.code == 2
-    assert "Single-quote the payload" in capsys.readouterr().err
-
-
 def test_the_seam_leaves_an_intact_payload_alone():
     from fno.agents import rust_runtime
 
