@@ -12,7 +12,6 @@ from an isolated events path.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -273,9 +272,9 @@ def test_failed_spawn_emits_no_receipt(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         parts = [str(part) for part in cmd]
-        if {"name-mint", "name-codes", "name-parse"} & set(parts):
-            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
-        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        if parts[1:3] == ["agents", "spawn"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
 
     monkeypatch.setattr(advance.subprocess, "run", fake_run)
     monkeypatch.setattr("fno.config.load_settings", lambda: _settings())

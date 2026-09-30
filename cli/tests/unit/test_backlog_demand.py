@@ -44,7 +44,7 @@ def _node(node_id: str, priority: str = "p2", **over) -> dict:
     entry = {
         "id": node_id,
         "slug": f"slug-{node_id}",
-        "title": f"node {node_id}",
+        "title": "seed node",
         "type": "feature",
         "status": "ready",
         "priority": priority,
