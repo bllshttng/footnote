@@ -1205,7 +1205,7 @@ Unknown combo (in env or settings) logs a WARNING and falls through to the next 
 
 ### What chooses the account a spawn bills
 
-`accounts.active` is rung four of `agents.dispatch_target.resolve_dispatch_target`. Failover and outage-handoff routes read it. It is a rotation pointer, not a spawn default. For a spawn, `agents.spawn_defaults.inject_spawn_defaults` checks the lane, then `agents.profiles.<verb>.account`, then `agents.defaults.account`. An explicit `--account` is the CLI pin.
+`accounts.active` is rung four of `agents.dispatch_target.resolve_dispatch_target`. Failover and outage-handoff routes read it. It is a rotation pointer, not a spawn default. For a spawn, the spawn compose (`spawn_compose.rs` via `compose_spawn_argv`) checks the lane, then `agents.profiles.<verb>.account`, then `agents.defaults.account`. An explicit `--account` is the CLI pin.
 
 | Reading | Where it shows | What it means |
 |---|---|---|
