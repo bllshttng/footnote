@@ -300,21 +300,7 @@ pub fn name_crown(
                 "this crown is already named {existing}; the name belongs to the crown"
             ));
         }
-        if let Some((held_scope, _)) = store.crowns.iter().find(|(s, rec)| {
-            *s != &canon && names.contains_key(*s) && rec.name.eq_ignore_ascii_case(name)
-        }) {
-            let holder = live
-                .get(held_scope)
-                .map(|c| c.holder.as_str())
-                .unwrap_or("another crown");
-            return Err(format!(
-                "the name {} is held by {holder} over {held_scope}; pick another name",
-                display(
-                    &store.crowns[held_scope].name,
-                    store.crowns[held_scope].regnal
-                )
-            ));
-        }
+        check_duplicate_name(store, &names, &live, &canon, name)?;
         let holder_session = live.get(&canon).and_then(|c| c.holder_session.clone());
         store.crowns.insert(
             canon.clone(),
@@ -335,6 +321,109 @@ pub fn name_crown(
     })?;
     ensure_named_crown(store_path, registry_path, &canon)?;
     Ok(shown)
+}
+
+fn check_duplicate_name(
+    store: &Store,
+    names: &BTreeMap<String, String>,
+    live: &BTreeMap<String, crate::territory::Crown>,
+    canon: &str,
+    name: &str,
+) -> Result<(), String> {
+    if let Some((held_scope, _)) = store.crowns.iter().find(|(scope, rec)| {
+        scope.as_str() != canon && names.contains_key(*scope) && rec.name.eq_ignore_ascii_case(name)
+    }) {
+        let holder = live
+            .get(held_scope)
+            .map(|crown| crown.holder.as_str())
+            .unwrap_or("another crown");
+        return Err(format!(
+            "the name {} is held by {holder} over {held_scope}; pick another name",
+            display(
+                &store.crowns[held_scope].name,
+                store.crowns[held_scope].regnal
+            )
+        ));
+    }
+    Ok(())
+}
+
+/// Rename the named live crown held by `session`, or return `None` when the
+/// session does not hold one. With `apply = false`, validate without writing.
+pub fn rename_crown(
+    store_path: &Path,
+    registry_path: &Path,
+    session: &str,
+    new_name: &str,
+    apply: bool,
+) -> Result<Option<(String, String)>, String> {
+    if !valid_name(new_name) {
+        let live = live_index(registry_path)?;
+        let holder = live
+            .values()
+            .find(|crown| crown.holder_session.as_deref() == Some(session));
+        if let Some(crown) = holder {
+            return Err(format!(
+                "{} holds the crown over {}, so its name is the crown name: 2-24 letters (apostrophes and hyphens after the first), got {new_name:?}",
+                crown.holder, crown.scope
+            ));
+        }
+        return Ok(None);
+    }
+    let live = live_index(registry_path)?;
+    let Some((scope, _crown)) = live
+        .iter()
+        .find(|(_, crown)| crown.holder_session.as_deref() == Some(session))
+    else {
+        return Ok(None);
+    };
+    let canon = crate::territory::canonical_scope(scope);
+    let prior = read(store_path)?;
+    let Some(record) = prior.crowns.get(&canon) else {
+        return Ok(None);
+    };
+    if record
+        .holder_session
+        .as_deref()
+        .is_some_and(|holder| holder != session)
+    {
+        return Ok(None);
+    }
+    if !apply {
+        let from = display(&record.name, record.regnal);
+        let to = display(new_name, 1);
+        let names = live_names_in(&prior, &live);
+        check_duplicate_name(&prior, &names, &live, &canon, new_name)?;
+        return Ok(Some((from, to)));
+    }
+    let result = update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        check_duplicate_name(store, &names, &live, &canon, new_name)?;
+        let current = store
+            .crowns
+            .get(&canon)
+            .ok_or_else(|| format!("no named crown over {canon}"))?;
+        if current
+            .holder_session
+            .as_deref()
+            .is_some_and(|holder| holder != session)
+        {
+            return Err(format!("crown over {canon} changed holder before rename"));
+        }
+        let from = display(&current.name, current.regnal);
+        let to = display(new_name, 1);
+        let record = store
+            .crowns
+            .get_mut(&canon)
+            .ok_or_else(|| format!("no named crown over {canon}"))?;
+        record.name = new_name.to_string();
+        record.regnal = 1;
+        record.holder_session = Some(session.to_string());
+        record.pending_succession = None;
+        record.updated_at = now_stamp();
+        Ok((from, to))
+    })?;
+    Ok(Some(result))
 }
 
 /// Keep the live holder's registry label in step with the name bound to this
