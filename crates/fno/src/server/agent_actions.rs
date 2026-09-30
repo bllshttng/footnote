@@ -529,8 +529,73 @@ impl super::Core {
     }
 }
 
-/// Resolve the restore verb's claude re-entry plans OFF the core
-/// loop: squad members resolve their `resume` transition, held portals their
+/// Shell `fno-agents pane-rebind --harness <h> --session <sid> --mux-session
+/// <s> --pane <id> --pid <pid> --json` OFF the core loop, the same bounded,
+/// fail-closed-per-job shape as [`run_reentry_plan`]: the restore walk just
+/// spawned the row's pane, and this is what moves its registry row onto it
+/// (mux ref, pid, Live) instead of leaving it orphaned on the dead pane. The
+/// receipt line the verb prints is the notice the restore row carries. The
+/// bound sits under the client's 10s control timeout because the restore
+/// reply waits for every receipt.
+pub(super) async fn run_pane_rebind(
+    harness: &str,
+    session_id: &str,
+    mux_session: &str,
+    pane: u64,
+    pid: u32,
+) -> Result<String, String> {
+    const REBIND_TIMEOUT: Duration = Duration::from_secs(8);
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
+    command.args([
+        "pane-rebind",
+        "--harness",
+        harness,
+        "--session",
+        session_id,
+        "--mux-session",
+        mux_session,
+        "--pane",
+        &pane.to_string(),
+        "--pid",
+        &pid.to_string(),
+        "--json",
+    ]);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    match tokio::time::timeout(REBIND_TIMEOUT, fut).await {
+        Err(_) => Err("registry row rebind: timed out".to_string()),
+        Ok(Err(_)) => Err("registry row rebind: fno-agents unavailable".to_string()),
+        Ok(Ok(o)) if o.status.success() => {
+            // The verb's receipt is authoritative (it ran under the registry
+            // lock); the notice names the pane and pid it joined.
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let v: serde_json::Value = serde_json::from_str(stdout.trim())
+                .map_err(|e| format!("registry row rebind: unparseable receipt: {e}"))?;
+            let name = v
+                .get("rebound")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let pane_id = v
+                .get("mux")
+                .and_then(|m| m.get("pane_id"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(pane);
+            Ok(format!(
+                "registry row {name} rebound to pane {pane_id} (pid {pid}) live"
+            ))
+        }
+        Ok(Ok(o)) => Err(first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            "registry row rebind refused",
+        )),
+    }
+}
+
+/// Resolve the restore verb's claude re-entry plans OFF the core/// loop: squad members resolve their `resume` transition, held portals their
 /// `attach` transition (keyed `portal:<name>` so one row that is both a
 /// member and a held portal resolves each transition it actually needs).
 /// Every failure shape is that row's visible refusal, the same typed `Err`

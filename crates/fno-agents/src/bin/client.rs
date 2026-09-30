@@ -214,6 +214,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("mail-hold") {
         std::process::exit(fno_agents::mail_hold::run_mail_hold(&args[1..]));
     }
+    // `pane-rebind`: the mux workspace restore's registry rebind door;
+    // transport-only (no client action - the shrink law allows no new
+    // action); the mux server's restore walk is the only caller. Answers in
+    // one registry transaction, so it dispatches before the runtime builds,
+    // with the other early arms.
+    if args.first().map(String::as_str) == Some("pane-rebind") {
+        std::process::exit(fno_agents::pane_rebind::run(&args[1..]));
+    }
     // `state-root`: the seal-handshake door (agents_config::run_state_root_probe).
     if args.first().map(String::as_str) == Some("state-root") {
         std::process::exit(fno_agents::agents_config::run_state_root_probe());
