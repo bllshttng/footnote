@@ -281,15 +281,26 @@ pub(crate) fn transcript_reading(
 }
 
 pub(crate) fn session_transcript(sid: &str, harness: &str) -> Option<PathBuf> {
-    match harness {
-        "claude" => crate::claude_drive::find_transcript(sid),
-        "codex" => {
-            let sessions = crate::gc_inventory::codex_store_sessions().ok()?;
-            sessions
+    SessionTranscripts::default().find(sid, harness)
+}
+
+#[derive(Default)]
+pub(crate) struct SessionTranscripts {
+    codex: std::cell::OnceCell<Option<std::collections::BTreeMap<String, Vec<PathBuf>>>>,
+}
+
+impl SessionTranscripts {
+    pub(crate) fn find(&self, sid: &str, harness: &str) -> Option<PathBuf> {
+        match harness {
+            "claude" => crate::claude_drive::find_transcript(sid),
+            "codex" => self
+                .codex
+                .get_or_init(|| crate::gc_inventory::codex_store_sessions().ok())
+                .as_ref()?
                 .get(&sid.to_ascii_lowercase())
-                .and_then(|paths| paths.first().cloned())
+                .and_then(|paths| paths.first().cloned()),
+            _ => None,
         }
-        _ => None,
     }
 }
 

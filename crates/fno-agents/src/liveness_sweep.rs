@@ -687,6 +687,7 @@ pub(crate) fn persist_reconcile_changes(
             .collect::<Result<Vec<_>, _>>()
             .ok()
     });
+    let transcripts = crate::context_run::SessionTranscripts::default();
     let readings: Vec<_> = entries
         .iter()
         .filter(|e| e.status != AgentStatus::Exited)
@@ -694,7 +695,7 @@ pub(crate) fn persist_reconcile_changes(
             let transcript = entry
                 .harness_session_id
                 .as_deref()
-                .and_then(|sid| crate::context_run::session_transcript(sid, entry.harness_name()));
+                .and_then(|sid| transcripts.find(sid, entry.harness_name()));
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
         })
         .collect();
