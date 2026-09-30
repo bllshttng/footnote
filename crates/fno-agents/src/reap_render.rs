@@ -788,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn crowns_render_in_text_and_json() {
+    fn crowns_rows() {
         let mut s = summary(&[]);
         s.crowns = Some(crate::crown_reap::CrownReap {
             vacated: vec![crate::crown_reap::VacatedCrown {
@@ -849,10 +849,7 @@ mod tests {
         let json = render_reap(&summary(&[]), true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
         assert!(v["crowns"].is_null());
-    }
 
-    #[test]
-    fn a_dry_run_renders_would_vacate() {
         let mut s = summary(&[]);
         s.crowns = Some(crate::crown_reap::CrownReap {
             vacated: vec![crate::crown_reap::VacatedCrown {
@@ -879,6 +876,34 @@ mod tests {
         let text = render_reap(&s, false, true);
         assert!(text.contains("would vacate crown zed"), "{text}");
         assert!(text.contains("would revert succession"), "{text}");
+
+        // The gate, both directions: a key the renderer emits with no doc
+        // row is an undocumented bucket; a doc row naming no rendered key is
+        // a stale one. One failure names every offender.
+        let out = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&crate::gc_inventory::Inventory::default()),
+            Some(&MuxSweep::Skipped),
+            true,
+            true,
+        );
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        let rendered: Vec<String> = v
+            .as_object()
+            .expect("json object")
+            .keys()
+            .cloned()
+            .collect();
+        let doc_keys = doc_json_keys(include_str!("../../../docs/reaping-faq.md"));
+        let undocumented: Vec<&String> =
+            rendered.iter().filter(|k| !doc_keys.contains(k)).collect();
+        let stale: Vec<&String> = doc_keys.iter().filter(|k| !rendered.contains(k)).collect();
+        assert!(
+            undocumented.is_empty() && stale.is_empty(),
+            "docs/reaping-faq.md `## Every JSON key` disagrees with \
+             render_reap_with_inventory:\nkeys with no doc row: {undocumented:?}\n\
+             doc rows naming no rendered key: {stale:?}"
+        );
     }
 
     /// The doc's key list: every backticked snake_case token in the first
@@ -915,38 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn the_doc_names_every_reap_json_key_and_only_those_keys() {
-        // The gate, both directions: a key the renderer emits with no doc
-        // row is an undocumented bucket; a doc row naming no rendered key is
-        // a stale one. One failure names every offender.
-        let out = render_reap_with_inventory(
-            &summary(&[]),
-            Some(&crate::gc_inventory::Inventory::default()),
-            Some(&MuxSweep::Skipped),
-            true,
-            true,
-        );
-        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
-        let rendered: Vec<String> = v
-            .as_object()
-            .expect("json object")
-            .keys()
-            .cloned()
-            .collect();
-        let doc_keys = doc_json_keys(include_str!("../../../docs/reaping-faq.md"));
-        let undocumented: Vec<&String> =
-            rendered.iter().filter(|k| !doc_keys.contains(k)).collect();
-        let stale: Vec<&String> = doc_keys.iter().filter(|k| !rendered.contains(k)).collect();
-        assert!(
-            undocumented.is_empty() && stale.is_empty(),
-            "docs/reaping-faq.md `## Every JSON key` disagrees with \
-             render_reap_with_inventory:\nkeys with no doc row: {undocumented:?}\n\
-             doc rows naming no rendered key: {stale:?}"
-        );
-    }
-
-    #[test]
-    fn reap_reports_every_bucket_even_when_all_are_zero() {
+    fn census_rows() {
         // A key that vanishes at zero makes every consumer write a default,
         // and one of them will default to "no retirements ever happened".
         // The doc table is the one list of keys; this test carries no
@@ -965,25 +959,7 @@ mod tests {
                 "bucket {key} missing from json: {out}"
             );
         }
-    }
 
-    fn inv_session(
-        harness: &str,
-        sid: &str,
-        sources: &[crate::gc_inventory::Source],
-    ) -> crate::gc_inventory::InventorySession {
-        crate::gc_inventory::InventorySession {
-            harness: harness.to_string(),
-            session_id: sid.to_string(),
-            registry_name: None,
-            sources: sources.to_vec(),
-            transcripts: Vec::new(),
-            transcript_age_s: None,
-        }
-    }
-
-    #[test]
-    fn the_text_receipt_prints_the_census_beside_the_judged_rows() {
         // A sweep that filters its candidate set prints what it never looked
         // at: the census count beside the judged count, in text exactly as
         // the JSON read already carries it.
@@ -1037,10 +1013,7 @@ mod tests {
         );
         let v: Value = serde_json::from_str(json.trim()).unwrap();
         assert_eq!(v["inventory"]["sessions"].as_array().map(Vec::len), Some(4));
-    }
 
-    #[test]
-    fn the_text_receipt_names_the_census_coverage_gaps() {
         // An incomplete census has NOT enumerated the world (AC1-EDGE), so
         // the text receipt names the unread source and the root gap the way
         // the JSON already does.
@@ -1075,10 +1048,7 @@ mod tests {
             text.contains("session inventory (partial): transcript roots 2 of 3 readable"),
             "{text}"
         );
-    }
 
-    #[test]
-    fn an_unread_registry_makes_the_unjudged_count_unknown_not_zero() {
         // When the registry read fails, NO session carries the Registry
         // source, so a printed count would read every session as never
         // judged. The receipt says unknown instead of diagnosing a scoping
@@ -1119,10 +1089,7 @@ mod tests {
             !text.contains("never judged"),
             "no count may read as a measured zero: {text}"
         );
-    }
 
-    #[test]
-    fn no_census_prints_no_census_lines() {
         // Apply-mode receipts build no census; the renderer must stay silent
         // rather than print a default-shaped zero.
         let text =
@@ -1130,8 +1097,23 @@ mod tests {
         assert!(!text.contains("session inventory"), "{text}");
     }
 
+    fn inv_session(
+        harness: &str,
+        sid: &str,
+        sources: &[crate::gc_inventory::Source],
+    ) -> crate::gc_inventory::InventorySession {
+        crate::gc_inventory::InventorySession {
+            harness: harness.to_string(),
+            session_id: sid.to_string(),
+            registry_name: None,
+            sources: sources.to_vec(),
+            transcripts: Vec::new(),
+            transcript_age_s: None,
+        }
+    }
+
     #[test]
-    fn reap_names_every_retired_row_with_its_basis() {
+    fn receipt_rows() {
         let out = render_reap(
             &summary(&[("a1", "every named node done: N1")]),
             false,
@@ -1145,10 +1127,7 @@ mod tests {
             out.contains("  retired a1 (every named node done: N1)"),
             "{out}"
         );
-    }
 
-    #[test]
-    fn reap_dry_run_says_would_retire_not_retired() {
         // `--dry-run` must never claim past tense on a row nothing removed.
         let out = render_reap(
             &summary(&[("a1", "every named node done: N1")]),
@@ -1162,10 +1141,7 @@ mod tests {
             "must not also say retired: {out}"
         );
         assert!(out.contains("(dry-run: no changes made)"));
-    }
 
-    #[test]
-    fn reap_dry_run_says_would_prune_not_pruned() {
         // A rehearsal never confirms a removal - the `pruned` line must
         // carry the same "would" verb the `retired` line already does.
         let s = GcSummary {
@@ -1178,10 +1154,7 @@ mod tests {
         let live = render_reap(&s, false, false);
         assert!(live.contains("  pruned a1"), "{live}");
         assert!(!live.contains("would prune"), "{live}");
-    }
 
-    #[test]
-    fn an_unread_probe_row_prints_its_line_and_json_key() {
         // an unread probe is its own bucket, never `active` - the
         // render must show both the text line and the JSON key.
         let mut s = GcSummary::default();
@@ -1212,25 +1185,19 @@ mod tests {
             Some(0),
             "kept_active stays empty: {out}"
         );
-    }
 
-    #[test]
-    fn reap_dry_run_json_names_the_mode() {
         let out = render_reap(&summary(&[("a1", "x")]), true, true);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["dry_run"], json!(true));
         assert_eq!(v["retired"], json!([{"id": "a1", "basis": "x"}]));
-    }
 
-    #[test]
-    fn reap_live_run_json_names_the_mode_false() {
         let out = render_reap(&summary(&[]), true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["dry_run"], json!(false));
     }
 
     #[test]
-    fn reap_names_open_work_with_its_node_and_status() {
+    fn open_work_rows() {
         let s = GcSummary {
             kept_open_work: vec![(
                 "b1".into(),
@@ -1251,12 +1218,7 @@ mod tests {
             v["kept_open_work"],
             json!([{"id": "b1", "node": "N3", "status": "in_review", "reader": "sessions"}])
         );
-    }
 
-    /// change 2: the stale bucket names the pinning node and says
-    /// the keep has a clock, in both renderings.
-    #[test]
-    fn reap_open_work_stale_names_the_node_and_its_clock() {
         let s = GcSummary {
             kept_open_work_stale: vec![(
                 "b2".into(),
@@ -1277,14 +1239,7 @@ mod tests {
             v["kept_open_work_stale"],
             json!([{"id": "b2", "node": "N4", "status": "in_progress", "reader": "sessions"}])
         );
-    }
 
-    /// change 4: the no-provenance keep line carries a closing paren
-    /// and a real newline. The old spelling emitted an unbalanced paren and
-    /// a literal backslash-n; invisible only while the bucket measured
-    /// empty.
-    #[test]
-    fn reap_no_provenance_line_is_well_formed() {
         let s = GcSummary {
             kept_no_provenance: vec!["d1".into()],
             ..Default::default()
@@ -1302,13 +1257,7 @@ mod tests {
             !text.contains("\\n"),
             "no literal backslash-n in stdout: {text}"
         );
-    }
 
-    /// change 2: a terminal-state retirement names the session state
-    /// and the reader in the basis; the all-done basis is byte-identical to
-    /// its old string.
-    #[test]
-    fn reap_retired_bases_spell_their_answer() {
         let s = GcSummary {
             retired: vec![(
                 "a1".into(),
@@ -1321,10 +1270,7 @@ mod tests {
             text.contains("session terminal: harness state done"),
             "{text}"
         );
-    }
 
-    #[test]
-    fn reap_names_active_with_the_transcript_age() {
         let s = GcSummary {
             kept_active: vec![("c1".into(), 10)],
             ..Default::default()
@@ -1334,10 +1280,7 @@ mod tests {
             text.contains("  kept c1 (active: transcript written 10s ago)"),
             "{text}"
         );
-    }
 
-    #[test]
-    fn reap_no_bucket_reads_an_exit_vocabulary_word() {
         // The retired vocabulary: no bucket, reason string, or
         // receipt field reads exited_at, not-terminal, contradicted,
         // within-grace, uncorroborated, or backstop.
@@ -1369,6 +1312,18 @@ mod tests {
         }
     }
 
+    /// change 2: the stale bucket names the pinning node and says
+    /// the keep has a clock, in both renderings.
+
+    /// change 4: the no-provenance keep line carries a closing paren
+    /// and a real newline. The old spelling emitted an unbalanced paren and
+    /// a literal backslash-n; invisible only while the bucket measured
+    /// empty.
+
+    /// change 2: a terminal-state retirement names the session state
+    /// and the reader in the basis; the all-done basis is byte-identical to
+    /// its old string.
+
     fn ran_receipt() -> MuxSweep {
         MuxSweep::Ran {
             receipt: PruneReceipt {
@@ -1382,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mux_half_renders_in_three_distinguishable_states() {
+    fn mux_rows() {
         let unread = MuxSweep::Unread {
             exit_code: Some(1),
             stderr_first: "socket refused".into(),
@@ -1404,10 +1359,7 @@ mod tests {
             let m = v.get("mux").expect("mux object present in every mode");
             assert_eq!(m["state"], json!(mux.state()), "state word: {m}");
         }
-    }
 
-    #[test]
-    fn the_ran_state_names_the_tabs_it_closed_with_their_labels() {
         for (dry, _count) in [(false, 2), (true, 0)] {
             let out =
                 render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), true, dry);
@@ -1423,10 +1375,7 @@ mod tests {
                 render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), false, dry);
             assert!(text.contains("ghost"), "the label rides the text: {text}");
         }
-    }
 
-    #[test]
-    fn the_unread_state_never_carries_a_count() {
         // AC3-EDGE: an unparsable sweep is `unread`, never a measured zero -
         // would_close must be ABSENT, not 0 (the plan's reader asserts it).
         let out = render_reap_with_inventory(
@@ -1462,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_prune_receipt_fails_closed_on_garbage_and_reads_the_real_keys() {
+    fn state_rows() {
         // None over a zeroed report: garbage stdout and a receipt
         // missing the tab counts parse as None; the real verb's keys parse
         // into the receipt.
@@ -1483,10 +1432,7 @@ mod tests {
             receipt.notice.as_deref(),
             Some("server liveness incomplete")
         );
-    }
 
-    #[test]
-    fn state_file_reap_json_keeps_all_five_zero_count_families() {
         let summary = crate::gc_sweep::StateFilesReapSummary::default();
         let out = render_state_files_reap(&summary, true);
         let value: Value = serde_json::from_str(out.trim()).expect("valid json");
@@ -1511,10 +1457,7 @@ mod tests {
         assert_eq!(value["applied"], json!(false));
         assert_eq!(value["dry_run"], json!(true));
         assert_eq!(value["skip_reason"], Value::Null);
-    }
 
-    #[test]
-    fn state_file_reap_text_names_each_family_total_and_dry_run() {
         let mut summary = crate::gc_sweep::StateFilesReapSummary::default();
         summary.plan_locks.kept = vec![
             crate::gc_sweep::StateReapKept {
@@ -1541,13 +1484,10 @@ mod tests {
         assert!(lines[4].starts_with("claim_tmp:"));
         assert!(lines[5].starts_with("total:"));
         assert_eq!(lines[6], "(dry-run: no changes made)");
-    }
 
-    /// (change 3) AC3-HP: a 17h hold on done work names its age and
-    /// ends with the decision. AC3-EDGE: a 2h hold carries no decision.
-    /// AC3-ERR: an old hold whose node is not done carries no decision.
-    #[test]
-    fn an_unresolved_hold_names_its_age_and_asks_for_a_decision_when_old_and_done() {
+        // (change 3) AC3-HP: a 17h hold on done work names its age and
+        // ends with the decision. AC3-EDGE: a 2h hold carries no decision.
+        // AC3-ERR: an old hold whose node is not done carries no decision.
         let hold = |held_s: i64, nodes_done: bool| UnresolvedHold {
             id: "bp-ebd2-verb-law".into(),
             held_s,
@@ -1590,12 +1530,9 @@ mod tests {
         assert_eq!(row["id"], "bp-ebd2-verb-law");
         assert_eq!(row["held_s"], 7 * 3600);
         assert_eq!(row["nodes_done"], true);
-    }
 
-    /// d-81c6da7e AC4-HP: a held planner's line names the node, carries the
-    /// hold suffix, and once escalated names the release verb.
-    #[test]
-    fn a_held_planner_line_names_the_node_age_and_release() {
+        // d-81c6da7e AC4-HP: a held planner's line names the node, carries the
+        // hold suffix, and once escalated names the release verb.
         let mut s = summary(&[]);
         s.kept_planning_unclosed
             .push(("bp-x-aaaa".to_string(), "x-aaaa".to_string()));
