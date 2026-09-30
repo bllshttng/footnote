@@ -19,6 +19,20 @@ pub(super) fn mux_command(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::C
     command
 }
 
+/// One spawn-failure notice that keeps the underlying error: the resolved
+/// executable, the message (an admission refusal's reason rides the
+/// Display), the error kind, and the errno when the OS set one. The fixed
+/// "unavailable" word discarded all four, leaving a live row's tap
+/// undiagnosable.
+fn spawn_failure(what: &str, bin: &std::path::Path, e: &std::io::Error) -> String {
+    format!(
+        "{what}: spawning {} failed: {e} (kind {:?}, errno {:?})",
+        bin.display(),
+        e.kind(),
+        e.raw_os_error()
+    )
+}
+
 /// Why `run_resume_argv` failed. The split is load-bearing: the mux
 /// gesture fail-opens to the declared-form render ONLY on `Unavailable`; a
 /// `Refused` line names the door that restores the route and spawns nothing.
@@ -275,7 +289,8 @@ fn reap_notice(stdout: &str) -> String {
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 pub(super) async fn run_reap() -> String {
     const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = mux_command(&bin);
     command
         // --no-mux keeps this gesture on its registry-row contract:
         // the 20s bound kills only the direct child, so a mux tab sweep that
@@ -292,7 +307,7 @@ pub(super) async fn run_reap() -> String {
         .kill_on_drop(true);
     let mut child = match crate::process_admission::tokio_spawn(&mut command) {
         Ok(c) => c,
-        Err(_) => return "reap: unavailable".to_string(),
+        Err(e) => return spawn_failure("reap", &bin, &e),
     };
     // Drain both pipes concurrently so a timeout can still read how
     // far the sweep got: the child's partial stderr progress names rows
@@ -395,7 +410,8 @@ fn reap_progress_note(stderr: &str) -> String {
 /// stderr's first line.
 pub(super) async fn run_agent_rename(token: &str, new_name: &str) -> Result<String, String> {
     const RENAME_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = mux_command(&bin);
     command
         .args(["rename", token, "--name", new_name])
         .stdin(std::process::Stdio::null())
@@ -405,7 +421,7 @@ pub(super) async fn run_agent_rename(token: &str, new_name: &str) -> Result<Stri
     let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(RENAME_TIMEOUT, fut).await {
         Err(_) => Err(format!("rename {token}: timed out")),
-        Ok(Err(_)) => Err(format!("rename {token}: fno-agents unavailable")),
+        Ok(Err(e)) => Err(spawn_failure(&format!("rename {token}"), &bin, &e)),
         Ok(Ok(out)) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let line = first_line_or(&stdout.trim(), &format!("renamed {token} -> {new_name}"));
@@ -429,7 +445,8 @@ pub(super) async fn run_reentry_plan(
     transition: &str,
 ) -> Result<ReentryVerdict, String> {
     const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = mux_command(&bin);
     command
         .args(["reentry-plan", name, "--transition", transition])
         .stdin(std::process::Stdio::null())
@@ -437,7 +454,11 @@ pub(super) async fn run_reentry_plan(
     let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(PLAN_TIMEOUT, fut).await {
         Err(_) => Err(format!("re-entry plan for {name}: timed out")),
-        Ok(Err(_)) => Err(format!("re-entry plan for {name}: fno-agents unavailable")),
+        Ok(Err(e)) => Err(spawn_failure(
+            &format!("re-entry plan for {name}"),
+            &bin,
+            &e,
+        )),
         Ok(Ok(o)) if o.status.success() => {
             ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))
         }
@@ -456,7 +477,8 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let mut command = mux_command(fno_bin());
+    let bin = fno_bin();
+    let mut command = mux_command(&bin);
     command
         .args([
             "agents",
@@ -473,7 +495,7 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(MAIL_TIMEOUT, fut).await {
         Err(_) => format!("mail {name}: timed out"),
-        Ok(Err(_)) => format!("mail {name}: unavailable"),
+        Ok(Err(e)) => spawn_failure(&format!("mail {name}"), &bin, &e),
         Ok(Ok(o)) if o.status.success() => first_line_or(
             &String::from_utf8_lossy(&o.stdout),
             &format!("mailed {name}"),
@@ -545,7 +567,8 @@ pub(super) async fn run_pane_rebind(
     pid: u32,
 ) -> Result<String, String> {
     const REBIND_TIMEOUT: Duration = Duration::from_secs(8);
-    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = mux_command(&bin);
     command.args([
         "pane-rebind",
         "--harness",
@@ -568,7 +591,7 @@ pub(super) async fn run_pane_rebind(
     let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(REBIND_TIMEOUT, fut).await {
         Err(_) => Err("registry row rebind: timed out".to_string()),
-        Ok(Err(_)) => Err("registry row rebind: fno-agents unavailable".to_string()),
+        Ok(Err(e)) => Err(spawn_failure("registry row rebind", &bin, &e)),
         Ok(Ok(o)) if o.status.success() => {
             // The verb's receipt is authoritative (it ran under the registry
             // lock); the notice names the pane and pid it joined.
@@ -723,6 +746,40 @@ mod tests {
             reap_progress_note(""),
             "no rows scanned before the deadline"
         );
+    }
+
+    #[test]
+    fn spawn_failure_keeps_failure_classes_distinct() {
+        // ENOENT (binary missing), EACCES (permission), and an admission
+        // refusal (io::Error::other, no errno) must stay distinguishable in
+        // the notice: kind, errno, resolved executable, and the admission
+        // reason all survive the format.
+        let bin = std::path::Path::new("/opt/fno/bin/fno-agents");
+        let enoent = std::io::Error::from_raw_os_error(2);
+        let eacces = std::io::Error::from_raw_os_error(13);
+        let admission = std::io::Error::other(
+            "process admission refused: count=24 ceiling=23 scope=fleet reason=over-limit",
+        );
+        let missing = spawn_failure("re-entry plan for row", bin, &enoent);
+        let denied = spawn_failure("re-entry plan for row", bin, &eacces);
+        let refused = spawn_failure("re-entry plan for row", bin, &admission);
+        assert!(missing.contains("/opt/fno/bin/fno-agents"), "{missing}");
+        assert!(
+            missing.contains("kind NotFound") && missing.contains("errno Some(2)"),
+            "{missing}"
+        );
+        assert!(
+            denied.contains("kind PermissionDenied") && denied.contains("errno Some(13)"),
+            "{denied}"
+        );
+        assert!(
+            refused.contains("process admission refused: count=24 ceiling=23")
+                && refused.contains("kind Other")
+                && refused.contains("errno None"),
+            "{refused}"
+        );
+        assert_ne!(missing, denied);
+        assert_ne!(denied, refused);
     }
 
     /// Serialized process env for the tests that pin FNO_AGENTS_BIN /
