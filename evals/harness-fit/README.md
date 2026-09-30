@@ -89,6 +89,19 @@ The machine restarted at 12:21:17Z on 2026-09-30. Harbor last wrote its log at 1
 - Load. From 16:40Z a sampler records the load average once a minute. run-0.md and run-1.md print the load beside each timeout and stall. They also print each rate without the results that ran above load 50. No load record exists before 16:40Z.
 - A trial or attempt that a restart kills again gets the same treatment. run-0.md and run-1.md count each one by reason.
 
+## Amendment 6 (2026-09-30, a new machine, before any results commit)
+
+The user moved the study to an Intel iMac with 128 GB of RAM. Every Terminal-Bench 2 task image is `linux/amd64`. The first machine was an arm64 Mac, so it emulated every task. The 1-minute load there swung from 24 to 331 during Run 0. A load guard paused both runs again at 18:54:58Z, 9 minutes after a resume.
+
+- Pilot. Every result from the arm64 Mac is a pilot: all of Run 0 and all of Run 1 to date. The results files report the pilot apart from the study. A pilot result fires no decision rule.
+- Clean restart. Both runs restart clean on the iMac. Run 0 runs the one-task smoke per arm first, then the same seeded arm order. Run 1 runs the same seeded lane order, then the top-up. Harbor, the bank, the prices and every rule stay the same.
+- Concurrency. Run 0 runs min(4, half the physical cores) trials at once. Run 1 runs one attempt at a time beside it.
+- Scripts. The run scripts move into `evals/harness-fit/run/`, so the iMac runs the reviewed code from this branch. `evals/harness-fit/setup-imac.sh` installs Docker, Harbor, the harness CLIs and the key. The zcode adapter stays out of the repo, so zcode reads `unavailable` unless its files are copied in.
+- Account. The z.ai account and key stay the same. Rate limits follow the key, not the machine, so the 1302 rule stays.
+- Load. The sampler runs on the iMac from the first trial. The results print the load beside each timeout and stall.
+- Dollars. The pilot spend counts against the $200 ceiling.
+- Results reach this branch by push from the iMac.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
