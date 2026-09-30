@@ -432,6 +432,7 @@ pub(super) fn two_pane_view() -> View {
     // accent (`Indexed(3)`), which is the theme whose byte-identity the
     // lattice structure protects.
     view.theme = crate::theme::Theme::from_name("terminal").0;
+    view.server_proto = Some(crate::proto::PROTO_VERSION);
     view
 }
 
@@ -12378,7 +12379,6 @@ fn density_button_glyph_sits_one_column_off_the_divider() {
 pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
     let mut v = two_pane_view();
     v.layout.agents = agents;
-    v.server_proto = Some(crate::proto::PROTO_VERSION);
     v
 }
 
