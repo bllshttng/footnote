@@ -294,7 +294,9 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.messaging_socket_path == receipt["keeper_socket"]
     assert row.pid == 4242
     assert row.mux is None, "a thread row is pane-less: no mux ref"
-    assert row.fno_id == session_id
+    # The row's id is its own mint now, never the keeper session id beside it.
+    assert row.fno_id
+    assert row.fno_id != session_id
     assert row.origin == "spawn"
     # The keeper passes its env through to the harness child, so a stale seed
     # block inherited from the dispatcher must not survive the spawn floor.

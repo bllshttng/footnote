@@ -14,13 +14,14 @@ import fcntl
 import json
 import os
 import re
-import secrets
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from fno import rust_binary
 
 #: Iteration ceiling before a walk terminates on Budget.
 DEFAULT_MAX_ITERATIONS = 40
@@ -227,13 +228,6 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def mint_fno_id(pid: Optional[int] = None) -> str:
-    """``{ts}-kg{pid}-{6hex}``: three dash-separated segments like the target
-    manifest, because ``split('-')[0]`` consumers depend on that count."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-kg{pid or os.getpid()}-{secrets.token_hex(3)}"
-
-
 def write_manifest(
     path: Path,
     *,
@@ -261,7 +255,7 @@ def write_manifest(
             "Pass --force to re-init deliberately."
         )
     fields = {
-        "fno_id": mint_fno_id(),
+        "fno_id": rust_binary.mint_fno_id(),
         "created_at": _utc_now(),
         "scope": scope,
         "shape": shape if shape in ("pass", "court") else "pass",

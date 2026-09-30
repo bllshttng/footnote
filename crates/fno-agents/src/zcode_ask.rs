@@ -346,7 +346,6 @@ pub fn dispatch_zcode_once(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: Some(session_id.clone()),
         delivery_policy: None,
         sandbox_posture: None,
         git_grant: None,

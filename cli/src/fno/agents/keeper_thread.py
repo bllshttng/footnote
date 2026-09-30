@@ -141,20 +141,6 @@ def _mint_thread_session_id(
         yolo=yolo,
     )
     return minted if minted is not None else str(uuid.uuid4())
-    from fno.agents.harness_map import capabilities
-
-    binding = capabilities(harness).get("session_binding") or {}
-    if binding.get("strategy") == "callee-minted-read-back":
-        from fno.agents.dispatch import DispatchAskError
-
-        raise DispatchAskError(
-            f"{harness} declares session_binding.strategy = "
-            "callee-minted-read-back but fno has no mint for it; the "
-            "caller-assigned UUIDv4 fallback launches the keeper on an id the "
-            "harness never adopts, and Identify reports that fabricated id",
-            exit_code=2,
-        )
-    return requested
 
 
 def complete_launch_argv(

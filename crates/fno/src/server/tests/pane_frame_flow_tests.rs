@@ -26,7 +26,7 @@ fn counter_core(bytes: &[u8]) -> (Core, u64) {
 }
 
 #[test]
-fn pane_counters_count_fed_bytes_bursts_and_cpu() {
+fn pane_counters_count_fed_bytes_and_hidden_panes_never_composite() {
     let (core, pid) = counter_core(b"hello");
     let c = &core.panes[&pid].stats;
     assert_eq!(c.bytes_in.load(Ordering::Relaxed), 5);
@@ -35,6 +35,13 @@ fn pane_counters_count_fed_bytes_bursts_and_cpu() {
         c.cpu_ns.load(Ordering::Relaxed) > 0,
         "feeding one burst must attribute nonzero handling time"
     );
+    // No client is attached, so broadcast_pane's visible-gate returns
+    // before vt.frame(): the counter set must show fed-but-never-
+    // composited, the exact reading that separates feeding from display.
+    let (core, pid) = counter_core(b"data");
+    let c = &core.panes[&pid].stats;
+    assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
+    assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
 }
 
 #[test]
@@ -64,17 +71,6 @@ fn watcherless_pane_stamps_last_output_on_every_burst() {
         core.panes[&pid].last_output > registered,
         "a second burst must advance the registration stamp"
     );
-}
-
-#[test]
-fn hidden_pane_is_fed_but_never_composites() {
-    // No client is attached, so broadcast_pane's visible-gate returns
-    // before vt.frame(): the counter set must show fed-but-never-
-    // composited, the exact reading that separates feeding from display.
-    let (core, pid) = counter_core(b"data");
-    let c = &core.panes[&pid].stats;
-    assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
-    assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
 }
 
 #[test]
@@ -281,4 +277,45 @@ fn reaping_a_pane_drops_its_counter_row() {
     assert!(core.pane_stats.read().unwrap().contains_key(&pid));
     core.reap_pane(pid);
     assert!(!core.pane_stats.read().unwrap().contains_key(&pid));
+}
+
+#[test]
+fn an_unfocused_pane_s_osc_query_resolves_its_own_ground() {
+    // The query scan answers with the theme the PANE's directory
+    // resolves (the server's own cwd names no project), and an unhosted
+    // pane answers nothing. The write into the pane's stdin is the one
+    // line after this seam; delivery is the pty writer's own contract.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".fno")).unwrap();
+    std::fs::write(
+        dir.path().join(".fno/config.toml"),
+        "[mux]\ntheme = \"footnote-paper\"\n",
+    )
+    .unwrap();
+    let dark = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dark.path().join(".fno")).unwrap();
+    std::fs::write(
+        dark.path().join(".fno/config.toml"),
+        "[mux]\ntheme = \"footnote-superscript\"\n",
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let pid = core
+        .spawn_pane(2, 4, dir.path().to_str().unwrap())
+        .expect("pane");
+    let query: &[u8] = b"\x1b]11;?\x1b\\";
+    assert_eq!(
+        core.osc_reply_for(pid, query).as_deref(),
+        Some(&b"\x1b]11;rgb:f7f7/f7f7/f7f7\x1b\\"[..]),
+        "the pane's own ground answers its probe"
+    );
+    // A pane whose directory pins the dark twin answers with its ground.
+    core.panes.get_mut(&pid).unwrap().cwd = dark.path().to_str().unwrap().into();
+    assert_eq!(
+        core.osc_reply_for(pid, query).as_deref(),
+        Some(&b"\x1b]11;rgb:1414/1414/1414\x1b\\"[..])
+    );
+    core.panes.remove(&pid);
+    assert!(core.osc_reply_for(pid, query).is_none());
 }

@@ -197,8 +197,8 @@ pub(crate) fn resolve_blocked_child_candidates(
 /// Does a bus address reach this blocked row? A target row is keyed by its
 /// run id, which the bus never addresses; the node's live claim names the
 /// harness session the bus does address. The harness-shape guard keeps a run
-/// id from matching by its first 8 characters, which are a date - valid hex,
-/// so a bare handle could collide with it.
+/// id from matching by its first 8 characters: a run id is a random UUID, so
+/// its head matches a bare handle only by chance, never by construction.
 pub(crate) fn addresses_row(addr: &str, row_session: &str, holder: Option<&str>) -> bool {
     addr == row_session
         || (crate::identity::harness_of_session_id(row_session).is_some()

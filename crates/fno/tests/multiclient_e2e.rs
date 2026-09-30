@@ -418,6 +418,20 @@ fn multiclient_server_outlives_client_crash_mid_command() {
     });
     a.input(b"echo consistent#\r");
     a.wait_pane_text(15, l.focus, |t| t.contains("consistent#"));
+
+    // The skew branch of the same family: a frame the server cannot
+    // decode (the SplitH a v95 client sends) costs a refusal notice,
+    // never the session; the stream stays on its frame boundary, so
+    // the same socket still carries a split this build speaks.
+    a.send_raw_frame(br#"{"Command":"SplitH"}"#);
+    a.wait(10, "refusal notice", |c| {
+        c.notices
+            .iter()
+            .any(|n| n.contains("unusable message refused"))
+            .then(|| ())
+    });
+    a.cmd(Command::SplitDir(Dir::Right));
+    a.wait_layout(10, "split stands after the refusal", |l| l.panes.len() == 3);
 }
 
 // -- AC3: named sessions -----------------------------------------------------

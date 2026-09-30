@@ -3489,40 +3489,6 @@ fn run_node_route(rest: &[String]) -> i32 {
     0
 }
 
-/// Mint a random UUID (RFC-4122 v4) to pin an interactive claude `--session-id`.
-/// The daemon refuses an interactive claude host without a pinned session id
-/// (the single-writer claim + transcript discovery key on it); a fresh host
-/// supplies one client-side.
-// ponytail: v4 from getrandom (the OS CSPRNG), not the `uuid` crate.
-// `--session-id` only needs a unique, well-formed UUID -- v7's time-ordering
-// buys nothing for a session pin. getrandom is already in the tree, so this
-// adds no compile cost and is cross-platform (unlike a `/dev/urandom` read).
-fn mint_session_uuid() -> String {
-    let mut b = [0u8; 16];
-    if getrandom::fill(&mut b).is_err() {
-        // Never panic: mix wall-clock nanos with the pid. Collision is
-        // implausible for a session pin and getrandom is the real path.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mix = nanos ^ ((std::process::id() as u128) << 96);
-        b = mix.to_be_bytes();
-    }
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // RFC-4122 variant
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
-}
-
-/// Build (method, params) from a verb and its flags.
 /// Apply the owned-interactive (drivable grid pane) defaults to a spawn/host
 /// request. Sets `host_mode=interactive`; for claude additionally defaults the
 /// PTY lane (`mode=interactive`) and mints a `session_id` when none is pinned or
@@ -3533,7 +3499,7 @@ fn mint_session_uuid() -> String {
 /// explicit `--mode` wins, so `--mode stream_json` opts a claude spawn back out
 /// of the PTY lane. Non-claude providers get only `host_mode`; their create argv
 /// stays byte-unchanged (the mint is claude-only, mirroring the host contract).
-fn apply_interactive_defaults(params: &mut Map<String, Value>) {
+fn apply_interactive_defaults(params: &mut Map<String, Value>) -> Result<(), String> {
     params.insert(
         "host_mode".into(),
         Value::String(fno_agents::state::HOST_MODE_INTERACTIVE.into()),
@@ -3550,9 +3516,13 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
         let is_pty_lane = params.get("mode").and_then(Value::as_str)
             == Some(fno_agents::state::CLAUDE_MODE_INTERACTIVE);
         if is_pty_lane && !params.contains_key("session_id") && !params.contains_key("resume_id") {
-            params.insert("session_id".into(), Value::String(mint_session_uuid()));
+            // The crate's one mint; a getrandom failure surfaces instead of
+            // launching with an invented pin.
+            let id = fno_agents::identity::mint_fno_id()?;
+            params.insert("session_id".into(), Value::String(id));
         }
     }
+    Ok(())
 }
 
 /// The substrate a spawn with NO explicit `--substrate` gets: thread where the
@@ -4173,7 +4143,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 .and_then(Value::as_str)
                 .is_some_and(|p| KNOWN_PROVIDERS.contains(&p));
             if substrate == "pane" && pty_capable {
-                apply_interactive_defaults(&mut params);
+                apply_interactive_defaults(&mut params)?;
             }
             fno_agents::spawn_context::refuse_inherited_tier_remap(&params)?;
             fno_agents::spawn_context::stamp_spawn_lineage(&mut params)?;

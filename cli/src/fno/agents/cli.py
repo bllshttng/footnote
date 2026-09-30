@@ -2457,8 +2457,6 @@ def cmd_spawn(
                 receipt_obj["claim_store_path"] = str(
                     claims_dir(global_claims_root())
                 )
-            if pane_result.fno_id is not None:
-                receipt_obj["fno_id"] = pane_result.fno_id
             if pane_result.bound is False:
                 # `is False`, not falsy: `bound` is tri-state and None means this
                 # harness binds no session at all (gemini, agy), which is not a
