@@ -1360,7 +1360,9 @@ def query_pr_merge_state(
             ).get("row")
         except VerbUnavailable:
             pass
-    if isinstance(cached, dict) and isinstance(cached.get("info"), dict) and (
+    if isinstance(cached, dict) and isinstance(cached.get("info"), dict) and isinstance(
+        cached["info"].get("state"), str
+    ) and (
         not include_files or isinstance(cached.get("files"), list)
     ):
         info = cached["info"]
@@ -1442,18 +1444,21 @@ def query_pr_merge_state(
         ) from exc
 
     if info_reader is None and state == "MERGED":
-        from fno.rust_binary import verb_call
+        from fno.rust_binary import VerbUnavailable, verb_call
 
-        verb_call(
-            "gh-cache",
-            {
-                "op": "write",
-                "kind": "merged",
-                "slug": repo,
-                "pr": pr_number,
-                "row": {"info": info, **({"files": changed_files} if include_files else {})},
-            },
-        )
+        try:
+            verb_call(
+                "gh-cache",
+                {
+                    "op": "write",
+                    "kind": "merged",
+                    "slug": repo,
+                    "pr": pr_number,
+                    "row": {"info": info, **({"files": changed_files} if include_files else {})},
+                },
+            )
+        except VerbUnavailable:
+            pass
     return PrMergeState(
         number=number,
         state=state,

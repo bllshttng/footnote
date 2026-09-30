@@ -76,10 +76,11 @@ fn write_row(root: &Path, kind: &str, slug: &str, pr: Option<u64>, row: &Value) 
         return false;
     };
     let mut out = Map::new();
-    out.insert("ts".to_string(), json!(now_secs()));
     for (k, v) in map {
         out.insert(k.clone(), v.clone());
     }
+    // The freshness stamp lands last so a caller-supplied ts never wins.
+    out.insert("ts".to_string(), json!(now_secs()));
     let text = Value::Object(out).to_string();
     if fs::create_dir_all(path.parent().unwrap_or(root)).is_err() {
         return false;
