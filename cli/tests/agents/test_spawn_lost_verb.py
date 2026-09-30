@@ -26,11 +26,19 @@ def _expand(shell: str, payload: str) -> str:
     return subprocess.run(argv + [script], env=env, capture_output=True, text=True, check=True).stdout
 
 
-@pytest.mark.parametrize("shell", ["bash", "zsh"])
-@pytest.mark.parametrize(
-    "payload",
-    ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1"],
-)
+_SHELLS = ["bash", "zsh"]
+# zsh reads `$fno:ship` as the multi-char `:s` modifier and expands the word
+# to nothing, so no verb token survives for the refusal to name; bash leaves
+# `:ship`, which the detector does catch. The retired `$fno:pr` spelling must
+# still refuse on bash even though nothing mints it anymore.
+_COMMON_PAYLOADS = ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1"]
+
+
+@pytest.mark.parametrize("shell,payload", [
+    *[(s, p) for s in _SHELLS for p in _COMMON_PAYLOADS],
+    ("bash", "$fno:pr check 7"),
+    ("bash", "$fno:ship pr check 7"),
+])
 def test_a_real_shell_mangling_is_refused(shell, payload):
     if shutil.which(shell) is None:
         pytest.skip(f"{shell} not installed")
@@ -38,19 +46,6 @@ def test_a_real_shell_mangling_is_refused(shell, payload):
     assert "$fno:" not in mangled, f"control: {shell} did not expand {payload!r}"
     reason = lost_verb_refusal(mangled)
     assert reason is not None, f"{shell} turned {payload!r} into {mangled!r}"
-    assert "Single-quote the payload" in reason
-
-
-def test_a_ship_seed_mangling_is_refused_by_bash():
-    # zsh reads `$fno:ship` as the multi-char `:s` modifier and expands the
-    # word to nothing, so no verb token survives for the refusal to name;
-    # bash leaves `:ship`, which the detector does catch.
-    if shutil.which("bash") is None:
-        pytest.skip("bash not installed")
-    mangled = _expand("bash", "$fno:ship pr check 7")
-    assert "$fno:" not in mangled, f"control: bash did not expand the payload ({mangled!r})"
-    reason = lost_verb_refusal(mangled)
-    assert reason is not None, f"bash turned the ship seed into {mangled!r}"
     assert "Single-quote the payload" in reason
 
 
