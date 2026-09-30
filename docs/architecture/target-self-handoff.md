@@ -10,7 +10,7 @@ The automatic path also collapsed five independent axes. It named the child from
 
 Context pressure triggers compaction. It never triggers capability escalation. Blueprint/do and wave boundaries continue in the current session.
 
-Capability escalation is explicit. An external operator or supervising king selects a stronger destination after reading evidence that the current worker cannot finish. The worker signals that it is stuck. It must not select its own successor.
+Capability escalation is explicit. An external operator or supervising king selects a stronger destination after reading evidence that the current worker cannot finish. The worker signals that it is stuck. It must not select its own successor. The daemon's burn arm supplies the evidence. It samples five counters per live execute worker. When a threshold trips, it sends the supervising crown one note. It never selects a destination and never moves a worker.
 
 Invoke the bundled transaction with an explicit destination:
 
