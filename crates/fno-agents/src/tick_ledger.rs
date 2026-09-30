@@ -248,6 +248,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "reign_eval",
+        default_interval_s: crate::reign_eval::REIGN_EVAL_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "fleet_page",
         default_interval_s: crate::fleet_page::FLEET_PAGE_INTERVAL_S,
         scheduler: SCHED_DAEMON,
