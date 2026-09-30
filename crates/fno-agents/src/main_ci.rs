@@ -46,6 +46,11 @@ fn fold_page<'a>(
     }
 }
 
+/// How far back the check-in reports an old-commit failure: past this the
+/// failure is archaeology, not a live signal, and the un-paginated branch
+/// page would bury it anyway.
+const STALE_REPORT_WINDOW_DAYS: i64 = 14;
+
 /// One verdict token for the check-in line, from the workflow-run history on
 /// main, judged at the branch head only: the verdict reduces rows whose
 /// head sha equals `head_sha` - `at_sha` carries those push runs, and the
@@ -58,11 +63,15 @@ fn fold_page<'a>(
 /// rows the newest COMPLETED run decides - red on fail or cancel, naming
 /// the workflow and the sha it ran on; a workflow whose newest head run is
 /// still in flight reads pending; no head rows at all reads pending, never
-/// green.
+/// green. The stale list reports within a bounded window (`now` minus
+/// [`STALE_REPORT_WINDOW_DAYS`]): the branch page is one un-paginated read,
+/// so an unbounded stale list would silently expire at the 100-row page
+/// bound instead of at a named age.
 fn main_ci_token_from_pages<'a>(
     head_sha: &str,
     at_sha: &'a [Value],
     on_main: &'a [Value],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Value {
     let at_head = |run: &Value| run.get("head_sha").and_then(Value::as_str) == Some(head_sha);
     let mut head: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
@@ -70,10 +79,18 @@ fn main_ci_token_from_pages<'a>(
     fold_page(&mut head, on_main.iter().filter(|run| at_head(run)));
     let mut older: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
     fold_page(&mut older, on_main.iter().filter(|run| !at_head(run)));
+    let window_start = now - chrono::Duration::days(STALE_REPORT_WINDOW_DAYS);
     let stale: Vec<Value> = older
         .iter()
         .filter_map(|(_, _, completed)| *completed)
         .filter(|run| matches!(crate::pr_push::rest_bucket(run), "fail" | "cancel"))
+        .filter(|run| {
+            run.get("created_at")
+                .and_then(Value::as_str)
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(|ts| ts.with_timezone(&chrono::Utc) >= window_start)
+                .unwrap_or(true)
+        })
         .map(|run| {
             json!({
                 "workflow": run.get("name").and_then(Value::as_str).unwrap_or("unknown"),
@@ -218,8 +235,33 @@ pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
     let at_sha = read_runs(&format!(
         "repos/{{owner}}/{{repo}}/actions/runs?head_sha={head_sha}&event=push&per_page=100"
     ))?;
-    let on_main = read_runs("repos/{owner}/{repo}/actions/runs?branch=main&per_page=100")?;
-    Ok(main_ci_token_from_pages(&head_sha, &at_sha, &on_main))
+    let mut on_main = read_runs("repos/{owner}/{repo}/actions/runs?branch=main&per_page=100")?;
+    // The verdict only needs the head rows, but the stale report owes the
+    // whole window: when the newest 100 rows end inside it, a burst has
+    // pushed in-window failures onto page 2. One extra page, and no more -
+    // a burst past two pages outruns the stale report, never the verdict.
+    let window_start = chrono::Utc::now() - chrono::Duration::days(STALE_REPORT_WINDOW_DAYS);
+    let covers_window = on_main
+        .iter()
+        .filter_map(|run| {
+            run.get("created_at")
+                .and_then(Value::as_str)
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        })
+        .min()
+        .map(|oldest| oldest.with_timezone(&chrono::Utc) <= window_start)
+        .unwrap_or(true);
+    if !covers_window {
+        on_main.extend(read_runs(
+            "repos/{owner}/{repo}/actions/runs?branch=main&per_page=100&page=2",
+        )?);
+    }
+    Ok(main_ci_token_from_pages(
+        &head_sha,
+        &at_sha,
+        &on_main,
+        chrono::Utc::now(),
+    ))
 }
 
 /// The one red run a main-ci token names, as (workflow, head sha). The word
@@ -286,6 +328,19 @@ mod tests {
         })
     }
 
+    /// The reducer at the tests' fixed clock, 2026-09-30T12:00:00Z, so the
+    /// stale window's boundary never drifts under a hardcoded date.
+    fn token_at(head_sha: &str, at_sha: &[Value], on_main: &[Value]) -> Value {
+        main_ci_token_from_pages(
+            head_sha,
+            at_sha,
+            on_main,
+            chrono::DateTime::parse_from_rfc3339("2026-09-30T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+    }
+
     #[test]
     fn an_old_commit_failure_rides_the_stale_list_and_never_sets_the_verdict() {
         let at_sha = vec![
@@ -314,11 +369,11 @@ mod tests {
         // A clean head with no older failure is the plain word: every head
         // workflow's newest completed run passed.
         assert_eq!(
-            main_ci_token_from_pages("b2", &at_sha, &[]),
+            token_at("b2", &at_sha, &[]),
             serde_json::json!({"verdict": "green"})
         );
         assert_eq!(
-            main_ci_token_from_pages("b2", &at_sha, &on_main),
+            token_at("b2", &at_sha, &on_main),
             serde_json::json!({
                 "verdict": "green",
                 "stale": [
@@ -344,11 +399,11 @@ mod tests {
             wf_run("cli-ci", "b2", "in_progress", "", "2026-09-12T04:00:00Z"),
         ];
         assert_eq!(
-            main_ci_token_from_pages("b2", &runs, &[]),
+            token_at("b2", &runs, &[]),
             serde_json::json!({"verdict": "pending"})
         );
         assert_eq!(
-            main_ci_token_from_pages("b2", &[], &[]),
+            token_at("b2", &[], &[]),
             serde_json::json!({"verdict": "pending"})
         );
     }
@@ -373,7 +428,7 @@ mod tests {
             "2026-09-26T03:35:00Z",
         )];
         assert_eq!(
-            main_ci_token_from_pages("b3", &at_sha, &on_main),
+            token_at("b3", &at_sha, &on_main),
             serde_json::json!({
                 "verdict": "pending",
                 "stale": [
@@ -413,7 +468,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_pages("fresh", &[], &on_main),
+            token_at("fresh", &[], &on_main),
             serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "fresh"})
         );
     }
@@ -446,7 +501,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_pages("head", &at_sha, &on_main),
+            token_at("head", &at_sha, &on_main),
             serde_json::json!({"verdict": "pending"})
         );
     }
@@ -481,13 +536,35 @@ mod tests {
             ),
         ];
         assert_eq!(
-            main_ci_token_from_pages("head", &at_sha, &on_main),
+            token_at("head", &at_sha, &on_main),
             serde_json::json!({
                 "verdict": "green",
                 "stale": [
                     {"workflow": "release", "sha": "oldsha", "created_at": "2026-09-26T03:35:00Z"}
                 ]
             })
+        );
+        // Past the report window the failure is archaeology: it rides no
+        // list and the token is the plain word.
+        let ancient = vec![
+            wf_run(
+                "guards",
+                "head",
+                "completed",
+                "success",
+                "2026-09-28T08:00:00Z",
+            ),
+            wf_run(
+                "release",
+                "oldsha",
+                "completed",
+                "cancelled",
+                "2026-08-01T03:35:00Z",
+            ),
+        ];
+        assert_eq!(
+            token_at("head", &at_sha, &ancient),
+            serde_json::json!({"verdict": "green"})
         );
     }
 
