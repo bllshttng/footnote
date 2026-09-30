@@ -95,7 +95,7 @@ mod tests {
         assert_eq!(priors(trend, "x-bbbb"), (Some(0.175), None));
         record(trend, "x-bbbb", "2026-09-15T10:05:00Z", 0.165);
         record(trend, "x-bbbb", "2026-09-15T10:10:00Z", 0.150);
-        assert_eq!(priors(trend, "x-bbbb"), (Some(0.165), Some(0.175)));
+        assert_eq!(priors(trend, "x-bbbb"), (Some(0.150), Some(0.165)));
         // The ring keeps three: the fourth pushes the oldest off.
         record(trend, "x-bbbb", "2026-09-15T10:15:00Z", 0.120);
         assert_eq!(priors(trend, "x-bbbb"), (Some(0.120), Some(0.150)));
