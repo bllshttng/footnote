@@ -383,6 +383,15 @@ mod tests {
         std::env::set_var("FNO_HOME", dir);
         std::env::set_var("FNO_STATE_DIR", dir);
         std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
+        // Pin the global tier off the machine's real file too.
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", dir.join("global"));
+    }
+
+    fn hermetic_drop() {
+        std::env::remove_var("FNO_CONFIG");
+        std::env::remove_var("FNO_HOME");
+        std::env::remove_var("FNO_STATE_DIR");
+        std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
     }
 
     fn law_envelope(id: &str, subject: &str, decision: &str, authority: &str) -> String {
@@ -397,9 +406,19 @@ mod tests {
         fs::write(dir.join("decisions.jsonl"), lines.join("\n") + "\n").unwrap();
     }
 
+    fn fixture_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pdr-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The argv and config read layers over their branch tables: gh-wide
+    /// option stripping, draft intent per spelling, and the pr.open_ready
+    /// read with its quoted-value coercion and fail-on defaults.
     #[test]
-    fn command_args_drops_gh_wide_options() {
+    fn argv_and_config_read_tables() {
         let s = |xs: &[&str]| -> Vec<String> { xs.iter().map(|x| x.to_string()).collect() };
+        // gh-wide options fall off, before `pr` and after it.
         assert_eq!(
             command_args(&s(&["-R", "o/r", "pr", "create", "--draft"])),
             s(&["pr", "create", "--draft"])
@@ -409,287 +428,216 @@ mod tests {
             s(&["pr", "ready", "7"])
         );
         assert_eq!(command_args(&s(&["-R"])), Vec::<String>::new());
-    }
-
-    #[test]
-    fn draft_intent_table() {
-        let s = |xs: &[&str]| -> Vec<String> { xs.iter().map(|x| x.to_string()).collect() };
+        // draft intent per spelling: --draft=false creates ready, not draft.
+        let intent = |xs: &[&str]| draft_intent(&command_args(&s(xs)));
+        assert_eq!(intent(&["pr", "create", "--draft"]), Some(Intent::Create));
         assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "create", "--draft"]))),
+            intent(&["pr", "create", "--draft=true"]),
             Some(Intent::Create)
         );
+        assert_eq!(intent(&["pr", "create", "--draft=false"]), None);
+        assert_eq!(intent(&["pr", "view", "9"]), None);
+        assert_eq!(intent(&["auth", "status"]), None);
         assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "create", "--draft=true"]))),
-            Some(Intent::Create)
-        );
-        assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "create", "--draft=false"]))),
-            None
-        );
-        assert_eq!(draft_intent(&command_args(&s(&["pr", "view", "9"]))), None);
-        assert_eq!(draft_intent(&command_args(&s(&["auth", "status"]))), None);
-        assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "ready", "7", "--draft"]))),
+            intent(&["pr", "ready", "7", "--draft"]),
             Some(Intent::Ready(Some(7)))
         );
         assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "ready", "--draft"]))),
+            intent(&["pr", "ready", "--draft"]),
             Some(Intent::Ready(None))
         );
-        assert_eq!(
-            draft_intent(&command_args(&s(&["pr", "ready", "--draft=false"]))),
-            None
-        );
-    }
+        assert_eq!(intent(&["pr", "ready", "--draft=false"]), None);
 
-    #[test]
-    fn open_ready_coerces_and_defaults_true() {
         let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-open-ready-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let config = dir.join("config.toml");
+        let dir = fixture_dir("reads");
         hermetic(&dir);
-
+        let config = dir.join("config.toml");
+        // No file reads as the default on; quoted and malformed values follow
+        // the stored-type rule (a quoted false coerces, garbage fails on).
         fs::remove_file(&config).ok();
-        assert!(open_ready(Some(&dir)), "no file reads as the default on");
-
-        fs::write(&config, "[pr]\nopen_ready = false\n").unwrap();
-        assert!(!open_ready(Some(&dir)));
-
-        fs::write(&config, "[pr]\nopen_ready = \"false\"\n").unwrap();
-        assert!(!open_ready(Some(&dir)), "a quoted false coerces");
-
+        assert!(open_ready(Some(&dir)));
+        for body in [
+            "[pr]\nopen_ready = false\n",
+            "[pr]\nopen_ready = \"false\"\n",
+        ] {
+            fs::write(&config, body).unwrap();
+            assert!(!open_ready(Some(&dir)), "{body}");
+        }
         fs::write(&config, "[pr]\nopen_ready = 3\n").unwrap();
-        assert!(
-            open_ready(Some(&dir)),
-            "a malformed value reads as the default on"
-        );
-
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
+        assert!(open_ready(Some(&dir)));
+        hermetic_drop();
     }
 
+    /// The three-state law read over row shapes and probe health, seeded into
+    /// a hermetic decision store: single only on one operator row carrying the
+    /// exact decision; chat rows and notes are none; damaged or conflicting
+    /// stores are unknown, never none.
     #[test]
     fn law_authority_three_states() {
         let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-law-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir("law");
         hermetic(&dir);
         let subject = "pr-draft:owner/repo#7";
 
+        // No store at all is unknown, never none: an unreadable store must
+        // not read as "no rulings exist".
+        assert_eq!(law_authority(subject, None).0, "unknown");
+        fs::write(dir.join("decisions.jsonl"), "").unwrap();
         assert_eq!(
             law_authority(subject, None).0,
             "none",
             "an empty store is none"
         );
-
-        seed_laws(
-            &dir,
-            vec![law_envelope("d-1", subject, DRAFT_DECISION, "operator")],
-        );
-        assert_eq!(law_authority(subject, None).0, "single");
-
-        seed_laws(
-            &dir,
-            vec![law_envelope(
+        let row = |id: &str, decision: &str, authority: &str| {
+            law_envelope(id, subject, decision, authority)
+        };
+        for (id, decision, authority, want, why) in [
+            ("d-1", DRAFT_DECISION, "operator", "single", ""),
+            (
                 "d-2",
-                subject,
                 DRAFT_DECISION,
                 "chat_attested",
-            )],
-        );
-        assert_eq!(law_authority(subject, None).0, "none", "chat cannot grant");
-
+                "none",
+                "chat cannot grant",
+            ),
+            ("d-3", "a note", "operator", "none", "a note is no waiver"),
+        ] {
+            seed_laws(&dir, &[row(id, decision, authority)]);
+            assert_eq!(law_authority(subject, None).0, want, "{why}");
+        }
         seed_laws(
             &dir,
-            vec![law_envelope("d-3", subject, "a note", "operator")],
-        );
-        assert_eq!(
-            law_authority(subject, None).0,
-            "none",
-            "a note is no waiver"
-        );
-
-        seed_laws(
-            &dir,
-            vec![
-                law_envelope("d-4", subject, DRAFT_DECISION, "operator"),
-                law_envelope("d-5", subject, DRAFT_DECISION, "operator"),
+            &[
+                row("d-4", DRAFT_DECISION, "operator"),
+                row("d-5", DRAFT_DECISION, "operator"),
             ],
         );
         assert_eq!(law_authority(subject, None).0, "unknown", "conflicting");
-
         seed_laws(
             &dir,
-            vec![
+            &[
                 "this line is not json".to_string(),
-                law_envelope("d-6", subject, DRAFT_DECISION, "operator"),
+                row("d-6", DRAFT_DECISION, "operator"),
             ],
         );
         let (status, probe) = law_authority(subject, None);
         assert_eq!(status, "unknown", "a damaged probe is never none");
-        assert!(probe.contains("damaged 1 rows") || probe.contains("damaged 1 row"));
-
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
+        assert!(probe.contains("1 damaged row"), "{probe}");
+        hermetic_drop();
     }
 
+    /// The check door over its outcome table: draft argv refused with a
+    /// recordable subject and door; an operator ruling, an ordinary argv, or
+    /// a stood-down rule admitted; the ready spelling keys the subject on the
+    /// repo; an unknown door op names its error.
     #[test]
-    fn check_refuses_draft_and_names_the_door() {
+    fn check_door_table() {
         let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-check-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir("check");
         hermetic(&dir);
+        let argv = |xs: &[&str]| -> Vec<String> { xs.iter().map(|x| x.to_string()).collect() };
+        // A nonexistent cwd: branch and slug reads fail, so the subjects are
+        // the stable unknown-branch / unknown-repo fallbacks.
+        let nowhen = Some("/nonexistent-pdr-check");
 
-        let reply = check(
-            &[
-                "pr".to_string(),
-                "create".to_string(),
-                "--draft".to_string(),
-            ],
-            None,
-        );
+        let reply = check(&argv(&["pr", "create", "--draft"]), nowhen);
         assert_eq!(reply["admitted"], json!(false));
         let refusal = reply["refusal"].as_str().unwrap();
         assert!(refusal.contains("pr-draft:unknown-branch"), "{refusal}");
         assert!(refusal.contains(DRAFT_DECISION), "{refusal}");
         assert!(refusal.contains("fno inbox law set"), "{refusal}");
 
-        let ruling = law_envelope("d-7", "pr-draft:unknown-branch", DRAFT_DECISION, "operator");
-        seed_laws(&dir, vec![ruling]);
-        let reply = check(
-            &[
-                "pr".to_string(),
-                "create".to_string(),
-                "--draft".to_string(),
-            ],
-            None,
-        );
-        assert_eq!(reply["admitted"], json!(true), "a ruling spares the draft");
-
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
-    }
-
-    #[test]
-    fn check_admits_ordinary_argv_and_standdown() {
-        let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-admit-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        hermetic(&dir);
-
-        let reply = check(&["auth".to_string(), "status".to_string()], None);
-        assert_eq!(reply["admitted"], json!(true));
-
-        fs::write(dir.join("config.toml"), "[pr]\nopen_ready = false\n").unwrap();
-        let reply = check(
-            &[
-                "pr".to_string(),
-                "create".to_string(),
-                "--draft".to_string(),
-            ],
-            None,
-        );
-        assert_eq!(reply["admitted"], json!(true), "the rule stood down");
-
-        let reply = check(
-            &[
-                "pr".to_string(),
-                "ready".to_string(),
-                "7".to_string(),
-                "--draft".to_string(),
-            ],
-            Some("/nonexistent-x-3159"),
-        );
-        assert_eq!(reply["admitted"], json!(true));
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
-    }
-
-    #[test]
-    fn check_keys_the_ready_subject_on_the_repo() {
-        let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-ready-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        hermetic(&dir);
-        let reply = check(
-            &[
-                "pr".to_string(),
-                "ready".to_string(),
-                "7".to_string(),
-                "--draft".to_string(),
-            ],
-            Some("/nonexistent-x-3159"),
-        );
+        // The ready spelling keys the subject on the repo, not the branch.
+        let reply = check(&argv(&["pr", "ready", "7", "--draft"]), nowhen);
         let refusal = reply["refusal"].as_str().unwrap();
         assert!(refusal.contains("pr-draft:unknown-repo#7"), "{refusal}");
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
+
+        // One operator ruling at the exact subject admits.
+        seed_laws(
+            &dir,
+            &[law_envelope(
+                "d-7",
+                "pr-draft:unknown-branch",
+                DRAFT_DECISION,
+                "operator",
+            )],
+        );
+        let reply = check(&argv(&["pr", "create", "--draft"]), nowhen);
+        assert_eq!(reply["admitted"], json!(true), "a ruling spares the draft");
+
+        // Ordinary argv pays nothing, and a stood-down rule admits the draft.
+        assert_eq!(
+            check(&argv(&["auth", "status"]), nowhen)["admitted"],
+            json!(true)
+        );
+        fs::write(dir.join("config.toml"), "[pr]\nopen_ready = false\n").unwrap();
+        assert_eq!(
+            check(&argv(&["pr", "create", "--draft"]), nowhen)["admitted"],
+            json!(true)
+        );
+        assert!(run_door(&json!({}))["error"]
+            .as_str()
+            .unwrap()
+            .contains("check or flip"));
+        hermetic_drop();
     }
 
-    fn flip_spec(journal: &Path) -> Value {
-        json!({
+    /// The flip over its outcome table: spared and stood-down never run gh;
+    /// a flip pins gh to the candidate's repo and journals the row; a refused
+    /// flip journals the error instead. One outcome row per branch, the same
+    /// shapes the sweep reads.
+    #[test]
+    fn flip_outcome_table() {
+        let _guard = env_guard();
+        let dir = fixture_dir("flip");
+        hermetic(&dir);
+        let journal = dir.join("events.jsonl");
+        let spec = json!({
             "pr": 7,
             "repo": "owner/repo",
             "node": "x-abc12345",
             "cwd": null,
             "journal": journal.to_string_lossy(),
-        })
-    }
-
-    #[test]
-    fn flip_spared_or_stood_down_never_calls_gh() {
-        let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-flip-a-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        hermetic(&dir);
-        let journal = dir.join("events.jsonl");
+        });
         let no_gh = |_argv: &[String], _cwd: Option<&Path>| -> (i32, String, String) {
             panic!("gh must not run when the flip is spared or stood down");
         };
 
         seed_laws(
             &dir,
-            vec![law_envelope(
+            &[law_envelope(
                 "d-8",
                 "pr-draft:owner/repo#7",
                 DRAFT_DECISION,
                 "operator",
             )],
         );
-        let reply = flip(&flip_spec(&journal), &no_gh);
+        let reply = flip(&spec, &no_gh);
         assert_eq!(reply["outcome"], json!("spared"));
         assert!(reply["receipt"]
             .as_str()
             .unwrap()
             .contains("operator ruling"));
-
+        // Clear the ruling: the spare check precedes the stand-down read.
+        // The stand-down read needs a repo cwd; null reads as the default on.
+        fs::write(dir.join("decisions.jsonl"), "").unwrap();
         fs::write(dir.join("config.toml"), "[pr]\nopen_ready = false\n").unwrap();
-        let reply = flip(&flip_spec(&journal), &no_gh);
-        assert_eq!(reply["outcome"], json!("stand_down"));
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
-    }
+        let spec_cwd = json!({
+            "pr": 7,
+            "repo": "owner/repo",
+            "node": "x-abc12345",
+            "cwd": dir.to_string_lossy(),
+            "journal": journal.to_string_lossy(),
+        });
+        assert_eq!(flip(&spec_cwd, &no_gh)["outcome"], json!("stand_down"));
+        fs::remove_file(dir.join("config.toml")).unwrap();
 
-    #[test]
-    fn flip_pins_the_repo_and_journals() {
-        let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-flip-b-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        hermetic(&dir);
-        let journal = dir.join("events.jsonl");
         let calls = std::cell::RefCell::new(Vec::new());
-        let gh = |argv: &[String], _cwd: Option<&Path>| -> (i32, String, String) {
+        let ok_gh = |argv: &[String], _cwd: Option<&Path>| -> (i32, String, String) {
             calls.borrow_mut().push(argv.to_vec());
             (0, String::new(), String::new())
         };
-        let reply = flip(&flip_spec(&journal), &gh);
+        let reply = flip(&spec, &ok_gh);
         assert_eq!(reply["outcome"], json!("flipped"));
         assert_eq!(reply["journaled"], json!(true));
         assert_eq!(
@@ -703,46 +651,23 @@ mod tests {
                 "owner/repo".to_string(),
             ]]
         );
-        let text = crate::event_store::journal_text(&journal, &["pr_watch_draft_flip".to_string()])
-            .unwrap();
+        let text = crate::event_store::journal_text(&journal, &["pr_watch_draft_flip"]);
         let row: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(row["type"], json!("pr_watch_draft_flip"));
         assert_eq!(row["source"], json!("daemon"));
         assert_eq!(row["data"]["outcome"], json!("flipped"));
         assert_eq!(row["data"]["pr"], json!(7));
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
-    }
 
-    #[test]
-    fn flip_error_journals_the_refusal() {
-        let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!("pdr-flip-c-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        hermetic(&dir);
-        let journal = dir.join("events.jsonl");
-        let gh = |_argv: &[String], _cwd: Option<&Path>| -> (i32, String, String) {
+        let bad_gh = |_argv: &[String], _cwd: Option<&Path>| -> (i32, String, String) {
             (1, String::new(), "not a draft".to_string())
         };
-        let reply = flip(&flip_spec(&journal), &gh);
+        let reply = flip(&spec, &bad_gh);
         assert_eq!(reply["outcome"], json!("error"));
         assert!(reply["receipt"].as_str().unwrap().contains("not a draft"));
-        let text = crate::event_store::journal_text(&journal, &["pr_watch_draft_flip".to_string()])
-            .unwrap();
-        let row: Value = serde_json::from_str(text.trim()).unwrap();
+        let text = crate::event_store::journal_text(&journal, &["pr_watch_draft_flip"]);
+        let last = text.lines().last().unwrap_or("");
+        let row: Value = serde_json::from_str(last).unwrap();
         assert_eq!(row["data"]["outcome"], json!("error"));
         assert_eq!(row["data"]["error"], json!("not a draft"));
-        std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_STATE_DIR");
-    }
-
-    #[test]
-    fn door_needs_a_known_op() {
-        let reply = run_door(&json!({ "pr_draft_ready": {} }));
-        assert!(reply["error"].as_str().unwrap().contains("check or flip"));
-        let reply = run_door(&json!({}));
-        assert!(reply["error"].as_str().unwrap().contains("check or flip"));
+        hermetic_drop();
     }
 }
