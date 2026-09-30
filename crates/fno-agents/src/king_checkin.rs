@@ -1261,6 +1261,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
     take("repeated_asks", crate::repeated_asks::reading());
+    take("skill_drift", crate::skill_drift::reading());
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("self_hold", {
@@ -1395,6 +1396,22 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(hold) = get("self_hold").filter(|r| r.ok) {
         data.insert("self_hold".into(), hold.value.clone());
     }
+    if let Some(sd) = get("skill_drift").filter(|r| r.ok) {
+        let names: Vec<String> = sd
+            .value
+            .get("stale")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !names.is_empty() {
+            data.insert("skill_drift_stale".into(), json!(names));
+        }
+    }
     let failed: Vec<&Reading> = readings.iter().filter(|r| !r.ok).collect();
     data.insert("coverage".into(), json!(readings.len() - failed.len()));
     data.insert(
@@ -1478,6 +1495,17 @@ fn derive_change(
             == Some("bus-only")
     {
         attention.push("DND on".into());
+    }
+    let stale_skills: Vec<&str> = data
+        .get("skill_drift_stale")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !stale_skills.is_empty() {
+        attention.push(format!(
+            "skill text stale since compaction: {}",
+            stale_skills.join(", ")
+        ));
     }
     if data
         .get("refusal_rate_rising")
@@ -1732,6 +1760,7 @@ fn render_lines(
 
     lines.extend(crate::king_answers::held_lines(readings));
     lines.extend(crate::repeated_asks::lines(readings));
+    lines.extend(crate::skill_drift::lines(readings));
 
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
@@ -3787,6 +3816,21 @@ mod tests {
             line,
             "wake_ratio: 287 machine / 44 user wakes = 6.5 to 1 - OVER 3 to 1"
         );
+
+        // A zero-user over beat journals n/a, never a 0.0 ratio that
+        // contradicts the printed n/a line.
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "wake_meter",
+                json!({"machine": 5, "user": 0, "ratio": null, "over": true,
+                       "tokens_since": 0, "tokens_session": 0}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(change.contains("wake ratio n/a"), "change: {change}");
+        assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
     // AC5: a failed wake_meter reading prints the READER FAILED line, names
@@ -3812,25 +3856,6 @@ mod tests {
         );
         assert!(!lines.iter().any(|l| l.starts_with("wake_ratio:")));
         assert!(!lines.iter().any(|l| l.starts_with("subagent_tokens:")));
-    }
-
-    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
-    // the printed n/a line.
-    #[test]
-    fn wake_attention_without_typed_turns_names_n_a() {
-        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
-        set_reading(
-            &mut readings,
-            Reading::took(
-                "wake_meter",
-                json!({"machine": 5, "user": 0, "ratio": null, "over": true,
-                       "tokens_since": 0, "tokens_session": 0}),
-            ),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        let change = derive_change(None, &data, "");
-        assert!(change.contains("wake ratio n/a"), "change: {change}");
-        assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
     // AC2: the handoff signal reads the true beat-to-beat direction. Two
@@ -4269,6 +4294,23 @@ mod tests {
         assert!(lines.iter().any(
             |l| l == "self_hold: clock active until 2030-01-01T00:00:00Z; delivery_policy none"
         ));
+
+        // A stale carried skill body journals attention, never no change.
+        readings.push(Reading::took(
+            "skill_drift",
+            json!({
+                "compacted_at": "2026-09-30T01:35:00Z",
+                "carried": 1,
+                "stale": [{"name": "fno:reign", "file": "/tmp/skills/reign/SKILL.md", "reason": "text drift"}],
+            }),
+        ));
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(change.starts_with("attention:"), "change: {change}");
+        assert!(
+            change.contains("skill text stale since compaction: fno:reign"),
+            "change: {change}"
+        );
     }
 
     #[test]
