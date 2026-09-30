@@ -20,6 +20,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         ts: "2026-09-02T18:27:06Z".into(),
         kind: "pr_created".into(),
         node: node.map(str::to_string),
+        cwd: None,
         session_id: sid.map(str::to_string),
         harness: None,
         title: "PR 1395".into(),
@@ -41,6 +42,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         ts: "2026-09-06T10:00:00Z".into(),
         kind: "session_reaped".into(),
         node: None,
+        cwd: None,
         session_id: Some(sid.into()),
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
@@ -226,11 +228,27 @@ fn hit_on_an_unjoined_row_attaches_its_session() {
     }]));
 }
 
-#[test]
-fn hit_on_a_row_without_session_id_is_none() {
+#[tokio::test]
+async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() {
     let v = view_with_rows(vec![]);
-    let item = feed_item(Some("x-nope"), None);
+    let mut item = feed_item(None, None);
+    item.kind = "node_created".into();
     assert!(feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).is_none());
+
+    let mut v = v;
+    v.feed_detail_of = Some(item);
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        v.launcher.is_none(),
+        "missing node id cannot prefill the composer"
+    );
+    assert!(
+        v.feed_detail_of.is_some(),
+        "an ineligible detail stays open"
+    );
 }
 
 #[test]
@@ -562,7 +580,7 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
     );
     let lines = feed_detail::detail_lines(&item, &d, 60);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
-    assert!(feed_detail::detail_footer(&d).contains("resume line"));
+    assert!(feed_detail::detail_footer(&item, &d).contains("resume line"));
 
     let mut v = view_with_rows(vec![]);
     v.feed_detail_of = Some(item);
@@ -603,7 +621,7 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
     assert_eq!(by("lead"), "L1 e-0001");
-    assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
+    assert!(feed_detail::detail_footer(&item, &d).contains("focus its pane"));
 
     // A row whose session id does not match is NOT this event's session,
     // however its name reads: parent and king stay unrecorded, and the pane
@@ -734,12 +752,20 @@ fn an_absent_field_names_its_own_kind_of_silence() {
 // on a real View and read the COMPOSED frame. A field that never reaches the
 // screen is the defect this view exists to prevent, so the assertion is on
 // painted text.
-#[test]
-fn the_composed_frame_paints_every_field_and_its_action() {
+#[tokio::test]
+async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer() {
     let mut v = view_with_rows(vec![]);
     v.term = (44, 120);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    v.feed_detail_of = Some(item.clone());
+    let ordinary_text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !ordinary_text.contains("b: blueprint"),
+        "non-created rows have no blueprint action"
+    );
+    item.kind = "node_created".into();
+    item.cwd = Some("/workspace/node-project".into());
     item.harness = Some("claude".into());
     item.model = Some("glm-5.3-flash".into());
     v.feed_detail_of = Some(item);
@@ -765,6 +791,24 @@ fn the_composed_frame_paints_every_field_and_its_action() {
     assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
     // The action is named before it is pressed.
     assert!(text.contains("attach on portal 0"), "footer missing");
+    assert!(text.contains("b: blueprint"), "blueprint key missing");
+
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    let launch = v.launcher.as_ref().expect("blueprint key opens composer");
+    assert_eq!(launch.draft.message, "/fno:blueprint x-9223");
+    assert_eq!(launch.draft.node.as_deref(), Some("x-9223"));
+    assert_eq!(
+        launch
+            .draft
+            .projects
+            .get(launch.draft.project_idx)
+            .map(String::as_str),
+        Some("/workspace/node-project")
+    );
+    assert!(v.feed_detail_of.is_none(), "composer replaces feed detail");
 }
 
 // (x-9cbf) The parent field spends the derived NAME when the edge resolves

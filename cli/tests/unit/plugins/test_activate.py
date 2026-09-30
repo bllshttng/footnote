@@ -109,6 +109,7 @@ def test_written_definition_is_a_role_definition_source_at_plugin_layer(tmp_path
 # AC2-SEC: activation grants no effect.
 
 
+@pytest.mark.dev_build
 def test_activation_leaves_authority_byte_identical_and_effect_still_blocked(tmp_path):
     store, root = _store_and_root(tmp_path)
     pack_dir = _write_pack(tmp_path, _full_pack())
