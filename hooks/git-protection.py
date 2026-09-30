@@ -43,10 +43,15 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
+
+# The shared liveness-row writer (hooks/lib) sits beside this script; the
+# guard runs under whatever interpreter the harness hands it, so the import
+# path is built from __file__, never the cwd.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from guard_mark import guard_mark
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
@@ -1926,49 +1931,10 @@ def _find_graphql_pr_reads(segments):
 
 def _guard_mark(decision, tool):
     """One guard_decision event row per run: the liveness signal that this
-    guard actually ran and what it decided. Without it, a guard that cannot
-    prove it ran is indistinguishable from one that never launched. Row shape
-    matches hooks/lib/guard-mark.sh output so bash and python guards write
-    indistinguishable rows. Best-effort by contract: any failure is swallowed
+    guard actually ran and what it decided. The shared writer commits it to
+    the journal's store; best-effort by contract: any failure is swallowed
     and can never change the decision."""
-    if decision == "deny":
-        # One vocabulary across every guard: bash guards say block, and the
-        # audit row is shared surface, so a refusal is "block" whichever
-        # language recorded it.
-        decision = "block"
-    try:
-        pin = os.environ.get("FNO_EVENTS_PATH")
-        path = pin
-        if not path:
-            # The same resolver the bash transport uses: the space journal the
-            # store reads. A cwd/rev-parse guess is how guard rows landed in
-            # the checkout journal the store ignores; it stays only as the
-            # degrade for a machine where fno-agents cannot answer.
-            probe = subprocess.run(
-                ["fno-agents", "state", "path", "events"],
-                capture_output=True, text=True, timeout=5,
-            )
-            path = probe.stdout.strip() if probe.returncode == 0 else ""
-        if not path:
-            root = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip()
-            path = os.path.join(root or os.getcwd(), ".fno", "events.jsonl")
-        row = (
-            '{"ts":"%s","type":"guard_decision","data":{"guard":"git-protection",'
-            '"decision":"%s","tool":"%s"},"source":"hook"}'
-            % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision, tool)
-        )
-        bin = shutil.which("fno")
-        if bin is None:
-            return
-        subprocess.run(
-            [bin, "doctor", "event", "emit-envelope", "--events", path],
-            input=row, capture_output=True, text=True, timeout=10,
-        )
-    except Exception:
-        pass
+    guard_mark("git-protection", decision, tool)
 
 
 _GUARD_MARKED = {"done": False}

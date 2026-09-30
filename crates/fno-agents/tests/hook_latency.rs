@@ -1174,6 +1174,7 @@ fn hook_budget_bash_pretooluse_dispatch() {
                 "cat",
                 "dirname",
                 "fno-agents",
+                "fno",
                 "git",
                 "jq",
                 "mktemp",
