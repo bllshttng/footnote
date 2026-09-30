@@ -1691,6 +1691,14 @@ mod tests {
         let now_ms = crate::claims::now_ms();
         let now_epoch = now_ms / 1000;
         if trip == "slot" {
+            // The holder must predate the marker: anchor the marker at pid 1's
+            // real creation, because a fresh CI runner is younger than any
+            // fixed 70-minute offset. The wait then reads the host's uptime
+            // past the row's one-minute threshold on any machine.
+            let since_ms = match crate::claims::probe_pid(1) {
+                crate::claims::PidProbe::Created(created) => created,
+                _ => now_epoch * 1000 - 70 * 60_000,
+            };
             std::fs::write(
                 waiters.join(format!(
                     "{}.json",
@@ -1698,7 +1706,7 @@ mod tests {
                 )),
                 serde_json::to_string(&json!({
                     "pid": 1,
-                    "since_ms": now_epoch * 1000 - 70 * 60_000,
+                    "since_ms": since_ms,
                     "holder": "cargo:/other:42"
                 }))
                 .unwrap(),
@@ -1848,25 +1856,53 @@ mod tests {
 
     #[test]
     fn escalation_trips_once_and_reaches_the_crown_or_the_board() {
-        // Each threshold trips alone; the note reaches the crown.
-        for (trip, phrase) in [
-            ("red", "cli-ci red on 3 heads (threshold 3)"),
+        // The pure trip shape keeps the exact example: a 70-minute wait
+        // against the 60-minute default.
+        let trips = escalation_trips(
+            &Counters {
+                slot_wait_min: Some(70),
+                ..Counters::default()
+            },
+            &Thresholds::default(),
+        );
+        assert_eq!(
+            trips,
+            vec!["70m waiting at the cargo build door (threshold 60m)".to_string()]
+        );
+        // Each threshold trips alone; the note reaches the crown. The slot
+        // row trips at one minute because the marker anchors at the holder's
+        // real creation (a fresh CI runner is younger than a fixed offset).
+        for (trip, phrase, thresholds) in [
+            (
+                "red",
+                "cli-ci red on 3 heads (threshold 3)",
+                Thresholds::default(),
+            ),
             (
                 "conflict",
                 "2 merges of the base needed a resolution (threshold 2)",
+                Thresholds::default(),
             ),
             (
                 "diff",
                 "2510 changed lines against the base (threshold 2500)",
+                Thresholds::default(),
             ),
-            ("hours", "25h on the node (threshold 24h)"),
+            (
+                "hours",
+                "25h on the node (threshold 24h)",
+                Thresholds::default(),
+            ),
             (
                 "slot",
-                "70m waiting at the cargo build door (threshold 60m)",
+                "waiting at the cargo build door (threshold 1m)",
+                Thresholds {
+                    slot_wait_minutes: 1,
+                    ..Thresholds::default()
+                },
             ),
         ] {
-            let (calls, home, _td, tasks) =
-                escalation_scenario(trip, Thresholds::default(), true, 1);
+            let (calls, home, _td, tasks) = escalation_scenario(trip, thresholds, true, 1);
             let notes: Vec<_> = calls
                 .iter()
                 .filter(|a| a.join(" ").contains("--to-king"))
