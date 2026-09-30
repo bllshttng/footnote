@@ -1963,24 +1963,17 @@ mod tests {
         );
     }
 
-    /// The NoSource admit is the whole point of the third outcome.
+    /// No source and no descriptor both admit: neither is headroom or a
+    /// refusal, and the famine never reads as an absent host.
     #[test]
-    fn a_census_with_no_source_admits() {
-        let decision = decide_processes(
-            &Census::no_source("cannot read /proc"),
-            MaxProcesses::new(2),
-        );
-        assert_eq!(decision, AdmissionDecision::Admit);
-    }
-
-    /// The fourth outcome admits too, and never reads as an absent host.
-    #[test]
-    fn a_census_with_descriptors_exhausted_admits() {
-        let decision = decide_processes(
-            &Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)"),
-            MaxProcesses::new(2),
-        );
-        assert_eq!(decision, AdmissionDecision::Admit);
+    fn a_census_with_no_source_or_no_descriptor_admits() {
+        for census in [
+            Census::no_source("cannot read /proc"),
+            Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)"),
+        ] {
+            let decision = decide_processes(&census, MaxProcesses::new(2));
+            assert_eq!(decision, AdmissionDecision::Admit, "{census:?}");
+        }
     }
 
     /// The guard against retry-then-hold-forever: a NoSource answer stops
