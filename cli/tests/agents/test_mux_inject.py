@@ -311,12 +311,24 @@ def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
     """The correction this node exists for: mail REACHES a codex pane. It landed
     in the composer and was never submitted, because a capability table refused
     the lane before the transport was tried. With submit_keys pinned, the text
-    and the carriage return both go."""
+    and the carriage return both go, and the composer read-back sees the
+    landed frame (payload visible, no queue affordance beside it)."""
     from fno.agents.dispatch import _mux_pane_send
 
-    fake = FakeMux()
+    class LandedMux(FakeMux):
+        def __call__(self, argv, input=None, **kwargs):
+            if len(argv) > 3 and argv[3] == "read":
+                self.calls.append((list(argv), input))
+                return subprocess.CompletedProcess(
+                    argv, 0, "working\n<fno_mail>\nhi\n</fno_mail>\n", ""
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = LandedMux()
     _patch_mux(monkeypatch, fake)
-    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi") is True
+    # guarded=False is the shape the mail lane sends with; the read-back lives
+    # on that path.
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False) is True
 
     verbs = [call[0][3] for call in fake.calls]
     assert "send" in verbs
@@ -324,6 +336,139 @@ def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
     # "tab to queue message" and sits there unsent.
     written = "".join((call[1] or "") + " ".join(call[0]) for call in fake.calls)
     assert "\r" in written
+
+
+def test_codex_mail_queues_on_the_composer_affordance(monkeypatch) -> None:
+    """Repro 1: the pane is mid-turn, the envelope sits in the composer
+    under ``tab to queue message``, and the old lane had already printed
+    delivered. The lane sends the queue key itself and classifies the queued
+    frame; the receipt never claims a delivery the composer never made."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    class BusyMux(FakeMux):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def __call__(self, argv, input=None, **kwargs):
+            if len(argv) > 3 and argv[3] == "read":
+                self.calls.append((list(argv), input))
+                self.reads += 1
+                if self.reads == 1:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        "working\n<fno_mail>\nhi\n</fno_mail>\ntab to queue message",
+                        "",
+                    )
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "working\n<fno_mail>\nhi\n</fno_mail>\nQueued follow-up inputs",
+                    "",
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = BusyMux()
+    _patch_mux(monkeypatch, fake)
+
+    result = _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False)
+
+    assert result == "queued"
+    controls = [
+        call[0][call[0].index("--text") + 1]
+        for call in fake.calls
+        if "--text" in call[0]
+    ]
+    assert "\t" in controls
+
+
+def test_codex_mail_resends_the_submit_key_after_a_slow_paste(monkeypatch) -> None:
+    """Timing repro: the receipt preceded the end of typing -- the CR is
+    sent before the composer holds the whole envelope, and it lands as a
+    newline. The read-back keeps polling while the payload is only partially
+    rendered, then spends one late submit key, the lone Enter after the burst
+    that landed it every reproduced time."""
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    class SlowPasteMux(FakeMux):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def __call__(self, argv, input=None, **kwargs):
+            if len(argv) > 3 and argv[3] == "read":
+                self.calls.append((list(argv), input))
+                self.reads += 1
+                if self.reads <= dispatch_mod._CODEX_ABSORB_POLLS:
+                    # Only the first characters have rendered; the payload is
+                    # not fully visible yet.
+                    return subprocess.CompletedProcess(argv, 0, "working\n<fno_mail>", "")
+                # The late key landed it.
+                return subprocess.CompletedProcess(
+                    argv, 0, "working\n<fno_mail>\nhi\n</fno_mail>", ""
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = SlowPasteMux()
+    _patch_mux(monkeypatch, fake)
+
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False) is True
+    controls = [
+        call[0][call[0].index("--text") + 1]
+        for call in fake.calls
+        if "--text" in call[0]
+    ]
+    assert controls.count("\r") == 2
+
+
+def test_codex_mail_ends_unconfirmed_when_the_payload_never_renders(monkeypatch) -> None:
+    """The receipt must never say delivered over a composer that may
+    still hold the envelope. A frame that never renders the payload spends the
+    resend budget, then demotes honestly."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False) == "unconfirmed"
+    controls = [
+        call[0][call[0].index("--text") + 1]
+        for call in fake.calls
+        if "--text" in call[0]
+    ]
+    assert controls.count("\r") == 3  # the initial CR plus the resend budget
+
+
+def test_codex_mail_keeps_the_bytes_written_verdict_on_an_unreadable_pane(
+    monkeypatch,
+) -> None:
+    """An unreadable frame proves nothing in either direction: keep the
+    bytes-written verdict rather than demote a landed paste to the durable
+    floor, where the recipient would drain it twice."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    class BlindMux(FakeMux):
+        def __call__(self, argv, input=None, **kwargs):
+            if len(argv) > 3 and argv[3] == "read":
+                self.calls.append((list(argv), input))
+                return subprocess.CompletedProcess(argv, 1, "", "read refused")
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = BlindMux()
+    _patch_mux(monkeypatch, fake)
+
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False) is True
+    # Exactly one control key (the initial CR) and the read as the last verb:
+    # no retry keys after the read came back unreadable.
+    controls = [call for call in fake.calls if "--text" in call[0]]
+    assert len(controls) == 1
+    assert controls[0][0][controls[0][0].index("--text") + 1] == "\r"
+    # No control key after the read came back unreadable.
+    verbs = [call[0][3] for call in fake.calls]
+    last_send = max(i for i, v in enumerate(verbs) if v == "send")
+    assert verbs.index("read") > last_send
 
 
 def test_codex_review_request_queues_only_on_positive_composer_marker(monkeypatch):
