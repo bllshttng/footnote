@@ -2881,7 +2881,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_probe_rows() {
+    fn opencode_reachable_when_store_returns_the_id() {
         // Leading plugin banner: opencode plugins print to stdout ahead of real
         // output, so the probe must tolerate garbage before the row.
         fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
@@ -2898,7 +2898,10 @@ mod tests {
             ),
             Ok(true)
         );
+    }
 
+    #[test]
+    fn opencode_probe_embeds_only_the_validated_id_in_the_query() {
         use std::sync::{Mutex, OnceLock};
         static SEEN: OnceLock<Mutex<String>> = OnceLock::new();
         fn run(sql: &str, _t: Duration) -> Result<(bool, String), String> {
@@ -2914,7 +2917,10 @@ mod tests {
             *SEEN.get_or_init(Default::default).lock().unwrap(),
             format!("select id from session where id='{OC_SES}'")
         );
+    }
 
+    #[test]
+    fn opencode_clean_query_without_the_id_is_gone() {
         // Verified on v1.14.50: an absent id exits 0 with empty stdout.
         fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
             Ok((true, String::new()))
@@ -2927,7 +2933,10 @@ mod tests {
             ),
             Ok(false)
         );
+    }
 
+    #[test]
+    fn opencode_infrastructure_failure_is_inconclusive_never_gone() {
         // Spawn failure (binary missing) and a nonzero exit (unopenable store)
         // must both stay Err, or a dead-pane pass would orphan a live pane.
         fn spawn_failed(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
@@ -2948,7 +2957,10 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.provider, "opencode");
         }
+    }
 
+    #[test]
+    fn opencode_malformed_id_never_reaches_the_subprocess() {
         fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
             panic!("probe must reject a malformed id before spawning");
         }
@@ -2961,7 +2973,10 @@ mod tests {
             .unwrap_err();
             assert!(err.reason.contains(bad), "reason should quote {bad:?}");
         }
+    }
 
+    #[test]
+    fn opencode_missing_session_id_is_inconclusive() {
         fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
             panic!("no id means nothing to probe");
         }
@@ -2971,7 +2986,10 @@ mod tests {
             &(run as OpencodeDbRunner)
         )
         .is_err());
+    }
 
+    #[test]
+    fn opencode_probe_is_stateless_across_calls() {
         // AC1-FR: a transient failure poisons nothing; the next call reports the
         // true store verdict.
         fn failing(_sql: &str, _t: Duration) -> Result<(bool, String), String> {

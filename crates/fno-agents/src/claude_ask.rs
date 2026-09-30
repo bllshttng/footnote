@@ -4234,7 +4234,6 @@ mod tests {
         let got = handle.join().unwrap();
         assert_eq!(got, build_envelope("ping", "tester").unwrap());
 
-        use std::os::unix::net::UnixListener;
         let dir = tmpdir();
         let sock = dir.join("live.sock");
         let _listener = UnixListener::bind(&sock).unwrap();
@@ -4630,7 +4629,6 @@ mod tests {
             .expect_err("a sidecar without supervisor start time is unreadable");
         assert!(error.contains("process start"), "{error}");
 
-        use crate::harness_daemon::HarnessDaemonAdapter;
         let adapter = ClaudeDaemonAdapter::new(PathBuf::from("/tmp/claude-roster.json"));
         let state = adapter
             .parse_state(r#"{"supervisorPid":42,"processStartTime":99,"controlSocket":"/tmp/control.sock","shortId":"a1b2c3d4"}"#)
