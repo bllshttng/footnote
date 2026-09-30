@@ -92,6 +92,7 @@ fn proto_agent_launch_roundtrips() {
         substrate: "pane".into(),
         model: None,
         provider: Some("openrouter".into()),
+        route: None,
         model_names_harness: false,
         effort: Some("high".into()),
         permission_mode: None,
