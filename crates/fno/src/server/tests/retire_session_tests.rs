@@ -482,23 +482,43 @@ fn a_portal_repointed_off_a_row_keeps_no_trace_of_the_old_row() {
 /// (no closes, no tombstone, the reply counts it), while a pane whose last
 /// typing instant is older than the window retires exactly as before.
 #[test]
+/// The 60s guard: a pane typed into this minute holds the whole identity
+/// (no closes, no tombstone, the reply counts it), while an identity whose
+/// last typing instant is older than the window retires exactly as before.
+/// Both arms seat a sibling member so the session never empties and the
+/// flow stays Continue.
+#[test]
 fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
-    let fresh = |tag: &str, sid: &str, stale: bool| {
+    let fresh = |tag: &str, target_sid: &str, stale: bool| {
         let s = StoreScratch::new(tag);
         let origin = s.dir.join("repo");
         std::fs::create_dir_all(&origin).unwrap();
-        let members = vec![crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: Some("g-one".into()),
-            harness: Some("codex".into()),
-            harness_session_id: Some(sid.into()),
-            pane_id: None,
-        }];
+        let members = vec![
+            crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tombstone_reason: None,
+                detached: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("g-one".into()),
+                harness: Some("codex".into()),
+                harness_session_id: Some(target_sid.into()),
+                pane_id: None,
+            },
+            crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tombstone_reason: None,
+                detached: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("g-two".into()),
+                harness: Some("codex".into()),
+                harness_session_id: Some("sess-guard-sib".into()),
+                pane_id: None,
+            },
+        ];
         crate::squad_store::upsert(
             "",
             &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
@@ -510,34 +530,37 @@ fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
         core.shells = vec!["/bin/cat".into()];
         let mut one = exited_claude_row("g-one", None);
         one.harness = Some("codex".into());
-        one.harness_session_id = Some(sid.into());
-        core.agents = vec![one];
+        one.harness_session_id = Some(target_sid.into());
+        let mut two = exited_claude_row("g-two", None);
+        two.harness = Some("codex".into());
+        two.harness_session_id = Some("sess-guard-sib".into());
+        core.agents = vec![one, two];
         let _known = KnownWorkersGuard;
-        set_known_workers(&["g-one"]);
+        set_known_workers(&["g-one", "g-two"]);
         let (c, _rx) = client_with_rx(1);
         core.clients.push(c);
         core.restore_squads(24, 80, 999);
-        let pane = core
+        let target_pane = core
             .panes
             .iter()
             .find(|(_, e)| e.name.as_deref() == Some("g-one"))
             .map(|(pid, _)| *pid)
-            .expect("the member holds a pane");
+            .expect("the target member holds a pane");
         core.touch_last_emit.insert(
-            pane,
+            target_pane,
             if stale {
                 Instant::now() - std::time::Duration::from_secs(61)
             } else {
                 Instant::now()
             },
         );
-        (core, pane, s)
+        (core, target_pane, s)
     };
 
     let (mut core, pane, _s) = fresh("retire-guard-typed", "sess-guard-one", false);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-one".into(), reply_tx);
-    assert!(matches!(flow, Flow::Continue));
+    assert!(matches!(flow, Flow::Continue), "the sibling keeps the session alive");
     let reply = reply_rx.try_recv().expect("the handler replied");
     let ServerMsg::SessionRetired {
         retired,
@@ -567,9 +590,7 @@ fn retire_holds_a_typed_identity_and_releases_it_once_typing_is_stale() {
     let (mut core, _pane, _s) = fresh("retire-guard-stale", "sess-guard-two", true);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     let flow = core.handle_retire_session("codex".into(), "sess-guard-two".into(), reply_tx);
-    // The contract is the reply, not the flow: a single-member session may
-    // empty and end (Shutdown) when its one pane retires.
-    assert!(matches!(flow, Flow::Continue | Flow::Shutdown));
+    assert!(matches!(flow, Flow::Continue), "the sibling keeps the session alive");
     let reply = reply_rx.try_recv().expect("the handler replied");
     let ServerMsg::SessionRetired {
         retired,
