@@ -384,12 +384,21 @@ fn num_opt(v: Option<&Value>) -> Option<f64> {
     }
 }
 
+/// The ported `_pct` (fold.py:325): `round()` in Python is half-to-even, so
+/// an integer build keeps a tie from flipping a digit the old view printed.
 fn pct(n: u64, d: u64) -> i64 {
     if d == 0 {
-        0
-    } else {
-        ((100.0 * n as f64) / d as f64).round() as i64
+        return 0;
     }
+    let num = 100u128 * n as u128;
+    let q = num / d as u128;
+    let twice = (num % d as u128) * 2;
+    let out = if twice > d as u128 || (twice == d as u128 && q % 2 == 1) {
+        q + 1
+    } else {
+        q
+    };
+    out as i64
 }
 
 fn round2(f: f64) -> f64 {
@@ -572,6 +581,9 @@ mod tests {
         let b = &rs[1];
         assert_eq!(b["harness"], "codex");
         assert_eq!(b["model"], "gpt");
+        // The ported _pct rounds half-to-even, like Python's round().
+        assert_eq!(pct(1, 8), 12, "12.5 never rounds up");
+        assert_eq!(pct(3, 8), 38, "37.5 rounds to the even 38");
     }
 
     #[test]
