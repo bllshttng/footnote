@@ -1433,58 +1433,6 @@ mod tests {
             Some("server liveness incomplete")
         );
 
-        let summary = crate::gc_sweep::StateFilesReapSummary::default();
-        let out = render_state_files_reap(&summary, true);
-        let value: Value = serde_json::from_str(out.trim()).expect("valid json");
-
-        for family in [
-            "expired_claims",
-            "plan_locks",
-            "agent_locks",
-            "pr_status_cache",
-            "claim_tmp",
-        ] {
-            assert_eq!(value["families"][family]["scanned"], json!(0));
-            assert_eq!(value["families"][family]["deleted"], json!(0));
-            assert_eq!(value["families"][family]["would_delete"], json!(0));
-            assert_eq!(value["families"][family]["bytes"], json!(0));
-            assert!(value["families"][family].get("oldest_age_s").is_some());
-            assert_eq!(value["families"][family]["kept"], json!([]));
-        }
-        assert_eq!(value["totals"]["scanned"], json!(0));
-        assert_eq!(value["totals"]["deleted"], json!(0));
-        assert_eq!(value["totals"]["would_delete"], json!(0));
-        assert_eq!(value["applied"], json!(false));
-        assert_eq!(value["dry_run"], json!(true));
-        assert_eq!(value["skip_reason"], Value::Null);
-
-        let mut summary = crate::gc_sweep::StateFilesReapSummary::default();
-        summary.plan_locks.kept = vec![
-            crate::gc_sweep::StateReapKept {
-                path: "locks/plan.lock".into(),
-                reason: "within retention window".into(),
-            };
-            10_000
-        ];
-        summary.totals.kept = 10_000;
-        let out = render_state_files_reap(&summary, false);
-
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 7, "five families, total, and dry-run marker");
-        assert!(
-            out.len() < 1_024,
-            "text output grew with kept paths: {}B",
-            out.len()
-        );
-        assert!(lines[0].starts_with("expired_claims:"));
-        assert!(lines[1].starts_with("plan_locks:"));
-        assert!(lines[1].contains("within retention window=10000"));
-        assert!(lines[2].starts_with("agent_locks:"));
-        assert!(lines[3].starts_with("pr_status_cache:"));
-        assert!(lines[4].starts_with("claim_tmp:"));
-        assert!(lines[5].starts_with("total:"));
-        assert_eq!(lines[6], "(dry-run: no changes made)");
-
         // (change 3) AC3-HP: a 17h hold on done work names its age and
         // ends with the decision. AC3-EDGE: a 2h hold carries no decision.
         // AC3-ERR: an old hold whose node is not done carries no decision.
@@ -1560,5 +1508,57 @@ mod tests {
             line.contains("fno agents reap --release bp-x-aaaa"),
             "{line}"
         );
+
+        let summary = crate::gc_sweep::StateFilesReapSummary::default();
+        let out = render_state_files_reap(&summary, true);
+        let value: Value = serde_json::from_str(out.trim()).expect("valid json");
+
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+            "claim_tmp",
+        ] {
+            assert_eq!(value["families"][family]["scanned"], json!(0));
+            assert_eq!(value["families"][family]["deleted"], json!(0));
+            assert_eq!(value["families"][family]["would_delete"], json!(0));
+            assert_eq!(value["families"][family]["bytes"], json!(0));
+            assert!(value["families"][family].get("oldest_age_s").is_some());
+            assert_eq!(value["families"][family]["kept"], json!([]));
+        }
+        assert_eq!(value["totals"]["scanned"], json!(0));
+        assert_eq!(value["totals"]["deleted"], json!(0));
+        assert_eq!(value["totals"]["would_delete"], json!(0));
+        assert_eq!(value["applied"], json!(false));
+        assert_eq!(value["dry_run"], json!(true));
+        assert_eq!(value["skip_reason"], Value::Null);
+
+        let mut summary = crate::gc_sweep::StateFilesReapSummary::default();
+        summary.plan_locks.kept = vec![
+            crate::gc_sweep::StateReapKept {
+                path: "locks/plan.lock".into(),
+                reason: "within retention window".into(),
+            };
+            10_000
+        ];
+        summary.totals.kept = 10_000;
+        let out = render_state_files_reap(&summary, false);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 7, "five families, total, and dry-run marker");
+        assert!(
+            out.len() < 1_024,
+            "text output grew with kept paths: {}B",
+            out.len()
+        );
+        assert!(lines[0].starts_with("expired_claims:"));
+        assert!(lines[1].starts_with("plan_locks:"));
+        assert!(lines[1].contains("within retention window=10000"));
+        assert!(lines[2].starts_with("agent_locks:"));
+        assert!(lines[3].starts_with("pr_status_cache:"));
+        assert!(lines[4].starts_with("claim_tmp:"));
+        assert!(lines[5].starts_with("total:"));
+        assert_eq!(lines[6], "(dry-run: no changes made)");
     }
 }
