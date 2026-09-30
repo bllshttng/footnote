@@ -70,6 +70,8 @@ One verb runs the body: `fno agents org checkin`. It gathers every reading below
 
 A king names its crown at the first beat: `fno agents org checkin --name <name>`. Pick the name yourself, 2 to 24 letters, unique among live crowns. An heir crowned through `--succeed` passes no `--name`. Its first beat binds the carried name to its own session, and the crown line shows the regnal number (Barnaby, Barnaby II). A king re-scoped onto new territory runs `--keep-name-from <old-scope>` once to keep its name. Every later beat needs neither flag. The crown line leads every beat. An unnamed crown prints the `--name` instruction itself.
 
+To change the name later, run `fno agents rename <you> --name <new>`. It moves the label and crown name together, and the regnal count restarts at 1.
+
 Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/install/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact. Past the compaction ceiling (default 3), a doc older than 24 hours blocks the stop gate. The beat refresh is what keeps the reign exitable.
 
 Crown mail delivers live between beats.
