@@ -309,10 +309,13 @@ fn push_wrapped(lines: &mut Vec<String>, label: &str, value: &str, width: usize)
 /// The one-line footer: what pressing Enter does, named before it is pressed.
 /// Reads the SAME [`Destination`] the action does, so the two cannot disagree.
 pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
-    (item.kind == "node_created")
-        .then(|| item.node.as_deref())
-        .flatten()
-        .filter(|node| !node.trim().is_empty())
+    if item.kind != "node_created" {
+        return None;
+    }
+    item.node
+        .as_deref()
+        .map(str::trim)
+        .filter(|node| !node.is_empty())
 }
 
 /// The one-line footer names the existing Enter action and, for a created
