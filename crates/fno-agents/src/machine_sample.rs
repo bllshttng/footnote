@@ -348,8 +348,8 @@ fn mux_server_issues(procs: &[crate::census::ProcRow]) -> Value {
         let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
             continue;
         };
-        sockets.entry(socket.to_string()).or_default().push(row);
-        let owner = crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket));
+        sockets.entry(socket.clone()).or_default().push(row);
+        let owner = crate::process_owner::owner_lease_for_server(row.pid, Path::new(&socket));
         owner_sessions.insert(
             row.pid,
             match &owner {

@@ -1,6 +1,10 @@
 //! Read the narrow owner lease carried by fno-launched sandbox processes.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+
+const MAX_OWNER_SIDECAR_BYTES: usize = 4096;
+const MAX_PROCESS_ENVIRONMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerLease {
@@ -36,24 +40,47 @@ pub fn owner_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("owner")
 }
 
-pub fn mux_server_socket(command: &str) -> Option<&str> {
-    let mut words = command.split_whitespace();
-    let executable = words.next()?;
+pub fn mux_server_socket(command: &str) -> Option<String> {
+    let first_end = command.find(char::is_whitespace)?;
+    let executable = &command[..first_end];
     if Path::new(executable)
         .file_name()
         .and_then(|name| name.to_str())
         != Some("fno")
-        || words.next()? != "--server"
     {
         return None;
     }
-    words.next()
+    let after_executable = command[first_end..].trim_start();
+    let flag_end = after_executable.find(char::is_whitespace)?;
+    if &after_executable[..flag_end] != "--server" {
+        return None;
+    }
+    let raw_socket = after_executable[flag_end..].trim();
+    let socket = raw_socket
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            raw_socket
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(raw_socket);
+    (!socket.is_empty()).then(|| socket.to_string())
 }
 
 pub fn owner_lease_for_server(pid: u32, socket: &Path) -> OwnerRead {
     let path = owner_sidecar_path(socket);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
+    match std::fs::File::open(&path) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            if file
+                .take((MAX_OWNER_SIDECAR_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() > MAX_OWNER_SIDECAR_BYTES
+            {
+                return OwnerRead::Unknown;
+            }
             let Some(lease) = crate::daemon::process_start_time(pid)
                 .and_then(|birth| lease_from_sidecar(&bytes, pid, birth))
             else {
@@ -108,7 +135,12 @@ pub fn lease_from_sidecar(
 
 #[cfg(target_os = "linux")]
 fn process_environment(pid: u32) -> Option<Vec<u8>> {
-    std::fs::read(format!("/proc/{pid}/environ")).ok()
+    let file = std::fs::File::open(format!("/proc/{pid}/environ")).ok()?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PROCESS_ENVIRONMENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_PROCESS_ENVIRONMENT_BYTES).then_some(bytes)
 }
 
 pub fn lease_from_environment(bytes: &[u8]) -> Option<OwnerLease> {

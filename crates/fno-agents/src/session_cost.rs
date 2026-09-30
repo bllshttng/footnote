@@ -299,7 +299,7 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
             continue;
         };
         let crate::process_owner::OwnerRead::Owner(lease) =
-            crate::process_owner::owner_lease_for_server(row.pid, Path::new(socket))
+            crate::process_owner::owner_lease_for_server(row.pid, Path::new(&socket))
         else {
             continue;
         };

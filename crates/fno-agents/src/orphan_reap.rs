@@ -320,8 +320,7 @@ fn owner_server_rows(ps_output: &str) -> Vec<(u32, u64, String, PathBuf)> {
             continue;
         };
         let command = fields[6..].join(" ");
-        let Some(socket) = crate::process_owner::mux_server_socket(&command).map(str::to_string)
-        else {
+        let Some(socket) = crate::process_owner::mux_server_socket(&command) else {
             continue;
         };
         candidates.push((pid, elapsed_seconds, command, PathBuf::from(socket)));
@@ -489,12 +488,14 @@ pub fn run_orphan_reap(args: &[String]) -> i32 {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
-        if let Some(session) = &row.owner_session {
+        if row.owner_session.is_some()
+            || crate::process_owner::mux_server_socket(&row.command).is_some()
+        {
             let _ = writeln!(
                 out,
                 "owner-tagged mux server: pid {}, owner session {}, elapsed {}:{:02}:{:02}: {}",
                 row.pid,
-                session,
+                row.owner_session.as_deref().unwrap_or("unknown"),
                 row.elapsed_seconds / 3600,
                 (row.elapsed_seconds % 3600) / 60,
                 row.elapsed_seconds % 60,
@@ -627,7 +628,13 @@ mod tests {
         .is_none());
         assert_eq!(
             crate::process_owner::mux_server_socket("/usr/bin/fno --server /tmp/repro.sock"),
-            Some("/tmp/repro.sock")
+            Some("/tmp/repro.sock".to_string())
+        );
+        assert_eq!(
+            crate::process_owner::mux_server_socket(
+                "/usr/bin/fno --server /tmp/repro dir/socket.sock"
+            ),
+            Some("/tmp/repro dir/socket.sock".to_string())
         );
         assert_eq!(
             crate::process_owner::mux_server_socket("/usr/bin/fno agents status"),
