@@ -5,6 +5,7 @@ use crate::provenance::BusIndex;
 use crate::session_activity::{Activity, ActivityFold};
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -1141,8 +1142,18 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
             .collect::<BTreeSet<_>>(),
         Err(error) => return (0, Some("registry_read_failed".into()), error.to_string()),
     };
-    let written = session_has_eval;
+    let eval_lookup_error = Cell::new(None::<String>);
+    let written = |session: &str| match session_has_eval(session) {
+        Ok(has_eval) => has_eval,
+        Err(error) => {
+            eval_lookup_error.set(Some(error));
+            true
+        }
+    };
     let due = due_sessions(&checkins, &live, written, now);
+    if let Some(error) = eval_lookup_error.into_inner() {
+        return (0, Some("eval_lookup_failed".into()), error);
+    }
     let Some(session) = due.first() else {
         return (0, Some("not_due".into()), "none due".into());
     };
@@ -1204,28 +1215,35 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     }
 }
 
-fn session_has_eval(session: &str) -> bool {
+fn session_has_eval(session: &str) -> Result<bool, String> {
     let Some(transcript) = crate::king_history::hygiene_transcript_for_holder("claude", session)
     else {
-        return true;
+        return Ok(true);
     };
     let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
-        return true;
+        return Ok(true);
     };
     let Some(plans) = crate::plans_path::plans_content_dir(&cwd) else {
-        return true;
+        return Err(format!(
+            "plans directory could not be resolved from {}",
+            cwd.display()
+        ));
     };
     let evals = plans.join("..").join("evals").join("kings");
     let sid8 = &session[..session.len().min(8)];
     let entries = match std::fs::read_dir(evals) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("eval directory unreadable: {error}")),
     };
-    entries.flatten().any(|entry| {
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("eval directory entry unreadable: {error}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        name.contains(sid8)
-    })
+        if name.contains(sid8) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn due_sessions(
