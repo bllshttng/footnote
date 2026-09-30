@@ -13,6 +13,7 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use crate::graph_keeper::{cached_entries, StoreState};
@@ -123,7 +124,7 @@ fn run_locked(
     }
     let entries = doc["entries"].as_array_mut().expect("checked above");
 
-    let mut outcome: Option<String> = None;
+    let mut outcome: Option<&'static str> = None;
     if let (Some(node_id), Some(pr_number)) = (node_id, pr_number) {
         outcome = Some(upsert(
             entries,
@@ -451,7 +452,7 @@ fn fill_axis(row: &mut Value, key: &str, value: Option<String>, counts: &mut Fil
 /// plus the scalar `session_id` and `fno_id`.
 fn row_ids(row: &Value) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    let mut push = |s: &str, ids: &mut Vec<String>| {
+    let push = |s: &str, ids: &mut Vec<String>| {
         if !s.is_empty() && !ids.contains(&s.to_string()) {
             ids.push(s.to_string());
         }

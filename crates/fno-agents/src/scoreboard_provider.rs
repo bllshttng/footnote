@@ -251,16 +251,14 @@ fn build(
     }
     // Unattributed buckets sorted last, then by harness, then spend desc.
     out_rows.sort_by(|x, y| {
-        let f = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
-        let key = |v: &Value| {
-            (
-                f(v, "harness") == UNATTRIBUTED,
-                f(v, "harness"),
-                -v["spend_usd"].as_f64().unwrap_or(0.0),
-                f(v, "model"),
-            )
-        };
-        key(x).cmp(&key(y))
+        let s = |v: &Value| v["spend_usd"].as_f64().unwrap_or(0.0);
+        let g = |v: &Value, k: &str| v[k].as_str().unwrap_or_default();
+        (g(x, "harness") == UNATTRIBUTED)
+            .cmp(&(g(y, "harness") == UNATTRIBUTED))
+            .then_with(|| g(x, "harness").cmp(g(y, "harness")))
+            .then_with(|| s(y).total_cmp(&s(x)))
+            .then_with(|| g(x, "model").cmp(g(y, "model")))
+            .then_with(|| g(x, "provider").cmp(g(y, "provider")))
     });
 
     Ok(json!({
