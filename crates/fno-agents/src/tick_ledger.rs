@@ -176,6 +176,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "orphan_reap",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
@@ -1584,7 +1592,7 @@ mod tests {
     /// reign eval arm its 600-second daemon cadence.
     #[test]
     fn arm_watch_merge_close_and_reign_eval_are_known_daemon_arms() {
-        assert_eq!(KNOWN_ARMS.len(), 22);
+        assert_eq!(KNOWN_ARMS.len(), 23);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")

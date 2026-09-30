@@ -730,16 +730,6 @@ jobs:
           # tip and the PR head; the default shallow fetch cannot compute one.
           fetch-depth: 0
 
-      - name: Build the fno front for the truth probes
-        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
-        # `cargo test --lib`, where fno_cmd prefers it over every test's
-        # stub binary and the whole stubbed-shellout suite fails for a
-        # provisioning reason. A bare "fno" has no PATH leg here otherwise,
-        # so the probes ENOENT without this.
-        run: |
-          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
-          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
-
       - name: Set isolated FNO state roots
         run: |
           echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
@@ -830,6 +820,17 @@ jobs:
         # Dependencies remain cached; only this shard's package is rebuilt.
         # The fno mux shard cleans its own package the same way.
         run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build the fno front for the truth probes
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test --lib`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise,
+        # so the probes ENOENT without this.
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
@@ -983,15 +984,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build the fno front for the truth probes
-        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
-        # `cargo test`, where fno_cmd prefers it over every test's
-        # stub binary and the whole stubbed-shellout suite fails for a
-        # provisioning reason. A bare "fno" has no PATH leg here otherwise.
-        run: |
-          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
-          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
-
       - name: Set isolated FNO state roots
         run: |
           echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
@@ -1035,6 +1027,16 @@ jobs:
 
       - name: Clean cached Rust package artifacts
         run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build the fno front for the truth probes
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise.
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Build fno-agents binary
         working-directory: crates/fno-agents

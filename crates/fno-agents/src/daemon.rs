@@ -36,6 +36,7 @@ mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
+mod stop_by_session;
 mod stop_refusal_detail;
 pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
@@ -52,6 +53,7 @@ use self::list_rows::{
     handle_list, rendered_status_from_truth,
 };
 pub(crate) use self::list_rows::{progress_from_truth, registry_truth_handle};
+pub(crate) use self::stop_by_session::stop_session_for_home;
 mod prune_outcome;
 pub(crate) use self::prune_outcome::PruneOutcome;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
@@ -1617,15 +1619,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // `ab_shutdown` winds the task down on daemon shutdown.
     let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sandbox = ctx.home.is_sandbox();
+    let sandbox = ctx.home.is_sandbox() || crate::test_run::sandbox_owner_from_env().is_some();
     let _ = ctx.emitter.emit(
         "daemon_fleet_scope",
         &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
     );
-    // A sandbox home starts no supervisor and builds no fleet arms: their
-    // targets resolve from the real cwd and real graph, so they would work
-    // the operator's board from a tempdir (and pin ab_live true forever,
-    // so the daemon never idle-exits).
+    // Sandbox homes skip fleet work that could target real state from a tempdir
+    // and keep the daemon open forever.
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {

@@ -358,6 +358,16 @@ pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
     Ok(payload)
 }
 
+pub(crate) fn overdue_watches_reading() -> Result<Value, String> {
+    let rows = crate::watch_expiry::overdue(&crate::paths::AgentsHome::from_env())?;
+    Ok(json!({
+        "rows": rows.into_iter().map(|watch| json!({
+            "session_id": watch.session_id,
+            "overdue_ms": watch.overdue_ms,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// The finished background subagents this session still holds, read from
 /// its own claude transcript; claude-only, the same posture as the refusal
 /// and wake readers, and it fails as a reader on every other harness.

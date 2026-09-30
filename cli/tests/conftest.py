@@ -788,8 +788,20 @@ if not os.environ.get("PYTEST_XDIST_WORKER"):
     _CANONICAL_CHECKOUT = Path(__file__).resolve().parents[2]
     _real_home = _REAL_ENV.get("HOME")
     _real_plans_dir = resolve_real_plans_dir(_REAL_ENV, _CANONICAL_CHECKOUT)
+    # Explicit sandbox provenance only: this process's own scratch, plus the
+    # outer `fno doctor test` sandbox when the runner declared it. Nothing is
+    # inferred from HOME, layout, or names.
+    _sandbox_excludes = {str(Path(_SANDBOX).resolve())}
+    _declared = _REAL_ENV.get("FNO_TEST_SANDBOX")
+    if _declared:
+        _sandbox_excludes.add(str(Path(_declared).resolve()))
     _tripwire_roots = (
-        live_roots(Path(_real_home), _CANONICAL_CHECKOUT, _real_plans_dir)
+        live_roots(
+            Path(_real_home),
+            _CANONICAL_CHECKOUT,
+            _real_plans_dir,
+            exclude=frozenset(_sandbox_excludes),
+        )
         if _real_home
         else []
     )
