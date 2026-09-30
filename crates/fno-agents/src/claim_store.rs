@@ -805,6 +805,35 @@ mod tests {
             .unwrap();
         assert_eq!(claims_count, 1);
         assert_eq!(node_claims_count, 1);
+
+        // The board's claims cache busts on a db-only write: its key stats
+        // the resolved store the projection reads, never a hand-built
+        // sibling path.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", temp.path());
+        let first = crate::backlog::nodes::node_claims_by_id().unwrap();
+        assert!(
+            first.contains_key("store-test"),
+            "the projection reads the folded store"
+        );
+        let connection = open(None).unwrap();
+        connection
+            .execute("UPDATE claims SET session_id = 'rescue-session'", [])
+            .unwrap();
+        drop(connection);
+        let second = crate::backlog::nodes::node_claims_by_id().unwrap();
+        assert_eq!(
+            second["store-test"].locked_by.as_deref(),
+            Some("rescue-session"),
+            "a db-only write must bust the claims cache"
+        );
+        match prior_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     #[test]
