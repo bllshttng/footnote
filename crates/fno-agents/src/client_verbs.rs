@@ -1108,6 +1108,16 @@ impl ResolveError {
 use crate::identity::session_handle_tier;
 
 fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
+    // The row's own id addresses it at the FULL tier when the token is
+    // session-shaped. A legacy short or name-valued fno_id keeps resolving
+    // through the tiers below, which read the harness id.
+    if is_session_shaped(token) {
+        if let Some(fno) = entry.get("fno_id").and_then(Value::as_str) {
+            if token == fno {
+                return Some(0);
+            }
+        }
+    }
     let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
     if let Some(tier) = session_handle_tier(token, session_id) {
         return Some(tier);
@@ -1341,7 +1351,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // Synthesized from an identity that arrived without a row; the lane
         // it ran on is unobserved, so the substrate stays unknown.
         substrate: None,
-        name: crate::claude_adopt::synthesized_entry_name(&session, &id.fno_id, &short),
+        name: crate::claude_adopt::synthesized_entry_name(&session, &short),
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
@@ -1395,11 +1405,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: if id.fno_id.is_empty() {
-            None
-        } else {
-            Some(id.fno_id.clone())
-        },
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
@@ -3275,6 +3280,18 @@ mod tests {
             let e = find_agent_entry(&rows, tok).expect("resolves");
             assert_eq!(e["name"], "billing");
         }
+        // The row's own minted id addresses it at the full tier; an unknown
+        // session-shaped token still refuses.
+        let fno_id = "0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b";
+        let mut split_row = claude_row("split", "7c5dcf5e", "7c5dcf5e-1111-4222-8333-444444444444");
+        split_row["fno_id"] = json!(fno_id);
+        let rows = vec![split_row];
+        let e = find_agent_entry(&rows, fno_id).expect("resolves");
+        assert_eq!(e["name"], "split");
+        assert!(
+            find_agent_entry(&rows, "0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b").is_err(),
+            "an fno_id no row carries refuses"
+        );
     }
 
     #[test]

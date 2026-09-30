@@ -3345,8 +3345,7 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
     registry.entries.push(predecessor);
 
     assert_eq!(
-        apply_session_transition(&mut registry, "worker", "session-b", Some(false), "", "",)
-            .unwrap(),
+        apply_session_transition(&mut registry, "worker", "session-b", Some(false), "",).unwrap(),
         state::SessionTransition::Succession
     );
     assert_eq!(registry.entries.len(), 1);
@@ -3363,7 +3362,6 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
             "session-c",
             Some(true),
             "worker-branch",
-            "thread-c",
         )
         .unwrap(),
         state::SessionTransition::Branch
@@ -3381,8 +3379,12 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         registry.entries[1].forked_from_session_id.as_deref(),
         Some("session-b")
     );
-    assert_eq!(registry.entries[1].fno_id.as_deref(), Some("thread-c"));
-    assert_ne!(registry.entries[0].fno_id, registry.entries[1].fno_id);
+    // The branch leaves the write with its own minted id, never one handed in.
+    let branch_id = registry.entries[1]
+        .fno_id
+        .clone()
+        .expect("branch fno_id minted at the write");
+    assert_ne!(branch_id, "thread-a");
 
     assert_eq!(
         apply_session_transition(
@@ -3391,7 +3393,6 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
             "session-d",
             Some(true),
             "worker-branch",
-            "thread-d",
         )
         .unwrap(),
         state::SessionTransition::Branch
@@ -3399,9 +3400,14 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
     let second_branch = registry
         .entries
         .iter()
-        .find(|entry| entry.fno_id.as_deref() == Some("thread-d"))
+        .find(|entry| entry.harness_session_id.as_deref() == Some("session-d"))
         .expect("second branch row");
     assert_eq!(second_branch.name, "worker-branch-2");
+    assert_ne!(
+        second_branch.fno_id.as_deref(),
+        Some(branch_id.as_str()),
+        "each branch mints its own"
+    );
 }
 
 // ── x-8739: the sweep settles a stale open do row on a settled node ──

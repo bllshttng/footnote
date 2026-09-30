@@ -5889,14 +5889,7 @@ fn late_bind_codex_sessions_with_transition(
                 (Some(previous), Some(sampled_predecessor), Some(_), Some(reachable))
                     if previous == sampled_predecessor && previous != sid =>
                 {
-                    match apply_session_transition(
-                        r,
-                        &name,
-                        &sid,
-                        Some(reachable),
-                        &branch_name,
-                        &sid,
-                    ) {
+                    match apply_session_transition(r, &name, &sid, Some(reachable), &branch_name) {
                         Ok(applied) => {
                             applied_transition = Some(applied);
                             true
@@ -5962,7 +5955,6 @@ pub(crate) fn apply_session_transition(
     successor_session_id: &str,
     predecessor_reachable: Option<bool>,
     branch_name: &str,
-    branch_fno_id: &str,
 ) -> Result<state::SessionTransition, String> {
     let index = registry
         .entries
@@ -5988,17 +5980,15 @@ pub(crate) fn apply_session_transition(
             }
         }
         state::SessionTransition::Branch => {
-            if branch_name.is_empty() || branch_fno_id.is_empty() {
-                return Err("branch needs a distinct name and fno_id".to_string());
+            if branch_name.is_empty() {
+                return Err("branch needs a distinct name".to_string());
             }
             if let Some(existing) = registry
                 .entries
                 .iter()
                 .find(|entry| entry.harness_session_id.as_deref() == Some(successor_session_id))
             {
-                if existing.forked_from_session_id.as_deref() == Some(&predecessor_session_id)
-                    && existing.fno_id.as_deref() == Some(branch_fno_id)
-                {
+                if existing.forked_from_session_id.as_deref() == Some(&predecessor_session_id) {
                     return Ok(state::SessionTransition::Branch);
                 }
                 return Err(format!(
@@ -6019,29 +6009,16 @@ pub(crate) fn apply_session_transition(
             if registry
                 .entries
                 .iter()
-                .any(|entry| entry.fno_id.as_deref() == Some(branch_fno_id))
-            {
-                return Err(format!(
-                    "branch fno_id {branch_fno_id:?} already has a registry row"
-                ));
-            }
-            if registry
-                .entries
-                .iter()
                 .any(|entry| entry.harness_session_id.as_deref() == Some(successor_session_id))
             {
                 return Err(format!(
                     "branch successor session {successor_session_id:?} already has a row"
                 ));
             }
-            if registry.entries[index].fno_id.as_deref() == Some(branch_fno_id) {
-                return Err("branch fno_id must be distinct from predecessor".to_string());
-            }
             let branch = registry.entries[index].fork_for_session(
                 &unique_branch_name,
                 successor_session_id,
                 &predecessor_session_id,
-                branch_fno_id,
             );
             registry.entries.push(branch);
         }
