@@ -2035,3 +2035,31 @@ def test_system_exit_during_rollback_persists_failure_receipt(
     assert receipt["channel"] == "release"
     assert receipt["stage"] == "plugin-add"
     assert "termination during rollback" in receipt["detail"]
+
+
+def test_door_forwards_extra_args_to_fno_agents(monkeypatch) -> None:
+    """The plugin-install door forwards unknown flags to the Rust verb
+    byte-exact: the opencode arm's --yes/--dry-run live in Rust, and the
+    Typer door must accept them without declaring them."""
+    from fno.plugin_install_cli import plugin_app
+
+    class _Proc:
+        returncode = 0
+
+    captured: dict = {}
+
+    def fake_run(argv, check=False):
+        captured["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.plugin_install_cli._binary", lambda: Path("/bin/true")
+    )
+    result = CliRunner().invoke(
+        plugin_app, ["install", "opencode", "--dry-run", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    argv = captured["argv"]
+    assert argv[1] == "plugin-install"
+    assert argv[2:] == ["opencode", "--dry-run", "--yes"]

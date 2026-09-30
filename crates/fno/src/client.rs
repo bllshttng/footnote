@@ -1162,6 +1162,10 @@ struct View {
     /// Colors tab. Client-local ephemera like `create`/`rename`; dormant while
     /// another tab or no popup is front, reset on tab switch away from Colors.
     lane: LaneColorsUi,
+    /// The theme file importer, active only inside Settings > Theme.
+    theme_import: theme_import_ui::ThemeImportUi,
+    theme_import_gen: u64,
+    theme_import_esc: Vec<u8>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1869,6 +1873,9 @@ pub(crate) enum AuxAction {
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
+    ThemeImportOpen,
+    ThemeImportSave,
+    ThemeImportCancel,
     /// Apply a validated mux prefix change now, then persist it through the CLI.
     ApplyPrefix(String),
     /// Open the color picker for one `[sideline.colors]` axis key
@@ -1887,11 +1894,13 @@ pub(crate) enum AuxAction {
 mod backlog_board;
 mod backlog_style;
 mod config_set;
+mod lane_entry;
 mod node_detail;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
 mod theme_ground;
+mod theme_import_ui;
 mod update_menu;
 
 use config_set::spawn_config_set;
@@ -2096,6 +2105,9 @@ impl View {
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
+            theme_import: theme_import_ui::ThemeImportUi::Idle,
+            theme_import_gen: 0,
+            theme_import_esc: Vec::new(),
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -8269,6 +8281,8 @@ async fn attach_and_run(
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+    let (theme_import_tx, mut theme_import_rx) =
+        tokio::sync::mpsc::unbounded_channel::<theme_import_ui::ImportMsg>();
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
 
@@ -8400,6 +8414,7 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        theme_import_ui::maybe_kick(&mut view, &theme_import_tx);
         // the backlog board's probe/gather kick, the same single-flight.
         backlog_board::maybe_kick(&mut view, &board_tx);
         // a queued board write verb runs off the UI loop too.
@@ -9044,6 +9059,12 @@ async fn attach_and_run(
                 // same-generation panel (a result for a closed/superseded open
                 // is discarded, the needs arm's contract, one consumer).
                 feed_view::apply_fold(&mut view, gen, outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(message) = theme_import_rx.recv() => {
+                theme_import_ui::apply_result(&mut view, message);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11549,6 +11570,7 @@ async fn execute_aux_action(
         // deliberately keeps it: it rebuilds the SAME view after an action.
         AuxAction::OpenSettings => {
             view.lane.reset();
+            theme_import_ui::reset(view);
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
@@ -11621,6 +11643,9 @@ async fn execute_aux_action(
         AuxAction::ApplyTheme(name) => {
             theme_ground::apply(view, &name).await?;
         }
+        AuxAction::ThemeImportOpen => theme_import_ui::open(view),
+        AuxAction::ThemeImportSave => theme_import_ui::save(view).await?,
+        AuxAction::ThemeImportCancel => theme_import_ui::cancel(view),
         AuxAction::ApplyPrefix(spec) => {
             let notice = match crate::keys::resolve_prefix_change(&spec) {
                 Err(refusal) => refusal,
@@ -11654,7 +11679,7 @@ async fn execute_aux_action(
         }
         AuxAction::LaneColorSet(axis, key, color) => {
             view.lane.pick = None;
-            lane_color_save(view, &axis, &key, &color).await?;
+            lane_entry::lane_color_save(view, &axis, &key, &color).await?;
         }
     }
     Ok(DispatchFlow::Continue)
@@ -11689,8 +11714,11 @@ async fn aux_keys(
 ) -> Result<StdinFlow, String> {
     // A lane-colors text entry (naming a key / typing a free-form
     // color) consumes the chunk, same precedence shape as create_keys.
+    if theme_import_ui::is_entry(&view.theme_import) {
+        return theme_import_ui::entry_keys(view, bytes).await;
+    }
     if view.lane.is_entry() {
-        return lane_entry_keys(view, bytes, sock_w).await;
+        return lane_entry::lane_entry_keys(view, bytes, sock_w).await;
     }
     let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
@@ -11701,7 +11729,10 @@ async fn aux_keys(
             break;
         }
         match tok {
-            ModalKey::Esc => view.aux = None,
+            ModalKey::Esc => {
+                theme_import_ui::reset(view);
+                view.aux = None;
+            }
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);
@@ -11757,13 +11788,18 @@ async fn aux_keys(
                     // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();
+                    theme_import_ui::reset(view);
                     view.reopen_settings_keeping_sel();
                 } else {
+                    theme_import_ui::reset(view);
                     view.aux = None;
                 }
             }
             // Any other (unbound) key dismisses, per the shared popup contract.
-            ModalKey::Byte(_) => view.aux = None,
+            ModalKey::Byte(_) => {
+                theme_import_ui::reset(view);
+                view.aux = None;
+            }
         }
     }
     Ok(StdinFlow::Continue)
@@ -11775,124 +11811,6 @@ async fn aux_keys(
 /// with the settings modal staying open underneath. Enter on an EMPTY buffer
 /// keeps the entry open; Enter on a custom entry validates through
 /// `parse_color` and saves or refuses with a notice.
-async fn lane_entry_keys(
-    view: &mut View,
-    bytes: &[u8],
-    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.lane.entry_esc);
-    let keys = fold_search_input(&mut esc, bytes);
-    view.lane.entry_esc = esc;
-    for key in keys {
-        // Re-read the mode each key: a submit or Esc mid-chunk closes it, and
-        // the rest of the chunk must be swallowed, never forwarded.
-        if !view.lane.is_entry() {
-            break;
-        }
-        match key {
-            SearchKey::Esc => {
-                view.lane.clear_entry();
-                view.reopen_settings_keeping_sel();
-                break;
-            }
-            SearchKey::Byte(b) => match b {
-                b'\r' | b'\n' => {
-                    if let Some((axis, buf)) = view.lane.key_entry.clone() {
-                        // Naming a NEW key: an empty buffer keeps the entry
-                        // open (the create_keys shape); a typed name opens the
-                        // picker for it.
-                        let name = buf.trim().to_string();
-                        if name.is_empty() {
-                            continue;
-                        }
-                        view.lane.clear_entry();
-                        view.lane.pick = Some((axis, name));
-                        view.reopen_settings_keeping_sel();
-                    } else if let Some(buf) = view.lane.custom_entry.clone() {
-                        // Free-form color: validate, then save through the
-                        // same path the picker rows use.
-                        let text = buf.trim().to_string();
-                        if let Some((axis, key)) = view.lane.pick.clone() {
-                            view.lane.clear_entry();
-                            if crate::sideline_color::parse_color(&text).is_some() {
-                                lane_color_save(view, &axis, &key, &text).await?;
-                            } else {
-                                view.set_notice(format!(
-                                    "{axis}.{key}: invalid color (name, indexed(n), #rrggbb)"
-                                ));
-                                view.reopen_settings_keeping_sel();
-                            }
-                        }
-                    }
-                }
-                0x7f | 0x08 => {
-                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                        buf.pop();
-                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                        buf.pop();
-                    }
-                }
-                0x20..=0x7e => {
-                    // Same bound as the create overlay: a key name or color
-                    // string never needs to grow without limit.
-                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                        if buf.len() < MAX_SEARCH_QUERY {
-                            buf.push(b as char);
-                        }
-                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                        if buf.len() < MAX_SEARCH_QUERY {
-                            buf.push(b as char);
-                        }
-                    }
-                }
-                _ => {}
-            },
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// Persist one lane color through the CLI block-replace form and
-/// reload the palette so it goes live without a restart. The merge source is
-/// re-read fresh first, so a config change written by another process since
-/// the palette loaded is not clobbered by the whole-block replace.
-async fn lane_color_save(
-    view: &mut View,
-    axis: &str,
-    key: &str,
-    color: &str,
-) -> Result<(), String> {
-    crate::sideline_color::reload_palette();
-    use crate::lane_colors_panel as panel;
-    let json = panel::merged_axis_json(
-        &panel::lane_axis_entries(crate::sideline_color::palette(), axis),
-        key,
-        color,
-    );
-    let notice = match spawn_config_set(&format!("sideline.colors.{axis}"), &json).await {
-        Ok(()) => {
-            crate::sideline_color::reload_palette();
-            // Verify at the palette's own source: the CLI write and the
-            // palette read can land in different config layers (a concurrent
-            // block-replace, or a project config shadowing the global write).
-            // A lost write is surfaced here, never silently swallowed.
-            if panel::current_lane_color(crate::sideline_color::palette(), axis, key).as_deref()
-                == Some(color)
-            {
-                format!("{axis}.{key}: {color}")
-            } else {
-                format!(
-                    "{axis}.{key}: save did not stick in the config the sideline reads; check config layering"
-                )
-            }
-        }
-        Err(_) => format!("{axis}.{key}: save failed"),
-    };
-    view.set_notice(notice);
-    view.reopen_settings_keeping_sel();
-    Ok(())
-}
-
 /// One mouse report while an aux popup is open (US4/US5): hover selects, a left
 /// click runs the entry (propagating detach), a click off the popup dismisses.
 async fn aux_mouse(
@@ -11919,6 +11837,7 @@ async fn aux_mouse(
                 .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
                 view.lane.clear_entry();
+                theme_import_ui::reset(view);
                 view.aux = None;
                 return Ok(StdinFlow::Continue);
             }
@@ -11927,7 +11846,7 @@ async fn aux_mouse(
                     // While a lane text entry owns the keyboard, row
                     // clicks are inert: acting on a picker row mid-typing
                     // would leave the buffer armed under a changed view.
-                    if view.lane.is_entry() {
+                    if view.lane.is_entry() || theme_import_ui::is_entry(&view.theme_import) {
                         return Ok(StdinFlow::Continue);
                     }
                     if let Some(m) = view.aux.as_mut() {
@@ -11944,6 +11863,7 @@ async fn aux_mouse(
                     // In-block miss (a header) is swallowed; off-block dismisses.
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
+                        theme_import_ui::reset(view);
                         view.aux = None;
                     }
                 }
@@ -13665,6 +13585,10 @@ mod esc_quiet_tests;
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
+
+#[cfg(test)]
+#[path = "client_tests/theme_import_tests.rs"]
+mod theme_import_tests;
 
 #[cfg(test)]
 #[path = "client_tests/keys_modal_tests.rs"]

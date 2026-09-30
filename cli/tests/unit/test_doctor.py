@@ -427,11 +427,21 @@ def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -
         capture_present="present",
     )
     monkeypatch.setattr(
-        doctor, "_harness_surface_report", lambda: {"opencode": "stale"}
+        doctor,
+        "_harness_surface_report",
+        lambda: {
+            "opencode_doctor_lines": [
+                "WARN opencode: installed at footnote 0.3.1, source is 0.3.2; "
+                "re-run fno config plugin install opencode"
+            ]
+        },
     )
     result = runner.invoke(app, ["doctor"])
-    assert "opencode footnote plugin is STALE" in result.stdout
-    assert "fno config setup" in result.stdout
+    assert (
+        "fno doctor: WARN opencode: installed at footnote 0.3.1, source is 0.3.2"
+        in result.stdout
+    )
+    assert "fno config plugin install opencode" in result.stdout
 
 
 def test_doctor_reports_stale_surface_via_door(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -447,12 +457,20 @@ def test_doctor_reports_stale_surface_via_door(monkeypatch: pytest.MonkeyPatch, 
                 "version": "0.3.1",
                 "source_version": "0.3.2",
                 "missing": [],
+                "doctor_lines": [
+                    {
+                        "level": "WARN",
+                        "text": "opencode: installed at footnote 0.3.1, "
+                        "source is 0.3.2; re-run fno config plugin install opencode",
+                    }
+                ],
             },
         ),
     )
     report = doctor._harness_surface_report()
-    assert "STALE" in report["opencode"]
-    assert "0.3.2" in report["opencode"]
+    lines = report["opencode_doctor_lines"]
+    assert any("0.3.2" in line for line in lines)
+    assert any("re-run fno config plugin install opencode" in line for line in lines)
 
 
 def test_doctor_main_run_points_at_codex_hooks_dual(

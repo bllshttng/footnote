@@ -790,7 +790,10 @@ pub struct Arm {
 }
 
 /// The production runner: the page render, cwd-bound (config, the graph and
-/// the default out path all resolve per cwd).
+/// the default out path all resolve per cwd). The Rust front is the program:
+/// `org rundown` is its rewrite of `king ledger` plus the faithful-root
+/// `--out`; fno-py serves no `org` group and bare `king ledger` defaults to
+/// reign.html, which the /crown route does not read.
 fn run_ledger() -> Result<(), String> {
     let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["agents", "org", "rundown"])
