@@ -2584,7 +2584,7 @@ impl Core {
                 Ok(ok) => ok,
                 Err(keeper_err) => {
                     let fallback_permit =
-                        crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+                        crate::process_admission::admit_fallback().map_err(|e| e.to_string())?;
                     let shell = PtyShell::spawn_cmd_with_permit(
                         argv,
                         rows,

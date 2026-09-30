@@ -582,6 +582,13 @@ pub fn admit_shell_pane() -> Result<AdmissionPermit, AdmissionFailure> {
     admit_fleet_for(true)
 }
 
+/// Fleet admission for the inline pty a failed keeper falls back to. The
+/// spawn's first permit already answered the brake, human or agent, so the
+/// same spawn is not braked twice. The census and ceiling still apply.
+pub fn admit_fallback() -> Result<AdmissionPermit, AdmissionFailure> {
+    admit_fleet_for(true)
+}
+
 fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),

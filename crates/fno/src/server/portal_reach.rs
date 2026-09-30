@@ -1500,7 +1500,8 @@ impl Core {
     /// Pane admission for a client's own gesture (a row tap, a portal open).
     /// An attached, driving client is a human at their terminal, and the
     /// machine brake never refuses the user's own attach. A passive
-    /// client is how the control verbs reach in, so agents stay braked.
+    /// client is how the control verbs reach in, and restore's id is never
+    /// attached at all, so both stay braked.
     pub(super) fn admit_gesture_pane(
         &self,
         client_id: u64,
@@ -1508,7 +1509,7 @@ impl Core {
         cap: Option<usize>,
     ) -> Result<crate::process_admission::AdmissionPermit, crate::process_admission::AdmissionFailure>
     {
-        let human = !self.is_passive(client_id);
+        let human = self.clients.iter().any(|c| c.id == client_id && !c.passive);
         crate::process_admission::admit_pane_for(human, pane_count, cap)
     }
 
