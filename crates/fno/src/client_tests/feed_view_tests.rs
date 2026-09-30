@@ -252,6 +252,7 @@ fn hit_on_a_row_without_session_id_is_none() {
             .iter()
             .any(|a| matches!(a, feed_detail::FeedAction::Session(_))),
         "no session, no session action"
+    );
 }
 
 #[tokio::test]
@@ -278,8 +279,6 @@ async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() 
         "missing node id cannot prefill the composer"
     );
     assert!(v.feed_detail.is_some(), "an ineligible detail stays open");
-}
-    );
 }
 
 #[test]
