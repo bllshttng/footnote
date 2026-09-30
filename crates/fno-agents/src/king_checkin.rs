@@ -1258,6 +1258,12 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("held", crate::king_answers::held_reading(&ctx.scope));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
+    take("self_hold", {
+        crate::claims::resolve_identity()
+            .0
+            .ok_or_else(|| "current session identity is unavailable".to_string())
+            .and_then(|session| crate::mail_hold::self_status(&session))
+    });
     take("parked", r_parked());
     readings
 }
@@ -1380,6 +1386,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             cp.value.get("attention").cloned().unwrap_or(json!([])),
         );
     }
+    if let Some(hold) = get("self_hold").filter(|r| r.ok) {
+        data.insert("self_hold".into(), hold.value.clone());
+    }
     let failed: Vec<&Reading> = readings.iter().filter(|r| !r.ok).collect();
     data.insert("coverage".into(), json!(readings.len() - failed.len()));
     data.insert(
@@ -1475,6 +1484,18 @@ fn derive_change(
                 .collect()
         })
         .unwrap_or_default();
+    let self_hold = data.get("self_hold");
+    if self_hold
+        .and_then(|hold| hold.get("clock_live"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || self_hold
+            .and_then(|hold| hold.get("delivery_policy"))
+            .and_then(Value::as_str)
+            == Some("bus-only")
+    {
+        attention.push("DND on".into());
+    }
     if data
         .get("refusal_rate_rising")
         .and_then(Value::as_bool)
@@ -1979,6 +2000,32 @@ fn render_lines(
                 for entry in attention {
                     lines.push(format!("  {entry}"));
                 }
+            }
+        }
+    }
+    match failed("self_hold") {
+        Some(r) => lines.push(format!("READER FAILED self_hold: {}", r.error)),
+        None => {
+            let hold = by_name("self_hold")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let clock_live = hold
+                .get("clock_live")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let clock = match (clock_live, hold.get("clock_until").and_then(Value::as_str)) {
+                (true, Some(until)) => format!("clock active until {until}"),
+                (true, None) => "clock active".into(),
+                (false, Some(until)) => format!("clock inactive (until {until})"),
+                (false, None) => "clock inactive".into(),
+            };
+            let policy = hold
+                .get("delivery_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
+            if clock_live || policy == "bus-only" {
+                lines.push("attention: DND on".into());
             }
         }
     }
@@ -3410,6 +3457,10 @@ mod tests {
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": null}),
+            ),
             Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
     }
@@ -3658,9 +3709,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(20)));
+        assert_eq!(data.get("coverage"), Some(&json!(21)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3748,7 +3799,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(20)), "20 of 21 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3906,7 +3957,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
+            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -4071,7 +4122,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4203,23 +4254,54 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
+            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
     }
 
-    // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
+    // The self-hold line exposes both inputs, and either one raises attention.
     #[test]
-    fn a_quiet_control_plane_reads_ok() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+    fn self_hold_attention_reads_clock_and_registry_together() {
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
-            data.get("control_plane_attention"),
-            Some(&json!([])),
-            "empty attention"
+            derive_change(None, &data, ""),
+            "first canonical beat for this scope"
         );
-        let change = derive_change(None, &data, "");
-        assert_eq!(change, "first canonical beat for this scope");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy none"));
         assert!(lines.iter().any(|l| l == "control plane: ok"));
+
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": false, "clock_until": null, "delivery_policy": "bus-only"}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines
+            .iter()
+            .any(|l| l == "self_hold: clock inactive; delivery_policy bus-only"));
+        assert!(lines.iter().any(|l| l == "attention: DND on"));
+
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "self_hold",
+                json!({"clock_live": true, "clock_until": "2030-01-01T00:00:00Z", "delivery_policy": null}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "attention: DND on");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        assert!(lines.iter().any(
+            |l| l == "self_hold: clock active until 2030-01-01T00:00:00Z; delivery_policy none"
+        ));
     }
 
     #[test]

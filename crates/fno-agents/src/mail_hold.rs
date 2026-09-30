@@ -144,6 +144,29 @@ fn lookup_row(session_id: &str) -> Option<(String, Option<String>)> {
     ))
 }
 
+/// Read the current session's hold clock and registry delivery stamp together.
+/// Check-in needs both: either can hold delivery while the other is absent.
+pub(crate) fn self_status(session_id: &str) -> Result<serde_json::Value, String> {
+    let registry = load_registry(&AgentsHome::shared_registry_json())
+        .map_err(|error| format!("agent registry unreadable: {error}"))?;
+    let index = row_for_session(&registry, session_id)
+        .ok_or_else(|| format!("no registry row carries session {session_id}"))?;
+    let entry = &registry.entries[index];
+    let matched = entry
+        .harness_session_id
+        .as_deref()
+        .ok_or_else(|| format!("registry row for session {session_id} has no session id"))?;
+    let delivery_policy = entry.delivery_policy.clone();
+    let clock = read_clock(&identity_key(matched));
+    let now = chrono::Utc::now();
+    let until = clock.as_ref().and_then(|clock| clock.until);
+    Ok(serde_json::json!({
+        "clock_live": clock.as_ref().is_some_and(|clock| clock.live(now)),
+        "clock_until": until.map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        "delivery_policy": delivery_policy,
+    }))
+}
+
 /// Write the sidecar clock in hold.py `_write`'s exact shape: one JSON
 /// object, Python's `, `/`: ` separators and key order, trailing newline,
 /// atomic via temp file + rename. `source` appends the conversation mark
@@ -1133,6 +1156,14 @@ pub(crate) mod tests {
                 (3550..=3600).contains(&left),
                 "the answering clock sits about 60 minutes out, got {left}s"
             );
+            let status = self_status(SID).unwrap();
+            assert_eq!(status["clock_live"], true);
+            assert_eq!(status["delivery_policy"], "bus-only");
+            std::fs::remove_file(clock_path(dir, SID)).unwrap();
+            let status = self_status(SID).unwrap();
+            assert_eq!(status["clock_live"], false);
+            assert!(status["clock_until"].is_null());
+            assert_eq!(status["delivery_policy"], "bus-only");
         });
     }
 
