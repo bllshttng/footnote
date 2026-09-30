@@ -452,7 +452,7 @@ mod tests {
 
         // (b) The same agent withdraws (no --answer): refused, still open.
         let tmp = tempfile::tempdir().unwrap();
-        let req = request(&tmp, "q-gate-w", None);
+        let mut req = request(&tmp, "q-gate-w", None);
         req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "agent"});
         seed_question(&req, &ask_from("q-gate-w", "49a80492", "which lane?"));
         let result = run_clear(&req);
