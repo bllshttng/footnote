@@ -19,7 +19,7 @@ from fno.graph._intake import (
 )
 
 # Canonical Kanban column order, left to right. Single source of truth for both
-# renderers: render_graph_md (below) and render_html.COLUMNS import this, so the
+# renderers: render_graph_md (below) and roadmap_public's board render import this, so the
 # column set + order can never drift between the markdown board and the HTML
 # board. In Progress leads, Now holds ready today-work, Triage holds the
 # awaiting-ack queue, and Done is terminal.
@@ -227,7 +227,7 @@ def _kanban_card(
     # artifact_url: the user-supplied design/doc link (done --link). Shown
     # on the board so the field has a purpose-built reader, not just a writer.
     # Non-http(s) schemes render as code so a markdown auto-linker cannot turn a
-    # javascript:/data: URI into a clickable anchor (parity with render_html).
+    # javascript:/data: URI into a clickable anchor (parity with the web backlog page).
     artifact_url = (entry.get("artifact_url") or "").strip()
     if artifact_url:
         if artifact_url.startswith(("https://", "http://")):

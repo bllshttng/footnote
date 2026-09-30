@@ -269,9 +269,9 @@ def test_maintain_stale_receipt_zero_prints_zero_line(tmp_graph):
 def test_maintain_wip_count_includes_live_epic_promoted_children(
     tmp_graph, monkeypatch
 ):
-    import fno.graph.render_html as render_html
+    import fno.graph.maintain as maintain
 
-    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    monkeypatch.setattr(maintain, "_now_wip_cap", lambda: 1)
     _seed(tmp_graph, [
         _node("ab-epic01", type="epic", status="ready", priority="p1"),
         _node(
@@ -288,9 +288,9 @@ def test_maintain_wip_count_includes_live_epic_promoted_children(
 def test_maintain_now_wip_excludes_in_progress_epic_overlay(
     tmp_graph, monkeypatch
 ):
-    import fno.graph.render_html as render_html
+    import fno.graph.maintain as maintain
 
-    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    monkeypatch.setattr(maintain, "_now_wip_cap", lambda: 1)
     _seed(tmp_graph, [
         _node("ab-epic02", type="epic", status="ready", priority="p2"),
         _node(
@@ -311,9 +311,9 @@ def test_maintain_now_wip_excludes_in_progress_epic_overlay(
 
 
 def test_maintain_now_wip_excludes_stored_progress(tmp_graph, monkeypatch):
-    import fno.graph.render_html as render_html
+    import fno.graph.maintain as maintain
 
-    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    monkeypatch.setattr(maintain, "_now_wip_cap", lambda: 1)
     _seed(tmp_graph, [
         _node(
             "ab-claim01",
@@ -476,6 +476,17 @@ def _clean_events():
     yield
     if p.exists():
         p.unlink()
+
+
+@pytest.fixture(autouse=True)
+def _no_board_render(monkeypatch):
+    # The post-publish board render shells the installed front binary; these
+    # tests are about the maintain legs, and a stderr warning from a lagging
+    # install would land in CliRunner's mixed output and break the --json
+    # parses.
+    import fno.graph.roadmap_public as rp
+
+    monkeypatch.setattr(rp, "render_local_targets", lambda: 0)
 
 
 def _ready(node_id: str, **over) -> dict:
