@@ -93,6 +93,7 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
             panes_closed,
             closed_panes,
             tabs_removed,
+            skipped_typing,
         }) => {
             if json {
                 println!(
@@ -103,6 +104,7 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
                         "panes_closed": panes_closed,
                         "closed_panes": closed_panes,
                         "tabs_removed": tabs_removed,
+                        "skipped_typing": skipped_typing,
                     })
                 );
             } else {
@@ -116,8 +118,13 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
                 } else {
                     format!("; removed empty tab(s): {}", tabs_removed.join(", "))
                 };
+                let held = if skipped_typing == 0 {
+                    String::new()
+                } else {
+                    format!("; held {skipped_typing} pane(s) typed into this minute")
+                };
                 println!(
-                    "retire-session {host_session}: retired {retired} member(s), closed {panes_closed} pane(s){names}{tabs}"
+                    "retire-session {host_session}: retired {retired} member(s), closed {panes_closed} pane(s){names}{tabs}{held}"
                 );
             }
             EXIT_OK

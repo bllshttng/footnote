@@ -24,8 +24,8 @@ Absorbed bugs, each verified in this PR's tests:
   sync-canonical`` both exist); no dangling references survive.
 - - ``parking_lot_path`` is resolved against the CANONICAL root, never a
   worktree cwd that may carry a stale override.
-- - canonical-sync pipes are closed + timeouted (see
-  ``_sync_canonical._default_shell_runner``) so a trailing ``fno agents restart``
+- - canonical-sync pipes are closed + timeouted by the native verb
+  (``crates/fno-agents/src/sync_canonical.rs``) so a trailing ``fno agents restart``
   detached daemon cannot hold the pipe and wedge the ritual.
 - x-aaaa - the advance leg runs bounded with streamed progress lines instead of
   hanging silent for minutes.
@@ -528,7 +528,7 @@ class Ritual:
         )
 
     def leg_sync_canonical(self) -> None:
-        """Step 3d: fix lives in _sync_canonical._default_shell_runner."""
+        """Step 3d: the guard chain lives in the native verb (sync_canonical.rs)."""
         if not getattr(self.ctx.pm, "sync_command", None):
             self._emit("sync-canonical", _SKIPPED, "not configured")
             return

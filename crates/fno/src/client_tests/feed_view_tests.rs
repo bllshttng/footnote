@@ -68,7 +68,6 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
         inflight: false,
         want: false,
         gen: 0,
-        focused: false,
         hpan: 0,
         last_fold: None,
     }
@@ -136,7 +135,7 @@ fn lines_render_newest_first_with_marker() {
         c.ts = "2026-09-02T18:27:06Z".into();
         overlay(vec![a, b, c])
     };
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
     assert_eq!(lines.len(), ROWS);
@@ -172,7 +171,7 @@ fn offset_windows_the_items() {
     };
     // Slot offset 1 skips the group header, so the newest row (x-c) leads
     // the window now.
-    let lines = feed_panel_lines(&o, W, ROWS, 1);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 1);
     assert!(lines[1].contains("x-c"));
     assert!(lines[2].contains("x-b"));
     assert!(lines[3].contains("x-a"));
@@ -186,14 +185,14 @@ fn degraded_footer_renders_the_typed_reason() {
     // body carries the projection's stderr so the cause leads the line.
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Timeout);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("timed out after 10s")));
 
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Exit(
         "unreadable store: graph.json".into(),
     ));
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // At the panel's 40 columns pad_to truncates the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
@@ -254,7 +253,7 @@ async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() 
 #[test]
 fn empty_panel_renders_an_earned_empty_notice_and_footer() {
     let o = overlay(vec![]);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.last().unwrap().contains("0 events"));
 }
@@ -265,7 +264,7 @@ fn folding_first_open_claims_no_activity() {
     // a statement only a settled fold has earned.
     let mut o = overlay(vec![]);
     o.inflight = true;
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(!lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.iter().any(|l| l.contains("folding...")));
 }
@@ -322,7 +321,7 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
                                 // same row deep-links THAT event's session: painter and resolver must
                                 // name one event, never two.
     let f = v.feed.as_ref().unwrap();
-    let lines = feed_panel_lines(f, w as usize - 1, v.term.0 as usize, 0);
+    let lines = feed_panel_lines(f, false, w as usize - 1, v.term.0 as usize, 0);
     assert!(
         lines[2].contains("x-c"),
         "top ITEM row is the newest: {}",
@@ -480,7 +479,7 @@ fn a_double_width_glyph_claims_two_cells() {
 #[test]
 fn the_header_names_the_input_state_the_panel_is_in() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    let lines = feed_panel_lines(&unfocused, W, ROWS, 0);
+    let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
         lines[0].contains("E focus"),
         "unfocused header: {}",
@@ -492,9 +491,8 @@ fn the_header_names_the_input_state_the_panel_is_in() {
         lines[0]
     );
 
-    let mut focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    focused.focused = true;
-    let lines = feed_panel_lines(&focused, W, ROWS, 0);
+    let focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+    let lines = feed_panel_lines(&focused, true, W, ROWS, 0);
     assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
     assert!(lines[0].contains("esc release"));
 
@@ -518,10 +516,38 @@ fn the_header_names_the_input_state_the_panel_is_in() {
 fn esc_releases_the_keyboard_without_closing_the_panel() {
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
-    v.feed.as_mut().unwrap().focused = true;
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    // The cursor band rides keyboard ownership (AC3-HP/AC4-HP): the selected
+    // row wears the theme's band pair while the feed owns typing, and the
+    // band is gone the moment the keyboard returns to the pane.
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let feed_w = v.feed_panel_w() as usize;
+    assert!(feed_w > 0, "the panel is painted with a width");
+    let x0 = cols - feed_w;
+    let sel = v.feed.as_ref().unwrap().sel;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        crate::theme::band_style(&v.theme).1,
+        "the selected row wears the band while the feed owns the keyboard"
+    );
     assert!(crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some(), "the panel stays open");
-    assert!(!v.feed.as_ref().unwrap().focused);
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane,
+        "the release returns typing to the pane"
+    );
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let x0 = cols - v.feed_panel_w() as usize;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        Color::Default,
+        "the band is gone once typing returns to the pane"
+    );
     // Releasing twice is a no-op, never a close.
     assert!(!crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some());
@@ -921,7 +947,7 @@ fn feed_panel_rows_style_the_actionable_kinds() {
     vacated.ts = "2026-09-28T16:45:58Z".into();
     vacated.title = "warden left".into();
     let o = overlay(vec![vacated]);
-    let rows = feed_view::feed_panel_rows(&o, W, ROWS, 0);
+    let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
     // Row 1 is the group header: every span bold.
     assert!(
         rows[1].iter().all(|s| s.bold),
@@ -941,7 +967,7 @@ fn feed_panel_rows_style_the_actionable_kinds() {
         "the node id is bold: {:?}",
         rows[2]
     );
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(
         lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
         "text is unchanged: {}",
