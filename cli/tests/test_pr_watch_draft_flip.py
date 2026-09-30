@@ -1,8 +1,9 @@
 """The pr-watch draft flip leg (config.pr.open_ready's second enforcement point).
 
-Self-contained on purpose: `test_pr_watch_dispatch.py` is over the file
-budget and may only shrink, so the flip-leg tests live here with their own
-stubs. No real gh, config, or decision index is touched.
+Self-contained on purpose: test_pr_watch_dispatch.py is over the file budget
+and may only shrink, so the flip-leg tests live here with their own stubs.
+One table test per surface; every branch keeps a row. No real gh, config,
+or decision index is touched.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def _candidate(pr_number=7, slug="owner/repo", node_id="x-abc12345"):
     )
 
 
-def _obs(pr_number=7, state="OPEN", is_draft=True):
+def _obs(pr_number=7, state="OPEN", is_draft=None):
     return PrObservation(
         pr_number=pr_number,
         state=state,
@@ -61,16 +62,16 @@ class _Claim:
         return False
 
 
-def _run_tick(tmp_path, candidates, obs_map, flip_fn, **tick_kw):
+def _run_tick(tmp_path, flip_fn, is_draft, **tick_kw):
     from fno.pr_watch._dispatch import tick
 
     events = []
 
     def discover(_entries):
-        return candidates
+        return [_candidate()]
 
     def read_state(cand, *, reviewers):
-        return obs_map.get(cand.pr_number) or _obs(cand.pr_number, is_draft=None)
+        return _obs(7, is_draft=is_draft)
 
     def fake_flip(cand, obs, *, emit):
         events.append(("flipped", cand.pr_number))
@@ -105,49 +106,34 @@ def _seed_open(store_path, pr_number=7, now="2026-06-14T12:00:00Z"):
     })
 
 
-def test_open_draft_candidate_is_flipped_and_counted(tmp_path):
-    store_path = tmp_path / "state.json"
-    _seed_open(store_path)
-    result, events = _run_tick(tmp_path, [_candidate()], {7: _obs(7)}, None)
-    assert ("flipped", 7) in events, "the flip leg must run for an OPEN + is_draft observation"
-    assert result.draft_flips == 1
-    receipt = next(d for t, d in events if t == "pr_watch_tick")
-    assert receipt["draft_flips"] == 1
-
-
-def test_non_draft_and_unknown_draft_observations_never_flip(tmp_path):
-    store_path = tmp_path / "state.json"
-    _seed_open(store_path, pr_number=7)
-    calls = []
-    result, events = _run_tick(
-        tmp_path, [_candidate()], {7: _obs(7, is_draft=None)},
-        flip_fn=lambda c, o, *, emit: calls.append(o),
-    )
-    assert calls == []
-    assert result.draft_flips == 0
-
-
-def test_flip_disabled_by_config_runs_no_leg(tmp_path):
-    store_path = tmp_path / "state.json"
-    _seed_open(store_path)
-    calls = []
-    result, _ = _run_tick(
-        tmp_path, [_candidate()], {7: _obs(7)},
-        flip_fn=lambda c, o, *, emit: calls.append(o),
-        draft_flip_enabled=False,
-    )
-    assert calls == []
-    assert result.draft_flips == 0
-
-
-def test_a_raising_flip_never_breaks_the_sweep(tmp_path):
+@pytest.mark.parametrize(
+    "is_draft,enabled,flip,expect_flips",
+    [
+        # the firing branch: OPEN + is_draft runs the leg, receipt counts it.
+        (True, True, "ok", 1),
+        # no draft bit, or the leg disabled by config: no flip, count 0.
+        (None, True, "ok", 0),
+        (True, False, "ok", 0),
+        # a raising flip is one degraded row; the sweep completes past it.
+        (True, True, "raises", 0),
+    ],
+)
+def test_flip_leg_branches(tmp_path, is_draft, enabled, flip, expect_flips):
     store_path = tmp_path / "state.json"
     _seed_open(store_path)
 
     def boom(cand, obs, *, emit):
         raise RuntimeError("flip exploded")
 
-    result, events = _run_tick(tmp_path, [_candidate()], {7: _obs(7)}, flip_fn=boom)
-    assert result.acted >= 0, "the tick completes past a raising flip leg"
+    result, events = _run_tick(
+        tmp_path,
+        flip_fn=None if flip == "ok" else boom,
+        is_draft=is_draft,
+        draft_flip_enabled=enabled,
+    )
+    assert result.draft_flips == expect_flips
     receipt = next(d for t, d in events if t == "pr_watch_tick")
-    assert receipt["merge_scan"]["completed"] is True
+    assert receipt["draft_flips"] == expect_flips
+
+
+

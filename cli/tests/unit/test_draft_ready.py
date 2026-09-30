@@ -2,7 +2,8 @@
 
 Covers `fno/pr/_draft_ready.py` and its delegate() wiring in
 `fno/pr/gh_proxy.py`. All decision and config reads are seamed - no test
-touches the real decision index or the real settings files.
+touches the real decision index or the real settings files. One table test
+per surface; each row names its branch.
 """
 from __future__ import annotations
 
@@ -10,149 +11,103 @@ import pytest
 
 from fno.pr._draft_ready import (
     DRAFT_DECISION,
-    draft_argv_intent,
     draft_law_authority,
     draft_refusal,
     draft_subject_for_pr,
     run_draft_flip,
 )
 
-
-def _admitting(**overrides):
-    """Seams that admit: open_ready on, authority none, branch fixed."""
-    seams = {
-        "open_ready_fn": lambda _cwd: True,
-        "authority_fn": lambda _subject: ("none", ""),
-        "branch_fn": lambda _cwd: "feature/x-3159",
-    }
-    seams.update(overrides)
-    return seams
-
-
-class TestDraftArgvIntent:
-    def test_create_with_draft_flag_is_create_intent(self):
-        assert draft_argv_intent(["pr", "create", "--title", "t", "--draft"]) == (
-            True,
-            "create",
-            None,
-        )
-
-    def test_create_with_draft_true_is_intent_and_false_is_not(self):
-        assert draft_argv_intent(["pr", "create", "--draft=true"])[0] is True
-        assert draft_argv_intent(["pr", "create", "--draft=false"])[0] is False
-
-    def test_ready_with_number_is_ready_intent(self):
-        assert draft_argv_intent(["pr", "ready", "7", "--draft"]) == (True, "ready", 7)
-
-    def test_numberless_ready_dwim_is_still_draft_intent(self):
-        """`gh pr ready --draft` DWIMs against the current branch's PR; the
-        subject falls back to the branch so the refusal still names a door."""
-        assert draft_argv_intent(["pr", "ready", "--draft"]) == (True, "ready", None)
-        refusal = draft_refusal(
-            ["pr", "ready", "--draft"],
-            None,
-            **_admitting(),
-        )
-        assert refusal is not None
-        assert "pr-draft:feature/x-3159" in refusal
-
-    def test_non_draft_and_non_pr_commands_are_not_intent(self):
-        assert draft_argv_intent(["pr", "create", "--title", "t"])[0] is False
-        assert draft_argv_intent(["pr", "view", "9", "--draft"])[0] is False
-        assert draft_argv_intent(["auth", "status"])[0] is False
-        assert draft_argv_intent([])[0] is False
+_BRANCH = "feature/x-3159"
+_ADMITTING = {
+    "open_ready_fn": lambda _cwd: True,
+    "authority_fn": lambda _subject: ("none", ""),
+    "branch_fn": lambda _cwd: _BRANCH,
+}
 
 
 class TestDraftRefusal:
-    def test_create_draft_refused_by_default_and_names_the_door(self):
-        refusal = draft_refusal(["pr", "create", "--draft"], None, **_admitting())
-        assert refusal is not None
-        assert "pr-draft:feature/x-3159" in refusal
-        assert DRAFT_DECISION in refusal
-        assert "fno inbox law set" in refusal
+    """One table per surface: draft_refusal over every argv and authority branch."""
 
-    def test_operator_ruling_admits_the_draft(self):
-        refusal = draft_refusal(
-            ["pr", "create", "--draft"],
-            None,
-            **_admitting(authority_fn=lambda _s: ("single", "")),
-        )
-        assert refusal is None
+    @pytest.mark.parametrize(
+        "argv,seams,expect",
+        [
+            # create + --draft: refused, subject keyed on the branch, door named.
+            (["pr", "create", "--draft"], {}, "pr-draft:" + _BRANCH),
+            # --draft=true is intent; --draft=false creates ready and is not.
+            (["pr", "create", "--draft=true"], {}, "pr-draft:"),
+            (["pr", "create", "--draft=false"], {}, None),
+            # ordinary argv pays nothing: no intent, no law read.
+            (["pr", "view", "9"], {}, "no-authority-read"),
+            (["auth", "status"], {}, "no-authority-read"),
+            # an operator ruling admits; an unreadable probe refuses fail-closed.
+            (["pr", "create", "--draft"], {"authority_fn": lambda _s: ("single", "")}, None),
+            (["pr", "create", "--draft"], {"authority_fn": lambda _s: ("unknown", "probe died")}, "pr-draft:"),
+            # the rule off for the repo: the guard stands down.
+            (["pr", "create", "--draft"], {"open_ready_fn": lambda _cwd: False}, None),
+            # gh DWIM ready with no number: still draft intent, branch subject.
+            (["pr", "ready", "--draft"], {}, "pr-draft:" + _BRANCH),
+            # a resolvable PR number keys the subject on the repo.
+            (["pr", "ready", "7", "--draft"], {}, "pr-draft:owner/repo#7"),
+            # an unresolvable branch still names a recordable door.
+            (["pr", "create", "--draft"], {"branch_fn": lambda _cwd: None}, "pr-draft:unknown-branch"),
+        ],
+    )
+    def test_refusal_branches(self, monkeypatch, argv, seams, expect):
+        merged = dict(_ADMITTING)
+        merged.update(seams)
+        if expect == "no-authority-read":
+            calls = []
 
-    def test_unknown_authority_refuses_fail_closed(self):
-        refusal = draft_refusal(
-            ["pr", "create", "--draft"],
-            None,
-            **_admitting(authority_fn=lambda _s: ("unknown", "probe died")),
-        )
-        assert refusal is not None
+            def spy(subject):
+                calls.append(subject)
+                return "none", ""
 
-    def test_ready_draft_keys_the_subject_on_the_pr(self, monkeypatch):
-        monkeypatch.setattr(
-            "fno.graph._reconcile.resolve_current_repo_slug", lambda _cwd: "owner/repo"
-        )
-        seen = {}
-
-        def authority(subject):
-            seen["subject"] = subject
-            return "none", ""
-
-        refusal = draft_refusal(
-            ["pr", "ready", "7", "--draft"], None, authority_fn=authority
-        )
-        assert refusal is not None
-        assert seen["subject"] == "pr-draft:owner/repo#7"
-
-    def test_open_ready_false_disables_the_guard(self):
-        refusal = draft_refusal(
-            ["pr", "create", "--draft"],
-            None,
-            **_admitting(open_ready_fn=lambda _cwd: False),
-        )
-        assert refusal is None
-
-    def test_no_draft_intent_costs_nothing(self):
-        calls = []
-
-        def spy_authority(subject):
-            calls.append(subject)
-            return "none", ""
-
-        assert draft_refusal(["pr", "view", "9"], None, authority_fn=spy_authority) is None
-        assert calls == [], "the law read must not run on ordinary argv"
-
-    def test_branch_falls_back_to_unknown_branch_marker(self):
-        refusal = draft_refusal(
-            ["pr", "create", "--draft"],
-            None,
-            **_admitting(branch_fn=lambda _cwd: None),
-        )
-        assert "pr-draft:unknown-branch" in refusal
+            merged["authority_fn"] = spy
+            assert draft_refusal(argv, None, **merged) is None
+            assert calls == [], "the law read must not run on ordinary argv"
+            return
+        if argv[:2] == ["pr", "ready"] and "7" in argv:
+            monkeypatch.setattr(
+                "fno.graph._reconcile.resolve_current_repo_slug",
+                lambda _cwd: "owner/repo",
+            )
+        refusal = draft_refusal(argv, None, **merged)
+        if expect is None:
+            assert refusal is None
+        else:
+            assert refusal is not None
+            assert expect in refusal
+            assert DRAFT_DECISION in refusal
+            assert "fno inbox law set" in refusal
 
 
 class TestDraftLawAuthority:
-    def test_single_operator_row_with_the_affirmative_value(self):
-        rows = [
-            {"authority_source": "operator", "decision": DRAFT_DECISION},
-        ]
-        status, probe = draft_law_authority("pr-draft:o/r#7", list_fn=lambda *a, **k: ("", rows, 0))
-        assert (status, probe) == ("single", "")
+    """One table: the three-state law read over row shapes and probe health."""
 
-    def test_chat_attested_row_is_a_clean_no(self):
-        rows = [{"authority_source": "coord", "decision": DRAFT_DECISION}]
-        status, _ = draft_law_authority("s", list_fn=lambda *a, **k: ("", rows, 0))
-        assert status == "none"
+    @pytest.mark.parametrize(
+        "rows,damaged,expect",
+        [
+            ([{"authority_source": "operator", "decision": DRAFT_DECISION}], 0, "single"),
+            # a chat_attested row cannot carry a draft exception: clean no.
+            ([{"authority_source": "coord", "decision": DRAFT_DECISION}], 0, "none"),
+            # row existence carries no polarity: a note at the subject is no.
+            ([{"authority_source": "operator", "decision": "a note"}], 0, "none"),
+            # conflicting, damaged, and dead probes are unknown, never none.
+            (
+                [{"authority_source": "operator", "decision": DRAFT_DECISION}] * 2,
+                0,
+                "unknown",
+            ),
+            ([], 2, "unknown"),
+        ],
+    )
+    def test_authority_branches(self, rows, damaged, expect):
+        status, _ = draft_law_authority(
+            "s", list_fn=lambda *a, **k: ("", rows, damaged)
+        )
+        assert status == expect
 
-    def test_row_without_polarity_is_none(self):
-        rows = [{"authority_source": "operator", "decision": "a note, not a grant"}]
-        status, _ = draft_law_authority("s", list_fn=lambda *a, **k: ("", rows, 0))
-        assert status == "none"
-
-    def test_conflict_and_damage_and_dead_probe_are_unknown(self):
-        two = [{"authority_source": "operator", "decision": DRAFT_DECISION}] * 2
-        assert draft_law_authority("s", list_fn=lambda *a, **k: ("", two, 0))[0] == "unknown"
-        assert draft_law_authority("s", list_fn=lambda *a, **k: ("", [], 2))[0] == "unknown"
-
+    def test_dead_probe_is_unknown_with_the_fault_named(self):
         def dead(*_a, **_k):
             raise RuntimeError("index unreadable")
 
@@ -162,7 +117,7 @@ class TestDraftLawAuthority:
 
 
 class TestConfigBlock:
-    def test_default_is_on_and_quoted_values_coerce(self):
+    def test_open_ready_default_and_quoted_coercion(self):
         from fno.config import PrBlock
 
         assert PrBlock().open_ready is True
@@ -207,6 +162,8 @@ class TestProxyWiring:
 
 
 class TestRunDraftFlip:
+    """One table: the sweep flip over its outcome branches."""
+
     @staticmethod
     def _cand(pr_number=7, slug="owner/repo", node_id="x-abc12345", repo_dir=None):
         from fno.pr_watch._discover import PrCandidate
@@ -227,83 +184,52 @@ class TestRunDraftFlip:
             pr_number=7, state="OPEN", latest_review_ts=None, opened_at=None, is_draft=is_draft
         )
 
-    def test_flip_runs_gh_pr_ready_and_journals(self):
+    @pytest.mark.parametrize(
+        "ruling,open_ready,run,expect_receipt,expect_event",
+        [
+            # flipped: gh pr ready pinned to the candidate's repo, event journaled.
+            ("none", True, "ok", "flipped", ("pr_watch_draft_flip", "flipped")),
+            # an operator ruling spares the draft with no call and no event.
+            ("single", True, "never", "spared", None),
+            # gh refusing is an error event and a receipt, never a raise.
+            ("none", True, "refused", "flip refused", ("pr_watch_draft_flip", "error")),
+            # open_ready=false leaves the draft alone without running gh.
+            ("none", False, "never", "open_ready=false", None),
+        ],
+    )
+    def test_flip_branches(self, ruling, open_ready, run, expect_receipt, expect_event):
         events = []
         calls = []
 
         def runner(cmd, **kwargs):
             calls.append(list(cmd))
-
-            class R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-
-            return R()
+            if run == "refused":
+                return type("R", (), {"returncode": 1, "stdout": "", "stderr": "not a draft"})()
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         receipt = run_draft_flip(
             self._cand(),
             self._obs(),
             emit=lambda t, d: events.append((t, d)),
             runner=runner,
-            ruling_fn=lambda _s: ("none", ""),
+            ruling_fn=lambda _s: (ruling, ""),
+            open_ready_fn=lambda _cwd: open_ready,
         )
-        assert receipt == "flipped"
-        assert calls == [["gh", "pr", "ready", "7", "--repo", "owner/repo"]]
-        assert events == [
-            (
-                "pr_watch_draft_flip",
-                {"pr": 7, "repo": "owner/repo", "node": "x-abc12345", "outcome": "flipped"},
-            )
-        ]
-
-    def test_operator_ruling_spares_the_draft_without_a_call(self):
-        events = []
-        calls = []
-        receipt = run_draft_flip(
-            self._cand(),
-            self._obs(),
-            emit=lambda t, d: events.append((t, d)),
-            runner=lambda cmd, **k: calls.append(cmd),
-            ruling_fn=lambda _s: ("single", ""),
-        )
-        assert "spared" in receipt
-        assert calls == []
-        assert events == []
-
-    def test_gh_refusal_is_an_error_event_never_a_raise(self):
-        events = []
-
-        def runner(cmd, **kwargs):
-            class R:
-                returncode = 1
-                stdout = ""
-                stderr = "not a draft"
-
-            return R()
-
-        receipt = run_draft_flip(
-            self._cand(),
-            self._obs(),
-            emit=lambda t, d: events.append((t, d)),
-            runner=runner,
-            ruling_fn=lambda _s: ("none", ""),
-        )
-        assert receipt.startswith("flip refused")
-        assert events[0][1]["outcome"] == "error"
-
-    def test_open_ready_false_leaves_the_draft_alone(self):
-        events = []
-        receipt = run_draft_flip(
-            self._cand(),
-            self._obs(),
-            emit=lambda t, d: events.append((t, d)),
-            runner=lambda cmd, **k: (_ for _ in ()).throw(AssertionError("must not run gh")),
-            ruling_fn=lambda _s: ("none", ""),
-            open_ready_fn=lambda _cwd: False,
-        )
-        assert "open_ready=false" in receipt
-        assert events == []
+        assert expect_receipt in receipt
+        if expect_event is None:
+            assert events == []
+        else:
+            got = [(t, {k: v for k, v in d.items() if k != "error"}) for t, d in events]
+            assert got == [
+                (
+                    expect_event[0],
+                    {"pr": 7, "repo": "owner/repo", "node": "x-abc12345", "outcome": expect_event[1]},
+                )
+            ]
+        if run == "never":
+            assert calls == []
+        else:
+            assert calls == [["gh", "pr", "ready", "7", "--repo", "owner/repo"]]
 
     def test_subject_shape_matches_the_guard(self):
         assert draft_subject_for_pr("owner/repo", 7) == "pr-draft:owner/repo#7"

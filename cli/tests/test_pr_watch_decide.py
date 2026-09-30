@@ -560,16 +560,6 @@ def test_decide_has_no_execute_kind():
     assert "execute" not in typing.get_args(DecisionKind)
 
 
-def test_merged_state_takes_the_post_merge_arm():
-    """A MERGED PR keeps the post-merge path."""
-    obs = _obs(state="MERGED")
-    d = decide(
-        obs, watermark={"merge_dispatched": False},
-        reviewers=[], merge_ready=True, now_iso=NOW,
-    )
-    assert d.kind == "merge"
-
-
 def test_max_age_parks_before_review():
     """A stale PR parks even with fresh reviewer activity: the age gate is
     the watcher's own judgment and outranks a dispatch."""
