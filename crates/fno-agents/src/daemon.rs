@@ -4271,14 +4271,8 @@ where
                     .as_deref()
                     .map(|s| Value::String(s.to_string()))
                     .unwrap_or(Value::Null);
-                // The mailbox address, mirroring `fno.agents.format.row_address`.
-                // This projection is the one `fno agents list` takes whenever an
-                // installed binary is present, so a column emitted Python-side only
-                // would be missing from the path nearly every reader uses -- which
-                // is exactly how this row shape drifted before. `short_id` is a
-                // fallback for claude ONLY, where the transport key IS the first
-                // eight; elsewhere it is a daemon worker key and would advertise a
-                // mailbox nothing drains.
+                // Only Claude's short transport key is a mailbox address;
+                // other harnesses need their full session identity.
                 let address: Value = e
                     .harness_session_id
                     .as_deref()
@@ -4356,6 +4350,11 @@ where
                         e.liveness_measured_at.as_deref(),
                     ),
                     "liveness_measured_at": e.liveness_measured_at,
+                    "context_used_pct": e.context_used_pct,
+                    "context_used_tokens": e.context_used_tokens,
+                    "context_window_tokens": e.context_window_tokens,
+                    "context_measured_at": e.context_measured_at,
+                    "mail_unread": e.mail_unread,
                     // The harness's own title for the session, served
                     // from the probe's fresh reading; a probe that ANSWERED
                     // None is trusted (the harness carries no title now, e.g.
