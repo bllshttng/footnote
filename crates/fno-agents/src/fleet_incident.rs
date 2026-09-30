@@ -1694,21 +1694,17 @@ mod tests {
     #[test]
     fn hold_list_resolves_order_drops_dupes_and_refuses_unknown_words() {
         assert_eq!(
-            super::parse_hold_list("merges, tests,merges").unwrap(),
-            vec!["tests".to_string(), "merges".to_string()],
+            super::parse_hold_list("loops,merges, tests,merges").unwrap(),
+            vec![
+                "tests".to_string(),
+                "merges".to_string(),
+                "loops".to_string()
+            ],
             "the readout order is canonical, whatever order the operator typed"
         );
         assert_eq!(super::parse_hold_list("").unwrap(), Vec::<String>::new());
         let err = super::parse_hold_list("spawns,mergess").expect_err("typo must refuse");
         assert!(err.contains("mergess") && err.contains("spawns, tests, merges"));
-    }
-
-    #[test]
-    fn loops_is_a_hold_scope() {
-        assert_eq!(
-            super::parse_hold_list("loops"),
-            Ok(vec!["loops".to_string()])
-        );
     }
 
     #[test]
