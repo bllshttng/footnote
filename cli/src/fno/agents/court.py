@@ -16,9 +16,7 @@ from typing import Any, Optional
 
 from fno.agents.crown import (
     _canonical_project,
-    _crown_rivals,
     _graph_index,
-    _territory_key,
     crown_reading,
     split_scope,
 )
@@ -70,42 +68,44 @@ def _agreement(
 def _conflicts(rows: list) -> list[dict[str, Any]]:
     """Territory two live crowned rows double-rule, one entry per rival PAIR.
 
-    Keys on :func:`_crown_rivals`, the rule the grant-time holder scan uses,
-    so a conflict here and the refusal at grant time cannot disagree: a
-    set-holder rivals a holder over one member; a portfolio and the project
-    kings of its court are two legitimate crowns. One entry PER PAIR, never a
-    merged group: rivalry is not transitive (A/e-1, B/e-1,e-2, C/e-2 rivals
-    A-B and B-C only), so a group would claim three rows hold what no pair
-    does. Each entry names its two rows and the members they actually share.
+    Answered by the spawn-overlay ``court-rivals`` kind, the same ladder-aware
+    rule the grant path enforces, so a conflict here and the refusal at grant
+    time cannot disagree: a set-holder rivals a holder over one member; a
+    portfolio and the project kings of its court are two legitimate crowns.
+    One entry PER PAIR, never a merged group: rivalry is not transitive
+    (A/e-1, B/e-1,e-2, C/e-2 rivals A-B and B-C only), so a group would claim
+    three rows hold what no pair does. Each entry names its two rows and the
+    members they actually share. An unavailable scanner answers no conflicts
+    with a stderr line - a view degrades loud, never to a silent all-clear.
     """
-    # Joined on crown_scope, not a full crown_reading: a scope claims territory
-    # with or without a level, and gather_court surfaces those rows too.
-    claims: list[tuple[Any, str, frozenset[str]]] = []
-    for row in rows:
-        scope = getattr(row, "crown_scope", None)
-        if isinstance(scope, str) and scope.strip():
-            key = _territory_key(scope)
-            if key:
-                claims.append((row, scope, key))
-    conflicts: list[dict[str, Any]] = []
-    for i in range(len(claims)):
-        for j in range(i + 1, len(claims)):
-            row_i, scope_i, key_i = claims[i]
-            row_j, scope_j, key_j = claims[j]
-            if not _crown_rivals(
-                scope_i,
-                getattr(row_i, "crown_level", None),
-                scope_j,
-                getattr(row_j, "crown_level", None),
-            ):
-                continue
-            conflicts.append(
+    import sys
+
+    from fno import projects as projects_mod
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    # An unreadable settings table must not take the view down: omitting
+    # the key sends the scanner to its cwd read and its degrade rule.
+    try:
+        projects = projects_mod.resolve._get_cache()
+    except Exception:  # noqa: BLE001 - the scanner's own degrade rule owns this
+        projects = None
+    try:
+        answer = spawn_overlay_call({
+            "kind": "court-rivals",
+            "rows": [
                 {
-                    "scope": ",".join(sorted(key_i & key_j)),
-                    "holders": [row_i.name, row_j.name],
+                    "name": row.name,
+                    "crown_scope": getattr(row, "crown_scope", None),
+                    "crown_level": getattr(row, "crown_level", None),
                 }
-            )
-    return conflicts
+                for row in rows
+            ],
+            **({"projects": projects} if projects is not None else {}),
+        })
+        return answer["pairs"]
+    except (SpawnOverlayUnavailable, LookupError, TypeError) as exc:
+        print(f"court: rivalry scan unavailable ({exc}); conflicts not listed", file=sys.stderr)
+        return []
 
 
 def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:

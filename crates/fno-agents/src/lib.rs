@@ -128,6 +128,7 @@ pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
+pub mod court_rivals;
 pub mod crown_alarm;
 pub mod crown_identity;
 pub mod crown_names;
