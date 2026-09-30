@@ -769,6 +769,11 @@ pub fn run(args: &[String]) -> i32 {
         let value = fold_json(&fold);
         if let Some(dir) = &write_dir {
             if let Err(error) = write_eval(&fold, &value, &dir) {
+                if let Err(index_error) =
+                    write_fold_failed_index(&session, &transcript, dir, &error)
+                {
+                    eprintln!("fno-agents intel --windows: {index_error}");
+                }
                 eprintln!("fno-agents intel --windows: {error}");
                 return 1;
             }
@@ -933,7 +938,6 @@ fn write_eval(fold: &Fold, value: &Value, dir: &Path) -> Result<(), String> {
     if index_md.is_empty() {
         index_md.push('\n');
     }
-    write_if_missing(&index, &index_md)?;
     let source = "Source: `data/fold.json`.\n";
     let mut metrics = format!(
         "# Part 1: metrics\n\n{source}\n| # | Start (UTC) | Hours | Tools | Errors | Error % | Tools per hour | User lines | cache_read | Output |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n"
@@ -1039,6 +1043,7 @@ fn write_eval(fold: &Fold, value: &Value, dir: &Path) -> Result<(), String> {
             )?;
         }
     }
+    write_if_missing(&index, &index_md)?;
     Ok(())
 }
 
