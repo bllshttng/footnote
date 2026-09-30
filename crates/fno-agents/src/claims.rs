@@ -1201,8 +1201,13 @@ fn claim_events_path_with(events_dir: Option<&Path>, cwd: &Path, pin: Option<&st
     }
     // The space journal the store and every reader resolve; a raw repo-root
     // join is how single_flight and claim rows landed in a stray root whose
-    // MOVED-TO pointer nobody followed.
-    crate::paths::events_path(cwd)
+    // MOVED-TO pointer nobody followed. An undeclared hermetic run has no
+    // space root to resolve (the fence refuses ambient $HOME), so it keeps
+    // the checkout path and its sandbox.
+    match crate::paths::space_dir_opt(cwd) {
+        Some(space) => space.join("events.jsonl"),
+        None => crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl"),
+    }
 }
 
 /// Age past which a mkdir mutex dir is a corpse left by a killed holder.

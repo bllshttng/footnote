@@ -337,8 +337,18 @@ fn configure_store_connection(conn: &Connection, store: &Path) -> Result<(), Str
 
 /// Read-only handle for history readers; a failure names the store path.
 pub fn open_read(store: &Path) -> Result<Connection, String> {
-    let conn = Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("{}: {e}", store.display()))?;
+    // A writer that exec-replaced itself or died leaves a hot -wal; a
+    // READ_ONLY open cannot run the WAL recovery reading it needs, and the
+    // durable rows behind it would read as an empty store. Retry
+    // read-write, which recovers the log on open, before reporting the
+    // read-only error.
+    let conn = match Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    {
+        Ok(conn) => conn,
+        Err(ro_error) => {
+            Connection::open(store).map_err(|_| format!("{}: {ro_error}", store.display()))?
+        }
+    };
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     refuse_newer_schema(&conn, store)?;
