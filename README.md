@@ -4,7 +4,7 @@
 
 footnote is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin on any harness that accepts plugins and hooks (Claude Code, Codex, OpenCode, and agy are wired today), with a standalone CLI underneath.
 
-![The fno mux with three agent panes working fno tasks, a sideline roster, and a live status row](docs/images/ux-shot-live-fleet.png)
+![The fno mux with four agent panes working fno tasks, a sideline roster, and a live status row](docs/images/ux-shot-live-fleet.png)
 
 - Point it at a feature description or a backlog node. It plans, builds with TDD, reviews its own diff, and ships the PR.
 - Completion is decided by the world, not by a model's mood. The PR exists, CI is green, review has had its rounds.
