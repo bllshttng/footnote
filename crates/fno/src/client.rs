@@ -50,8 +50,8 @@ use row_menu::{build_row_menu, build_tab_menu};
 // The placement pickers (attach `p`, portal `P`) and the launch moment
 // (terminal guard + splash) live in their own modules; client.rs is
 // shrink-only under the file-budget gate.
-mod launch;
 pub(crate) mod attach_handshake;
+mod launch;
 mod placement_pickers;
 
 use self::placement_pickers::{
