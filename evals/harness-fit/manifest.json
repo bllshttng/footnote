@@ -52,6 +52,7 @@
     "scope": "attempts that never started; no grade or rule changes",
     "docker_down": "a Run 0 trial whose docker environment never started is an infrastructure exclusion; harbor jobs resume -f RuntimeError reruns it in place; unrun arms run in the same seeded order",
     "provider_cap": "a Run 1 spawn refused before the worker starts reads unavailable; a top-up pass reruns missing graded attempts up to 3 per task, at most 3 passes; each refusal stays counted by reason",
-    "started_attempts": "a started attempt or trial is never rerun; it is scored as it stands"
+    "started_attempts": "a started attempt or trial is never rerun; it is scored as it stands",
+    "stalls": "a Run 1 worker that exhausts its 45m budget (spawn exit 12 opencode, 124 claude) started; the runner files it unavailable with no grade; this study scores it as a stall, an attempt with no accepted change, and prints each rate with and without stalls"
   }
 }
