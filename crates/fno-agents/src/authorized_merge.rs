@@ -22,6 +22,7 @@ use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
+use crate::king_checkin::main_ci_red_run;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -405,10 +406,11 @@ pub trait Probes {
         0
     }
     /// The base branch `main`'s CI verdict, read by the king check-in's own
-    /// reduction (`king_checkin::main_ci_reading`): a red object naming the
-    /// failed workflow and head sha, or the `green`/`pending` word. `Err` = the
-    /// read could not answer, which never reads as red. Default `pending`
-    /// keeps the gate disarmed wherever an impl does not read main.
+    /// reduction (`king_checkin::main_ci_reading`, behind a short TTL row
+    /// cache): a red object naming the failed workflow and head sha, or the
+    /// `green`/`pending` word. `Err` = the read could not answer, which never
+    /// reads as red. Default `pending` keeps the gate disarmed wherever an
+    /// impl does not read main.
     fn main_ci_token(&self, _cwd: &Path) -> Result<Value, String> {
         Ok(Value::String("pending".to_string()))
     }
@@ -1468,7 +1470,7 @@ impl Probes for RealProbes {
     }
 
     fn main_ci_token(&self, cwd: &Path) -> Result<Value, String> {
-        crate::king_checkin::main_ci_reading(cwd)
+        crate::king_checkin::main_ci_reading_cached(cwd)
     }
 
     fn main_repair_hold(&self, cwd: &Path, facts: &PrFacts) -> Option<String> {
@@ -1939,17 +1941,6 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
 /// The graph tag that declares a repair lane: a node carrying it may merge
 /// through a red main, because it IS the repair.
 const MAIN_REPAIR_TAG: &str = "main-repair";
-
-/// The one red run the king check-in's token names, as (workflow, head sha).
-/// The word tokens (`green`, `pending`) and any other shape are not red: a
-/// pending main is not red.
-fn main_ci_red_run(token: &Value) -> Option<(String, String)> {
-    if token.get("verdict").and_then(Value::as_str) != Some("red") {
-        return None;
-    }
-    let field = |k: &str| token.get(k).and_then(Value::as_str).unwrap_or("unknown");
-    Some((field("workflow").to_string(), field("sha").to_string()))
-}
 
 /// The refusal: the red run named, then the repair lane.
 fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {

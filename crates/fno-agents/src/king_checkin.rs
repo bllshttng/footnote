@@ -1044,6 +1044,57 @@ pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
     Ok(main_ci_token_from_pages(&at_sha, &on_main))
 }
 
+/// The one red run a main-ci token names, as (workflow, head sha). The word
+/// tokens (`green`, `pending`) and any other shape are not red: a pending
+/// main is not red. Lives beside the token's producer so the shape is read
+/// in one module.
+pub(crate) fn main_ci_red_run(token: &Value) -> Option<(String, String)> {
+    if token.get("verdict").and_then(Value::as_str) != Some("red") {
+        return None;
+    }
+    let field = |k: &str| token.get(k).and_then(Value::as_str).unwrap_or("unknown");
+    Some((field("workflow").to_string(), field("sha").to_string()))
+}
+
+/// How long a cached main verdict answers before the live read runs again.
+const MAIN_CI_CACHE_TTL_S: u64 = 60;
+
+/// [`main_ci_reading`] behind the gh-facts row store, TTL'd: the merge gate
+/// and the preview walk read main's verdict on every pass (every status
+/// receipt included), far more often than the verdict changes. A stale,
+/// missing or corrupt row falls through to the live read, which stays the
+/// truth; a failed live read is an `Err`, never a manufactured red.
+pub(crate) fn main_ci_reading_cached(cwd: &Path) -> Result<Value, String> {
+    let root = crate::gh_cache::rows_root(cwd);
+    let slug = crate::finalize::slug_from_git_remote(cwd);
+    let (Some(root), Some(slug)) = (root, slug) else {
+        return main_ci_reading(cwd);
+    };
+    let fresh = crate::gh_cache::read_row(
+        &root,
+        "main-ci",
+        &slug,
+        None,
+        Some(MAIN_CI_CACHE_TTL_S),
+        crate::gh_cache::now_secs(),
+    );
+    if let Some(token) = fresh.get("row").and_then(|r| r.get("token")) {
+        return Ok(token.clone());
+    }
+    let token = main_ci_reading(cwd)?;
+    // The token rides an object row because the row store only holds
+    // objects; the bare `green`/`pending` words must cache too, or the
+    // common case pays the live read on every pass.
+    crate::gh_cache::write_row(
+        &root,
+        "main-ci",
+        &slug,
+        None,
+        &json!({ "token": token.clone() }),
+    );
+    Ok(token)
+}
+
 /// The control plane's own verdict: every arm failing past the notify
 /// threshold, then the stuck-work findings, as the lines a page would carry.
 /// Read in process - the same journals, predicate and threshold arm_watch
@@ -3232,6 +3283,69 @@ mod tests {
             "green".to_string()
         );
         assert_eq!(main_ci_render(None), "-".to_string());
+    }
+
+    /// The merge gate's main-verdict read is the TTL-cached one: a fresh row
+    /// answers (with the freshness stamp) and no live gh read runs behind it,
+    /// the red-run shape is read in one accessor, and an expired row is a
+    /// miss for the row op. The row store rides `FNO_GH_FACTS_DIR` so no
+    /// test touches a real state root; the variable is process-global but
+    /// nothing else in this binary reads it.
+    #[test]
+    fn the_merge_gates_main_verdict_read_is_ttl_cached() {
+        let root = std::env::temp_dir().join(format!("fno-main-ci-cache-{}", std::process::id()));
+        std::env::set_var("FNO_GH_FACTS_DIR", &root);
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let slug = crate::finalize::slug_from_git_remote(repo).expect("crate lives in a repo");
+        let token = serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"});
+        assert!(crate::gh_cache::write_row(
+            &root,
+            "main-ci",
+            &slug,
+            None,
+            &json!({ "token": token })
+        ));
+        let got = main_ci_reading_cached(repo).unwrap();
+        assert_eq!(got["verdict"], json!("red"));
+        assert_eq!(got["workflow"], json!("cli-ci"));
+        assert_eq!(got["sha"], json!("a1"));
+        assert!(crate::gh_cache::write_row(
+            &root,
+            "main-ci",
+            &slug,
+            None,
+            &json!({ "token": json!("green") })
+        ));
+        assert_eq!(main_ci_reading_cached(repo).unwrap(), json!("green"));
+        assert_eq!(
+            main_ci_red_run(&got),
+            Some(("cli-ci".to_string(), "a1".to_string()))
+        );
+        assert_eq!(main_ci_red_run(&Value::String("pending".into())), None);
+        let kind_dir = root.join("main-ci");
+        let path = std::fs::read_dir(&kind_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut row =
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        row["ts"] = json!(0.0);
+        std::fs::write(&path, row.to_string()).unwrap();
+        assert_eq!(
+            crate::gh_cache::read_row(
+                &root,
+                "main-ci",
+                &slug,
+                None,
+                Some(60),
+                crate::gh_cache::now_secs()
+            )["row"],
+            Value::Null
+        );
+        std::env::remove_var("FNO_GH_FACTS_DIR");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn board_payload() -> Value {
