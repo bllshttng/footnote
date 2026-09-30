@@ -74,6 +74,8 @@
     "concurrency": "Run 0 runs min(4, floor(physical cores / 2)) trials at once; Run 1 one attempt at a time beside it",
     "scripts": "run scripts live in evals/harness-fit/run/; evals/harness-fit/setup-imac.sh installs Docker, Harbor, the harness CLIs and the key; the zcode adapter stays out of the repo, so zcode reads unavailable unless its files are copied in",
     "account": "same z.ai account and key; the 1302 rule stays",
-    "dollars": "the pilot spend counts against the 200 USD ceiling"
+    "dollars": "the pilot spend counts against the 200 USD ceiling",
+    "pilot_spend_usd": 7.0,
+    "pilot_spend_basis": "Run 0 Harbor jobs 2.54 + Run 1 priced rows 2.36 + 2.00 floor for 8 unmeasured opencode stalls (0.25 each) = 6.90, rounded up"
   }
 }
