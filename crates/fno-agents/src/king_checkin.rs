@@ -4143,12 +4143,12 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        assert_eq!(data.get("held_open"), Some(&json!(3)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
         assert!(
-            summary[0].contains("2 question(s) for this crown"),
+            summary[0].contains("3 question(s) for this crown"),
             "lines: {lines:?}"
         );
         let verbs: Vec<&String> = lines
