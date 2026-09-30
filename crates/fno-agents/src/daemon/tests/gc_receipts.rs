@@ -3379,12 +3379,9 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         registry.entries[1].forked_from_session_id.as_deref(),
         Some("session-b")
     );
-    // The branch leaves the write with its own minted id, never one handed in.
-    let branch_id = registry.entries[1]
-        .fno_id
-        .clone()
-        .expect("branch fno_id minted at the write");
-    assert_ne!(branch_id, "thread-a");
+    // The transition itself stamps no id: the branch leaves with None and the
+    // registry write mints one (the write-time fill covers that contract).
+    assert_eq!(registry.entries[1].fno_id, None);
 
     assert_eq!(
         apply_session_transition(
@@ -3403,11 +3400,9 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         .find(|entry| entry.harness_session_id.as_deref() == Some("session-d"))
         .expect("second branch row");
     assert_eq!(second_branch.name, "worker-branch-2");
-    assert_ne!(
-        second_branch.fno_id.as_deref(),
-        Some(branch_id.as_str()),
-        "each branch mints its own"
-    );
+    // Both branches read None at the transition; distinct mints land at the
+    // write (covered by the update_registry fill test).
+    assert_eq!(second_branch.fno_id, None);
 }
 
 // ── x-8739: the sweep settles a stale open do row on a settled node ──

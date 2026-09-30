@@ -4474,7 +4474,11 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cwd, "/y");
-        assert_eq!(rows[0].fno_id.as_deref(), Some("run-1"));
+        // The row's id is minted at the first write and the re-upsert keeps it
+        // (the fill carries the predecessor's value); the manifest run id no
+        // longer names the row.
+        let minted = rows[0].fno_id.clone().expect("minted at the first write");
+        assert_ne!(minted, "run-1");
     }
 
     #[test]
@@ -4536,7 +4540,10 @@ mod tests {
             row.get("harness_session_id").and_then(Value::as_str),
             Some("thread-seed-1234")
         );
-        assert_eq!(fno_id, None, "seeded row carried no fno_id");
+        assert!(
+            fno_id.is_some(),
+            "the seeded row carries its write-minted id"
+        );
         let persisted = crate::state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
             persisted.entries[0].predecessor_session_ids,
