@@ -36,6 +36,7 @@ pub struct MachineWatchState {
     pub(crate) absolute_load_since: Option<Instant>,
     pub(crate) hot_since: Option<Instant>,
     pub(crate) runaway_escalation_sent: bool,
+    pub(crate) last_observed: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,14 +185,28 @@ pub fn tick_machine_watch_with_thresholds(
     let sample = match reading {
         Ok(sample) => sample,
         Err(why) => {
+            state.absolute_load_since = None;
+            state.hot_since = None;
+            state.hot_streak = 0;
+            state.runaway_escalation_sent = false;
+            state.last_observed = Some(now);
             return WatchOutcome {
                 acted: 0,
                 skip_reason: Some("machine_unreadable".into()),
                 detail: short(&format!("probe: {why}")),
                 verdict: "unreadable".into(),
-            }
+            };
         }
     };
+    if state.last_observed.is_some_and(|last| {
+        now.saturating_duration_since(last) >= Duration::from_secs(MACHINE_WATCH_INTERVAL_S * 2)
+    }) {
+        state.absolute_load_since = None;
+        state.hot_since = None;
+        state.hot_streak = 0;
+        state.runaway_escalation_sent = false;
+    }
+    state.last_observed = Some(now);
     // The current reading never sits on its own jury: baseline first, push after.
     let baseline = process_baseline(&state.recent_processes, now);
     if let Some(processes) = sample.processes {
@@ -773,16 +788,20 @@ mod tests {
             1
         );
         assert_eq!(calls, 1);
-        let escalated = tick_machine_watch(
-            &mut state,
-            Ok(&hot),
-            |_, _| {
-                calls += 1;
-                true
-            },
-            start + Duration::from_secs(HOT_ESCALATION_SECS),
-            |_, _| brakes += 1,
-        );
+        let mut escalated = None;
+        for elapsed in (600..=HOT_ESCALATION_SECS).step_by(300) {
+            escalated = Some(tick_machine_watch(
+                &mut state,
+                Ok(&hot),
+                |_, _| {
+                    calls += 1;
+                    true
+                },
+                start + Duration::from_secs(elapsed),
+                |_, _| brakes += 1,
+            ));
+        }
+        let escalated = escalated.unwrap();
         assert_eq!(escalated.verdict, "runaway");
         assert_eq!(
             escalated.acted, 1,
