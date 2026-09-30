@@ -30,6 +30,7 @@ pub(crate) struct OrgBoard {
     inflight: bool,
     last_read: Option<Instant>,
     collapsed: HashSet<String>,
+    departures: HashSet<String>,
     input: Option<String>,
     keys_help: bool,
     esc: Vec<u8>,
@@ -54,6 +55,7 @@ impl OrgBoard {
             inflight: false,
             last_read: None,
             collapsed: HashSet::new(),
+            departures: HashSet::new(),
             input: None,
             keys_help: false,
             esc: Vec::new(),
@@ -76,7 +78,7 @@ impl OrgBoard {
         };
         let query = self.query.to_lowercase();
         let mut rows = Vec::new();
-        for (li, lead) in tree.leads.iter().enumerate() {
+        for lead in &tree.leads {
             let lead_match = format!("{} {}", lead.holder.name, lead.scope)
                 .to_lowercase()
                 .contains(&query);
@@ -161,14 +163,35 @@ impl OrgBoard {
                 rows.extend(children);
                 if !lead.left.is_empty() {
                     rows.push(Row {
-                        key: format!("left:{li}"),
-                        text: format!("  left the team (24h): {}", lead.left.len()),
+                        key: format!("left-team:{}", lead.scope),
+                        text: format!(
+                            "  {} left the team (24h): {}",
+                            if self.departures.contains(&lead.scope) {
+                                "▾"
+                            } else {
+                                "▸"
+                            },
+                            lead.left.len()
+                        ),
                         selected: Selected::Lead(lead.holder.clone()),
                     });
-                    for node in &lead.left {
+                    for node in lead
+                        .left
+                        .iter()
+                        .filter(|_| self.departures.contains(&lead.scope))
+                    {
+                        let last = node.current.iter().chain(&node.former).max_by_key(|s| {
+                            s.view.ended_at.as_deref().or(s.view.started_at.as_deref())
+                        });
                         rows.push(Row {
                             key: format!("left:{}", node.view.card.id),
-                            text: format!("    {} {}", node.view.card.id, node.view.card.title),
+                            text: format!(
+                                "    {} {} · last session: {}",
+                                node.view.card.id,
+                                node.view.card.title,
+                                last.map(|s| session_line(s, now()))
+                                    .unwrap_or_else(|| "unobserved".into())
+                            ),
                             selected: Selected::Node(node.view.clone()),
                         });
                     }
@@ -706,12 +729,20 @@ pub(crate) async fn keys(
             }
             ModalKey::Left | ModalKey::Byte(b'h') => {
                 if let Some(r) = b.rows().get(b.cursor) {
-                    b.collapsed.insert(r.key.clone());
+                    if let Some(scope) = r.key.strip_prefix("left-team:") {
+                        b.departures.remove(scope);
+                    } else {
+                        b.collapsed.insert(r.key.clone());
+                    }
                 }
             }
             ModalKey::Right | ModalKey::Byte(b'l') => {
                 if let Some(r) = b.rows().get(b.cursor) {
-                    b.collapsed.remove(&r.key);
+                    if let Some(scope) = r.key.strip_prefix("left-team:") {
+                        b.departures.insert(scope.into());
+                    } else {
+                        b.collapsed.remove(&r.key);
+                    }
                 }
             }
             ModalKey::Enter => {
@@ -820,6 +851,23 @@ pub(super) fn check_fixture(view: &mut View) {
     assert!(!graph.iter().any(|l| l.contains("second")));
     b.query.clear();
     b.mode = OrgMode::Tree;
+    let mut departed = b.snapshot.tree.as_ref().unwrap().leads[0].nodes[0].clone();
+    departed.view.card.id = "departed-node".into();
+    departed.current.clear();
+    departed.former.truncate(1);
+    departed.former[0].view.session_id = Some("last-run".into());
+    b.snapshot.tree.as_mut().unwrap().leads[0]
+        .left
+        .push(departed);
+    assert!(b
+        .rows()
+        .iter()
+        .any(|r| r.text.contains("left the team (24h): 1")));
+    assert!(!b.rows().iter().any(|r| r.text.contains("last-run")));
+    b.departures.insert("team".into());
+    assert!(b.rows().iter().any(|r| r.text.contains("last-run")));
+    b.departures.clear();
+    assert!(!b.rows().iter().any(|r| r.text.contains("last-run")));
     let generation = view.org_generation;
     view.org_board = None;
     open(view);
