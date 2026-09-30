@@ -783,7 +783,7 @@ impl Core {
                     if caller_geometry {
                         self.notice(client_id, "a portal takes no split, target, or anchor");
                     }
-                    let permit = match crate::process_admission::admit_pane(0, None) {
+                    let permit = match self.admit_gesture_pane(client_id, 0, None) {
                         Ok(p) => p,
                         Err(error) => {
                             self.portals.insert(
@@ -970,7 +970,8 @@ impl Core {
                 (dest, eff)
             }
         };
-        let permit = match crate::process_admission::admit_pane(
+        let permit = match self.admit_gesture_pane(
+            client_id,
             self.placement_pane_count(dest, &effective),
             effective.max_panes,
         ) {
@@ -1496,6 +1497,21 @@ impl Core {
             .is_some_and(|e| e.cmd.is_some() && e.portal_hold.is_none())
     }
 
+    /// Pane admission for a client's own gesture (a row tap, a portal open).
+    /// An attached, driving client is a human at their terminal, and the
+    /// machine brake never refuses the user's own attach. A passive
+    /// client is how the control verbs reach in, so agents stay braked.
+    pub(super) fn admit_gesture_pane(
+        &self,
+        client_id: u64,
+        pane_count: usize,
+        cap: Option<usize>,
+    ) -> Result<crate::process_admission::AdmissionPermit, crate::process_admission::AdmissionFailure>
+    {
+        let human = !self.is_passive(client_id);
+        crate::process_admission::admit_pane_for(human, pane_count, cap)
+    }
+
     /// The pane a `--from` anchor names: `portal N` is that portal's live
     /// screen, a worker name is the pane the row hosts or the portal
     /// showing it, and `current` refuses here (the control door has no
@@ -1601,7 +1617,7 @@ impl Core {
             .map(|c| c.dims)
             .filter(|(r, c)| *r > 0 && *c > 0)
             .unwrap_or((vp.rows, vp.cols));
-        let permit = match crate::process_admission::admit_pane(0, None) {
+        let permit = match self.admit_gesture_pane(client_id, 0, None) {
             Ok(p) => p,
             Err(error) => {
                 self.notice(client_id, format!("view open failed: {error}"));

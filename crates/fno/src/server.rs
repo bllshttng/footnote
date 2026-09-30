@@ -10441,8 +10441,7 @@ impl Core {
                         .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
                         .unwrap_or(0);
                     let permit =
-                        match crate::process_admission::admit_pane(pane_count, placement.max_panes)
-                        {
+                        match self.admit_gesture_pane(client_id, pane_count, placement.max_panes) {
                             Ok(permit) => permit,
                             Err(error) => {
                                 self.notice(client_id, format!("attach failed: {error}"));
@@ -10581,7 +10580,8 @@ impl Core {
                 let Some((argv, cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
                     return Flow::Continue;
                 };
-                let permit = match crate::process_admission::admit_pane(
+                let permit = match self.admit_gesture_pane(
+                    client_id,
                     self.placement_pane_count(dest, &effective),
                     effective.max_panes,
                 ) {

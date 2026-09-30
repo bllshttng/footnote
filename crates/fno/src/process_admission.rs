@@ -763,6 +763,18 @@ pub fn admit_pane(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
+    admit_pane_for(human_at_tty(), pane_count, requested_cap)
+}
+
+/// [`admit_pane`] for a pane the caller knows a human asked for. The mux
+/// server has no TTY, so `human_at_tty` reads false there even for a click
+/// from the user's own attached client. The server passes that fact here, and
+/// the runaway brake warns instead of refusing the user's own attach.
+pub fn admit_pane_for(
+    human: bool,
+    pane_count: usize,
+    requested_cap: Option<usize>,
+) -> Result<AdmissionPermit, AdmissionFailure> {
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
         Ok(false) => {}
@@ -774,7 +786,7 @@ pub fn admit_pane(
             ))
         }
     }
-    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human_at_tty())?;
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human)?;
     let (fleet_ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -2107,8 +2119,14 @@ mod tests {
         assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
         // A human's shell pane is the recovery path and passes the brake.
         let shell = admit_shell_pane();
+        // The mux server has no TTY: a row tap from the user's own client
+        // passes the brake by the flag the server hands in, an agent's does not.
+        let tap = admit_pane_for(true, 0, None);
+        let agent_pane = admit_pane_for(false, 0, None);
         std::env::remove_var("FNO_AGENT_SELF");
         assert!(shell.is_ok(), "a shell pane passes the brake");
+        assert!(tap.is_ok(), "the user's own row tap passes the brake");
+        assert!(agent_pane.is_err(), "an agent's pane stays braked");
         // The absent-file branch: admission reads byte-for-byte as before.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
         let permit = admit_fleet();
