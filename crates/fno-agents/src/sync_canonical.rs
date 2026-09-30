@@ -287,7 +287,9 @@ fn drain_pending(
     let mut shas: Vec<String> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
+        // Only merge-SHA-shaped names count: a stray file in the dir (Finder
+        // drops .DS_Store) is neither a merge nor ours to delete.
+        .filter(|name| name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()))
         .collect();
     if shas.is_empty() {
         return 0;
