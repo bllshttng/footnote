@@ -2865,8 +2865,6 @@ event_types:
           type: string
         elapsed_seconds:
           type: integer
-        elapsed_seconds:
-          type: integer
 
   - name: agent_crown_vacated
     description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
