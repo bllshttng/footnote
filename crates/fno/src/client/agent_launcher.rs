@@ -22,6 +22,8 @@ use crate::clipboard::on_path;
 use crate::popup::{Anchor, NavDir, Popup, PopupRow};
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
 
+mod bang;
+
 /// Ceiling on an open bracketed paste's carried bytes. The submit gate
 /// refuses an over-cap message anyway; this only stops a close-marker-less
 /// paste from growing the carry forever.
@@ -244,6 +246,11 @@ pub(crate) struct Launcher {
     /// The request id this sheet's launch armed, if a launch is owned.
     pub armed: Option<u64>,
     pub next_request_id: u64,
+    /// Shell mode: a leading `!` on an empty input turned the composer
+    /// into a one-line shell prompt (`bang`); Backspace on an empty line
+    /// leaves it again. Not a draft field: shell mode never rides a
+    /// retained draft across an Esc.
+    pub shell: bool,
     /// The mouse rests on the Project chip: the cwd facts line shows.
     pub project_hover: bool,
     /// A chip-owned pill (`--model`) awaiting its value: the flag rides the
@@ -704,6 +711,7 @@ pub(crate) fn open(view: &mut View) {
             phase: Phase::Editing,
             armed: None,
             next_request_id: 1,
+            shell: false,
             project_hover: false,
             pending_chip_pin: None,
             picker: None,
