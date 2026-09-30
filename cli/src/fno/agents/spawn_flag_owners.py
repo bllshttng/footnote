@@ -99,8 +99,8 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
         site="crates/fno-agents/src/codex_posture.rs:permission_pane_tokens",
     ),
     "--effort": FlagOwner(
-        TRANSLATED, "reasoning effort; TWO maps (Python and Rust) that must agree",
-        site="mux_spawn.py:effort_tokens + crates/fno-agents/src/bin/client.rs:validate_effort_for_spawn",
+        TRANSLATED, "reasoning effort; one map, Python and Rust bridge it",
+        site="crates/fno-agents/src/effort_surface.rs:effort_tokens",
     ),
     "--resume": FlagOwner(
         TRANSLATED, "claude-only; refusal dies when resume crosses the separator",

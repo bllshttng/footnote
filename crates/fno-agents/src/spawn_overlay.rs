@@ -133,6 +133,7 @@ impl MergeValue for Value {
 pub fn resolve(payload: Value) -> Result<Value, String> {
     match payload.get("kind").and_then(Value::as_str) {
         Some("overlay") => resolve_overlay(&payload),
+        Some("compat") => Ok(crate::effort_surface::compat(&payload)),
         Some("model-vendor") => resolve_model_vendor(&payload),
         Some("lane-vendor") => {
             let toks: Vec<String> = payload
@@ -161,7 +162,7 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("crown-identity") => crate::crown_identity::resolve(&payload),
         Some("crown-widen") => crate::crown_widen::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen"
         )),
     }
 }

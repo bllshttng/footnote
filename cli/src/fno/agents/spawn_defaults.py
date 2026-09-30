@@ -887,23 +887,26 @@ def _grid_node(node_id: Optional[str] = None) -> Optional[dict]:
 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
-    resolved provider. ``thread`` requires the harness's journey-proven fno
-    driver (its spawn claim reads native); ``pane``/``headless`` are universal.
-    ``bg`` is accepted as a deprecated alias for ``thread``.
-    An unknown value (or ``thread`` on a non-thread provider) degrades open (warn, skip) -
-    never injected to fail at the spawn parser (both exit 2 there otherwise)."""
+    resolved provider. The vocabulary lives in Rust
+    (crates/fno-agents/src/effort_surface.rs), so this is a transport bridge;
+    the ``provider == "claude"`` arm answers for an unavailable owner."""
     if substrate not in _SUBSTRATES:
         return False
     if substrate == "bg":
         substrate = "thread"
     if substrate != "thread":
         return True
-    try:
-        from fno.agents.harness_map import thread_seatable
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-        return thread_seatable(provider)
-    except Exception:
+    try:
+        answer = verb_call(
+            "spawn-overlay",
+            {"kind": "compat", "harness": provider, "substrate": substrate},
+            VerbUnavailable,
+        )
+    except VerbUnavailable:
         return provider == "claude"
+    return bool((answer.get("substrate") or {}).get("compatible"))
 
 
 def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> bool:

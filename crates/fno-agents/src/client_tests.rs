@@ -2233,6 +2233,24 @@ fn agy_effort_is_accepted_and_gemini_is_still_refused() {
     assert!(validate_effort_for_spawn("gemini", "headless", Some("high")).is_err());
 }
 
+/// The deny set is the ONE owner's (effort_surface.rs): cursor-agent and an
+/// undeclared harness refuse on the thread and headless lanes too, with the
+/// same string the Python bridge raises. The pane lane still forwards.
+#[test]
+fn effort_deny_set_matches_the_owner_on_every_non_pane_lane() {
+    let cursor = validate_effort_for_spawn("cursor-agent", "headless", Some("high"));
+    assert!(cursor.unwrap_err().contains("cursor-agent"));
+    let undeclared = validate_effort_for_spawn("ghosth", "bg", Some("high"));
+    assert!(undeclared
+        .unwrap_err()
+        .starts_with("--effort is not available for harness"));
+    assert!(validate_effort_for_spawn("cursor-agent", "pane", Some("high")).is_ok());
+    assert_eq!(
+        validate_effort_for_spawn("gemini", "thread", Some("high")),
+        Err("harness 'gemini' has no reasoning-effort surface; omit --effort".to_string())
+    );
+}
+
 /// ab-098967b4: render_list_json folds in the discovered lane (additive
 /// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
 #[test]

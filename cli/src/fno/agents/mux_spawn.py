@@ -582,63 +582,30 @@ def tier3_pane_tokens(
 def effort_tokens(harness: str, value: str) -> list[str]:
     """Translate effort without maintaining a provider/model value catalog.
 
-    Keyed by HARNESS, not vendor: every branch below is a CLI binary, and the
-    flag spelling that has to be translated is the binary's. gemini has no
-    reasoning-effort surface at all, which is a property of that binary. agy
-    was measured into this same deny set until its own ``--help`` said
-    otherwise (`--effort (low|medium|high)` on 1.1.24, quoted by
-    `fno agents harness probe agy` - /); it now translates like
-    claude. The sibling that reads the same axis, ``harness_map.effort_values``,
-    was already spelled this way. The provider/model at the far end still owns
-    the accepted VALUES; fno translates the spelling and keeps no catalog.
-    """
-    if not value:
-        raise DispatchAskError("--effort requires a value", exit_code=2)
-    if harness == "gemini":
-        raise DispatchAskError(
-            f"harness {harness!r} has no reasoning-effort surface; omit --effort",
-            exit_code=2,
-        )
-    if harness in {"claude", "agy"}:
-        return ["--effort", value]
-    if harness == "codex":
-        return ["-c", f"model_reasoning_effort={value}"]
-    if harness == "opencode":
-        return []
-    if harness == "pi":
-        # pi's effort axis is `--thinking <level>`, a first-class flag rather
-        # than a model suffix or a config key: off, minimal, low, medium, high,
-        # xhigh, max. Exact passthrough, like claude's - pi validates the
-        # vocabulary itself, and fno does not keep a second copy of it.
-        return ["--thinking", value]
-    if harness == "grok":
-        # grok's first-class effort flag, exact passthrough (launched with
-        # `--reasoning-effort high` against 1.0.13 in the measurement).
-        return ["--reasoning-effort", value]
-    if harness == "cursor-agent":
-        raise DispatchAskError(
-            "harness 'cursor-agent' has no --effort flag; effort is encoded in "
-            "the selected --model value",
-            exit_code=2,
-        )
-    from fno.agents.harness_map import is_declared
+    Keyed by HARNESS, not vendor: every branch of the owner is a CLI binary,
+    and the flag spelling that has to be translated is the binary's. The
+    vocabulary lives in Rust (crates/fno-agents/src/effort_surface.rs), so
+    this is a transport bridge: one subprocess round-trip, the shape of
+    `permission_pane_tokens`. The owner answers the whole deny set (gemini,
+    cursor-agent, an undeclared harness) with the same strings this module
+    used to raise."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    if not is_declared(harness):
-        # the CLI seam validates --effort before routing, so an
-        # undeclared harness reaches THIS raise first. The advice names the
-        # undeclared lane's own escape (the operator's `--` passthrough), not
-        # "omit the flag" - the vendor's spelling is real, just unmeasured.
-        raise DispatchAskError(
-            f"--effort is not available for harness {harness!r}: fno has no "
-            "capability row for it, so there is no measured mapping to the "
-            "vendor's own flag spelling. Pass the vendor's own flag after "
-            "'--' instead.",
-            exit_code=2,
+    try:
+        answer = verb_call(
+            "spawn-overlay",
+            {"kind": "compat", "harness": harness, "effort": value},
+            VerbUnavailable,
         )
-    raise DispatchAskError(
-        f"harness {harness!r} has no reasoning-effort surface; omit --effort",
-        exit_code=2,
-    )
+    except VerbUnavailable as exc:
+        raise DispatchAskError(
+            f"the effort surface owner (fno-agents) is unavailable: ({exc})",
+            exit_code=2,
+        ) from exc
+    entry = answer.get("effort") or {}
+    if entry.get("refusal"):
+        raise DispatchAskError(entry["refusal"], exit_code=2)
+    return [str(token) for token in entry.get("tokens") or []]
 
 
 def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path] = None) -> None:

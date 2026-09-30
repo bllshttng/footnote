@@ -1936,13 +1936,10 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini") {
-        return Err(format!(
-            "harness {} has no reasoning-effort surface; omit --effort",
-            provider
-        ));
-    }
-    Ok(())
+    // The one effort owner (effort_surface.rs) answers the whole deny set:
+    // gemini, cursor-agent and an undeclared harness refuse on the thread and
+    // headless lanes exactly as the Python lane's bridge refuses them.
+    fno_agents::effort_surface::effort_tokens(provider, value).map(|_| ())
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
