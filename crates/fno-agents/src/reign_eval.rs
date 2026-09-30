@@ -250,11 +250,18 @@ fn fold_transcript(
     let since_epoch = fold.since.as_deref().and_then(timestamp_epoch);
     let until_epoch = fold.until.as_deref().and_then(timestamp_epoch);
     let mut first_after_boundary = false;
-    for line in BufReader::new(file).lines() {
+    for (line_no, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|e| format!("{}: read error: {e}", transcript.display()))?;
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+        if line.trim().is_empty() {
             continue;
-        };
+        }
+        let row = serde_json::from_str::<Value>(&line).map_err(|error| {
+            format!(
+                "{}:{}: malformed transcript JSON: {error}",
+                transcript.display(),
+                line_no + 1
+            )
+        })?;
         let ts = row.get("timestamp").and_then(Value::as_str).unwrap_or("");
         let ts_epoch = timestamp_epoch(ts);
         if until_epoch.is_some_and(|until| ts_epoch.is_some_and(|at| at > until)) {
