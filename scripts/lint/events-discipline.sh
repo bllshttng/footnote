@@ -186,7 +186,7 @@ done < <(
 )
 
 # Rule 7: events-file-pin
-# The x-b3bf guard legs bypassed the store resolver by pinning
+# The guard hooks bypassed the store resolver by pinning
 # EVENTS_FILE="$PWD/.fno/events.jsonl" when the cwd looked like a project
 # root. Only scripts/lib/events.sh (the transport itself) may assign the
 # variable, and only from a resolver.
@@ -204,8 +204,8 @@ done < <(
 )
 
 # Rule 8: event-fn-raw-append
-# Rule 5 only sees a literal events.jsonl in the open() call; every x-b3bf
-# leg hid the path behind a variable. An event-named function that opens a
+# Rule 5 only sees a literal events.jsonl in the open() call; the surviving
+# legs hid the path behind a variable. An event-named function that opens a
 # raw append is that shape, whatever the indirection, unless the line
 # carries an explicit events-discipline:allow marker.
 while IFS= read -r hit; do
