@@ -278,6 +278,9 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         // folds. The DDL, migrations and one-shot imports below stay
         // setup-only.
         import_if_needed(&mut connection)?;
+        if archive_needs_import(&connection, graph)? {
+            archive_import_if_needed(&mut connection, graph)?;
+        }
         return Ok(connection);
     }
     // First opens of a new file race to switch it to WAL. Each upgrades a
@@ -383,7 +386,10 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
-        if !schema_needs_ensure(&connection)? && !store_owes_a_fold(&connection)? {
+        if !schema_needs_ensure(&connection)?
+            && !store_owes_a_fold(&connection)?
+            && !archive_needs_import(&connection, graph)?
+        {
             return Ok(connection);
         }
         drop(connection);
@@ -395,6 +401,11 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
         .busy_timeout(Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
     Ok(connection)
+}
+
+fn archive_needs_import(connection: &Connection, graph: &Path) -> Result<bool, String> {
+    Ok(graph.with_file_name("graph-archive.json").exists()
+        && meta(connection, "archive_imported_v2")?.is_none())
 }
 
 /// The one-shot archive import: a sibling graph-archive.json folds its

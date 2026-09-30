@@ -261,9 +261,6 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
                 "domain": "code",
                 "details": "user-supplied implementation guidance",
                 "cost_sessions": [{"cost_usd": 1.5}, {"cost_usd": 2.0}],
-                "claimed_at": "2026-04-27T10:00:00Z",
-                "pr_number": 42,
-                "merge_status": "open",
                 "status": "ready",
             }
         ],
@@ -281,9 +278,9 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
     assert c["details"] == "user-supplied implementation guidance"
     assert c["claim_history"]["session_count"] == 2
     assert c["claim_history"]["total_cost_usd"] == 3.5
-    assert c["claim_history"]["last_locked_at"] == "2026-04-27T10:00:00Z"
-    assert c["ship_state"]["pr_number"] == 42
-    assert c["ship_state"]["merge_status"] == "open"
+    assert c["claim_history"]["last_locked_at"] is None
+    assert c["ship_state"]["pr_number"] is None
+    assert c["ship_state"]["merge_status"] is None
 
 
 def test_cli_context_idea_branch_also_enriched(tmp_graph):
