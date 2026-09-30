@@ -3344,16 +3344,14 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn spawn_create_timeout_defaults_when_unset() {
+    fn timeout_rows() {
         assert_eq!(spawn_create_timeout(None), DEFAULT_SPAWN_TIMEOUT);
-    }
 
-    // An explicit --timeout still wins over the default.
-    #[test]
-    fn spawn_create_timeout_honors_explicit() {
         let explicit = Duration::from_secs(5);
         assert_eq!(spawn_create_timeout(Some(explicit)), explicit);
     }
+
+    // An explicit --timeout still wins over the default.
 
     // --- is_provably_live_report ----------------------------------
 
@@ -3368,30 +3366,21 @@ mod tests {
     }
 
     #[test]
-    fn provably_live_true_for_recent_inside_leg_report() {
+    fn live_rows() {
         // AC2-HP: a live worker (recent report) is not orphaned on a routing miss.
         let stamp = "2026-07-06T20:00:00Z";
         let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() + 30;
         assert!(is_provably_live_report(Some(&report_at(stamp)), now));
-    }
 
-    #[test]
-    fn not_provably_live_without_inside_leg_report() {
         // No liveness signal -> a routing failure is a real orphan (AC2-ERR side).
         assert!(!is_provably_live_report(None, 9_999_999_999));
-    }
 
-    #[test]
-    fn not_provably_live_when_inside_leg_is_stale() {
         // A report older than the window is not a liveness signal.
         let stamp = "2026-07-06T20:00:00Z";
         let now =
             crate::state::rfc3339_like_to_secs(stamp).unwrap() + PROVABLY_LIVE_WINDOW_SECS + 60;
         assert!(!is_provably_live_report(Some(&report_at(stamp)), now));
-    }
 
-    #[test]
-    fn not_provably_live_for_future_stamp() {
         // codex P3: a future/corrupt stamp must not count as recent.
         let stamp = "2026-07-06T20:00:00Z";
         let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() - 60;
@@ -3401,19 +3390,13 @@ mod tests {
     // PR #544 deeper fix (codex P1): the create wait returns on the launch
     // confirmation line, not at stdout EOF. A confirmation line yields the id.
     #[test]
-    fn scan_returns_short_id_on_confirmation_line() {
+    fn scan_rows() {
         let input = "backgrounded \u{b7} abcd1234 \u{b7} my-worker\n";
         match scan_stdout_for_short_id(std::io::Cursor::new(input)) {
             ShortIdScan::Found { short_id, .. } => assert_eq!(short_id, "abcd1234"),
             ShortIdScan::NoId { .. } => panic!("expected Found"),
         }
-    }
 
-    // The scan must STOP at the confirmation line -- lines after it are never
-    // read (in production they never arrive; the detached agent holds the pipe
-    // open). Proven by the post-confirmation sentinel being absent from consumed.
-    #[test]
-    fn scan_stops_at_confirmation_does_not_drain_to_eof() {
         let input = "warming up\nbackgrounded \u{b7} 0011aabb \u{b7} w\nSENTINEL_AFTER_ID\n";
         match scan_stdout_for_short_id(std::io::Cursor::new(input)) {
             ShortIdScan::Found { short_id, consumed } => {
@@ -3426,29 +3409,29 @@ mod tests {
             }
             ShortIdScan::NoId { .. } => panic!("expected Found"),
         }
-    }
 
-    // No confirmation anywhere -> NoId at EOF; the caller then reaps the exit code
-    // and surfaces a precise failure rather than a fabricated success.
-    #[test]
-    fn scan_no_confirmation_is_noid_at_eof() {
         let input = "error: could not start\ngiving up\n";
         match scan_stdout_for_short_id(std::io::Cursor::new(input)) {
             ShortIdScan::NoId { consumed } => assert!(consumed.contains("giving up")),
             ShortIdScan::Found { .. } => panic!("expected NoId"),
         }
-    }
 
-    // A colorized confirmation line (claude wraps the id in ANSI when stdout is
-    // colorized) still matches -- the scan reuses match_short_id's ANSI strip.
-    #[test]
-    fn scan_matches_colorized_confirmation_line() {
         let input = "backgrounded \u{b7} \u{1b}[36mdeadbeef\u{1b}[39m \u{b7} w\n";
         match scan_stdout_for_short_id(std::io::Cursor::new(input)) {
             ShortIdScan::Found { short_id, .. } => assert_eq!(short_id, "deadbeef"),
             ShortIdScan::NoId { .. } => panic!("expected Found on colorized line"),
         }
     }
+
+    // The scan must STOP at the confirmation line -- lines after it are never
+    // read (in production they never arrive; the detached agent holds the pipe
+    // open). Proven by the post-confirmation sentinel being absent from consumed.
+
+    // No confirmation anywhere -> NoId at EOF; the caller then reaps the exit code
+    // and surfaces a precise failure rather than a fabricated success.
+
+    // A colorized confirmation line (claude wraps the id in ANSI when stdout is
+    // colorized) still matches -- the scan reuses match_short_id's ANSI strip.
 
     // READINESS HANDSHAKE (read before adding a socket/timing test here)
     // ------------------------------------------------------------------
@@ -3505,42 +3488,27 @@ mod tests {
     // --- parse_short_id ---
 
     #[test]
-    fn parse_short_id_happy() {
+    fn parse_rows() {
         let out = "backgrounded \u{b7} 7c5dcf5d \u{b7} alice\n";
         assert_eq!(parse_short_id(out).unwrap(), "7c5dcf5d");
-    }
 
-    #[test]
-    fn parse_short_id_only_first_line() {
         let out = "backgrounded \u{b7} 7c5dcf5d \u{b7} alice\nextra garbage\n";
         assert_eq!(parse_short_id(out).unwrap(), "7c5dcf5d");
-    }
 
-    #[test]
-    fn parse_short_id_empty_is_error() {
         assert!(matches!(parse_short_id(""), Err(AskError::Parse { .. })));
-    }
 
-    #[test]
-    fn parse_short_id_strips_ansi_color() {
         // Regression: the installed `claude --bg` wraps the short-id in SGR
         // color codes (`backgrounded · \x1b[36m<id>\x1b[39m · <name>`), which
         // the matcher used to reject (leading ESC is not a hexdigit). The id
         // must survive the colorization.
         let out = "backgrounded \u{b7} \u{1b}[36m441064a2\u{1b}[39m \u{b7} fnogates\n";
         assert_eq!(parse_short_id(out).unwrap(), "441064a2");
-    }
 
-    #[test]
-    fn parse_short_id_strips_truecolor_sgr() {
         // Truecolor SGR uses `;`-separated params (0x3B); the CSI stripper must
         // consume the whole parameter run, not just a single byte.
         let out = "backgrounded \u{b7} \u{1b}[38;2;215;119;87m7c5dcf5d\u{1b}[0m \u{b7} alice";
         assert_eq!(parse_short_id(out).unwrap(), "7c5dcf5d");
-    }
 
-    #[test]
-    fn strip_ansi_csi_borrows_when_no_escape() {
         // Common path (no ESC) is zero-copy (gemini PR #403 review); a line
         // carrying CSI codes allocates and drops the escapes.
         assert!(matches!(
@@ -3550,19 +3518,13 @@ mod tests {
         let owned = strip_ansi_csi("a\u{1b}[31mb\u{1b}[0mc");
         assert!(matches!(owned, std::borrow::Cow::Owned(_)));
         assert_eq!(owned.as_ref(), "abc");
-    }
 
-    #[test]
-    fn parse_short_id_no_panic_on_non_ascii_at_byte_8() {
         // Codex P2: a multibyte char straddling byte 8 used to panic split_at(8).
         // 'é' (2 bytes) at rest-bytes 7-8 makes byte 8 a non-char-boundary.
         let out = "backgrounded \u{b7} 1234567\u{e9} \u{b7} x";
         // Must return Err, not panic.
         assert!(parse_short_id(out).is_err());
-    }
 
-    #[test]
-    fn parse_short_id_rejects_non_hex_and_uppercase() {
         assert!(parse_short_id("backgrounded \u{b7} 7C5DCF5D \u{b7} a").is_err());
         assert!(parse_short_id("backgrounded \u{b7} zzzzzzzz \u{b7} a").is_err());
         assert!(parse_short_id("nope \u{b7} 7c5dcf5d \u{b7} a").is_err());
@@ -3572,7 +3534,7 @@ mod tests {
     // --- build_argv / use_stdin_for ---
 
     #[test]
-    fn build_argv_inline_vs_stdin() {
+    fn argv_rows() {
         assert_eq!(
             build_argv("a", "hi", false, None, None, None, HarnessFlags::default()),
             vec!["claude", "--bg", "--name", "a", "--", "hi"]
@@ -3581,12 +3543,7 @@ mod tests {
             build_argv("a", "hi", true, None, None, None, HarnessFlags::default()),
             vec!["claude", "--bg", "--name", "a"]
         );
-    }
 
-    // The fenced `--` tokens ride the harness argv verbatim, before the
-    // message fence: claude's row carries ["*"].
-    #[test]
-    fn bg_argv_appends_fenced_tokens_before_the_message() {
         let flags = HarnessFlags {
             passthrough: &["--verbose".to_string(), "--dangerously-debug".to_string()],
             ..Default::default()
@@ -3604,12 +3561,7 @@ mod tests {
                 "hi"
             ]
         );
-    }
 
-    // an explicit --permission-mode rides between --name and --model as
-    // an exact passthrough; empty/None is byte-identical to today (AC1-HP/AC7).
-    #[test]
-    fn build_argv_appends_permission_mode() {
         assert_eq!(
             build_argv(
                 "a",
@@ -3656,13 +3608,7 @@ mod tests {
         )
         .iter()
         .any(|t| t == "--dangerously-skip-permissions"));
-    }
 
-    // a per-node model pin appends `--model <m>` between --name and the
-    // message; an empty/None pin is byte-identical to today (AC1-EDGE), and the
-    // argv must match Python's `_build_argv` (AC2-FR parity).
-    #[test]
-    fn build_argv_appends_model_pin() {
         assert_eq!(
             build_argv(
                 "a",
@@ -3700,10 +3646,7 @@ mod tests {
             ),
             build_argv("a", "hi", false, None, None, None, HarnessFlags::default())
         );
-    }
 
-    #[test]
-    fn build_argv_appends_effort() {
         assert_eq!(
             build_argv(
                 "a",
@@ -3716,20 +3659,7 @@ mod tests {
             ),
             vec!["claude", "--bg", "--name", "a", "--effort", "high", "--", "hi"]
         );
-    }
 
-    // the Tier-3 passthrough bundle maps to claude's own spellings, in a
-    // fixed order (--add-dir, --agent, --allowedTools, --disallowedTools), riding
-    // after --effort and before the message. Empty/None fields are omitted. This
-    // token order must match the Python _build_argv (AC2-EDGE parity).
-
-    // The seam-published set rides the SAME repeatable flag, after the
-    // operator's own grant. Without this the bg lane - the substrate the shipped
-    // stage table uses for its own delivery lane - launches a worker that cannot
-    // write the claim store, so the graph reads that node free while
-    // it works.
-    #[test]
-    fn build_argv_appends_the_seam_published_state_dirs() {
         let dirs = vec!["/home/u/.fno".to_string(), "/vault/plans".to_string()];
         let flags = HarnessFlags {
             state_dirs: &dirs,
@@ -3745,21 +3675,13 @@ mod tests {
         let granted: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
         // The operator's grant leads; it composes rather than being replaced.
         assert_eq!(granted, vec!["/work", "/home/u/.fno", "/vault/plans"]);
-    }
 
-    // An unset env is today's argv byte-for-byte, so a spawn that never passed
-    // through the Python seam is unchanged.
-    #[test]
-    fn state_dirs_from_env_is_empty_when_unset() {
         // Not asserted against the live env (a parallel test could set it);
         // the empty-slice path is what every other test here already exercises.
         let flags = HarnessFlags::default();
         let argv = build_argv("a", "hi", false, None, None, None, flags);
         assert!(!argv.iter().any(|t| t == "--add-dir"));
-    }
 
-    #[test]
-    fn build_argv_appends_harness_flags() {
         let flags = HarnessFlags {
             state_dirs: &[],
             add_dir: Some("/work"),
@@ -3809,23 +3731,39 @@ mod tests {
         );
     }
 
+    // The fenced `--` tokens ride the harness argv verbatim, before the
+    // message fence: claude's row carries ["*"].
+
+    // an explicit --permission-mode rides between --name and --model as
+    // an exact passthrough; empty/None is byte-identical to today (AC1-HP/AC7).
+
+    // a per-node model pin appends `--model <m>` between --name and the
+    // message; an empty/None pin is byte-identical to today (AC1-EDGE), and the
+    // argv must match Python's `_build_argv` (AC2-FR parity).
+
+    // the Tier-3 passthrough bundle maps to claude's own spellings, in a
+    // fixed order (--add-dir, --agent, --allowedTools, --disallowedTools), riding
+    // after --effort and before the message. Empty/None fields are omitted. This
+    // token order must match the Python _build_argv (AC2-EDGE parity).
+
+    // The seam-published set rides the SAME repeatable flag, after the
+    // operator's own grant. Without this the bg lane - the substrate the shipped
+    // stage table uses for its own delivery lane - launches a worker that cannot
+    // write the claim store, so the graph reads that node free while
+    // it works.
+
+    // An unset env is today's argv byte-for-byte, so a spawn that never passed
+    // through the Python seam is unchanged.
+
     #[test]
-    fn use_stdin_threshold() {
+    fn envelope_rows() {
         assert!(!use_stdin_for(&"x".repeat(ARGV_OVERFLOW_THRESHOLD)));
         assert!(use_stdin_for(&"x".repeat(ARGV_OVERFLOW_THRESHOLD + 1)));
-    }
 
-    // --- envelope byte-parity ---
-
-    #[test]
-    fn envelope_exact_bytes_ascii() {
         let env = build_envelope("hello", "bob").unwrap();
         let expected = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<cross-session-message from-name=\\\"bob\\\">\\nhello\\n</cross-session-message>\"},\"priority\":\"next\"}\n";
         assert_eq!(String::from_utf8(env).unwrap(), expected);
-    }
 
-    #[test]
-    fn envelope_escapes_from_name_html() {
         let env = build_envelope("hi", "a&b<c>\"d'e").unwrap();
         let s = String::from_utf8(env).unwrap();
         assert!(
@@ -3833,31 +3771,24 @@ mod tests {
             "{}",
             s
         );
-    }
 
-    #[test]
-    fn envelope_ensure_ascii_non_ascii() {
         // café -> café in the JSON string, matching Python ensure_ascii.
         let env = build_envelope("caf\u{e9}", "x").unwrap();
         let s = String::from_utf8(env).unwrap();
         assert!(s.contains("caf\\u00e9"), "{}", s);
         assert!(!s.contains('\u{e9}'), "raw non-ascii leaked: {}", s);
-    }
 
-    #[test]
-    fn envelope_astral_surrogate_pair() {
         // U+1F600 grinning face
         let env = build_envelope("\u{1F600}", "x").unwrap();
         let s = String::from_utf8(env).unwrap();
         assert!(s.contains("\\ud83d\\ude00"), "{}", s);
-    }
 
-    #[test]
-    fn json_string_escapes_control_chars() {
         assert_eq!(json_string_ascii("a\nb\tc"), "\"a\\nb\\tc\"");
         assert_eq!(json_string_ascii("\u{01}"), "\"\\u0001\"");
         assert_eq!(json_string_ascii("a\"b\\c"), "\"a\\\"b\\\\c\"");
     }
+
+    // --- envelope byte-parity ---
 
     // --- locate_session ---
 
@@ -3874,7 +3805,7 @@ mod tests {
     }
 
     #[test]
-    fn locate_session_happy() {
+    fn locate_rows() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -3888,12 +3819,7 @@ mod tests {
             loc.jobs_dir,
             home.join(".claude").join("jobs").join("7c5dcf5d")
         );
-    }
 
-    // --- every config root: HOME's first, then ambient, then accounts ---
-
-    #[test]
-    fn locate_session_finds_a_record_under_an_account_root() {
         // A config-dir account worker writes its record under the account
         // root; locate_session must see it, and its jobs_dir must be the
         // account's once that job dir exists there.
@@ -3911,10 +3837,7 @@ mod tests {
         assert_eq!(loc.messaging_socket_path, "/tmp/acct.sock");
         assert_eq!(loc.session_id.as_deref(), Some("sess-feedc0de"));
         assert_eq!(loc.jobs_dir, acct.join("jobs").join("feedc0de"));
-    }
 
-    #[test]
-    fn resolve_session_uuid_reads_account_roots() {
         let home = tmpdir();
         let acct = tmpdir();
         let sessions = acct.join("sessions");
@@ -3930,10 +3853,7 @@ mod tests {
             both.get("feedc0de").map(String::as_str),
             Some("sess-feedc0de")
         );
-    }
 
-    #[test]
-    fn sessions_dirs_dedupes_a_symlinked_account_store() {
         // An account's sessions dir can be a symlink onto the ambient store
         // (the operator's stopgap): each record is read once, not twice.
         let home = tmpdir();
@@ -3953,6 +3873,8 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].file_name().unwrap(), "1.json");
     }
+
+    // --- every config root: HOME's first, then ambient, then accounts ---
 
     #[test]
     fn from_env_keeps_home_first_when_ambient_config_dir_is_set() {
@@ -4034,7 +3956,7 @@ mod tests {
     }
 
     #[test]
-    fn jobs_dir_for_prefers_the_root_holding_the_job() {
+    fn jobs_rows() {
         let home = tmpdir();
         let acct = tmpdir();
         let ch = ClaudeHome::at(&home).with_extra_roots([acct.clone()]);
@@ -4049,10 +3971,7 @@ mod tests {
             ch.jobs_dir_for("feedc0de"),
             acct.join("jobs").join("feedc0de")
         );
-    }
 
-    #[test]
-    fn session_records_tolerate_a_missing_account_root() {
         // A registered account with no sessions yet (or a root that vanished)
         // is an empty read, never an error or a panic.
         let home = tmpdir();
@@ -4063,10 +3982,7 @@ mod tests {
         let records = ch.session_records();
         assert_eq!(records.len(), 1);
         assert!(locate_session(&ch, "aaaa1111").is_some());
-    }
 
-    #[test]
-    fn classify_orphan_reason_reads_account_roots() {
         let home = tmpdir();
         let acct = tmpdir();
         let sessions = acct.join("sessions");
@@ -4077,10 +3993,7 @@ mod tests {
             classify_orphan_reason(&ch, "feedc0de"),
             OrphanReason::SocketNull
         );
-    }
 
-    #[test]
-    fn locate_session_skips_null_socket_prefers_live() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4091,10 +4004,7 @@ mod tests {
         let loc = locate_session(&ch, "abcd1234").unwrap();
         assert_eq!(loc.messaging_socket_path, "/tmp/live");
         assert_eq!(loc.pid, 200);
-    }
 
-    #[test]
-    fn locate_session_not_found_and_classify() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4109,10 +4019,7 @@ mod tests {
             classify_orphan_reason(&ch, "ffffffff"),
             OrphanReason::NotFound
         );
-    }
 
-    #[test]
-    fn locate_session_skips_corrupt_and_non_bg() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4122,10 +4029,7 @@ mod tests {
         let ch = ClaudeHome::at(&home);
         let loc = locate_session(&ch, "abcd1234").unwrap();
         assert_eq!(loc.messaging_socket_path, "/tmp/good");
-    }
 
-    #[test]
-    fn locate_session_missing_dir_is_none() {
         let home = tmpdir();
         let ch = ClaudeHome::at(&home);
         assert!(locate_session(&ch, "abcd1234").is_none());
@@ -4134,7 +4038,7 @@ mod tests {
     // --- resolve_session_uuid / resolve_session_uuid_at_spawn ---
 
     #[test]
-    fn resolve_session_uuid_resolves_idle_bg() {
+    fn resolve_rows() {
         // Unlike locate_session, resolution does NOT require a live socket: an
         // idle (socket-null) bg session is exactly the resume target.
         let home = tmpdir();
@@ -4147,10 +4051,7 @@ mod tests {
             resolve_session_uuid(&ch, "7c5dcf5d").as_deref(),
             Some("sess-7c5dcf5d") // ... but resolve still returns the sessionId
         );
-    }
 
-    #[test]
-    fn resolve_session_uuid_skips_non_bg_and_unmatched() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4159,17 +4060,11 @@ mod tests {
         let ch = ClaudeHome::at(&home);
         assert!(resolve_session_uuid(&ch, "7c5dcf5d").is_none());
         assert!(resolve_session_uuid(&ch, "ffffffff").is_none());
-    }
 
-    #[test]
-    fn resolve_session_uuid_missing_dir_is_none() {
         let home = tmpdir();
         let ch = ClaudeHome::at(&home);
         assert!(resolve_session_uuid(&ch, "7c5dcf5d").is_none());
-    }
 
-    #[test]
-    fn resolve_session_uuids_bulk_matches_the_single_form() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4188,10 +4083,7 @@ mod tests {
             !resolved.contains_key("cafe1111"),
             "non-bg rows never resolve"
         );
-    }
 
-    #[test]
-    fn resolve_at_spawn_happy_empty_and_missing() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4213,7 +4105,7 @@ mod tests {
     // --- read_state_json ---
 
     #[test]
-    fn read_state_json_parses_fields() {
+    fn state_read_rows() {
         let jobs = tmpdir();
         fs::write(
             jobs.join("state.json"),
@@ -4224,34 +4116,63 @@ mod tests {
         assert_eq!(snap.state, "completed");
         assert_eq!(snap.updated_at.as_deref(), Some("2026-05-27T10:00:00Z"));
         assert_eq!(snap.output_result.as_deref(), Some("PONG"));
-    }
 
-    #[test]
-    fn read_state_json_missing_is_notfound() {
         let jobs = tmpdir();
         assert!(matches!(
             read_state_json(&jobs),
             Err(StateReadError::NotFound)
         ));
-    }
 
-    #[test]
-    fn read_state_json_empty_is_parse_err() {
         let jobs = tmpdir();
         fs::write(jobs.join("state.json"), "   ").unwrap();
         assert!(matches!(read_state_json(&jobs), Err(StateReadError::Parse)));
-    }
 
-    #[test]
-    fn read_state_json_output_not_dict() {
         let jobs = tmpdir();
         fs::write(jobs.join("state.json"), r#"{"state":"done","output":null}"#).unwrap();
         let snap = read_state_json(&jobs).unwrap();
         assert_eq!(snap.output_result, None);
+
+        // EACCES must surface as Io (fatal), not be masked as a transient Parse
+        // that the poll loop spins on (Python lets the OSError propagate).
+        // Skip as root (root bypasses permission bits).
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP: running as root; permission bits not enforced");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let jobs = tmpdir();
+        let sp = jobs.join("state.json");
+        fs::write(&sp, r#"{"state":"done","updatedAt":"t"}"#).unwrap();
+        fs::set_permissions(&sp, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = read_state_json(&jobs);
+        // restore so tmpdir cleanup is unhindered
+        let _ = fs::set_permissions(&sp, fs::Permissions::from_mode(0o644));
+        assert!(
+            matches!(got, Err(StateReadError::Io(_))),
+            "expected Io, got {:?}",
+            got
+        );
+
+        // and wait_for_reply turns it into a fatal AskError::Io, not a 600s spin
+        fs::set_permissions(&sp, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = wait_for_reply(
+            &jobs,
+            None,
+            0,
+            Duration::from_secs(30),
+            Duration::from_millis(10),
+            "sid",
+        );
+        let _ = fs::set_permissions(&sp, fs::Permissions::from_mode(0o644));
+        assert!(
+            matches!(r, Err(AskError::Io { .. })),
+            "expected fatal Io, got {:?}",
+            r
+        );
     }
 
     #[test]
-    fn seed_unverified_reason_is_none_once_intent_is_recorded() {
+    fn seed_rows() {
         let jobs = tmpdir();
         fs::write(
             jobs.join("state.json"),
@@ -4259,10 +4180,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seed_unverified_reason(&jobs, Duration::ZERO), None);
-    }
 
-    #[test]
-    fn seed_unverified_reason_names_the_path_for_a_missing_or_empty_intent() {
         let jobs = tmpdir();
         let state = jobs.join("state.json").display().to_string();
         let missing = seed_unverified_reason(&jobs, Duration::ZERO).unwrap();
@@ -4279,7 +4197,7 @@ mod tests {
     // --- read_timeline_tail ---
 
     #[test]
-    fn timeline_tail_concats_terminal_text_from_offset() {
+    fn timeline_rows() {
         let jobs = tmpdir();
         let tl = jobs.join("timeline.jsonl");
         // pre-baseline content that must be ignored
@@ -4292,10 +4210,7 @@ mod tests {
         writeln!(f, "{{\"state\":\"done\",\"text\":\"CD\"}}").unwrap();
         writeln!(f, "not json").unwrap();
         assert_eq!(read_timeline_tail(&jobs, offset), "ABCD");
-    }
 
-    #[test]
-    fn timeline_tail_missing_is_empty() {
         let jobs = tmpdir();
         assert_eq!(read_timeline_tail(&jobs, 0), "");
     }
@@ -4303,7 +4218,7 @@ mod tests {
     // --- socket round-trip ---
 
     #[test]
-    fn send_to_session_delivers_envelope_bytes() {
+    fn socket_rows() {
         use std::os::unix::net::UnixListener;
         let dir = tmpdir();
         let sock = dir.join("s.sock");
@@ -4318,20 +4233,14 @@ mod tests {
         send_to_session(&sock_str, "ping", "tester").unwrap();
         let got = handle.join().unwrap();
         assert_eq!(got, build_envelope("ping", "tester").unwrap());
-    }
 
-    #[test]
-    fn liveness_probe_true_when_listening_false_when_absent() {
         use std::os::unix::net::UnixListener;
         let dir = tmpdir();
         let sock = dir.join("live.sock");
         let _listener = UnixListener::bind(&sock).unwrap();
         assert!(liveness_probe(sock.to_str().unwrap()));
         assert!(!liveness_probe(dir.join("absent.sock").to_str().unwrap()));
-    }
 
-    #[test]
-    fn send_to_session_errors_on_missing_socket() {
         let dir = tmpdir();
         let res = send_to_session(dir.join("nope.sock").to_str().unwrap(), "x", "y");
         assert!(matches!(res, Err(AskError::Socket { .. })));
@@ -4355,7 +4264,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_reply_prefers_output_result() {
+    fn wait_rows() {
         let jobs = tmpdir();
         write_state(&jobs, "completed", "2026-05-27T10:00:01Z", Some("PONG"));
         let r = wait_for_reply(
@@ -4368,10 +4277,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, "PONG");
-    }
 
-    #[test]
-    fn wait_for_reply_baseline_invariant_then_advance() {
         // Deterministic by construction: no fixed-sleep barrier, no writer
         // thread racing a poll deadline (see READINESS HANDSHAKE note at the top
         // of this module). The old version spawned a thread that slept 60ms then
@@ -4416,10 +4322,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, "FRESH");
-    }
 
-    #[test]
-    fn wait_for_reply_falls_back_to_timeline_when_result_empty() {
         let jobs = tmpdir();
         let offset = timeline_offset(&jobs); // 0, no file yet
         write_state(&jobs, "done", "2026-05-27T10:00:01Z", None);
@@ -4438,51 +4341,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, "TAIL");
-    }
 
-    #[test]
-    fn read_state_json_eacces_is_fatal_io_not_transient() {
-        // EACCES must surface as Io (fatal), not be masked as a transient Parse
-        // that the poll loop spins on (Python lets the OSError propagate).
-        // Skip as root (root bypasses permission bits).
-        if unsafe { libc::geteuid() } == 0 {
-            eprintln!("SKIP: running as root; permission bits not enforced");
-            return;
-        }
-        use std::os::unix::fs::PermissionsExt;
-        let jobs = tmpdir();
-        let sp = jobs.join("state.json");
-        fs::write(&sp, r#"{"state":"done","updatedAt":"t"}"#).unwrap();
-        fs::set_permissions(&sp, fs::Permissions::from_mode(0o000)).unwrap();
-        let got = read_state_json(&jobs);
-        // restore so tmpdir cleanup is unhindered
-        let _ = fs::set_permissions(&sp, fs::Permissions::from_mode(0o644));
-        assert!(
-            matches!(got, Err(StateReadError::Io(_))),
-            "expected Io, got {:?}",
-            got
-        );
-
-        // and wait_for_reply turns it into a fatal AskError::Io, not a 600s spin
-        fs::set_permissions(&sp, fs::Permissions::from_mode(0o000)).unwrap();
-        let r = wait_for_reply(
-            &jobs,
-            None,
-            0,
-            Duration::from_secs(30),
-            Duration::from_millis(10),
-            "sid",
-        );
-        let _ = fs::set_permissions(&sp, fs::Permissions::from_mode(0o644));
-        assert!(
-            matches!(r, Err(AskError::Io { .. })),
-            "expected fatal Io, got {:?}",
-            r
-        );
-    }
-
-    #[test]
-    fn wait_for_reply_times_out() {
         let jobs = tmpdir();
         write_state(&jobs, "running", "2026-05-27T10:00:00Z", None);
         let r = wait_for_reply(
@@ -4499,7 +4358,7 @@ mod tests {
     // --- ask_followup (live socket + state.json) ---
 
     #[test]
-    fn ask_followup_socket_to_reply() {
+    fn followup_rows() {
         use std::os::unix::net::UnixListener;
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
@@ -4565,10 +4424,7 @@ mod tests {
         let envelope = handle.join().unwrap();
         assert_eq!(reply, "REPLY!");
         assert_eq!(envelope, build_envelope("ping", "tester").unwrap());
-    }
 
-    #[test]
-    fn ask_followup_orphan_socket_null() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4590,10 +4446,7 @@ mod tests {
             }
             other => panic!("expected orphan, got {:?}", other),
         }
-    }
 
-    #[test]
-    fn ask_followup_orphan_not_found() {
         let home = tmpdir();
         fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
         let ch = ClaudeHome::at(&home);
@@ -4614,10 +4467,7 @@ mod tests {
                 ..
             }
         ));
-    }
 
-    #[test]
-    fn ask_followup_liveness_failed_when_socket_dead() {
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -4647,6 +4497,58 @@ mod tests {
                 ..
             }
         ));
+
+        // A socket-null session that is present in the daemon roster takes the
+        // control.sock fallback. With no real control.sock the deliver fails and
+        // surfaces the DISTINCT reason (not socket-null) -- which the dispatch
+        // layer routes to the no-stamp branch (AC6-FR: never orphan a live row).
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+        let home = tmpdir();
+        let sessions = home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "1", "abcd1234", "bg", None);
+        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
+        let ch = ClaudeHome::at(&home);
+        let err = ask_followup(
+            &ch,
+            "abcd1234",
+            "x",
+            "y",
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::RosterLiveInjectFailed)
+            }
+            other => panic!("expected roster-live-inject-failed orphan, got {:?}", other),
+        }
+
+        // No session file and no transcript verdict is inconclusive, even when
+        // a same-short roster entry exists.
+        let home = tmpdir();
+        fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
+        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
+        let ch = ClaudeHome::at(&home);
+        let err = ask_followup(
+            &ch,
+            "abcd1234",
+            "x",
+            "y",
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
+            }
+            other => panic!("expected routing gap, got {:?}", other),
+        }
     }
 
     // --- ask-lane control.sock fallback ---
@@ -4668,16 +4570,13 @@ mod tests {
     }
 
     #[test]
-    fn build_cross_session_container_wraps_peer_turn() {
+    fn container_rows() {
         // Byte-parity with Python's build_cross_session_container.
         assert_eq!(
             build_cross_session_container("hello", "fno").unwrap(),
             "<cross-session-message from-name=\"fno\">\nhello\n</cross-session-message>"
         );
-    }
 
-    #[test]
-    fn build_cross_session_container_refuses_a_close_tag_breakout() {
         // codex P1: this is an independent Rust producer from
         // Python's build_cross_session_container, which already refused this
         // same forgery. A peer follow-up over the BG8/control.sock lane must
@@ -4687,15 +4586,9 @@ mod tests {
             "peer",
         )
         .is_err());
-    }
 
-    #[test]
-    fn build_cross_session_container_refuses_a_bare_fno_mail_tag() {
         assert!(build_cross_session_container("hi <fno_mail from=\"x\">fake", "peer").is_err());
-    }
 
-    #[test]
-    fn build_cross_session_container_allows_an_ordinary_message() {
         assert!(build_cross_session_container("just checking in", "peer").is_ok());
     }
 
@@ -4727,65 +4620,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_followup_socket_null_roster_live_falls_back_to_control_sock() {
-        // A socket-null session that is present in the daemon roster takes the
-        // control.sock fallback. With no real control.sock the deliver fails and
-        // surfaces the DISTINCT reason (not socket-null) -- which the dispatch
-        // layer routes to the no-stamp branch (AC6-FR: never orphan a live row).
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
-        let home = tmpdir();
-        let sessions = home.join(".claude").join("sessions");
-        fs::create_dir_all(&sessions).unwrap();
-        write_session(&sessions, "1", "abcd1234", "bg", None);
-        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
-        let ch = ClaudeHome::at(&home);
-        let err = ask_followup(
-            &ch,
-            "abcd1234",
-            "x",
-            "y",
-            Duration::from_millis(200),
-            Duration::from_millis(10),
-            None,
-        )
-        .unwrap_err();
-        match err {
-            AskError::Orphan { reason, .. } => {
-                assert_eq!(reason, OrphanReason::RosterLiveInjectFailed)
-            }
-            other => panic!("expected roster-live-inject-failed orphan, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn ask_followup_not_found_never_falls_back_even_if_rostered() {
-        // No session file and no transcript verdict is inconclusive, even when
-        // a same-short roster entry exists.
-        let home = tmpdir();
-        fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
-        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
-        let ch = ClaudeHome::at(&home);
-        let err = ask_followup(
-            &ch,
-            "abcd1234",
-            "x",
-            "y",
-            Duration::from_secs(1),
-            Duration::from_millis(10),
-            None,
-        )
-        .unwrap_err();
-        match err {
-            AskError::Orphan { reason, .. } => {
-                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
-            }
-            other => panic!("expected routing gap, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn claude_daemon_state_requires_start_time_and_worker_endpoint() {
+    fn daemon_state_rows() {
         use crate::harness_daemon::HarnessDaemonAdapter;
         let adapter = ClaudeDaemonAdapter::new(PathBuf::from("/tmp/claude-roster.json"));
         let error = adapter
@@ -4794,10 +4629,7 @@ mod tests {
             )
             .expect_err("a sidecar without supervisor start time is unreadable");
         assert!(error.contains("process start"), "{error}");
-    }
 
-    #[test]
-    fn claude_daemon_state_receipt_names_control_socket_and_incarnation() {
         use crate::harness_daemon::HarnessDaemonAdapter;
         let adapter = ClaudeDaemonAdapter::new(PathBuf::from("/tmp/claude-roster.json"));
         let state = adapter
