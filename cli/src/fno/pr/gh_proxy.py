@@ -58,6 +58,12 @@ def delegate(real: str, args: Sequence[str]) -> None:
     if refusal:
         print(refusal, file=sys.stderr)
         raise SystemExit(_quota.REFUSED)
+    from fno.pr._draft_ready import draft_refusal
+
+    refusal = draft_refusal(args, os.getcwd())
+    if refusal:
+        print(refusal, file=sys.stderr)
+        raise SystemExit(_REFUSE_EXIT)
     env = _quota.delegate_environment()
     env[_REENTRY_ENV] = str(os.getpid())
     os.execve(real, [real, *args], env)
