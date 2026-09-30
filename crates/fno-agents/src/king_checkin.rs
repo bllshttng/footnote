@@ -1414,40 +1414,26 @@ fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
     }
 }
 
-/// The `loop` row before `previous_row`'s. Needed only to tell a rising
-/// refusal rate from a single noisy tick - two consecutive rises, not one.
-fn second_previous_loop_row(ctx: &Ctx) -> Option<Value> {
-    let payload = crate::king_history::scan(&ctx.events_paths, &ctx.scope).ok()?;
-    payload["events"]
-        .as_array()?
-        .iter()
-        .filter(|r| s_str(r, "source") == Some("loop"))
-        .nth(1)
-        .cloned()
-}
-
-fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
-    previous_data?.get("refusal_rate")?.as_f64()
-}
-
 /// Sets `refusal_rate_rising`: true only when the current rate exceeds the
 /// last beat's, and that beat's exceeded the one before it. A single high
-/// tick is noise; two consecutive rises is the handoff signal.
+/// tick is noise; two consecutive rises is the handoff signal. The priors
+/// come from [`crate::refusal_trend`], whose baseline advances with every
+/// measured beat, journalled or not. A missing pair reads unmeasured, never
+/// rising.
 fn mark_refusal_rate_trend(
     data: &mut Map<String, Value>,
-    previous_data: Option<&Value>,
-    second_previous_data: Option<&Value>,
+    previous_rate: Option<f64>,
+    second_previous_rate: Option<f64>,
 ) {
     let current = data.get("refusal_rate").and_then(Value::as_f64);
-    let rising = match (
-        current,
-        refusal_rate_of(previous_data),
-        refusal_rate_of(second_previous_data),
-    ) {
+    let rising = match (current, previous_rate, second_previous_rate) {
         (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
         _ => false,
     };
     data.insert("refusal_rate_rising".into(), json!(rising));
+    let unmeasured =
+        current.is_some() && (previous_rate.is_none() || second_previous_rate.is_none());
+    data.insert("refusal_rate_trend_unmeasured".into(), json!(unmeasured));
 }
 
 fn derive_change(
@@ -1921,12 +1907,18 @@ fn render_lines(
                 dash(rr.get("total")),
                 dash(rr.get("window")),
             );
-            if data
+            let rising = data
                 .get("refusal_rate_rising")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let unmeasured = data
+                .get("refusal_rate_trend_unmeasured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if rising {
                 text.push_str(" - RISING (handoff signal)");
+            } else if unmeasured {
+                text.push_str(" - UNMEASURED (needs two prior beats)");
             }
             lines.push(text);
         }
@@ -2520,9 +2512,15 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let second_previous = second_previous_loop_row(&ctx);
-    let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
-    mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
+    let trend_dir = home.refusal_trend_dir();
+    let (previous_rate, second_previous_rate) =
+        crate::refusal_trend::priors(&trend_dir, &ctx.scope);
+    mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
+    // The baseline advances on the measurement the beat just printed,
+    // whether or not the full row journals below.
+    if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
+        crate::refusal_trend::record(&trend_dir, &ctx.scope, &ts, rate);
+    }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
@@ -2667,6 +2665,23 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+pub(crate) fn title_rename_command(
+    harness: &str,
+    label: &str,
+    title: Option<&str>,
+) -> Option<String> {
+    if title == Some(label) {
+        return None;
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
+    let capabilities = contract.capabilities(harness).ok()?;
+    capabilities
+        .native_verbs
+        .iter()
+        .any(|verb| verb == "/rename")
+        .then(|| format!("/rename {label}"))
+}
+
 fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
     let home = crate::paths::AgentsHome::from_env();
     let registry = crate::state::load_registry(&home.registry_json())
@@ -2704,10 +2719,9 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         return Err("the live crown holder is not this session".into());
     }
     let label = row.name.as_str();
-    if row.harness_title.as_deref() == Some(label) {
+    let Some(command) = title_rename_command(harness, label, row.harness_title.as_deref()) else {
         return Ok(());
-    }
-    let command = format!("/rename {label}");
+    };
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut child = std::process::Command::new(executable)
         .args([
@@ -3714,22 +3728,6 @@ mod tests {
         assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
-    // AC1: the printed body carries a refusal_rate line with the real
-    // refused/total/window counts, and the same rate lands in the
-    // journaled data.
-    #[test]
-    fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.starts_with("refusal_rate:"))
-            .unwrap();
-        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
-    }
-
     // The subagents reading: the workers line carries the fleet's active
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
@@ -3893,42 +3891,94 @@ mod tests {
         assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
-    // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
-    // or a flat/falling rate, does not.
+    // AC2: the handoff signal reads the true beat-to-beat direction. Two
+    // consecutive rises trip it; one rise, flat, or falling does not; and the
+    // baseline advances with every measured beat, so beats whose row never
+    // journaled can never pin the comparison to a stale pair.
     #[test]
-    fn refusal_rate_rising_only_after_two_consecutive_increases() {
+    fn refusal_rate_trend_reads_the_true_direction_across_unjournalled_beats() {
+        // Two rises: 0.05 -> 0.10 -> 0.20 trips the signal.
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate".into(), json!(0.20));
-        let row = |rate: f64| Some(json!({"refusal_rate": rate}));
-
-        // Two rises: 0.05 -> 0.10 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(false))
+        );
 
         // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
-        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.10).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.10));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
         // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
-        mark_refusal_rate_trend(&mut data, row(0.30).as_ref(), row(0.05).as_ref());
+        mark_refusal_rate_trend(&mut data, Some(0.30), Some(0.05));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
-        // Missing history reads as not-rising, never a false positive.
+        // Missing history reads unmeasured, never a false positive.
         mark_refusal_rate_trend(&mut data, None, None);
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(true))
+        );
+
+        // The filed defect: a falling series of unjournalled beats. Each
+        // beat's record advances the baseline, so the label follows the
+        // true direction instead of the same stale pair.
+        let dir = tempfile::tempdir().unwrap();
+        let trend = dir.path();
+        for (n, current) in [0.175, 0.165, 0.150].iter().enumerate() {
+            let (p1, p2) = crate::refusal_trend::priors(trend, "x-bbbb");
+            let mut data: Map<String, Value> = Map::new();
+            data.insert("refusal_rate".into(), json!(current));
+            mark_refusal_rate_trend(&mut data, p1, p2);
+            assert_eq!(
+                data.get("refusal_rate_rising"),
+                Some(&json!(false)),
+                "beat {n}: a falling series must not read RISING"
+            );
+            crate::refusal_trend::record(
+                trend,
+                "x-bbbb",
+                &format!("2026-09-15T10:0{n}:00Z"),
+                *current,
+            );
+        }
     }
 
+    // AC1+AC2: the printed line carries the real refused/total/window counts
+    // and exactly one trend verdict - RISING on two consecutive rises,
+    // UNMEASURED on a missing prior pair - and the same rate lands in the
+    // journaled data.
     #[test]
-    fn refusal_rate_rising_line_carries_the_handoff_suffix() {
+    fn refusal_rate_line_carries_the_handoff_or_unmeasured_suffix() {
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let line = lines
             .iter()
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
-        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - RISING (handoff signal)"
+        );
+
+        // A missing prior pair is stated on the line, never silently blank.
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("refusal_rate_trend_unmeasured".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(
+            line,
+            "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
+        );
     }
 
     // A rising refusal rate outranks silence the same way control-plane
