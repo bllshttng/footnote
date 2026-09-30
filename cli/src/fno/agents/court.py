@@ -97,7 +97,7 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
             "projects": projects_mod.resolve._get_cache(),
         })
         return answer["pairs"]
-    except SpawnOverlayUnavailable as exc:
+    except (SpawnOverlayUnavailable, LookupError, TypeError) as exc:
         print(f"court: rivalry scan unavailable ({exc}); conflicts not listed", file=sys.stderr)
         return []
 

@@ -18,7 +18,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub fn resolve(payload: &Value) -> Result<Value, String> {
-    let empty = HashMap::new();
     // The caller's own project table outranks the cwd read: tests plant a
     // config the overlay process cannot see, and a court run from a foreign
     // directory still answers from ITS repo's table.
@@ -38,7 +37,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         .unwrap_or_default();
     let projects = if injected.is_empty() && payload.get("projects").is_none() {
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_else(|_| empty.clone())
+            .unwrap_or_default()
     } else {
         injected
     };
