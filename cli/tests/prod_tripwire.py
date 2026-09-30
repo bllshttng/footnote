@@ -39,19 +39,29 @@ def _slug_token(marker: str) -> str:
     return f"{parent}-{name}" if parent else name
 
 
-def live_roots(home: Path, checkout: Path, plans_dir: Path | None) -> list[tuple[Path, int]]:
+def live_roots(
+    home: Path,
+    checkout: Path,
+    plans_dir: Path | None,
+    exclude: frozenset[str] = frozenset(),
+) -> list[tuple[Path, int]]:
     """The live roots to watch, deduped by realpath.
 
     ``<home>/.fno`` at depth 2, ``<home>/.claude`` at depth 1, the canonical
     checkout (the first ``worktree`` line of ``git -C <checkout> worktree list
     --porcelain``) at depth 1, the running checkout's toplevel at depth 1, and
-    ``plans_dir`` at depth 1 when given.
+    ``plans_dir`` at depth 1 when given. A candidate whose realpath falls
+    inside an ``exclude`` root (a sandbox the outer runner declared
+    explicitly) is not a live root.
     """
     roots: list[tuple[Path, int]] = []
-    seen: set[str] = set()
+    seen: set[Path] = set()
+    excluded = {Path(e) for e in exclude}
 
     def add(path: Path, depth: int) -> None:
-        resolved = os.path.realpath(path)
+        resolved = Path(os.path.realpath(path))
+        if any(resolved == e or resolved.is_relative_to(e) for e in excluded):
+            return
         if resolved in seen:
             return
         seen.add(resolved)

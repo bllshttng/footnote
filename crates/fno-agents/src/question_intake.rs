@@ -593,8 +593,8 @@ would mint a second id for the same question."
     }
 
     answer.lines.push(format!(
-        "outstanding: recorded {qid}. Clear it once answered: \
-fno inbox outstanding clear {qid} --answer \"...\""
+        "outstanding: recorded {qid}. The user answers it on the question board, \
+and the answer closes it. To withdraw it yourself: fno inbox outstanding clear {qid}"
     ));
     let (position, total) = receipt_position(&index, &qid);
     let total = total.unwrap_or(0);

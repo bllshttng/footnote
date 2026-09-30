@@ -30,9 +30,13 @@ crossing	crates/fno-agents/src/finalize.rs	let ok = Command::new(crate::scrape::
 crossing	crates/fno-agents/src/finalize.rs	let out = match Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/finalize.rs	let mut cmd = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/finalize_run_summary.rs	let mut cmd = Command::new(crate::loopcheck::loopcheck_fno_bin());
+crossing	crates/fno-agents/src/gate_probes.rs	let _ = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/gc.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	let mut argv = vec![fno_bin()];
+# The Rundown arm owns draining this site: the daemon renders through the
+# front door; the drain would be the front calling the ledger natively.
+crossing	crates/fno-agents/src/king_ledger.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/lifecycle_child.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	return Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	let out = Command::new(crate::scrape::fno_bin())

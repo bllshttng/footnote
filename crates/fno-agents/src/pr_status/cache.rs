@@ -226,6 +226,21 @@ pub(crate) fn cached_status(
     };
     let _ = std::fs::create_dir_all(&dir);
     let now = now_secs();
+    // The pre-network serve: any row for (slug, pr) younger than the TTL
+    // answers with ZERO gh calls, the key-minting head read included. The
+    // per-tick head check it replaces was the read that kept a cache "hit"
+    // at ~6 calls; a head that moves mid-window is noticed one TTL late,
+    // which is the freshness contract the TTL already sells. `refresh` is
+    // the escape hatch.
+    if !refresh {
+        if let Some(row) = newest_row(&dir, &slug_key, &pr.to_string()) {
+            if now - num(&row, "ts") < ttl() as f64 {
+                if let Some(answer) = serve(&row, false) {
+                    return into_answer(answer, 0);
+                }
+            }
+        }
+    }
     // Backoff pre-check, zero network: inside a live refusal every waiter's
     // tick short-circuits to the newest cached row instead of re-attempting.
     if !refresh
@@ -269,9 +284,10 @@ pub(crate) fn cached_status(
         }
     };
     // ONE hold probe per read: its verdict feeds both the cache-key material
-    // and the payload, instead of `hold-check` spawning twice.
+    // and the payload; the verdict resolves in process from the pulls
+    // payload this read already holds.
     let hold_state = if pr_state == "OPEN" {
-        Some(super::seams::hold_verdict(cwd, pr))
+        Some(super::seams::hold_verdict(cwd, pr, Some(&pulls)))
     } else {
         None
     };

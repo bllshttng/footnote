@@ -271,7 +271,16 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     connection
         .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
-    if !schema_needs_ensure(&connection)? && !has_legacy_entries(&connection)? {
+    if !schema_needs_ensure(&connection)? {
+        // A stamped store can still park legacy blob rows (a seed landing
+        // after the one-time setup): the fold self-gates on materialized
+        // rows, so a healthy store pays one COUNT here and a parked store
+        // folds. The DDL, migrations and one-shot imports below stay
+        // setup-only.
+        import_if_needed(&mut connection)?;
+        if archive_needs_import(&connection, graph)? {
+            archive_import_if_needed(&mut connection, graph)?;
+        }
         return Ok(connection);
     }
     // First opens of a new file race to switch it to WAL. Each upgrades a
@@ -340,6 +349,33 @@ fn version_is_below(version: Option<String>, expected: u32) -> bool {
         .map_or(true, |version| version < expected)
 }
 
+/// True when a stamped store still parks legacy blob rows: the one-time
+/// setup completed before the rows landed, so only a fold shows them. A
+/// folded store has no `entries` table, and a store born stamped has none
+/// either, so every healthy live store answers false. Read-only: a read
+/// connection runs this to decide whether it must fall back to the write
+/// open, and pays three cheap queries when it does not.
+fn store_owes_a_fold(connection: &Connection) -> Result<bool, String> {
+    let has_entries: bool = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .map_err(|error| error.to_string())?;
+    if !has_entries {
+        return Ok(false);
+    }
+    let parked: i64 = connection
+        .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if parked == 0 {
+        return Ok(false);
+    }
+    Ok(materialized_rows(connection)? == 0)
+}
+
 fn read_connection(graph: &Path) -> Result<Connection, String> {
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let path = database_path(graph);
@@ -350,7 +386,10 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
-        if !schema_needs_ensure(&connection)? && !has_legacy_entries(&connection)? {
+        if !schema_needs_ensure(&connection)?
+            && !store_owes_a_fold(&connection)?
+            && !archive_needs_import(&connection, graph)?
+        {
             return Ok(connection);
         }
         drop(connection);
@@ -364,21 +403,9 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
     Ok(connection)
 }
 
-/// A legacy blob table a pre-store writer left (or re-left) in this db. A
-/// schema-current store fast-paths every read and the open itself, so a blob
-/// that appears AFTER the first migration would never fold and every read
-/// would answer the empty relational tables - the silent-loss shape this
-/// probe closes. The import drops the table, so the steady state pays one
-/// sqlite_master probe per open.
-fn has_legacy_entries(connection: &Connection) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .map_err(|error| error.to_string())
+fn archive_needs_import(connection: &Connection, graph: &Path) -> Result<bool, String> {
+    Ok(graph.with_file_name("graph-archive.json").exists()
+        && meta(connection, "archive_imported_v2")?.is_none())
 }
 
 /// The one-shot archive import: a sibling graph-archive.json folds its
@@ -1579,6 +1606,32 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!entries.is_empty());
         connection.execute_batch("ROLLBACK;").unwrap();
+
+        // A seed landing on an already-stamped EMPTY store parks blob rows
+        // past the one-time setup; each open path must still fold them.
+        let row_sql = "CREATE TABLE entries (
+                           id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, row TEXT NOT NULL);
+                       INSERT INTO entries VALUES ('ab-late', 0, '{\"id\": \"ab-late\",
+                           \"slug\": \"late\", \"title\": \"Late\", \"type\": \"feature\",
+                           \"status\": \"ready\", \"priority\": \"p2\", \"domain\": \"code\",
+                           \"created_at\": \"2026-09-01T00:00:00+00:00\"}');";
+        let via_write = dir.path().join("fold-on-write.json");
+        drop(open(&via_write).unwrap());
+        open(&via_write).unwrap().execute_batch(row_sql).unwrap();
+        drop(open(&via_write).unwrap());
+        assert_eq!(
+            read_entries(&via_write).unwrap().len(),
+            1,
+            "a write open folds the parked rows"
+        );
+        let via_read = dir.path().join("fold-on-read.json");
+        drop(open(&via_read).unwrap());
+        open(&via_read).unwrap().execute_batch(row_sql).unwrap();
+        assert_eq!(
+            read_entries(&via_read).unwrap().len(),
+            1,
+            "a read folds the parked rows"
+        );
     }
 
     #[test]
@@ -1611,39 +1664,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_entries, 0, "the blob table is dropped");
-
-        // The seed-after-open shape (the graph_seed fixture's second write):
-        // a first open over an EMPTY blob leaves the store schema-current
-        // with zero materialized rows; the blob that lands after that must
-        // still fold on the next read. Neither open nor read may fast-path
-        // past a pending blob, or the rows sit in `entries` forever while
-        // every read answers the empty relational tables.
-        let dir2 = TempDir::new().unwrap();
-        let graph2 = dir2.path().join("graph.json");
-        let connection = open(&graph2).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE entries (
-                     id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, row TEXT NOT NULL);
-                 INSERT INTO entries VALUES ('ab-late', 0, '{\"id\": \"ab-late\",
-                     \"slug\": \"late\", \"title\": \"Late\", \"type\": \"feature\",
-                     \"status\": \"ready\", \"priority\": \"p2\", \"domain\": \"code\",
-                     \"created_at\": \"2026-09-02T00:00:00+00:00\"}');",
-            )
-            .unwrap();
-        drop(connection);
-        let entries = read_entries(&graph2).unwrap();
-        let ids: Vec<&str> = entries.iter().filter_map(|e| e["id"].as_str()).collect();
-        assert_eq!(ids, vec!["ab-late"], "the late blob folded");
-        let connection = open(&graph2).unwrap();
-        let has_entries: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(has_entries, 0, "the late blob is dropped after the fold");
     }
 
     #[test]

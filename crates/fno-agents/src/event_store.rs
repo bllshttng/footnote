@@ -132,6 +132,8 @@ pub fn live_journal(journal: &Path) -> PathBuf {
 }
 
 /// The store beside a journal: the live journal's `.jsonl` stem plus `.db`.
+/// A state-root journal (`events`, `decisions`, `questions`) resolves through
+/// the layout table instead, so a migrated root answers the `db/` store.
 pub fn store_path(journal: &Path) -> PathBuf {
     let live = live_journal(journal);
     let stem = live
@@ -139,7 +141,49 @@ pub fn store_path(journal: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let stem = stem.strip_suffix(".jsonl").unwrap_or(&stem);
+    if let Some(routed) = route_state_root_store(&live, stem) {
+        return routed;
+    }
     live.with_file_name(format!("{stem}.db"))
+}
+
+/// The canonical state root, cached per env fingerprint: an emit pays one
+/// derivation per process, and a test that re-pins its home still routes to
+/// its own root.
+fn route_state_root_store(live: &Path, stem: &str) -> Option<PathBuf> {
+    if !matches!(stem, "events" | "decisions" | "questions") {
+        return None;
+    }
+    type Cached = (
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        PathBuf,
+    );
+    static ROUTE_ROOT: std::sync::OnceLock<Cached> = std::sync::OnceLock::new();
+    let home_env = std::env::var_os("FNO_AGENTS_HOME").filter(|v| !v.is_empty());
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    let root = match ROUTE_ROOT.get() {
+        Some((e, h, r)) if *e == home_env && *h == home => r.clone(),
+        _ => {
+            let mut derived = home
+                .as_ref()
+                .map(|h| PathBuf::from(h).join(".fno"))
+                .unwrap_or_else(|| PathBuf::from(".fno"));
+            if let Some(v) = &home_env {
+                let pinned = PathBuf::from(v);
+                derived = pinned.parent().map(|p| p.to_path_buf()).unwrap_or(pinned);
+            }
+            let derived = std::fs::canonicalize(&derived).unwrap_or(derived);
+            let _ = ROUTE_ROOT.set((home_env, home, derived.clone()));
+            derived
+        }
+    };
+    let parent = live.parent()?;
+    let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    if parent != root {
+        return None;
+    }
+    Some(crate::state_layout::place(&root, &format!("{stem}.db")))
 }
 
 fn strip_rotation_suffix(name: &str) -> Option<String> {

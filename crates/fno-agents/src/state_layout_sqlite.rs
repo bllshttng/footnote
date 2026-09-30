@@ -129,13 +129,55 @@ fn table_counts(conn: &Connection) -> Result<BTreeMap<String, i64>, String> {
     Ok(out)
 }
 
-/// The verify record: per-table row counts at park time.
-fn write_verify_record(dir: &Path, counts: &BTreeMap<String, i64>) -> Result<(), String> {
+/// The verify record: per-table row counts plus the high-water `seq` where a
+/// table carries one. A stale writer's UPDATE-in-place bumps `seq` without
+/// changing row counts; the high-water catches it.
+fn write_verify_record(
+    dir: &Path,
+    counts: &BTreeMap<String, i64>,
+    seqs: &BTreeMap<String, i64>,
+) -> Result<(), String> {
     let mut text = String::new();
     for (name, n) in counts {
-        text.push_str(&format!("{name}\t{n}\n"));
+        let s = seqs
+            .get(name)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        text.push_str(&format!("{name}\t{n}\t{s}\n"));
     }
     std::fs::write(dir.join("verify.tsv"), text).map_err(|e| e.to_string())
+}
+
+/// The per-table high-water `seq` for every user table that carries the
+/// column. Absent where it does not.
+fn seq_high_water(
+    conn: &Connection,
+    counts: &BTreeMap<String, i64>,
+) -> Result<BTreeMap<String, i64>, String> {
+    let mut out = BTreeMap::new();
+    for name in counts.keys() {
+        let lit = name.replace('\'', "''");
+        let has_seq: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{lit}') WHERE name = 'seq'"),
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if has_seq == 0 {
+            continue;
+        }
+        let quoted = name.replace('"', "\"\"");
+        let m: Option<i64> = conn
+            .query_row(&format!("SELECT MAX(seq) FROM \"{quoted}\""), [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(m) = m {
+            out.insert(name.clone(), m);
+        }
+    }
+    Ok(out)
 }
 
 /// The 10s-later verify: the parked copy must still hold the row counts
@@ -156,15 +198,24 @@ fn verify_stamp(backup_root: &Path, stamp: &str) -> Option<Status> {
     if !age_ok {
         return None;
     }
-    let then: BTreeMap<String, i64> = record
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.split('\t');
-            let name = parts.next()?.to_string();
-            let n = parts.next()?.parse().ok()?;
-            Some((name, n))
-        })
-        .collect();
+    // Two-field lines predate the seq high-water; their counts still verify.
+    let mut then_counts: BTreeMap<String, i64> = BTreeMap::new();
+    let mut then_seqs: BTreeMap<String, i64> = BTreeMap::new();
+    for line in record.lines() {
+        let mut parts = line.split('\t');
+        let (Some(name), Some(count)) = (parts.next(), parts.next()) else {
+            return None;
+        };
+        let (Some(name), Ok(count)) = (Some(name.to_string()), count.parse::<i64>()) else {
+            return None;
+        };
+        then_counts.insert(name.clone(), count);
+        if let Some(seq) = parts.next() {
+            if let Ok(seq) = seq.parse::<i64>() {
+                then_seqs.insert(name, seq);
+            }
+        }
+    }
     let parked_db = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -180,9 +231,20 @@ fn verify_stamp(backup_root: &Path, stamp: &str) -> Option<Status> {
             }
         };
     match table_counts(&conn) {
-        Ok(now) if now == then => {
-            let _ = std::fs::remove_file(&record_path);
-            Some(Status::Moved)
+        Ok(now) if now == then_counts => {
+            let seqs_ok = match seq_high_water(&conn, &now) {
+                Ok(now_seqs) => then_seqs
+                    .iter()
+                    .all(|(name, seq)| now_seqs.get(name) == Some(seq)),
+                Err(_) => false,
+            };
+            if seqs_ok {
+                let _ = std::fs::remove_file(&record_path);
+                return Some(Status::Moved);
+            }
+            Some(Status::Refused(
+                "parked copy changed after publish".to_string(),
+            ))
         }
         Ok(_) | Err(_) => Some(Status::Refused(
             "parked copy changed after publish".to_string(),
@@ -480,7 +542,11 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
             return drain.fail(&guard, pid, format!("cannot park {name}"));
         }
     }
-    let _ = write_verify_record(&dir, &counts);
+    let seqs = match seq_high_water(&src, &counts) {
+        Ok(s) => s,
+        Err(e) => return drain.fail(&guard, pid, format!("cannot read the seq high-water: {e}")),
+    };
+    let _ = write_verify_record(&dir, &counts, &seqs);
     let _ = guard.execute_batch("ROLLBACK;");
     drop(src);
     drop(guard);
@@ -491,4 +557,124 @@ fn run_protocol(root: &Path, row: &Row, legacy: &Path, new: &Path, stamp: &str) 
 fn migrating_path(new: &Path) -> PathBuf {
     let name = new.file_name().and_then(|n| n.to_str()).unwrap_or("store");
     new.with_file_name(format!("{name}.migrating"))
+}
+
+/// The straggler lane: a stale long-lived writer (an old-build mux server)
+/// can recreate a legacy `events.db`, `decisions.db` or `questions.db` after
+/// the move published `db/<stem>.db`. One lane pass imports its rows into the
+/// published store by `event_id` with INSERT OR IGNORE, then parks the file.
+/// A refused row keeps both copies; the pass retries it next time.
+pub fn straggler_import(root: &Path, stamp: &str, apply: bool) -> Vec<(String, Status)> {
+    let mut out = Vec::new();
+    if !apply {
+        return out;
+    }
+    for stem in ["events", "decisions", "questions"] {
+        let name = format!("{stem}.db");
+        let legacy = root.join(&name);
+        if !legacy.exists() {
+            continue;
+        }
+        let new = root.join("db").join(&name);
+        if !new.exists() {
+            continue;
+        }
+        match import_straggler(&legacy, &new) {
+            Ok(_) => {
+                let dir = backup_dir(root, stamp);
+                if std::fs::create_dir_all(&dir).is_ok()
+                    && std::fs::rename(&legacy, dir.join(&name)).is_ok()
+                {
+                    out.push((name, Status::Merged));
+                } else {
+                    out.push((
+                        name,
+                        Status::Refused("cannot park the imported straggler".to_string()),
+                    ));
+                }
+            }
+            Err(e) => out.push((
+                name,
+                Status::Refused(format!("straggler import failed: {e}")),
+            )),
+        }
+    }
+    out
+}
+
+/// Import one straggler's events rows into the published store. The straggler
+/// migrates to v2 in place first (a v1 file carries no `event_id` to import
+/// by), then inserts distinct event identities with fresh local sequence numbers.
+fn import_straggler(legacy: &Path, new: &Path) -> Result<usize, String> {
+    let mut src = {
+        let c = Connection::open_with_flags(legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|e| e.to_string())?;
+        let _ = c.busy_timeout(Duration::from_secs(5));
+        c
+    };
+    crate::event_store::ensure_schema(&mut src, legacy)?;
+    let dst = Connection::open_with_flags(new, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| e.to_string())?;
+    let _ = dst.busy_timeout(Duration::from_secs(5));
+    let columns: Vec<String> = {
+        let mut stmt = dst
+            .prepare("SELECT name FROM pragma_table_info('events') ORDER BY cid")
+            .map_err(|e| e.to_string())?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        if names.is_empty() || !names.iter().any(|c| c == "event_id") {
+            return Err("the published store has no v2 events table".to_string());
+        }
+        names
+    };
+    let src_columns: Vec<String> = {
+        let mut stmt = src
+            .prepare("SELECT name FROM pragma_table_info('events') ORDER BY cid")
+            .map_err(|e| e.to_string())?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        names
+    };
+    if src_columns != columns {
+        return Err("the straggler's events columns diverge from the published store".to_string());
+    }
+    let columns: Vec<String> = columns.into_iter().filter(|name| name != "seq").collect();
+    let placeholders: Vec<&str> = columns.iter().map(|_| "?").collect();
+    let event_id_parameter = columns.iter().position(|name| name == "event_id").unwrap() + 1;
+    let insert = format!(
+        "INSERT INTO events ({}) SELECT {} WHERE NOT EXISTS (SELECT 1 FROM events WHERE event_id = ?{})",
+        columns.join(", "),
+        placeholders.join(", "),
+        event_id_parameter,
+    );
+    let select = format!("SELECT {} FROM events ORDER BY seq", columns.join(", "));
+    let mut imported = 0usize;
+    let tx = dst.unchecked_transaction().map_err(|e| e.to_string())?;
+    {
+        let mut rows = src.prepare(&select).map_err(|e| e.to_string())?;
+        let mut rows = rows.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let as_params: Vec<Box<dyn rusqlite::types::ToSql>> = columns
+                .iter()
+                .map(|c| {
+                    row.get::<_, rusqlite::types::Value>(c.as_str())
+                        .map(|value| Box::new(value) as Box<dyn rusqlite::types::ToSql>)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let params: Vec<&dyn rusqlite::types::ToSql> =
+                as_params.iter().map(|b| b.as_ref()).collect();
+            imported += dst
+                .execute(&insert, params.as_slice())
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(imported)
 }

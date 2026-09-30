@@ -176,6 +176,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "orphan_reap",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
@@ -242,6 +250,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
         arm: "crown_ledger",
         default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "reign_eval",
+        default_interval_s: crate::reign_eval::REIGN_EVAL_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
@@ -1572,11 +1588,11 @@ mod tests {
         p
     }
 
-    /// AC8-HP: the readout knows the arm even before its first tick - one
-    /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
+    /// The readout knows its arms before the first tick and assigns the new
+    /// reign eval arm its 600-second daemon cadence.
     #[test]
-    fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 21);
+    fn arm_watch_merge_close_and_reign_eval_are_known_daemon_arms() {
+        assert_eq!(KNOWN_ARMS.len(), 23);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")
@@ -1628,6 +1644,15 @@ mod tests {
             crate::king_ledger::CROWN_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
+        let reign_eval = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "reign_eval")
+            .expect("reign_eval row");
+        assert_eq!(
+            reign_eval.default_interval_s,
+            crate::reign_eval::REIGN_EVAL_INTERVAL_S
+        );
+        assert_eq!(reign_eval.scheduler, SCHED_DAEMON);
         let settle = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "king_settle")

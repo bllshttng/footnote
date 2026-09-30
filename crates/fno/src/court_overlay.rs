@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_measured_payload() {
+    fn parse_rows() {
         let court = live();
         assert_eq!(court.lane_count, Some(0));
         assert_eq!(court.census.kings, Some(5));
@@ -756,6 +756,15 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].name, "fno-py");
         assert_eq!(top[0].worktree.as_deref(), Some(".fno/worktrees/x-aaaa"));
+
+        // A binary newer than the fno on PATH: the census defaults to all
+        // unknown rather than failing the whole fold.
+        let court = parse(br#"{"lane_count": 7, "arms": []}"#).expect("parses");
+        assert_eq!(court.lane_count, Some(7));
+        assert_eq!(court.census, Census::default());
+
+        assert!(parse(b"{not json").is_none());
+        assert!(parse(b"").is_none());
     }
 
     #[test]
@@ -771,47 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_with_no_census_block_still_parses() {
-        // A binary newer than the fno on PATH: the census defaults to all
-        // unknown rather than failing the whole fold.
-        let court = parse(br#"{"lane_count": 7, "arms": []}"#).expect("parses");
-        assert_eq!(court.lane_count, Some(7));
-        assert_eq!(court.census, Census::default());
-    }
-
-    #[test]
-    fn ac5_hp_the_share_line_names_held_share_and_the_unattributed_bucket() {
-        let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
-
-        assert!(
-            text.contains("share    held 2 of share 7 across 4 kings"),
-            "{text}"
-        );
-        assert!(text.contains("2 unattributed (ghost-a, ghost-b)"), "{text}");
-    }
-
-    #[test]
-    fn an_empty_unattributed_bucket_renders_nothing() {
-        // Nobody in the bucket: the line stays clean rather than printing a
-        // zero that reads as a fact about liveness.
-        let mut court = live();
-        if let Some(share) = court.census.share.as_mut() {
-            share.unattributed = None;
-        }
-        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
-
-        assert!(text.contains("share    held 2 of share 7"), "{text}");
-        assert!(!text.contains("unattributed"), "{text}");
-    }
-
-    #[test]
-    fn torn_json_fails_quiet() {
-        assert!(parse(b"{not json").is_none());
-        assert!(parse(b"").is_none());
-    }
-
-    #[test]
-    fn a_refusal_with_no_reason_still_says_no_number_rather_than_printing_one() {
+    fn refusal_rows() {
         let mut court = live();
         court.lane_count = None;
         court.refused_reason = String::new();
@@ -819,20 +788,36 @@ mod tests {
 
         assert!(text.contains("REFUSED"), "{text}");
         assert!(text.contains("without naming a reason"), "{text}");
+
+        let court = parse(
+            br#"{"lane_count": null, "refused_reason": "arms dark",
+                 "census": {}, "arms": [{"name": "cpu admission", "state": "dark",
+                 "value": null, "reason": "the footprint reading is dark"}]}"#,
+        )
+        .expect("parses");
+
+        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(
+            text.contains("fleet    unknown - the footprint reading is dark"),
+            "{text}"
+        );
+        assert!(!text.contains("fleet 58%"), "{text}");
+
+        let mut court = live();
+        court.lane_count = None;
+        court.refused_reason =
+            "the machine arms cannot answer the lane question: memory dark (macmon not on PATH)"
+                .to_string();
+        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(text.contains("lanes    REFUSED"), "{text}");
+        assert!(text.contains("memory dark (macmon not on PATH)"), "{text}");
+        assert!(!text.contains("more fit"), "{text}");
     }
 
     #[test]
-    fn census_split_buckets_by_activity_age() {
-        let split = census_split(&AC6_AGES);
-        assert_eq!(split.working, 2); // 10s, 200s: under 5m
-        assert_eq!(split.idle, 2); // 900s, 4000s: 15m, 66m
-        assert_eq!(split.stale, 1); // 20000s: 5.6h
-        assert_eq!(split.dead, 1); // 40000s: 11h, the reap backlog
-        assert_eq!(split.unknown_age, 1);
-    }
-
-    #[test]
-    fn ac4_hp_every_load_number_names_its_unit_and_comparand() {
+    fn expanded_fleet_rows() {
         let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
 
         // the share renders as the deciding number, the trend trio is
@@ -851,90 +836,20 @@ mod tests {
         assert!(text.contains("64.9 GB available"), "{text}");
         assert!(text.contains("0 more fit"), "{text}");
         assert!(text.contains("0.0s ago"), "{text}");
-    }
 
-    #[test]
-    fn ac1_hp_minimized_block_is_three_glance_lines() {
-        let lines = opened(live()).minimized_lines(&AC6_AGES);
-
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(
-            lines[0].contains("58% of 12 cores against 50%"),
-            "{lines:?}"
-        );
-        assert!(lines[0].contains("1.2x"), "{lines:?}");
-        assert!(lines[1].contains("80% busy of 12 cores"), "{lines:?}");
-        assert!(
-            lines[2].contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"),
-            "{lines:?}"
-        );
-        assert!(lines[2].contains("(7 rows)"), "{lines:?}");
-    }
-
-    #[test]
-    fn ac2_hp_a_toggle_keeps_the_reading() {
-        let mut panel = opened(live());
-        panel.toggle();
-        assert!(panel.is_expanded());
-        panel.toggle();
-        assert!(!panel.is_expanded());
-        // Expanding never spawns a fold and never drops the cached reading.
-        assert!(!panel.take_want(), "inside the TTL no refetch");
-        assert!(panel
-            .expanded_lines(&AC6_AGES)
-            .join("\n")
-            .contains("5 kings"));
-    }
-
-    #[test]
-    fn ac5_edge_a_dark_load_arm_names_its_reason_rather_than_printing_a_number() {
-        let court = parse(
-            br#"{"lane_count": null, "refused_reason": "arms dark",
-                 "census": {}, "arms": [{"name": "cpu admission", "state": "dark",
-                 "value": null, "reason": "the footprint reading is dark"}]}"#,
-        )
-        .expect("parses");
-
+        // The 100%-busy reading was TRUE and read as a bug: the saturated
+        // line must name where the explanation lives.
+        let mut court = live();
+        let arm = court
+            .arms
+            .iter_mut()
+            .find(|a| a.name == "whole-machine cpu")
+            .expect("the cpu arm exists");
+        arm.value["busy_fraction"] = serde_json::json!(1.0);
         let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
 
-        assert!(
-            text.contains("fleet    unknown - the footprint reading is dark"),
-            "{text}"
-        );
-        assert!(!text.contains("fleet 58%"), "{text}");
-    }
+        assert!(text.contains("(all 12 saturated; see top)"), "{text}");
 
-    #[test]
-    fn ac6_hp_the_census_renders_a_split_not_a_total() {
-        let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
-
-        assert!(
-            text.contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age (7 rows)"),
-            "{text}"
-        );
-        assert!(
-            text.contains("1 dead: run `fno agents reap --apply`"),
-            "{text}"
-        );
-        // The lanes workers count is never rendered: the split replaced it.
-        assert!(!text.contains("45 workers"), "{text}");
-    }
-
-    #[test]
-    fn ac7_edge_no_age_anywhere_is_never_a_live_bucket() {
-        let ages = [None::<u64>, None, None];
-        let text = opened(live()).expanded_lines(&ages).join("\n");
-
-        assert!(text.contains("3 unknown age (3 rows)"), "{text}");
-        assert!(!text.contains("0 working"), "{text}");
-        assert!(!text.contains("0 idle"), "{text}");
-        assert!(!text.contains("0 stale"), "{text}");
-        assert!(!text.contains("0 dead"), "{text}");
-        assert!(!text.contains("reap"), "{text}");
-    }
-
-    #[test]
-    fn ac8_hp_top_consumers_name_the_process_and_the_worktree() {
         let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
 
         assert!(text.contains("fno-py 23 procs 41%"), "{text}");
@@ -946,10 +861,7 @@ mod tests {
             text.contains("18 of fno-agents-worker in .fno/worktrees/x-aaaa"),
             "{text}"
         );
-    }
 
-    #[test]
-    fn ac9_edge_an_absent_top_block_degrades_only_the_top_line() {
         let mut court = live();
         court.census.top_consumers = None;
         let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
@@ -967,23 +879,22 @@ mod tests {
     }
 
     #[test]
-    fn a_saturated_box_points_at_the_top_block() {
-        // The 100%-busy reading was TRUE and read as a bug: the saturated
-        // line must name where the explanation lives.
-        let mut court = live();
-        let arm = court
-            .arms
-            .iter_mut()
-            .find(|a| a.name == "whole-machine cpu")
-            .expect("the cpu arm exists");
-        arm.value["busy_fraction"] = serde_json::json!(1.0);
-        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
+    fn glance_rows() {
+        let lines = opened(live()).minimized_lines(&AC6_AGES);
 
-        assert!(text.contains("(all 12 saturated; see top)"), "{text}");
-    }
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].contains("58% of 12 cores against 50%"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("1.2x"), "{lines:?}");
+        assert!(lines[1].contains("80% busy of 12 cores"), "{lines:?}");
+        assert!(
+            lines[2].contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("(7 rows)"), "{lines:?}");
 
-    #[test]
-    fn a_pending_fold_minimized_says_so_rather_than_showing_zeroes() {
         let panel = Panel::default();
 
         let lines = panel.minimized_lines(&[]);
@@ -995,23 +906,7 @@ mod tests {
             "a pending fold must show no counts"
         );
         assert!(lines[1].is_empty() && lines[2].is_empty(), "{lines:?}");
-    }
 
-    #[test]
-    fn a_failed_fold_expanded_is_a_named_degrade_never_a_blank_panel() {
-        let mut panel = Panel::default();
-        assert!(panel.take_want());
-        panel.apply(None);
-
-        let lines = panel.expanded_lines(&[]);
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("fold failed"), "{lines:?}");
-        assert!(lines[0].contains("10s"), "{lines:?}");
-    }
-
-    #[test]
-    fn a_fold_failure_minimized_names_the_retry() {
         let mut panel = Panel::default();
         assert!(panel.take_want());
         panel.apply(None);
@@ -1022,7 +917,96 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fold_backs_off_to_the_next_ttl_boundary() {
+    fn panel_lifecycle_rows() {
+        let mut panel = opened(live());
+        panel.toggle();
+        assert!(panel.is_expanded());
+        panel.toggle();
+        assert!(!panel.is_expanded());
+        // Expanding never spawns a fold and never drops the cached reading.
+        assert!(!panel.take_want(), "inside the TTL no refetch");
+        assert!(panel
+            .expanded_lines(&AC6_AGES)
+            .join("\n")
+            .contains("5 kings"));
+
+        let mut panel = Panel::default();
+
+        assert!(panel.take_want());
+        assert!(
+            !panel.take_want(),
+            "holding the key down must not queue Python processes"
+        );
+    }
+
+    #[test]
+    fn census_rows() {
+        let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(
+            text.contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age (7 rows)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 dead: run `fno agents reap --apply`"),
+            "{text}"
+        );
+        // The lanes workers count is never rendered: the split replaced it.
+        assert!(!text.contains("45 workers"), "{text}");
+
+        let split = census_split(&AC6_AGES);
+        assert_eq!(split.working, 2); // 10s, 200s: under 5m
+        assert_eq!(split.idle, 2); // 900s, 4000s: 15m, 66m
+        assert_eq!(split.stale, 1); // 20000s: 5.6h
+        assert_eq!(split.dead, 1); // 40000s: 11h, the reap backlog
+        assert_eq!(split.unknown_age, 1);
+
+        let ages = [None::<u64>, None, None];
+        let text = opened(live()).expanded_lines(&ages).join("\n");
+
+        assert!(text.contains("3 unknown age (3 rows)"), "{text}");
+        assert!(!text.contains("0 working"), "{text}");
+        assert!(!text.contains("0 idle"), "{text}");
+        assert!(!text.contains("0 stale"), "{text}");
+        assert!(!text.contains("0 dead"), "{text}");
+        assert!(!text.contains("reap"), "{text}");
+
+        let text = opened(live()).expanded_lines(&[]).join("\n");
+
+        assert!(text.contains("no roster rows held"), "{text}");
+
+        let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(
+            text.contains("share    held 2 of share 7 across 4 kings"),
+            "{text}"
+        );
+        assert!(text.contains("2 unattributed (ghost-a, ghost-b)"), "{text}");
+
+        // Nobody in the bucket: the line stays clean rather than printing a
+        // zero that reads as a fact about liveness.
+        let mut court = live();
+        if let Some(share) = court.census.share.as_mut() {
+            share.unattributed = None;
+        }
+        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(text.contains("share    held 2 of share 7"), "{text}");
+        assert!(!text.contains("unattributed"), "{text}");
+    }
+
+    #[test]
+    fn fold_failure_rows() {
+        let mut panel = Panel::default();
+        assert!(panel.take_want());
+        panel.apply(None);
+
+        let lines = panel.expanded_lines(&[]);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("fold failed"), "{lines:?}");
+        assert!(lines[0].contains("10s"), "{lines:?}");
+
         let mut panel = Panel::default();
         assert!(panel.take_want());
         panel.apply(None);
@@ -1031,10 +1015,7 @@ mod tests {
         // not turn an instantly-failing fold into a hot refetch loop.
         assert!(!panel.take_want());
         assert!(panel.refresh_deadline().is_some_and(|t| t > Instant::now()));
-    }
 
-    #[test]
-    fn a_failed_refresh_over_a_stale_reading_never_leaves_a_past_due_deadline() {
         // The spin: a stale reading arms a refresh, the refresh fails, and
         // the retry backoff starts from NOW while the stale reading's due
         // time is already long past. The timer wake must wait for the
@@ -1046,10 +1027,7 @@ mod tests {
 
         assert!(!panel.take_want(), "still inside the retry backoff");
         assert!(panel.refresh_deadline().is_some_and(|t| t > Instant::now()));
-    }
 
-    #[test]
-    fn a_failed_refresh_over_a_good_reading_keeps_the_numbers_and_says_so() {
         let mut panel = opened(live());
         panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
         assert!(panel.take_want());
@@ -1065,10 +1043,7 @@ mod tests {
             text.contains("stale, refreshing) · last refresh failed"),
             "{text}"
         );
-    }
 
-    #[test]
-    fn a_successful_refresh_clears_the_failure_note() {
         let mut panel = opened(live());
         panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
         assert!(panel.take_want());
@@ -1085,15 +1060,12 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_inside_the_ttl_spawns_no_refold() {
+    fn ttl_rows() {
         let mut panel = opened(live());
 
         assert!(!panel.take_want(), "no refetch inside the TTL");
         assert!(panel.refresh_deadline().is_some_and(|t| t > Instant::now()));
-    }
 
-    #[test]
-    fn a_reading_past_the_ttl_refetches_and_keeps_showing_the_stale_reading() {
         let mut panel = opened(live());
         panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
 
@@ -1107,14 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_roster_says_so_instead_of_a_zero() {
-        let text = opened(live()).expanded_lines(&[]).join("\n");
-
-        assert!(text.contains("no roster rows held"), "{text}");
-    }
-
-    #[test]
-    fn the_attribution_gap_gets_its_own_line_and_never_a_count() {
+    fn census_degrade_rows() {
         // made the gap honest. A panel that folded it into a count
         // would re-open the hole: the gap is a process-to-row failure and
         // cannot change how many rows exist.
@@ -1126,10 +1091,7 @@ mod tests {
         assert!(text.contains("11 pidless row(s)"), "{text}");
         assert!(text.contains("undercount, not headroom"), "{text}");
         assert!(text.contains("5 kings"), "{text}");
-    }
 
-    #[test]
-    fn an_unreadable_census_renders_unknown_never_a_fabricated_zero() {
         let mut court = live();
         court.census = Census {
             tests: Some(3),
@@ -1138,10 +1100,7 @@ mod tests {
         let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
 
         assert!(text.contains("unknown kings · 3 test processes"), "{text}");
-    }
 
-    #[test]
-    fn a_king_conflict_is_warned_because_a_bare_count_hides_it() {
         let mut court = live();
         court.census.king_conflicts = Some(2);
 
@@ -1150,31 +1109,6 @@ mod tests {
         assert!(
             text.contains("2 scope(s) held by more than one crown"),
             "{text}"
-        );
-    }
-
-    #[test]
-    fn a_refusal_carries_the_advisors_words_and_no_lane_number() {
-        let mut court = live();
-        court.lane_count = None;
-        court.refused_reason =
-            "the machine arms cannot answer the lane question: memory dark (macmon not on PATH)"
-                .to_string();
-        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
-
-        assert!(text.contains("lanes    REFUSED"), "{text}");
-        assert!(text.contains("memory dark (macmon not on PATH)"), "{text}");
-        assert!(!text.contains("more fit"), "{text}");
-    }
-
-    #[test]
-    fn only_one_fold_is_ever_in_flight() {
-        let mut panel = Panel::default();
-
-        assert!(panel.take_want());
-        assert!(
-            !panel.take_want(),
-            "holding the key down must not queue Python processes"
         );
     }
 
