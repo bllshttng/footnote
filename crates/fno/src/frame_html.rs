@@ -488,46 +488,6 @@ pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::P
 mod tests {
     use super::*;
 
-    fn line_frame(text: &str) -> Frame {
-        let cells: Vec<Cell> = text
-            .chars()
-            .map(|c| Cell {
-                c,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: 0,
-            })
-            .collect();
-        Frame {
-            rows: 1,
-            cols: cells.len() as u16,
-            cells,
-            cursor_row: 0,
-            cursor_col: 0,
-            cursor_visible: true,
-            scroll_offset: 0,
-        }
-    }
-
-    /// A published shot fills with the chosen theme's own background, keeps
-    /// inner spaces on the grid, and escapes markup in pane text.
-    #[test]
-    fn svg_paints_the_named_theme_and_escapes_text() {
-        let frame = line_frame("a <b>  c");
-        for (name, theme) in [("dark", DARK), ("light", LIGHT)] {
-            assert_eq!(theme_by_name(name), Some(theme));
-            let svg = frame_svg(&frame, theme);
-            assert!(
-                svg.contains(&format!("fill=\"{}\"", hex(theme.bg))),
-                "{svg}"
-            );
-            assert!(svg.contains("xml:space=\"preserve\""));
-            assert!(svg.contains("a &lt;b&gt;  c"), "{svg}");
-            assert!(screen_html(&frame, theme).contains(&format!("background:{}", hex(theme.bg))));
-        }
-        assert_eq!(theme_by_name("solarized"), None);
-    }
-
     fn cell(flags: u8) -> Cell {
         Cell {
             c: 'x',
@@ -552,12 +512,6 @@ mod tests {
             "on a light theme bold over inverse should LOSE contrast: \
              plain {plain:.2} vs bold {bolded:.2}"
         );
-    }
-
-    #[test]
-    fn inverse_swaps_the_pair() {
-        let ((fr, _, _), (br, _, _)) = cell_colors(&cell(cell_flags::INVERSE), DARK);
-        assert_eq!((fr, br), (DARK.bg.0, DARK.fg.0));
     }
 
     #[test]

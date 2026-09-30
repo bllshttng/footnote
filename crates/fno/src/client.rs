@@ -44,9 +44,8 @@ use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, Swee
 use self::rename_overlay::RenameTarget;
 use row_menu::{build_row_menu, build_tab_menu};
 
-// The placement pickers (attach `p`, portal `P`) and the launch moment
-// (terminal guard + splash) live in their own modules; client.rs is
-// shrink-only under the file-budget gate.
+// Pickers, the launch moment and the snapshot action live in their own
+// modules: client.rs is shrink-only under the file-budget gate.
 mod launch;
 mod placement_pickers;
 pub mod snapshot;
@@ -85,8 +84,7 @@ pub(crate) use overlay_paint::family_b_origin;
 use sideline::sideline_column_rects;
 
 mod row_stamp;
-// (v75) The sideline's density width rules, moved out under the file-budget
-// ratchet while the SessionRetired arms landed.
+// The sideline's density width rules.
 mod density_width;
 mod name_fit;
 use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};

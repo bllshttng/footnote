@@ -545,41 +545,40 @@ async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::cell_flags;
 
-    fn os(args: &[&str]) -> Vec<OsString> {
-        args.iter().map(OsString::from).collect()
-    }
-
-    /// The default source is the staged fleet: its names are on the picture,
-    /// in both themes, and no cursor block is drawn.
+    /// The default source is the staged fleet, and each theme paints it on
+    /// its own background: markup in pane text is escaped, and an inverse
+    /// cell becomes a rect in the theme's foreground (the terminal's swap).
     #[test]
     fn snapshot_demo_fleet_renders_in_both_themes() {
         let dir = tempfile::tempdir().unwrap();
         crate::view_store::set_test_path(dir.path());
-        let frame = demo_frame((34, 150));
+        let mut frame = demo_frame((34, 150));
         crate::view_store::clear_test_path();
         let text = crate::vt::frame_text(&frame);
         for name in ["archer", "reviewer", "checkout", "rate limiting"] {
             assert!(text.contains(name), "{name} missing:\n{text}");
         }
+        let last = frame.cells.len() - 1;
+        frame.cells[last] = Cell {
+            c: 'x',
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: cell_flags::INVERSE,
+        };
         for theme in [frame_html::DARK, frame_html::LIGHT] {
+            let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
             let svg = frame_html::frame_svg(&frame, theme);
-            assert!(svg.contains("archer"));
+            assert!(svg.contains(&format!("height=\"100%\" fill=\"{}\"", hex(theme.bg))));
+            assert!(
+                svg.contains(&format!("height=\"17\" fill=\"{}\"", hex(theme.fg))),
+                "inverse cell not swapped"
+            );
+            assert!(svg.contains("xml:space=\"preserve\""));
+            assert!(svg.contains("&gt; add rate limiting"), "prompt not escaped");
+            let html = frame_html::screen_html(&frame, theme);
+            assert!(html.contains(&format!("background:{}", hex(theme.bg))));
         }
-    }
-
-    #[test]
-    fn snapshot_parse_names_bad_values() {
-        let ok = parse(&os(&["--snapshot", "--out", "x.png", "--theme", "light"])).unwrap();
-        assert_eq!(ok.format, Format::Png);
-        assert_eq!(ok.theme, frame_html::LIGHT);
-        assert!(ok.server.is_none());
-        let bad = parse(&os(&["--snapshot", "--out", "x", "--theme", "neon"])).unwrap_err();
-        assert!(bad.contains("dark, light or macchiato"), "{bad}");
-        let bad = parse(&os(&["--snapshot", "--out", "x", "--format", "gif"])).unwrap_err();
-        assert!(bad.contains("html, svg or png"), "{bad}");
-        assert!(parse(&os(&["--snapshot"]))
-            .unwrap_err()
-            .contains("--out is required"));
     }
 }

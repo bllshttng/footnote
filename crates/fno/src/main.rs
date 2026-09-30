@@ -1016,6 +1016,21 @@ mod tests {
             ),
             Role::MuxSnapshot(os(&["--snapshot", "--out", "a.svg"]))
         );
+        // Its flags parse in client::snapshot; a bad value names the valid ones.
+        let snap = |a: &[&str]| fno::client::snapshot::parse(&os(a));
+        let ok = snap(&["--snapshot", "--out", "x.png", "--theme", "light"]).unwrap();
+        assert!(ok.server.is_none() && ok.theme == fno::frame_html::LIGHT);
+        assert!(matches!(ok.format, fno::client::snapshot::Format::Png));
+        for (flag, value, named) in [
+            ("--theme", "neon", "dark, light or macchiato"),
+            ("--format", "gif", "html, svg or png"),
+        ] {
+            let err = snap(&["--snapshot", "--out", "x", flag, value]).unwrap_err();
+            assert!(err.contains(named), "{err}");
+        }
+        assert!(snap(&["--snapshot"])
+            .unwrap_err()
+            .contains("--out is required"));
         assert_eq!(
             decide_role(&os(&["mux", "squad"]), false),
             Role::MuxRemoved("squad".into())
