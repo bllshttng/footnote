@@ -241,6 +241,7 @@ pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;

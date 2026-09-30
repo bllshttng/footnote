@@ -22,7 +22,7 @@ use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
-use crate::king_checkin::main_ci_red_run;
+use crate::main_ci::main_ci_red_run;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -406,8 +406,8 @@ pub trait Probes {
         0
     }
     /// The base branch `main`'s CI verdict, read by the king check-in's own
-    /// reduction (`king_checkin::main_ci_reading`, behind a short TTL row
-    /// cache): a red object naming the failed workflow and head sha, or the
+    /// reduction (`main_ci::main_ci_reading`, behind a short TTL row cache):
+    /// a red object naming the failed workflow and head sha, or the
     /// `green`/`pending` word. `Err` = the read could not answer, which never
     /// reads as red. Default `pending` keeps the gate disarmed wherever an
     /// impl does not read main.
@@ -1470,7 +1470,7 @@ impl Probes for RealProbes {
     }
 
     fn main_ci_token(&self, cwd: &Path) -> Result<Value, String> {
-        crate::king_checkin::main_ci_reading_cached(cwd)
+        crate::main_ci::main_ci_reading_cached(cwd)
     }
 
     fn main_repair_hold(&self, cwd: &Path, facts: &PrFacts) -> Option<String> {
