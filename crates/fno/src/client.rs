@@ -928,7 +928,7 @@ struct View {
     /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
     /// it is open, so an index into `feed.items` would silently re-point at a
     /// different event; the inspected event never changes under the reader.
-    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    feed_detail: Option<feed_detail::FeedDetailModal>,
     /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
     /// safety as [`View::ans_esc`]).
     feed_esc: Vec<u8>,
@@ -2042,7 +2042,7 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
-            feed_detail_of: None,
+            feed_detail: None,
             feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
@@ -5303,15 +5303,8 @@ impl View {
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(item) = &self.feed_detail_of {
-            feed_detail::draw(
-                self,
-                item,
-                &mut cells,
-                (rows, cols),
-                overlay_origin,
-                overlay_dims,
-            );
+        if let Some(m) = &self.feed_detail {
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if questions::draw_detail(
             self,
             &mut cells,
@@ -9612,6 +9605,13 @@ async fn handle_stdin(
         {
             view.link_hover.clear();
         }
+        // The feed's provenance modal owns the pointer while open (hover
+        // selects, a click runs the row's action, a click off the popup
+        // dismisses) and is swallowed - it is the top surface.
+        if view.feed_detail.is_some() {
+            feed_detail_mouse(view, rep, sock_w).await?;
+            continue;
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
@@ -10704,8 +10704,12 @@ async fn apply_hit(
             view.open_sideline_menu(Anchor::At { row, col })
         }
         // Inspect first. The deep link is this view's own action, not the
-        // click path that opened it.
-        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
+        // click path that opened it. The modal resolves the roster once, at
+        // open - a later fold replaces the rows, never the open read.
+        ChromeHit::OpenFeedDetail(item) => {
+            let m = feed_detail::modal(view, item);
+            view.feed_detail = Some(m);
+        }
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
@@ -11426,6 +11430,52 @@ async fn row_menu_keys(
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// One mouse report while the feed's provenance modal is open: hover
+/// selects, a left click on the shared esc close target (footer words or
+/// border chip) closes, a click on a target runs that row's action, a click
+/// inside the block that hits no target is swallowed, a click off the popup
+/// dismisses. The row-menu contract, on the feed's own actions.
+async fn feed_detail_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = feed_detail::hit_at(view, rep.row, rep.col) {
+                if let Some(m) = view.feed_detail.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => {
+            let close = match view.feed_detail.as_ref() {
+                Some(m) => view.chrome_close_hit(&m.popup, rep.row, rep.col),
+                None => false,
+            };
+            if close {
+                view.feed_detail = None;
+                return Ok(());
+            }
+            match feed_detail::hit_at(view, rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.feed_detail.as_mut() {
+                        m.popup.select(t);
+                    }
+                    feed_detail::execute_selected(view, sock_w).await?;
+                }
+                None => {
+                    if !feed_detail::block_contains(view, rep.row, rep.col) {
+                        view.feed_detail = None;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// One mouse report while the row menu is open (US2): hover selects, a

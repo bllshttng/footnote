@@ -53,6 +53,47 @@ pub(crate) struct FeedOverlay {
     /// When the last fold LANDED. Arms the 15s auto-refresh; `None` until the
     /// first fold lands, and the first landing resets to the newest row.
     pub(crate) last_fold: Option<Instant>,
+    /// The row order the panel renders in, persisted per client (`o` toggles).
+    pub(crate) order: FeedOrder,
+}
+
+/// The panel's row order. `Grouped` is the shipped order (one header per
+/// owner, groups ordered by their newest row); `Recent` is one flat list,
+/// newest first. The operator toggles with `o`; the choice persists through
+/// the view store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FeedOrder {
+    #[default]
+    Grouped,
+    Recent,
+}
+
+impl FeedOrder {
+    /// The view-store spelling.
+    fn key(self) -> &'static str {
+        match self {
+            FeedOrder::Grouped => "grouped",
+            FeedOrder::Recent => "recent",
+        }
+    }
+
+    /// The stored spelling back; anything unreadable stays `None` so the
+    /// caller can fall to the shipped order.
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "grouped" => Some(FeedOrder::Grouped),
+            "recent" => Some(FeedOrder::Recent),
+            _ => None,
+        }
+    }
+
+    /// One press of `o`. A two-state cycle, so every press changes the order.
+    fn next(self) -> Self {
+        match self {
+            FeedOrder::Grouped => FeedOrder::Recent,
+            FeedOrder::Recent => FeedOrder::Grouped,
+        }
+    }
 }
 
 /// A fresh open: the prior items ride over (instant content), but a refold is
@@ -60,7 +101,10 @@ pub(crate) struct FeedOverlay {
 /// cheap and off-loop.
 pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay {
     let items = prior.map(|f| f.items).unwrap_or_default();
-    let sel = first_item_slot(&items);
+    let order = crate::view_store::load_feed_order()
+        .and_then(|o| FeedOrder::parse(&o))
+        .unwrap_or_default();
+    let sel = first_item_slot(&items, order);
     FeedOverlay {
         items,
         sel,
@@ -71,6 +115,7 @@ pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay 
         focused: false,
         hpan: 0,
         last_fold: None,
+        order,
     }
 }
 
@@ -90,10 +135,22 @@ fn in_crowns_band(kind: &str, crown: &Option<String>) -> bool {
         || (kind == "session_reaped" && crown.is_some())
 }
 
-/// The display order: the crowns band first (newest first), then one header
+/// The display order for one panel order. `Grouped` is the shipped shape;
+/// `Recent` is every row, newest first, no headers - one flat list the
+/// operator reads top as now.
+pub(crate) fn display_slots(items: &[FeedItem], order: FeedOrder) -> Vec<Slot> {
+    match order {
+        FeedOrder::Grouped => display_slots_grouped(items),
+        // Storage indexes ascending = oldest first, so the reversed range is
+        // the flat newest-first list.
+        FeedOrder::Recent => (0..items.len()).rev().map(Slot::Item).collect(),
+    }
+}
+
+/// The grouped order: the crowns band first (newest first), then one header
 /// per owner, groups ordered by their newest row, then the unowned rows under
 /// `other`. Within a group, newest first; ties keep storage order.
-pub(crate) fn display_slots(items: &[FeedItem]) -> Vec<Slot> {
+fn display_slots_grouped(items: &[FeedItem]) -> Vec<Slot> {
     let mut crowns: Vec<usize> = Vec::new();
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
@@ -152,6 +209,17 @@ fn ts_key_of(ts: &str) -> (u8, i64) {
     }
 }
 
+/// The kind as printed. The ship event renamed to `node_shipped` (ruling
+/// 2026-09-29); the projection derives rows at read time, so only a string
+/// embedded in an older surface spells the old name - this is the one reader.
+pub(crate) fn display_kind(kind: &str) -> &str {
+    if kind == "pr_created" {
+        "node_shipped"
+    } else {
+        kind
+    }
+}
+
 /// True for kinds whose event NEEDS ACTION, so the kind renders bold in the
 /// theme's accent: a question waiting, a crown leaving, a crowned session
 /// removed.
@@ -177,9 +245,12 @@ pub(crate) fn feed_panel_rows(
     // ONLY place the focus key is advertised, so it degrades to a shorter
     // spelling on a narrow panel rather than being clipped away.
     let mut rows: Vec<Vec<Span>> = Vec::new();
-    rows.push(vec![Span::plain(pad_to(header_line(o.focused, w), w))]);
+    rows.push(vec![Span::plain(pad_to(
+        &header_line(o.focused, o.order, w),
+        w,
+    ))]);
     let visible = visible_rows.saturating_sub(2);
-    let slots = display_slots(&o.items);
+    let slots = display_slots(&o.items, o.order);
     for d in offset..offset + visible {
         match slots.get(d) {
             Some(Slot::Header(label)) => {
@@ -197,7 +268,7 @@ pub(crate) fn feed_panel_rows(
                 let node = item.node.as_deref().unwrap_or("-");
                 let ts = short_ts(&item.ts);
                 let title = pan_by(&item.title, o.hpan);
-                let kind = format!("{:<16}", item.kind);
+                let kind = format!("{:<16}", display_kind(&item.kind));
                 let mut row = vec![
                     Span::plain(format!(" {marker} {ts} ")),
                     Span {
@@ -232,9 +303,9 @@ pub(crate) fn feed_panel_rows(
     } else if o.inflight && o.items.is_empty() {
         "   folding...".to_string()
     } else if o.items.len() >= 200 {
-        "   200+ events · newest first".to_string()
+        format!("   200+ events · {}", o.order.key())
     } else {
-        format!("   {} events · newest first", o.items.len())
+        format!("   {} events · {}", o.items.len(), o.order.key())
     };
     rows.push(vec![Span::plain(pad_to(&footer, w))]);
     rows
@@ -297,11 +368,12 @@ pub(crate) fn feed_row_item(
     painted_row: usize,
     visible_rows: usize,
     offset: usize,
+    order: FeedOrder,
 ) -> Option<usize> {
     if painted_row == 0 || painted_row + 1 >= visible_rows {
         return None;
     }
-    match display_slots(items).get(offset + painted_row - 1) {
+    match display_slots(items, order).get(offset + painted_row - 1) {
         Some(Slot::Item(i)) => Some(*i),
         _ => None,
     }
@@ -315,26 +387,33 @@ pub(crate) fn feed_row_item(
 /// The last spelling in each list leads with the KEY. The panel drags
 /// narrower than any prose fits, and the caller pads and clips from the end,
 /// so a label-first fallback loses the only place the key is advertised.
-pub(crate) fn header_line(focused: bool, w: usize) -> &'static str {
-    let candidates: [&str; 4] = if focused {
+pub(crate) fn header_line(focused: bool, order: FeedOrder, w: usize) -> String {
+    // The order word rides the FOCUSED spellings: `o` is a panel key, and
+    // the header is the only place the key is advertised. Key-led fallbacks
+    // for the widths prose cannot reach.
+    let order_word = order.key();
+    let candidates: [String; 4] = if focused {
         [
-            " FEED FOCUSED · up/down row · left/right pan · enter details · esc release",
-            " FEED FOCUSED · arrows move · enter details · esc release",
-            " FOCUSED · enter details · esc release",
-            " esc release",
+            format!(
+                " FEED FOCUSED · up/down row · enter details · o order: {order_word} · esc release"
+            ),
+            format!(" FOCUSED · arrows move · enter details · o {order_word} · esc release"),
+            format!(" FOCUSED · enter details · o {order_word} · esc release"),
+            " esc release".to_string(),
         ]
     } else {
         [
-            " activity feed · click row for details · E focus · e close",
-            " activity feed · click: details · E focus · e close",
-            " feed · click: details · E focus",
-            " E focus",
+            " activity feed · click row for details · E focus · e close".to_string(),
+            " activity feed · click: details · E focus · e close".to_string(),
+            " feed · click: details · E focus".to_string(),
+            " E focus".to_string(),
         ]
     };
+    let narrowest = if focused { " esc release" } else { " E focus" };
     candidates
         .into_iter()
-        .find(|c| unicode_width::UnicodeWidthStr::width(*c) <= w)
-        .unwrap_or(candidates[candidates.len() - 1])
+        .find(|c| unicode_width::UnicodeWidthStr::width(c.as_str()) <= w)
+        .unwrap_or_else(|| narrowest.to_string())
 }
 
 /// Drop `cols` DISPLAY columns off the front of `s`, so a pan never splits a
@@ -498,7 +577,7 @@ impl View {
             return;
         };
         let visible = (self.term.0 as usize).saturating_sub(2); // header + footer
-        let slot_len = display_slots(&f.items).len();
+        let slot_len = display_slots(&f.items, f.order).len();
         let max_off = slot_len.saturating_sub(visible);
         self.feed_offset = if max_off == 0 {
             0
@@ -516,7 +595,7 @@ impl View {
             return 0;
         };
         let visible = (self.term.0 as usize).saturating_sub(2); // header + footer
-        let slot_len = display_slots(&f.items).len();
+        let slot_len = display_slots(&f.items, f.order).len();
         if slot_len <= visible {
             return 0;
         }
@@ -620,9 +699,16 @@ impl View {
             row as usize,
             self.term.0 as usize,
             self.feed_offset_clamped(),
+            f.order,
         )
         .and_then(|i| {
             let item = f.items.get(i)?;
+            // A question row answers from the feed: the whole question opens
+            // on the same path the questions view uses, never a provenance
+            // detour (ruling 2026-09-29).
+            if item.kind == "question_asked" {
+                return item.r#ref.clone().map(ChromeHit::OpenQuestionDetail);
+            }
             Some(ChromeHit::OpenFeedDetail(item.clone()))
         })
     }
@@ -639,7 +725,9 @@ impl View {
         if visible == 0 {
             return;
         }
-        let max_off = display_slots(&f.items).len().saturating_sub(visible);
+        let max_off = display_slots(&f.items, f.order)
+            .len()
+            .saturating_sub(visible);
         let sel = f.sel;
         let mut off = self.feed_offset.min(max_off);
         if sel < off {
@@ -658,25 +746,24 @@ impl View {
             return;
         };
         // `sel` is a SLOT index (headers included); a header has no detail.
-        let Some(item) = display_slots(&f.items).get(f.sel).and_then(|s| match s {
-            Slot::Item(i) => f.items.get(*i),
-            Slot::Header(_) => None,
-        }) else {
+        let Some(item) = display_slots(&f.items, f.order)
+            .get(f.sel)
+            .and_then(|s| match s {
+                Slot::Item(i) => f.items.get(*i),
+                Slot::Header(_) => None,
+            })
+        else {
             return;
         };
-        self.feed_detail_of = Some(item.clone());
-    }
-
-    /// What the provenance view's Enter does, resolved from the SAME evidence
-    /// the view rendered its footer from - one `Destination`, read twice. Resolving
-    /// it twice is how the footer came to promise a command the action did not
-    /// send: the footer joined on the exact session id while the action joined
-    /// on the row name, so a node_created row with a live worker on that node
-    /// read `esc close` and then focused a pane.
-    pub(super) fn feed_detail_hit(&self) -> Option<ChromeHit> {
-        let item = self.feed_detail_of.as_ref()?;
-        let dest = feed_detail::destination(&self.layout.agents, item);
-        feed_detail::detail_hit(self, &dest)
+        // A question row answers from the feed, the same question view the
+        // questions block opens (ruling 2026-09-29).
+        if item.kind == "question_asked" {
+            if let Some(qid) = item.r#ref.as_deref() {
+                self.open_detail_on(qid);
+                return;
+            }
+        }
+        self.feed_detail = Some(feed_detail::modal(self, item.clone()));
     }
 
     /// The hover marker follows the pointer inside the panel; anything else
@@ -689,13 +776,15 @@ impl View {
         let d = if feed_w > 0 && col > self.term.1 - feed_w {
             let items = &self.feed.as_ref().unwrap().items;
             // The resolver answers in STORAGE indexes; `sel` is a SLOT index.
+            let order = self.feed.as_ref().map(|f| f.order).unwrap_or_default();
             feed_row_item(
                 items,
                 row as usize,
                 self.term.0 as usize,
                 self.feed_offset_clamped(),
+                order,
             )
-            .map(|storage| slot_of(items, storage))
+            .map(|storage| slot_of(items, storage, order))
             .unwrap_or(0)
         } else {
             0
@@ -754,7 +843,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
             let kept = if first {
                 None
             } else {
-                display_slots(&f.items)
+                display_slots(&f.items, f.order)
                     .get(f.sel)
                     .and_then(|s| match s {
                         Slot::Item(i) => f.items.get(*i),
@@ -763,9 +852,10 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
                     .map(|item| (item.ts.clone(), item.kind.clone(), item.title.clone()))
             };
             f.items = items;
+            let order = f.order;
             match kept {
                 None => {
-                    f.sel = first_item_slot(&f.items);
+                    f.sel = first_item_slot(&f.items, order);
                     view.feed_offset = 0;
                 }
                 Some((ts, kind, title)) => {
@@ -773,7 +863,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
                         .items
                         .iter()
                         .position(|i| i.ts == ts && i.kind == kind && i.title == title)
-                        .map(|storage| slot_of(&f.items, storage))
+                        .map(|storage| slot_of(&f.items, storage, order))
                         .unwrap_or(0);
                 }
             }
@@ -785,8 +875,8 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
 
 /// The first ITEM slot: where a fresh selection parks, so the marker never
 /// sits on a group header.
-pub(crate) fn first_item_slot(items: &[FeedItem]) -> usize {
-    display_slots(items)
+pub(crate) fn first_item_slot(items: &[FeedItem], order: FeedOrder) -> usize {
+    display_slots(items, order)
         .iter()
         .position(|s| matches!(s, Slot::Item(_)))
         .unwrap_or(0)
@@ -794,8 +884,8 @@ pub(crate) fn first_item_slot(items: &[FeedItem]) -> usize {
 
 /// The SLOT index a storage index renders at, for selection-keeping across
 /// folds. A header-hunting fallback lands on the newest row.
-fn slot_of(items: &[FeedItem], storage: usize) -> usize {
-    display_slots(items)
+fn slot_of(items: &[FeedItem], storage: usize, order: FeedOrder) -> usize {
+    display_slots(items, order)
         .iter()
         .position(|s| matches!(s, Slot::Item(i) if *i == storage))
         .unwrap_or(0)
@@ -820,7 +910,7 @@ pub(crate) async fn toggle(
         // Closing releases the keyboard with the panel, so a later reopen
         // never starts already holding it.
         view.feed = None;
-        view.feed_detail_of = None;
+        view.feed_detail = None;
         // A half-read escape sequence must not survive the close: carried
         // into the next focus it folds with the fresh bytes into a key
         // nobody pressed.
@@ -929,19 +1019,28 @@ pub(crate) async fn feed_keys(
     let toks = fold_modal_keys(&mut esc, bytes);
     view.feed_esc = esc;
     for tok in toks {
-        if view.feed_detail_of.is_some() {
+        if view.feed_detail.is_some() {
+            let trows = view.term.0.max(1) as usize;
             match tok {
                 ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
-                    view.feed_detail_of = None;
+                    view.feed_detail = None;
                 }
-                ModalKey::Enter => {
-                    // The deep link is the view's ACTION, never its opening
-                    // gesture: inspecting attaches and resumes nothing.
-                    if let Some(hit) = view.feed_detail_hit() {
-                        apply_hit(view, hit, sock_w).await?;
+                ModalKey::Up => {
+                    if let Some(m) = view.feed_detail.as_mut() {
+                        m.popup.nav(crate::popup::NavDir::Up);
+                        m.popup.follow_sel(trows);
                     }
-                    view.feed_detail_of = None;
                 }
+                ModalKey::Down => {
+                    if let Some(m) = view.feed_detail.as_mut() {
+                        m.popup.nav(crate::popup::NavDir::Down);
+                        m.popup.follow_sel(trows);
+                    }
+                }
+                // The selected row's action, never the modal's dismissal:
+                // inspecting stays open so the next field is one arrow away.
+                ModalKey::Enter => feed_detail::execute_selected(view, sock_w).await?,
+                ModalKey::Byte(b'y') => feed_detail::copy_selected(view),
                 _ => {}
             }
             continue;
@@ -953,12 +1052,12 @@ pub(crate) async fn feed_keys(
         let Some(f) = view.feed.as_mut() else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
-        let len = display_slots(&f.items).len();
+        let len = display_slots(&f.items, f.order).len();
         match tok {
             ModalKey::Esc => {}
             ModalKey::Up => {
                 // The marker skips headers: the nearest ITEM slot above.
-                let slots = display_slots(&f.items);
+                let slots = display_slots(&f.items, f.order);
                 f.sel = (0..f.sel)
                     .rev()
                     .find(|s| matches!(slots.get(*s), Some(Slot::Item(_))))
@@ -966,7 +1065,7 @@ pub(crate) async fn feed_keys(
                 view.follow_feed_selection();
             }
             ModalKey::Down => {
-                let slots = display_slots(&f.items);
+                let slots = display_slots(&f.items, f.order);
                 f.sel = (f.sel + 1..slots.len())
                     .find(|s| matches!(slots.get(*s), Some(Slot::Item(_))))
                     .unwrap_or(f.sel);
@@ -993,6 +1092,12 @@ pub(crate) async fn feed_keys(
                 view.follow_feed_selection();
             }
             ModalKey::Enter => view.open_feed_detail(),
+            // The order toggle: the panel's ONE local preference, persisted
+            // per client like the dragged width.
+            ModalKey::Byte(b'o') => {
+                f.order = f.order.next();
+                crate::view_store::save_feed_order(f.order.key());
+            }
             ModalKey::Byte(_) => {}
         }
     }

@@ -114,7 +114,7 @@ pub(super) async fn route(
     // explicit, and both release back to the pane on Esc, so the property
     // this slot protects - typing reaches the focused pane - holds by
     // default and is set aside only on request.
-    if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
+    if view.feed_detail.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
         return Some(super::feed_view::feed_keys(view, bytes, sock_w).await);
     }
     if view.create.is_some() {

@@ -49,6 +49,10 @@ pub enum PopupRow {
     Header(String),
     /// A horizontal rule separator, not selectable.
     Rule,
+    /// A read-only field row: the label in the fixed key column (accent, the
+    /// bold left column a field list reads by), the value plain. No target
+    /// and no hit span: a modal's provenance text, never an action.
+    Info { label: String, value: String },
     /// A selectable action: glyph + label + right-aligned key hint.
     Entry {
         glyph: String,
@@ -90,7 +94,7 @@ impl PopupRow {
             PopupRow::Entry { enabled: false, .. }
             | PopupRow::SwatchEntry { enabled: false, .. } => 0,
             PopupRow::Entry { .. } | PopupRow::SwatchEntry { .. } | PopupRow::FullWidth(_) => 1,
-            PopupRow::Header(_) | PopupRow::Rule => 0,
+            PopupRow::Header(_) | PopupRow::Rule | PopupRow::Info { .. } => 0,
         }
     }
 }
@@ -118,7 +122,10 @@ fn validate_menu_glyphs(rows: &[PopupRow]) {
                     );
                 }
             }
-            PopupRow::Header(_) | PopupRow::Rule | PopupRow::FullWidth(_) => {}
+            PopupRow::Header(_)
+            | PopupRow::Rule
+            | PopupRow::FullWidth(_)
+            | PopupRow::Info { .. } => {}
         }
     }
 }
@@ -333,8 +340,8 @@ impl Popup {
     }
 
     /// The fixed key-column width for a plain-body popup: the widest entry
-    /// glyph, so descriptions start on one column. Non-plain popups never
-    /// call it.
+    /// glyph or Info label, so descriptions start on one column. Non-plain
+    /// popups never call it.
     fn key_col_w(&self) -> usize {
         self.rows
             .iter()
@@ -342,6 +349,7 @@ impl Popup {
                 PopupRow::Entry { glyph, .. } | PopupRow::SwatchEntry { glyph, .. } => {
                     Some(chrome::str_cols(glyph))
                 }
+                PopupRow::Info { label, .. } => Some(chrome::str_cols(label)),
                 _ => None,
             })
             .max()
@@ -462,6 +470,7 @@ impl Popup {
             .map(|r| match r {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
                 PopupRow::Rule => 0,
+                PopupRow::Info { label: _, value } => 1 + kw + 1 + chrome::str_cols(value) + 2,
                 PopupRow::Entry {
                     glyph, label, hint, ..
                 } => {
@@ -556,6 +565,22 @@ impl Popup {
                     segs: vec![],
                     pad_role: Role::PanelMeta,
                 },
+                PopupRow::Info { label, value } => {
+                    // The plain two-column shape, inert: the label sits in the
+                    // fixed key column as accent text (the bold left column a
+                    // field list reads by), the value plain. No hit span and
+                    // no selection: provenance text, never an action.
+                    let text = pad(&format!(" {} {}", pad(label, kw), value), width);
+                    RenderedLine {
+                        text,
+                        disabled: false,
+                        sel_span: None,
+                        hits: vec![],
+                        roles: vec![],
+                        segs: vec![(1usize, kw, Role::BodyAccent)],
+                        pad_role: Role::PanelBody,
+                    }
+                }
                 PopupRow::FullWidth(s) => {
                     let ti = target_idx;
                     target_idx += 1;
