@@ -202,8 +202,6 @@ fn render_rows() {
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
 }
 
-
-
 #[test]
 fn hit_rows() {
     // The cwd basename is the node id: the join the sideline itself uses.
@@ -232,7 +230,6 @@ fn hit_rows() {
         "no session, no session action"
     );
 }
-
 
 #[tokio::test]
 async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() {
@@ -275,7 +272,6 @@ fn empty_rows() {
     assert!(!lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.iter().any(|l| l.contains("folding...")));
 }
-
 
 #[test]
 fn click_rows() {
@@ -361,7 +357,6 @@ fn click_rows() {
     assert!(v.chrome_hit(0, col).is_none());
     assert!(v.chrome_hit((v.term.0 - 1) as u16, col).is_none());
 }
-
 
 #[test]
 fn width_rows() {
@@ -477,10 +472,6 @@ fn width_rows() {
         "the wide glyph reserves both cells"
     );
 }
-
-
-
-
 
 // (AC4) The narrowed invariant, both halves. An unfocused panel takes no
 // keys, so the header says how to focus and the marker does not move; a
@@ -604,7 +595,6 @@ fn header_rows() {
 // says, since no removal record carries the measurement on a field yet.
 #[test]
 fn detail_field_rows() {
-    use crate::client::feed_detail;
     let item = reaped_item(
         "00847995-e0db-47c2-ab5b-24468ba1a4f5",
         "resume: claude --resume x",
@@ -634,7 +624,6 @@ fn detail_field_rows() {
     assert_eq!(values[i], "resume: claude --resume x");
     assert!(labels.iter().any(|l| l == "resume"), "{labels:?}");
 
-    use crate::client::feed_detail;
     let mut row = joined_row("some-other-name", None, Some(0));
     row.harness_session_id = Some("s-9".into());
     row.portal = Some(0);

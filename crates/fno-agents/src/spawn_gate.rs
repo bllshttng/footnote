@@ -3310,7 +3310,6 @@ MemAvailable:    8000000 kB\n";
     /// with no grant at all: it is unsandboxed, so it is never denied the root
     /// and R3 does not reach it. A lane that works must not be refused.
 
-
     /// Every harness and substrate the fleet dispatches must declare a stance.
     /// Without this the gate's refusal is unreachable in practice and a lane
     /// added later inherits silence instead of a loud refusal.
@@ -3375,11 +3374,6 @@ Pages wired down:                        300000.\n\
 Pages purgeable:                          25000.\n\
 Swapins: 19235608.\n\
 Swapouts: 3444531.\n";
-
-
-
-
-
 
     /// AC9: the shared fixture pins the branch this gate takes per
     /// payload. The Python suite feeds the same file to `cpu_admission`, so
@@ -4153,7 +4147,6 @@ Swapouts: 3444531.\n";
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     #[test]
     fn rust_headless_slot_claim_stamps_unrouted_provider() {

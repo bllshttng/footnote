@@ -2141,8 +2141,6 @@ mod tests {
         );
     }
 
-
-
     /// The lanes cap reader: the configured table wins, the built-in fallback
     /// caps only zai, and a non-positive or missing lanes is uncapped.
     #[test]
@@ -2258,7 +2256,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     /// The subagents ceiling reader: the configured table wins, the built-in
     /// fallback caps only zai, and a non-positive or missing subagents is

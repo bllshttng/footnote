@@ -1380,15 +1380,6 @@ mod tests {
         assert!(validate(&req).is_ok());
     }
 
-
-
-
-
-
-
-
-
-
     fn proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
         ProcRow {
             pid,

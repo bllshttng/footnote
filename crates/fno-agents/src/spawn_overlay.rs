@@ -934,10 +934,6 @@ mod tests {
         );
     }
 
-
-
-
-
     #[test]
     fn model_vendor_rows() {
         let out = resolve(json!({
@@ -1047,12 +1043,6 @@ mod tests {
         assert_eq!(out["verdict"], "refuse");
     }
 
-
-
-
-
-
-
     #[test]
     fn fallback_rows() {
         let out = resolve(json!({
@@ -1073,7 +1063,6 @@ mod tests {
         assert!(out["error"].is_null());
         assert_eq!(out["links"]["default"][0]["provider"], "codex");
     }
-
 
     #[test]
     fn vendor_rows() {
@@ -1153,8 +1142,6 @@ mod tests {
             Some("anthropic".into())
         );
     }
-
-
 
     #[test]
     fn crown_widen_routes_to_the_widen_module() {
