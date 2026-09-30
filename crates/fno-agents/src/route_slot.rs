@@ -3188,7 +3188,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_spawn_leaves_one_routing_refusal_row() {
+    fn refusal_rows() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3224,10 +3224,7 @@ mod tests {
                 .contains("capacity=exhausted")),
             "lanes: {lanes:?}"
         );
-    }
 
-    #[test]
-    fn a_queued_refusal_rows_exit_78_and_the_payload_reason() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3251,10 +3248,7 @@ mod tests {
         assert_eq!(rows[0]["exit_code"], 78);
         assert_eq!(rows[0]["reason"], "slot_exhausted");
         assert_eq!(rows[0]["gate"], "routing");
-    }
 
-    #[test]
-    fn an_admitted_spawn_and_an_audit_write_no_refusal_row() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3278,10 +3272,7 @@ mod tests {
             snap.display().to_string(),
         ]);
         assert!(journal_rows(&journal).is_empty(), "audits never journal");
-    }
 
-    #[test]
-    fn a_dead_journal_never_changes_a_refusal() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3306,10 +3297,7 @@ mod tests {
             capture_file(dir.path(), &payload(exhausted_capacity()))
         };
         assert_eq!(baseline, with_dead, "output must not depend on the journal");
-    }
 
-    #[test]
-    fn the_journal_op_keeps_its_spawn_defaults_applied_kind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = dir.path().join("j.jsonl");
         let (code, stdout, _) = capture_file(
@@ -3331,22 +3319,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_accepts_both_json_spellings() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let snap = dir.path().join("snap.json");
-        std::fs::write(&snap, "{}").unwrap();
-        let path = snap.display().to_string();
-        let long =
-            run_route_slot_audit(&["--snapshot".to_string(), path.clone(), "--json".to_string()]);
-        let short = run_route_slot_audit(&["--snapshot".to_string(), path, "-J".to_string()]);
-        // Same snapshot, same code, empty stderr: only the flag differs.
-        assert_eq!(long, short);
-        assert_eq!(long.2, String::new());
-        assert_ne!(long.0, 2, "the flag parse must not refuse");
-    }
-
-    #[test]
-    fn grid_picks_the_first_clearing_candidate() {
+    fn grid_rows() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": [], "node": {"difficulty": "high", "priority": "p2"},
             "model_occupied": false,
@@ -3363,10 +3336,7 @@ mod tests {
         assert!(chain
             .iter()
             .any(|l| l == "grid candidate claude/sonnet capacity=ok window=w"));
-    }
 
-    #[test]
-    fn grid_candidate_carries_the_rows_route_and_account() {
         // AC2-HP: a routed row's candidate carries route and account, the
         // fields the lane leg always emitted and the grid leg dropped.
         let out = resolve_slot_payload(&payload(json!({
@@ -3397,10 +3367,7 @@ mod tests {
         assert_eq!(out["candidate"]["model"], "sonnet");
         assert!(out["candidate"].get("route").is_none());
         assert!(out["candidate"].get("account").is_none());
-    }
 
-    #[test]
-    fn grid_refuses_undeclared_inventory_and_bad_priority() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": [], "node": {"difficulty": "high", "priority": "p2"},
             "inventory": {"declared": false, "rows": []},
@@ -3413,10 +3380,7 @@ mod tests {
                 {"name": "r", "harness": "claude", "model": "m", "band": "high"}]},
         })));
         assert!(chain_of(&out).contains(&"grid=invalid-input".to_string()));
-    }
 
-    #[test]
-    fn grid_p3_prefers_the_low_band_and_unbanded_ranks_last() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": [], "node": {"difficulty": "high", "priority": "p3"},
             "inventory": {"declared": true, "objective": "cheapest-that-clears",
@@ -3432,10 +3396,7 @@ mod tests {
         assert!(chain
             .iter()
             .any(|l| l.contains("grid candidate claude/lowrow capacity=ok window=w")));
-    }
 
-    #[test]
-    fn grid_exhausted_candidates_are_skipped_and_the_terminal_names_it() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": [], "node": {"difficulty": "low", "priority": "p2"},
             "capacity": {"claude": {"state": "exhausted", "window": "lock",
@@ -3451,7 +3412,7 @@ mod tests {
     }
 
     #[test]
-    fn tier_resolves_degrades_and_falls_through() {
+    fn tier_states_rows() {
         let inv = json!({"rows": [
             {"name": "lowrow", "harness": "claude", "model": "m-low", "band": "low"},
             {"name": "highrow", "harness": "claude", "model": "m-high", "band": "high"},
@@ -3467,10 +3428,7 @@ mod tests {
             resolve_slot_payload(&json!({"mode": "tier", "tier": "banana", "inventory": inv}));
         assert_eq!(out["model"], Value::Null);
         assert!(chain_of(&out).contains(&"unknown-tier -> provider default".to_string()));
-    }
 
-    #[test]
-    fn states_readout_lists_every_lane() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -3486,10 +3444,7 @@ mod tests {
         assert_eq!(states.len(), 2);
         assert_eq!(states[0]["state"], "exhausted");
         assert_eq!(states[1]["state"], "no-such-row");
-    }
 
-    #[test]
-    fn states_verdict_names_the_lane_a_spawn_would_take() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -3504,10 +3459,7 @@ mod tests {
         assert_eq!(out["on_exhausted"], "refuse");
         assert_eq!(out["on_low"], "prefer_healthy");
         assert_eq!(out["on_unknown"], "allow");
-    }
 
-    #[test]
-    fn states_all_lanes_exhausted_reads_capacity_held_with_the_terminal() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -3542,7 +3494,7 @@ mod tests {
     }
 
     #[test]
-    fn the_exhausted_skip_line_names_the_evidence_that_produced_it() {
+    fn evidence_rows() {
         // Fresh 100% window, no lock: the refusal must name source=window and
         // an age token, not the bare word a caller has to argue with.
         let out = resolve_slot_payload(&payload(json!({
@@ -3562,10 +3514,7 @@ mod tests {
         assert!(age.ends_with('s') && age.len() > 1, "age token: {age}");
         let digits = age.trim_end_matches('s');
         assert!(digits.parse::<u64>().is_ok(), "age token: {age}");
-    }
 
-    #[test]
-    fn a_lock_verdict_announces_itself_in_minutes() {
         // The 09:4xZ case: an active provider lock, no fresh usage. The skip
         // must say source=lock with an age in minutes.
         let out = resolve_slot_payload(&payload(json!({
@@ -3585,10 +3534,7 @@ mod tests {
         assert!(age.ends_with('m'), "age token: {age}");
         let minutes: u64 = age.trim_end_matches('m').parse().expect("minute digits");
         assert!((50..=60).contains(&minutes), "age token: {age}");
-    }
 
-    #[test]
-    fn a_never_observed_lane_says_age_never_not_nothing() {
         // `age=never` is the positive marker; an empty age field renders
         // identically to a dropped token, so the literal is the assertion.
         let out = resolve_slot_payload(&payload(json!({
@@ -3607,10 +3553,7 @@ mod tests {
             .expect("an unknown skip line");
         assert!(line.contains("source=absent"), "line: {line}");
         assert!(line.contains(" age=never"), "line: {line}");
-    }
 
-    #[test]
-    fn each_lane_names_its_own_accounts_evidence() {
         // Two accounts on one harness with different sources: the harness-wide
         // `window` names the worst account's evidence, so a named row that
         // printed it would name ITS NEIGHBOR's evidence. Each skip line must
@@ -3642,10 +3585,7 @@ mod tests {
         assert!(flash.contains("source=lock"), "flash line: {flash}");
         assert!(makers.contains("source=window"), "makers line: {makers}");
         assert_ne!(flash, makers);
-    }
 
-    #[test]
-    fn the_refusal_terminal_names_the_oldest_evidence_and_the_refresh_verb() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": ["flash-x"],
             "capacity": {"claude": {"state": "exhausted", "window": "lock",
@@ -3660,10 +3600,7 @@ mod tests {
             "terminal: {text}"
         );
         assert!(text.contains("fno config accounts usage --refresh"));
-    }
 
-    #[test]
-    fn an_older_payload_still_renders_off_the_harness_window() {
         // No sources/observed_at maps: the pre-change payload shape falls back
         // to the harness-wide window and prints no age token.
         let out = resolve_slot_payload(&payload(json!({
@@ -3681,7 +3618,7 @@ mod tests {
     }
 
     #[test]
-    fn states_policy_refusal_reads_policy_held_with_the_reasons() {
+    fn states_policy_rows() {
         // A remote operator with only unverified views: every lane is skipped
         // by the operator_access filter. The readout must say policy-held,
         // never "exhausted", and carry the per-lane skip reasons.
@@ -3706,10 +3643,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("operator_access=remote"));
-    }
 
-    #[test]
-    fn states_no_lanes_names_the_grid_fallthrough_and_omits_policies() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -3727,10 +3661,7 @@ mod tests {
             "lanes_raw": [], "inventory": {"declared": false, "rows": []},
         }));
         assert_eq!(out["would_take"], "no lanes; no inventory; harness default");
-    }
 
-    #[test]
-    fn states_invalid_policy_is_displayed_with_the_invalid_marker() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -3744,10 +3675,7 @@ mod tests {
         // The walk refuses the same config, so the verdict names the fault.
         assert!(out["would_take"].as_str().unwrap().contains("not one of"));
         assert_eq!(out["routing"], "unarmed");
-    }
 
-    #[test]
-    fn states_fault_paths_still_display_the_policy_lines() {
         // A malformed overlay lanes list refuses, and the readout keeps the
         // policy display it always showed for a peeked-non-empty slot.
         let out = resolve_slot_payload(&json!({
@@ -3777,17 +3705,14 @@ mod tests {
     }
 
     #[test]
-    fn string_lane_names_a_declared_row() {
+    fn lane_config_rows() {
         let out = resolve_slot_payload(&payload(json!({})));
         assert_eq!(out["status"], "pick");
         assert_eq!(out["candidate"]["model"], "glm");
         assert!(chain_of(&out)
             .iter()
             .any(|l| l == "slot agents.profiles.target.lanes[0] flash-x capacity=ok window=w"));
-    }
 
-    #[test]
-    fn out_of_enum_on_low_refuses_instead_of_coercing() {
         let out = resolve_slot_payload(&payload(json!({
             "profile": {"on_exhausted": "refuse", "on_low": "maybe",
                         "on_unknown": "allow", "by_difficulty": {}},
@@ -3798,10 +3723,7 @@ mod tests {
             .last()
             .unwrap()
             .starts_with("slot=config agents.profiles.target.on_low"));
-    }
 
-    #[test]
-    fn inline_lanes_print_the_rung_once() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": [{"provider": "claude", "model": "m-2"}],
         })));
@@ -3811,10 +3733,7 @@ mod tests {
             .iter()
             .any(|l| l.starts_with("slot agents.profiles.target.lanes[0] ")));
         assert!(!chain.iter().any(|l| l.contains("lanes[0] agents.profiles")));
-    }
 
-    #[test]
-    fn harness_pin_skips_foreign_lanes() {
         let out = resolve_slot_payload(&payload(json!({
             "constrain_harness": "codex",
         })));
@@ -3823,10 +3742,7 @@ mod tests {
         assert!(chain
             .iter()
             .any(|l| l.contains("is not the pinned \"codex\"")));
-    }
 
-    #[test]
-    fn malformed_by_difficulty_refuses() {
         let out = resolve_slot_payload(&payload(json!({
             "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy",
                         "on_unknown": "allow",
@@ -3842,19 +3758,13 @@ mod tests {
         })));
         assert_eq!(out["status"], "none");
         assert!(chain_of(&out)[0].contains("has unknown field"));
-    }
 
-    #[test]
-    fn non_iterable_lanes_is_a_config_fault() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": "flash-x",
         })));
         assert_eq!(out["status"], "none");
         assert!(chain_of(&out)[0].contains("must be a list"));
-    }
 
-    #[test]
-    fn states_non_list_lanes_is_a_config_fault() {
         let out = resolve_slot_payload(&payload(json!({
             "mode": "states",
             "lanes_raw": "flash-x",
@@ -3864,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_terminal_carries_retry_at() {
+    fn capacity_rows() {
         let out = resolve_slot_payload(&payload(json!({
             "profile": {"on_exhausted": "queue", "on_low": "prefer_healthy",
                         "on_unknown": "allow", "by_difficulty": {}},
@@ -3880,10 +3790,7 @@ mod tests {
             .last()
             .unwrap()
             .starts_with("slot=exhausted queue retry_at=1900000000"));
-    }
 
-    #[test]
-    fn identity_only_exhaustion_names_the_manual_terminal() {
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": ["alt-a", "alt-b"],
             "declared_rows": {
@@ -3901,10 +3808,7 @@ mod tests {
         assert_eq!(out["status"], "none");
         let chain = chain_of(&out);
         assert_eq!(chain.last().unwrap(), "slot=manual_account_switch_required");
-    }
 
-    #[test]
-    fn prefer_healthy_demotes_low_then_takes_it_when_all_low() {
         let healthy = payload(json!({
             "capacity": {"claude": {"state": "low", "window": "w",
                                     "accounts": {"zai-main": "low"}, "evidence": {},
@@ -3922,20 +3826,14 @@ mod tests {
             .last()
             .unwrap()
             .contains("(no healthy lane; on_low=prefer_healthy)"));
-    }
 
-    #[test]
-    fn vendor_cap_skip_uses_the_gathered_count() {
         let out = resolve_slot_payload(&payload(json!({
             "vendor_counts": {"zai": 2}, "vendor_caps": {"zai": 2},
         })));
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains("provider zai at 2 of 2")));
-    }
 
-    #[test]
-    fn a_capped_lane_draining_names_the_uncapped_lane_it_falls_to() {
         // The cap block once skipped a no-vendor lane with no line at all:
         // a capped-and-full lane drained onto the uncapped tail silently
         // (the receipt could not answer "why THIS model"). Both lines must
@@ -3955,10 +3853,7 @@ mod tests {
         assert!(chain.iter().any(|l| l.contains(
             "slot note agents.profiles.target.lanes[1] sonnet-x uncapped (no vendor declared)"
         )));
-    }
 
-    #[test]
-    fn fully_capped_lanes_print_no_uncapped_note() {
         let out = resolve_slot_payload(&payload(json!({
             "declared_rows": {
                 "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
@@ -4004,7 +3899,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_planless_target_stays_the_target_slot() {
+    fn strict_pin_rows() {
         // the derived verb is the phase authority; a planless target
         // no longer rewrites to the blueprint slot - the walk reads the target
         // slot's own lane and picks it.
@@ -4037,10 +3932,7 @@ mod tests {
         assert!(!chain_of(&out)
             .iter()
             .any(|l| l.contains("blueprint eligibility")));
-    }
 
-    #[test]
-    fn strict_planless_low_target_picks_its_zai_lane() {
         // Acceptance specimen: a lawful planless low target used to refuse
         // twice - rewritten to the blueprint slot, then refused because the
         // blueprint lanes carried no zai route. The derived verb is the slot
@@ -4075,10 +3967,7 @@ mod tests {
         let chain = chain_of(&out);
         assert!(!chain.iter().any(|l| l.contains("blueprint eligibility")));
         assert!(!chain.iter().any(|l| l.contains("blueprint lanes")));
-    }
 
-    #[test]
-    fn strict_explicit_glm_pins_the_model_outranking_the_lanes() {
         // A typed --model is an operator pin: under strict routing it
         // outranks lane membership entirely, even when no declared lane
         // names it. This used to be a named refusal; the law (d-dd8e2743)
@@ -4098,10 +3987,7 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("slot=operator-pin-override")));
-    }
 
-    #[test]
-    fn pin_model_resolves_its_declared_row_harness() {
         // The row IS the model's own declaration, so the pin takes
         // the row's harness instead of a config-scalar default.
         let out = resolve_slot_payload(&strict_payload(json!({
@@ -4119,10 +4005,7 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("slot=operator-pin-override row=codex-astra harness=codex")));
-    }
 
-    #[test]
-    fn pin_model_candidate_carries_route_account_effort() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
             "declared_rows": {
@@ -4141,9 +4024,7 @@ mod tests {
         assert_eq!(out["candidate"]["route"], "zai/glm-5.3-flash[1m]");
         assert_eq!(out["candidate"]["account"], "zai");
         assert_eq!(out["candidate"]["effort"], "high");
-    }
-    #[test]
-    fn pin_model_on_rows_with_different_harnesses_refuses() {
+
         // AC6: two rows declare the same model under different harnesses;
         // the slot refuses instead of guessing. The text names both rows
         // and both -H values.
@@ -4164,9 +4045,7 @@ mod tests {
         assert!(chain
             .iter()
             .any(|l| l.contains("pass -H claude or -H codex")));
-    }
-    #[test]
-    fn pin_with_typed_vendor_or_lane_skips_the_row_lookup() {
+
         // AC10: a typed -P keeps the plain pin override - no row lookup,
         // no candidate. A typed -H (explicit_lane) with a model pin: same.
         let rows = r#"{"zai-flash": {"name": "zai-flash", "harness": "claude", "model": "glm"}}"#;
@@ -4196,9 +4075,7 @@ mod tests {
         assert_eq!(out["status"], "none");
         assert!(c2.iter().any(|l| l.contains("outranks the lanes)")));
         assert!(!c2.iter().any(|l| l.contains("row=")));
-    }
-    #[test]
-    fn strict_explicit_vendor_pin_overrides_the_lanes_even_when_one_matches() {
+
         // The pin branch returns before the lane walk runs at all, so it
         // never borrows a lane's route or account - not even a lane the pin
         // happens to match. Two pins here: one that could have matched a
@@ -4237,10 +4114,7 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("slot=operator-pin-override")));
-    }
 
-    #[test]
-    fn strict_explicit_route_pin_outranks_the_lanes_with_no_model_or_vendor() {
         // A bare --route (no -m, no -P) is still an operator pin: the third
         // coordinate follows the same rule as model and vendor.
         let out = resolve_slot_payload(&strict_payload(json!({
@@ -4273,7 +4147,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_remote_filter_skips_rows_without_a_verified_native_view() {
+    fn strict_filter_rows() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "policy": {"enforce_inventory": true, "operator_access": "remote"},
             "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
@@ -4298,10 +4172,7 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("no verified native view (operator_access=remote)")));
-    }
 
-    #[test]
-    fn strict_local_admits_the_zai_lane() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "policy": {"enforce_inventory": true, "operator_access": "local"},
             "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
@@ -4321,10 +4192,7 @@ mod tests {
         })));
         assert_eq!(out["status"], "pick");
         assert_eq!(out["candidate"]["model"], "glm");
-    }
 
-    #[test]
-    fn strict_mislabeled_native_view_refuses() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
             "slot_by_verb": {
@@ -4344,10 +4212,7 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("operator_view=\"claude-native\"")));
-    }
 
-    #[test]
-    fn strict_no_declared_slot_refuses_rather_than_defaulting() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "slot_by_verb": {},
         })));
@@ -4358,10 +4223,7 @@ mod tests {
             .iter()
             .any(|l| l.contains("strict routing refuses the harness default")));
         assert!(chain.iter().any(|l| l.contains("type --model")));
-    }
 
-    #[test]
-    fn strict_operator_pin_outranks_a_slot_with_no_lanes() {
         // A typed model on a verb no slot row declares is the operator's own
         // pin: it lands instead of refusing, and the refusal text never fires.
         let out = resolve_slot_payload(&strict_payload(json!({
@@ -4375,10 +4237,7 @@ mod tests {
             .iter()
             .any(|l| l.contains("slot=operator-pin-override")));
         assert!(!chain.iter().any(|l| l.contains("declares no lanes")));
-    }
 
-    #[test]
-    fn strict_capacity_terminal_keeps_the_queue_vocabulary_and_kind() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
             "declared_rows": {
@@ -4404,7 +4263,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_verifies_a_fresh_fully_evidenced_session() {
+    fn audit_rows() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": true, "operator_access": "local"},
@@ -4423,10 +4282,7 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
         assert_eq!(report["sessions"].as_array().unwrap().len(), 1);
-    }
 
-    #[test]
-    fn audit_names_the_boundary_when_only_a_preview_exists() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": true, "operator_access": "local"},
@@ -4442,10 +4298,7 @@ mod tests {
             .map(|v| v["boundary"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"no-launch"));
-    }
 
-    #[test]
-    fn audit_refuses_when_the_policy_is_not_armed() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": false, "operator_access": "local"},
@@ -4460,10 +4313,7 @@ mod tests {
             .map(|v| v["boundary"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"routing-not-enforced"));
-    }
 
-    #[test]
-    fn audit_names_each_missing_evidence_boundary() {
         let session = |extra: Value| {
             let mut s = json!({
                 "session_id": "s1", "name": "w1", "harness": "claude",
@@ -4542,10 +4392,19 @@ mod tests {
         let (report, code) = audit_verify(&snap(json!([s])));
         assert_eq!(code, 1);
         assert!(boundaries(&report).contains(&"view-harness-mismatch".to_string()));
-    }
 
-    #[test]
-    fn audit_reads_a_snapshot_file_and_prints_the_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snap = dir.path().join("snap.json");
+        std::fs::write(&snap, "{}").unwrap();
+        let path = snap.display().to_string();
+        let long =
+            run_route_slot_audit(&["--snapshot".to_string(), path.clone(), "--json".to_string()]);
+        let short = run_route_slot_audit(&["--snapshot".to_string(), path, "-J".to_string()]);
+        // Same snapshot, same code, empty stderr: only the flag differs.
+        assert_eq!(long, short);
+        assert_eq!(long.2, String::new());
+        assert_ne!(long.0, 2, "the flag parse must not refuse");
+
         let snapshot = concat!(
             r#"{"fingerprint": "fp1","#,
             r#" "policy": {"enforce_inventory": true, "operator_access": "local"},"#,
@@ -4575,19 +4434,13 @@ mod tests {
         let report: Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn since_parser_reads_units_and_bare_seconds() {
         assert_eq!(parse_since_seconds("30m").unwrap(), 1800);
         assert_eq!(parse_since_seconds("2h").unwrap(), 7200);
         assert_eq!(parse_since_seconds("7d").unwrap(), 604800);
         assert_eq!(parse_since_seconds("90").unwrap(), 90);
         assert!(parse_since_seconds("abc").is_err());
-    }
 
-    #[test]
-    fn inventory_command_runs_inside_the_audited_project() {
         // The inventory surface resolves config from the subprocess's CWD, so
         // the audit's facts must come from the audited project, never from
         // whatever checkout happened to invoke the audit.
@@ -4601,10 +4454,7 @@ mod tests {
         );
         assert_eq!(inventory_command("").get_current_dir(), None);
         std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn loader_builds_sessions_from_the_machine_stores() {
         use crate::state::{Lineage, RegistryEntry};
 
         let dir = std::env::temp_dir().join(format!("fno-auditld-{}", std::process::id()));
@@ -4849,46 +4699,14 @@ mod tests {
 
     /// AC5-HP: a stale codex reading is refreshed once and the fresh reading
     /// decides the pick: lanes[0] codex-luna instead of the sonnet fallthrough.
-    #[test]
-    fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
-        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-        let marker = env.dir.path().join("marker");
-        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
-        std::env::set_var("FNO_BIN", &stub);
-        let out = resolve_slot_payload(&slot_env_payload(json!({
-            "capacity_refresh": true,
-        })));
-        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
-        assert_eq!(out["candidate"]["lane"], "codex-luna");
-        let chain = chain_of(&out);
-        assert!(
-            chain
-                .iter()
-                .any(|l| l.starts_with("slot refresh accounts usage (")),
-            "chain: {chain:?}"
-        );
-        assert_eq!(out["candidate"]["evidence"]["window"], "window");
-    }
 
     /// AC6-EDGE: a never-probed (absent) account takes the same refresh: the
     /// most outdated case IS the never-probed case.
-    #[test]
-    fn refresh_gate_covers_a_never_probed_account() {
-        let env = CapacityEnv::new(&state_json(None), None);
-        let marker = env.dir.path().join("marker");
-        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
-        std::env::set_var("FNO_BIN", &stub);
-        let out = resolve_slot_payload(&slot_env_payload(json!({
-            "capacity_refresh": true,
-        })));
-        assert_eq!(out["status"], "pick");
-        assert_eq!(out["candidate"]["lane"], "codex-luna");
-    }
 
     /// AC7-HP: without capacity_refresh the refresh stub never runs; the
     /// positive-control run with the flag proves the marker would be written.
     #[test]
-    fn no_refresh_flag_means_no_probe() {
+    fn refresh_rows() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
         let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
@@ -4908,13 +4726,38 @@ mod tests {
         })));
         assert_eq!(out["status"], "pick");
         assert!(marker.exists(), "the stub never ran under the flag");
-    }
 
-    /// AC8-EDGE: the probe answers but cannot read the account
-    /// (auth-unsupported): the lane is still skipped, and the chain names
-    /// refresh:<reason> so the config smell is visible.
-    #[test]
-    fn a_lane_the_probe_cannot_read_stays_skipped_and_names_the_reason() {
+        let env = CapacityEnv::new(&state_json(None), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.starts_with("slot refresh accounts usage (")),
+            "chain: {chain:?}"
+        );
+        assert_eq!(out["candidate"]["evidence"]["window"], "window");
+
+        // AC8-EDGE: the probe answers but cannot read the account
+        // (auth-unsupported): the lane is still skipped, and the chain names
+        // refresh:<reason> so the config smell is visible.
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
         let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
