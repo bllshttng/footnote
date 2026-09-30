@@ -73,3 +73,11 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal: Option<u8>,
 }
+
+impl PaneInfo {
+    /// Whether the pane's joined row answers to this id: its own fno_id or
+    /// its harness session id, either spelling.
+    pub fn answers_id(&self, id: &str) -> bool {
+        self.fno_id.as_deref() == Some(id) || self.harness_session_id.as_deref() == Some(id)
+    }
+}

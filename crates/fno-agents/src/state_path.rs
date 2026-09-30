@@ -24,7 +24,7 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs|plan-dir|plan-path|migrate>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs|plan-dir|plan-path|migrate|mint-id>");
         return 2;
     };
     // `plans-dirs` is not a single-path accessor: it answers with one dir per
@@ -44,6 +44,22 @@ pub fn run(args: &[String]) -> i32 {
     }
     if name == "plan-path" {
         return crate::plans_path::run_plan_path(&args[1..]);
+    }
+    // `mint-id` is the shell door to the crate's one session-id mint: hooks
+    // and Python forwarders call it instead of minting their own, so one
+    // function owns the id's shape. Answers a value, not a path, so it rides
+    // the same pre-table dispatch as `migrate`.
+    if name == "mint-id" {
+        return match crate::identity::mint_fno_id() {
+            Ok(id) => {
+                println!("{id}");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Canonicalize so the slug matches what a caller passing the canonical

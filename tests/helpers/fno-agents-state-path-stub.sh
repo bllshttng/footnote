@@ -14,6 +14,23 @@ if [[ "${1:-} ${2:-}" == "state path" && -n "${FNO_TEST_SPACE:-}" ]]; then
   exit 0
 fi
 
+# `state mint-id`: the run-id mint the init hook calls. Answers a random v4
+# UUID built from /dev/urandom (the hook's own pre-mint idiom, no uuidgen
+# dependency); FNO_TEST_MINT_FAIL exercises the refusal path.
+if [[ "${1:-} ${2:-}" == "state mint-id" ]]; then
+  if [[ -n "${FNO_TEST_MINT_FAIL:-}" ]]; then
+    exit 1
+  fi
+  _h="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  if [[ -z "$_h" ]]; then
+    exit 1
+  fi
+  # Pin the v4 version nibble (byte 6) and the RFC-4122 variant nibble (byte 8).
+  printf '%s-%s-%s-%s-%s\n' \
+    "${_h:0:8}" "${_h:8:4}" "4${_h:13:3}" "8${_h:17:3}" "${_h:20:12}"
+  exit 0
+fi
+
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 _self="${BASH_SOURCE[0]:-$0}"
 _oldifs="$IFS"

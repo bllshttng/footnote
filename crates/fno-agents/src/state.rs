@@ -1070,11 +1070,11 @@ pub struct RegistryEntry {
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
-    /// fno do target run id (v13): the `fno_id` of the /target session an
-    /// adopted orphan was working, so the revived session is linked to its node.
-    /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
-    /// every row that did not come from a target manifest. Identity-adjacent
-    /// linkage, or the stable pane identity for a harness without a session id;
+    /// Footnote's own id for this session (v13): a random UUID minted at the
+    /// row's first write, stable across succession, never a harness session id
+    /// and never a target run id. `harness_session_id` names the harness
+    /// conversation beside it. Rows written before the mint keep the value they
+    /// hold (a legacy harness copy, short id or name). Identity-adjacent only;
     /// never read for liveness or ownership. Same X3 passthrough as
     /// `route_settings_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1543,17 +1543,17 @@ impl RegistryEntry {
         true
     }
 
-    /// Clone this row as an independently addressable live branch.
+    /// Clone this row as an independently addressable live branch. The branch
+    /// leaves with no `fno_id`: the registry write mints it one of its own.
     pub fn fork_for_session(
         &self,
         name: &str,
         successor_session_id: &str,
         predecessor_session_id: &str,
-        fno_id: &str,
     ) -> Self {
         let mut branch = self.clone();
         branch.name = name.to_string();
-        branch.fno_id = Some(fno_id.to_string());
+        branch.fno_id = None;
         branch.harness_session_id = Some(successor_session_id.to_string());
         branch.predecessor_session_ids.clear();
         branch.forked_from_session_id = Some(predecessor_session_id.to_string());
@@ -1629,28 +1629,6 @@ impl RegistryEntry {
                     if !value.is_empty() && value != "null" {
                         self.harness_session_id = Some(value);
                     }
-                }
-            }
-        }
-    }
-
-    /// Thread-ref back-fill, the Rust mirror of the same rule in Python's
-    /// `load_registry`. A claude thread row is minted before its session uuid
-    /// exists, so `fno_id` lands empty and no write site ever fills it: the
-    /// observation seam back-fills `harness_session_id` and `short_id` and
-    /// stops there. For a thread row the two ids are the same value, so adopt
-    /// the session id at load. A row that HAS a thread ref keeps it, because a
-    /// branch is minted with its own and a succession keeps its stable one.
-    /// Three readers share this file: Python's `load_registry`, this one, and
-    /// `crates/fno`'s own raw reader, which already resolves the identity as
-    /// fno_id then session_id then harness_session_id. This restates that
-    /// fallback so a daemon-side read cannot see None where the other two see
-    /// the session id.
-    pub fn backfill_fno_id(&mut self) {
-        if self.fno_id.as_deref().is_none_or(str::is_empty) {
-            if let Some(sid) = self.harness_session_id.as_deref() {
-                if !sid.is_empty() {
-                    self.fno_id = Some(sid.to_string());
                 }
             }
         }
@@ -2090,11 +2068,6 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     for entry in &mut reg.entries {
         entry.migrate_provider_semantics(reg.schema_version);
         entry.backfill_harness_aliases();
-        // Thread-ref back-fill: a row that learned its session id after spawn
-        // has learned its thread ref at the same moment. Runs after the
-        // harness back-fill above, which is what resolves harness_session_id
-        // on a legacy row.
-        entry.backfill_fno_id();
         // v9 transport-key backfill: move a legacy row's
         // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
         // and warns once (never silently prefers the legacy value).
@@ -2473,6 +2446,35 @@ where
         } else if entry.status.is_drive_eligible() && entry.exited_at.is_some() {
             entry.exited_at = None;
         }
+    }
+    // The row-birth fill: a row whose fno_id is empty after the closure leaves
+    // the write with footnote's own id, never a harness id or a run id. A row
+    // that replaces a pre-existing row (the wholesale adopt merges) keeps the
+    // value its predecessor held - the harness session id is the primary key,
+    // so it names the same row whatever its label is; a row with no harness id
+    // matches by name instead. A non-empty fno_id is never touched, so legacy
+    // rows keep their harness copies, short ids and names.
+    for entry in &mut registry.entries {
+        if entry.fno_id.as_deref().is_some_and(|v| !v.is_empty()) {
+            continue;
+        }
+        let inherited = match entry.harness_session_id.as_deref() {
+            Some(sid) if !sid.is_empty() => before_entries
+                .iter()
+                .find(|b| b.harness_session_id.as_deref() == Some(sid))
+                .and_then(|b| b.fno_id.clone()),
+            _ => before_entries
+                .iter()
+                .find(|b| b.name == entry.name)
+                .and_then(|b| b.fno_id.clone()),
+        };
+        entry.fno_id = match inherited.filter(|v| !v.is_empty()) {
+            Some(v) => Some(v),
+            None => match crate::identity::mint_fno_id() {
+                Ok(id) => Some(id),
+                Err(msg) => return Err(StateError::InvariantViolation(msg)),
+            },
+        };
     }
     // The shared-registry write guard. Fires only on the real shared
     // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -

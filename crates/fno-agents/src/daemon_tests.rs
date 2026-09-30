@@ -2000,7 +2000,9 @@ fn late_bind_preserves_a_live_predecessor_and_creates_a_clean_branch_row() {
         .find(|entry| entry.harness_session_id.as_deref() == Some("session-b"))
         .expect("branch session row");
     assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-a"));
-    assert_eq!(branch.fno_id.as_deref(), Some("session-b"));
+    // The branch mints its own id at the write; it never copies the successor.
+    assert!(branch.fno_id.is_some());
+    assert_ne!(branch.fno_id.as_deref(), Some("session-b"));
     assert!(branch.short_id.is_empty());
     assert!(branch.mux.is_none());
     std::fs::remove_dir_all(home.root()).ok();

@@ -786,6 +786,22 @@ impl RegistryAgent {
             .as_deref()
             .or(self.harness_session_id.as_deref())
     }
+
+    /// Whether the row answers to this id: its own `fno_id` (`session_id`, the
+    /// stable slot) or its harness session id. After the id split the two
+    /// differ on every healthy row, and a sender may name either.
+    pub fn answers_to(&self, id: &str) -> bool {
+        self.session_id.as_deref() == Some(id) || self.harness_session_id.as_deref() == Some(id)
+    }
+
+    /// The row's harness session id, falling back to the stable slot for a
+    /// legacy row that holds only one. The value a harness launch or a resume
+    /// argv needs.
+    pub fn harness_session(&self) -> Option<&str> {
+        self.harness_session_id
+            .as_deref()
+            .or(self.session_id.as_deref())
+    }
 }
 
 /// One claude-roster worker as the sideline consumes it (three fields, not

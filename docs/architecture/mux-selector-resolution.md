@@ -40,7 +40,7 @@ One resolver, three callers. A resolver wired into only one door leaves the othe
 |------|----------|
 | `fno mux view <selector>` | Resolve, then focus the hosting session's pane. `--url` prints the web-bridge URL for that pane instead. `--fzf` opens the interactive picker. |
 | `fno mux pane focus <target>` | All digits: the legacy pane-id door, unchanged. Anything else: the same resolution as `view`. `--fzf` (no argument) opens the picker. |
-| `fno mux where <fno_id>` | The same tiers. It reports the location rather than focusing. |
+| `fno mux where <fno_id>` | The same tiers. It reports the location rather than focusing. A row answers to its own minted `fno_id` or its harness session id; either resolves. |
 
 A row that resolves but hosts no pane (`mux == None`) never attaches. Attaching creates a pane, and the server's inherited fd limit makes that a wave-wedging side effect. The doors print the follow command (`fno agents peek <name> --follow`) and exit `17` (`EXIT_NOT_PANE_HOSTED`).
 
