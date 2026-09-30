@@ -114,6 +114,7 @@ async fn tab_menu_split_refuses_when_the_server_never_announced() {
     // tab_menu_join_and_split_target_the_viewed_tab in the parent.
     let mut v = view_with_agents(vec![]);
     let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+    v.layout.squads[0].active_tab = 0;
     v.server_proto = None;
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     let sel = v
@@ -128,9 +129,8 @@ async fn tab_menu_split_refuses_when_the_server_never_announced() {
     let mut buf: Vec<u8> = Vec::new();
     row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
     assert!(buf.is_empty(), "an unannounced server gets no split");
-    assert!(
-        v.notice
-            .as_ref()
-            .is_some_and(|(s, _)| s.contains("restart the mux server"))
-    );
+    assert!(v
+        .notice
+        .as_ref()
+        .is_some_and(|(s, _)| s.contains("restart the mux server")));
 }
