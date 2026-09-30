@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn mint_fno_id_is_well_formed_v4_and_unique() {
         let re = regex::Regex::new(
-            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-7][0-9a-f]{2}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
         )
         .unwrap();
         let a = mint_fno_id().expect("mint succeeds when the OS has randomness");

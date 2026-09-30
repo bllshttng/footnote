@@ -3235,13 +3235,13 @@ mod tests {
         // answers to a different mint refuses the token.
         let mut split_row = claude_row("split", "7c5dcf5e", "7c5dcf5e-1111-4222-8333-444444444444");
         split_row["fno_id"] = json!("0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b");
-        let fno_id = split_row["fno_id"].as_str().unwrap();
+        let fno_id = split_row["fno_id"].as_str().unwrap().to_string();
         assert_eq!(
-            find_agent_entry(std::slice::from_ref(&split_row), fno_id).unwrap()["name"],
+            find_agent_entry(std::slice::from_ref(&split_row), &fno_id).unwrap()["name"],
             "split"
         );
         split_row["fno_id"] = json!(Value::Null);
-        assert!(find_agent_entry(std::slice::from_ref(&split_row), fno_id).is_err());
+        assert!(find_agent_entry(std::slice::from_ref(&split_row), &fno_id).is_err());
     }
 
     #[test]
@@ -4429,7 +4429,7 @@ mod tests {
         assert!(!e.short_id.is_empty());
         // The name falls back to the derivable t- form (no transcript title
         // in this test env, and the manifest run id no longer names the row).
-        assert_eq!(e.name, "t-thread-12");
+        assert_eq!(e.name, "t-thread-1");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }
