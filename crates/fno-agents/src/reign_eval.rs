@@ -1075,9 +1075,7 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
                 entry.crown_scope.is_some()
                     && !matches!(
                         entry.status,
-                        crate::AgentStatus::Exited
-                            | crate::AgentStatus::Failed
-                            | crate::AgentStatus::PermanentDead
+                        crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
                     )
             })
             .filter_map(|entry| entry.harness_session_id)
