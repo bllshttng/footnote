@@ -20,7 +20,7 @@ from fno.agents.registry import (
     AgentEntry,
     resolve_agent,
 )
-from fno.agents.spawn_defaults import inject_spawn_defaults
+from fno.agents.spawn_defaults import compose_spawn_argv
 
 
 class RetaskTransportError(RuntimeError):
@@ -141,7 +141,6 @@ def resolve_thread_viewport(
 def resolve_target_coordinate(
     node: str,
     *,
-    settings: object = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -162,9 +161,8 @@ def resolve_target_coordinate(
     args.append(f"/fno:{verb} {node}")
     # a probe, not a real dispatch - the builtin rung would otherwise
     # read as an explicit override and force every retask to respawn.
-    resolved = inject_spawn_defaults(
+    resolved = compose_spawn_argv(
         args,
-        settings=settings,
         env=env,
         stderr=io.StringIO(),
         apply_permission_builtin=False,
@@ -250,7 +248,6 @@ def run_retask(
     worker: str,
     *,
     node: str,
-    settings: object = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -262,7 +259,6 @@ def run_retask(
     try:
         target = resolve_target_coordinate(
             node,
-            settings=settings,
             model=model,
             effort=effort,
             env=env,

@@ -1745,7 +1745,7 @@ def make_agents_group_cls() -> type:
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
                     if verb == "spawn":
-                        from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
+                        from fno.agents.spawn_defaults import compose_spawn_argv, extract_existing_pane
 
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
@@ -1754,7 +1754,7 @@ def make_agents_group_cls() -> type:
                         try:
                             args, node_verb = _node_seed_at_seam(args)
                             args, existing_pane = extract_existing_pane(
-                                inject_spawn_defaults(args, node_verb=node_verb)
+                                compose_spawn_argv(args, node_verb=node_verb)
                             )
                         except ValueError as exc:
                             print(f"fno agents spawn: {exc}", file=sys.stderr)

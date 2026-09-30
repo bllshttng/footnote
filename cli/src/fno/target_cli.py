@@ -2419,7 +2419,7 @@ def resolve_model(
     refuse_retired_provider(_provider_tombstone)
 
     # include_difficulty: the bash dispatch lane pins --harness in its spawn
-    # argv, which stands inject_spawn_defaults' grid down - there is no grid
+    # argv, which stands the compose's grid down - there is no grid
     # receiving end here, so the band resolves statically (the resolution
     # model_tier gave this lane before the field retired).
     model, _source = _resolve_node_model(

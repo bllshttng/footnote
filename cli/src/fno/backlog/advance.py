@@ -1698,13 +1698,11 @@ def _grid_lane_for(
     try:
         from fno import route_resolve
 
-        inventory = route_resolve.resolve_inventory()
         profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
         candidate, chain, _verdict = route_resolve.resolve_slot(
             profile_verb,
             node,
             None,
-            inventory=inventory,
             explicit_model_value=model,
             # The dispatch seam refreshes: a stale or never-probed lane
             # reading is probed once before the walk skips the lane.

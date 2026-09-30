@@ -2049,7 +2049,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
     Ok(())
 }
 
-/// The Python seam (rust_runtime.make_context -> inject_spawn_defaults) is
+/// The Python seam (rust_runtime.make_context -> compose_spawn_argv) is
 /// the only reader of config.agents.profiles. A spawn that skipped it carries
 /// no configured route, model, effort or account, so it goes back to the
 /// front door; the marker asserts the crossing and is parsed beside `--yolo`.
@@ -3797,7 +3797,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("yolo".into(), Value::Bool(true));
             }
             // The Python spawn seam (rust_runtime
-            // make_context -> inject_spawn_defaults) is the only reader of
+            // make_context -> compose_spawn_argv) is the only reader of
             // config.agents.profiles. This token asserts it crossed upstream
             // and carries its enforcement verdict. Consumed here - never
             // forwarded, never read past the `--` fence - so no harness argv

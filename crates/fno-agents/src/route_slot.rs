@@ -19,15 +19,15 @@ use std::sync::OnceLock;
 const SLOT_LANES_TABLE: &str = include_str!("slot_lanes.toml");
 
 /// The inline slot-lane vocabulary, read once from the canonical table
-/// (`slot_lanes.toml`; `build.rs` projects the byte copy Python reads).
+/// (`slot_lanes.toml`, this crate's owner).
 /// Lane fields are closed: every field has resolver code behind it. Slot
 /// VERBS are the open surface instead (`SLOT_VERBS` plus profiles keys).
-struct LaneVocabulary {
-    fields: Vec<String>,
-    passthrough: Vec<String>,
+pub(crate) struct LaneVocabulary {
+    pub(crate) fields: Vec<String>,
+    pub(crate) passthrough: Vec<String>,
 }
 
-fn lane_vocabulary() -> &'static LaneVocabulary {
+pub(crate) fn lane_vocabulary() -> &'static LaneVocabulary {
     static CELL: OnceLock<LaneVocabulary> = OnceLock::new();
     CELL.get_or_init(|| {
         let raw: toml::Value =
@@ -1140,7 +1140,7 @@ fn payload_fingerprint(payload: &Value) -> String {
         "slots": payload.get("slot_by_verb").cloned().unwrap_or(json!({})),
     });
     let mut h = Sha256::new();
-    h.update(serde_json::to_string(&facts).unwrap_or_default());
+    h.update(serde_json::to_string(&crate::route_gather::canonical(&facts)).unwrap_or_default());
     let hex = format!("{:x}", h.finalize());
     hex[..12].to_string()
 }
@@ -2352,7 +2352,18 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
     if payload.get("op").and_then(Value::as_str) == Some("journal") {
         return run_route_slot_journal(&payload);
     }
-    let out = resolve_slot_payload(&payload);
+    // The gather modes answer in route_gather before the walk; `inventory`
+    // here is the GATHER's fold (the doctor leg keeps its explicit
+    // `known_harnesses` payload and flows to the walk as before).
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    if matches!(mode, "policy" | "dispatch_model")
+        || (mode == "inventory" && payload.get("known_harnesses").is_none())
+    {
+        let out = crate::route_gather::run_mode(&payload, &slot_cwd());
+        return (0, format!("{out}\n"), String::new());
+    }
+    let filled = crate::route_gather::fill(&payload, &slot_cwd());
+    let out = resolve_slot_payload(&filled);
     journal_routing_refusal(&payload, &out);
     (0, format!("{out}\n"), String::new())
 }
@@ -2478,7 +2489,7 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
 /// `spawn_gate_refused` row per refusal, `gate: "routing"` so a query
 /// separates it from the Python gate's rows. Best effort, always: a dead
 /// journal never blocks a spawn and never changes a refusal.
-fn journal_routing_refusal(payload: &Value, out: &Value) {
+pub(crate) fn journal_routing_refusal(payload: &Value, out: &Value) {
     let refused = out.get("candidate").map(Value::is_null).unwrap_or(false)
         && matches!(
             out.get("verdict").and_then(Value::as_str),

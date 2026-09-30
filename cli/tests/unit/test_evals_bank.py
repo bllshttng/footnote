@@ -188,25 +188,29 @@ def _settings(*rows: dict) -> SimpleNamespace:
     ))
 
 
-def test_resolve_lane_reads_matching_routing_models_row() -> None:
-    settings = _settings({"name": "astra-high", "harness": "codex",
-                          "model": "gpt-6-astra", "effort": "high"})
-    coord = bank.resolve_lane("astra-high", settings=settings)
+def test_resolve_lane_reads_matching_routing_models_row(monkeypatch) -> None:
+    """resolve_lane rides resolve_inventory: the same fold the slot lanes
+    join against, never a second model/effort enum."""
+    from fno import route_resolve as rr
+
+    row = rr.InventoryRow(name="astra-high", harness="codex",
+                          model="gpt-6-astra", effort="high")
+    inv = rr.Inventory(rows={"astra-high": row}, declared=True)
+    monkeypatch.setattr(rr, "resolve_inventory", lambda: inv)
+    coord = bank.resolve_lane("astra-high")
     assert coord.name == "astra-high"
     assert coord.harness == "codex"
     assert coord.model == "gpt-6-astra"
     assert coord.effort == "high"
 
 
-def test_resolve_lane_later_row_overrides_earlier_same_name() -> None:
-    settings = _settings(
-        {"name": "astra-high", "harness": "codex", "effort": "medium"},
-        {"name": "astra-high", "effort": "high"},
-    )
-    assert bank.resolve_lane("astra-high", settings=settings).effort == "high"
+def test_resolve_lane_unknown_name_raises_naming_known_lanes(monkeypatch) -> None:
+    from fno import route_resolve as rr
 
-
-def test_resolve_lane_unknown_name_raises_naming_known_lanes() -> None:
-    settings = _settings({"name": "astra-high"}, {"name": "sol-low"})
+    rows = {n: rr.InventoryRow(name=n, harness="", model="")
+            for n in ("astra-high", "sol-low")}
+    monkeypatch.setattr(rr, "resolve_inventory", lambda: rr.Inventory(rows=rows, declared=True))
     with pytest.raises(bank.LaneError, match=r"astra-high.*sol-low|sol-low.*astra-high"):
-        bank.resolve_lane("no-such-lane", settings=settings)
+        bank.resolve_lane("no-such-lane")
+
+

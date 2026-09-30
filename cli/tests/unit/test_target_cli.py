@@ -765,9 +765,22 @@ def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
     monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
     # Reachability is config-declared now, so the band this test resolves has
     # to name its own fleet. Nothing built-in answers for it.
-    inv = rr.inventory_from_rows([
+    inv = _inv([
         {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7", "band": "low"},
     ])
+
+
+def _inv(rows):
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(

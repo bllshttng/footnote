@@ -366,6 +366,7 @@ pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
+pub mod spawn_compose;
 pub mod spawn_backends;
 pub mod spawn_context;
 pub mod spawn_contract;

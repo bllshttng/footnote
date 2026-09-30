@@ -839,25 +839,23 @@ def _report_band_routing() -> None:
     verb's slot would take a lane; ``model_routing.roles`` is a DIFFERENT
     axis and reads as already on."""
     from fno import route_resolve
-    from fno.config import load_settings
 
     inventory = route_resolve.resolve_inventory()
-    try:
-        settings = load_settings()
-    except Exception:  # noqa: BLE001 - an unreadable config reads as absent
-        settings = None
-    read_verbs = route_resolve.slot_verbs(settings=settings)
+    read_verbs = route_resolve.slot_verbs()
     # Silent once any verb's slot would take a lane: routing is armed, and
     # the unconfigured verbs are a per-verb choice, not a dead router.
     empty_verbs = [
         verb for verb in read_verbs
         if not str(route_resolve.slot_states(
-            verb, inventory=inventory, settings=settings
+            verb
         ).get("would_take", "")).startswith(f"agents.profiles.{verb}.lanes")
     ]
     if len(empty_verbs) < len(read_verbs):
         return
     try:
+        from fno.config import load_settings
+
+        settings = load_settings()
         roles = getattr(getattr(settings, "model_routing", None), "roles", None)
     except Exception:  # noqa: BLE001 - the note is a hint on top of the line
         roles = None

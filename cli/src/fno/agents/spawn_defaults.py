@@ -76,7 +76,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 # --------------------------------------------------------------------------- #
 # Spawn argv normalization: three ergonomic cuts, one argv->argv pass.
 #
-# Runs at the front door (inside inject_spawn_defaults, BEFORE config injection
+# Runs at the front door (inside compose_spawn_argv, BEFORE config injection
 # and BEFORE the runtime route/fork), so by the time either runtime parser sees
 # the argv it is canonical: an explicit NAME, long-form `--resume <full-uuid>`,
 # long-form `--substrate <s>`. Neither parser learns a new vocabulary.
@@ -724,88 +724,6 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
         return False
 
 
-def _verb_token(seed: Optional[str]) -> Optional[str]:
-    """The first verb-shaped token ANYWHERE in ``seed``, sigil and namespace
-    stripped to the bare verb word; None when none. Routing never executes,
-    so ``do a /fno:blueprint`` names the blueprint stage."""
-    if not seed:
-        return None
-    for tok in seed.split():
-        if parsed := parse_verb_token(tok):
-            return parsed[0]
-    return None
-
-
-def _known_verb_keys(profiles: object, settings: object) -> Tuple[Set[str], bool]:
-    """The vocabulary a verb seed must name, plus whether the shipped roster
-    actually RESOLVED. An unresolvable roster proves nothing about which
-    verbs exist, so the caller degrades open instead of refusing on it."""
-    known = {str(k) for k in profiles} if isinstance(profiles, Mapping) else set()
-    roster_ok = False
-    try:
-        from fno.agents.harness_map import footnote_verbs
-
-        verbs = footnote_verbs()
-        known |= set(verbs)
-        roster_ok = bool(verbs)
-    except Exception:  # noqa: BLE001 - an unreadable roster must not brick spawning
-        pass
-    registry = getattr(getattr(settings, "dispatch", None), "verbs", None)
-    if isinstance(registry, Mapping):
-        try:
-            from fno.config._dispatch_verbs import canonical_verb_key
-
-            for key in registry:
-                canon = canonical_verb_key(str(key)).lstrip("/")
-                if canon:
-                    known.add(canon)
-        except Exception:  # noqa: BLE001
-            pass
-    return known, roster_ok
-
-
-def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
-    """Whether the seed's verb token ``tok`` carried the ``fno:`` namespace -
-    the one marker that PROVES the seed names a footnote stage. A bare verb
-    may be any harness's own command (``/code-review`` ships in no fno
-    roster and is still a real dispatch)."""
-    if not seed:
-        return False
-    for t in seed.split():
-        if (parsed := parse_verb_token(t)) and parsed[0] == tok and parsed[1]:
-            return True
-    return False
-
-
-def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optional[str]:
-    """Classify a seed into its profile key. THREE outcomes : a
-    verb-shaped token that resolves (either sigil, anywhere, via
-    ``_VERB_ALIASES``) returns the canonical key, except a king verb
-    (``reign``, ``fno-me``), which returns ``crown``
-    like a verbless seed; NO verb-shaped token - every king seed, seedless
-    spawn, path, plain prose - returns ``crown``,
-    so ``[agents.profiles.crown]`` reaches crown spawns like every other
-    stage row; an ``fno:``-namespaced token ``known`` rejects returns None
-    (the caller refuses naming ``_verb_token(seed)``). The namespace proves
-    fno intent, so an unknown one is a typo refusing loudly instead of
-    spawning on the crown fallback - the old two-valued version made a codex
-    dollar seed indistinguishable from a genuine crown spawn and four config
-    axes silently wrong. A BARE unknown verb is a foreign command, not an
-    fno stage, and honestly takes the crown answer. ``known=None`` never
-    returns None."""
-    tok = _verb_token(seed)
-    if tok is None:
-        return "crown"
-    key = _VERB_ALIASES.get(tok, tok)
-    if key in _CROWN_VERBS:
-        return "crown"
-    if known is None or tok in known or key in known:
-        return key
-    if _carries_fno_namespace(seed, tok):
-        return None
-    return "crown"
-
-
 def _has_permission_mode(toks: Sequence[str]) -> bool:
     """Whether the permission control is pinned, up to the ``--argv`` boundary
     and a bare ``--`` fence (: a fenced ``--permission-mode`` is the
@@ -866,25 +784,6 @@ def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
     return None
 
 
-def _grid_node(node_id: Optional[str] = None) -> Optional[dict]:
-    """Read the node's difficulty and priority for the dispatch grid.
-
-    The id is the one answer inject_spawn_defaults resolved.
-    """
-    if not node_id:
-        return None
-    try:
-        from fno.tracker.metadata import read_entries
-
-        entries = read_entries("spawn_defaults._grid_node")
-        for entry in entries:
-            if isinstance(entry, Mapping) and entry.get("id") == node_id:
-                return dict(entry)
-    except Exception:  # noqa: BLE001 - the grid is advisory
-        return None
-    return None
-
-
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. The vocabulary lives in Rust
@@ -907,66 +806,6 @@ def _substrate_compatible(substrate: str, provider: str) -> bool:
     except VerbUnavailable:
         return provider == "claude"
     return bool((answer.get("substrate") or {}).get("compatible"))
-
-
-def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> bool:
-    """Whether the resolved (provider, substrate) can honor a mapped
-    permission-mode, answered by the one Rust owner (see
-    crates/fno-agents/src/codex_posture.rs permission_mappable): the pane lane
-    maps through the per-harness vocabulary; a thread lane is declared by
-    ``harness.<provider>.thread.carries`` in harness_capabilities.toml. A
-    refusal (or an unavailable owner) is answered False and NAMED by the
-    caller's skip line - never a silent skip that leaves the posture unnamed."""
-    if not mode:
-        return False
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        answer = verb_call(
-            "permission-tokens",
-            {"provider": provider, "mode": mode, "substrate": substrate or "pane"},
-            VerbUnavailable,
-        )
-    except VerbUnavailable as exc:
-        print(
-            f"fno agents spawn: permission mappability owner unavailable ({exc}); "
-            f"treating {provider} mode {mode!r} on {substrate} as unmappable",
-            file=sys.stderr,
-        )
-        return False
-    if answer.get("refusal"):
-        print(
-            f"fno agents spawn: permission mappability refused: {answer['refusal']}",
-            file=sys.stderr,
-        )
-        return False
-    return bool(answer.get("mappable"))
-
-
-
-
-def _lane_value(lane: object, name: str) -> str:
-    value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _overlays_present(defaults: object, profile: object, lane: object = None) -> bool:
-    """A harness overlay table (or lane args) can carry the ONLY value this
-    spawn injects, so an empty harness-blind scalar read must not end
-    composition before the post-resolution reads run."""
-    for obj in (defaults, profile):
-        table = getattr(obj, "harness", None)
-        if isinstance(table, Mapping) and table:
-            return True
-    if lane is not None:
-        lv = (
-            lane.get("args")
-            if isinstance(lane, Mapping)
-            else getattr(lane, "args", None)
-        )
-        if lv:
-            return True
-    return False
 
 
 def _overlay_payload(obj: object) -> dict:
@@ -1035,79 +874,9 @@ def resolve_lane_vendor(
         return None
 
 
-def _check_model_vendor_mismatch(
-    argv: Sequence[str],
-    err: IO[str],
-    env: Optional[Mapping[str, str]] = None,
-    *,
-    model_source: Optional[str] = None,
-    harness_typed: bool = True,
-) -> None:
-    """Judge a model whose implied vendor the resolved lane does not match.
-
-    WHAT THE CALLER TYPED AND WHAT CONFIG SUPPLIED ARE DIFFERENT FACTS, and
-    ``model_source`` carries the config path when the model was INJECTED and
-    None when the caller named it: a typed mismatch warns and proceeds (the
-    passthrough is deliberate), an injected one REFUSES - nobody chose that
-    pairing, and the worker it would start dies on its first inference.
-    An explicit --route suppresses both. The judgment lives in the
-    spawn-overlay verb; this shim keeps the Python side effects (event,
-    stderr line, exit 2).
-    """
-    toks = [str(t) for t in argv[1:]]
-    # Pure fast path: with no model named there is nothing to judge, and the
-    # spawn must compose on installs with no fno-agents binary at all.
-    if _flag_value(toks, "--model", "-m") is None:
-        return
-    # The lane's harness, resolved in the verb's precedence order: an explicit
-    # -H flag wins, then dispatch inference from env (as a LATE input; the
-    # argv head may still name the harness first).
-    harness = _flag_value(toks, "--harness", "-H")
-    env_harness = None
-    if not (harness and str(harness).strip()):
-        try:
-            from fno.dispatch_flags import resolve_dispatch_harness
-
-            env_harness = resolve_dispatch_harness(None, env=env)[0]
-        except Exception:
-            env_harness = "claude"
-    from fno.agents.spawn_overlay_client import (
-        SpawnOverlayUnavailable,
-        spawn_overlay_call,
-    )
-
-    try:
-        answer = spawn_overlay_call(
-            {
-                "kind": "model-vendor",
-                "argv_tail": toks,
-                "argv_head": argv[0] if argv else None,
-                "harness": harness,
-                "env_harness": env_harness,
-                "model_source": model_source,
-                "harness_typed": harness_typed,
-            }
-        )
-    except SpawnOverlayUnavailable as exc:
-        # No binary: the check degrades open with a named line. The refusal
-        # contract is kept wherever the verb actually ran.
-        print(f"fno agents spawn: vendor check skipped ({exc})", file=err)
-        return
-    if answer.get("event"):
-        from fno.agents import events
-
-        events.emit("model_vendor_mismatch", **answer["event"])
-    if answer.get("verdict") == "refuse":
-        print(answer.get("message"), file=err)
-        raise SystemExit(2)
-    if answer.get("verdict") == "warn":
-        print(answer.get("message"), file=err)
-
-
-def inject_spawn_defaults(
+def compose_spawn_argv(
     args: Sequence[str],
     *,
-    settings: object = None,
     env: Optional[Mapping[str, str]] = None,
     stderr: Optional[IO[str]] = None,
     apply_permission_builtin: bool = True,
@@ -1115,815 +884,122 @@ def inject_spawn_defaults(
 ) -> List[str]:
     """Return ``args`` with config spawn-defaults injected where absent.
 
-    Only acts on a `spawn` verb; returns the input unchanged for any other
-    verb, or when the config load fails (a bad config must never brick
-    spawning). Raises ``SystemExit(2)`` on an unknown config provider
-    (AC5-ERR) and on a malformed slot; exits 78 on an on_exhausted=queue
-    terminal. Config-sourced effort/substrate/permission_mode degrade open on
-    an incompatible resolved provider (warn, skip); an explicit flag stays
-    fail-closed downstream. ``apply_permission_builtin`` (default True) gates
-    the ``SPAWN_PERMISSION_BUILTIN`` rung ; off for a probe that
-    never launches (see ``retask.py``).
+    The composition lives in Rust (crates/fno-agents/src/spawn_compose.rs);
+    this is the transport: normalize, project the argv scan, one verb call,
+    apply the answer. Raises SystemExit on the verb's refusals (exit 2, or
+    78 with the exhausted payload on stdout). The old seam's degrade-open
+    stance survives as the unavailable-owner arm: a missing binary must not
+    brick an otherwise valid spawn, so it prints one named line and returns
+    the normalized argv.
     """
     out = list(args)
     if not out or out[0] != "spawn":
         return out
-    # `spawn --help`/`-h` must always render help, even under a broken config
-    # (a bad provider would otherwise exit 2 here before help prints). Stop at
-    # the --argv boundary so a payload's own --help is not consumed.
+    # `spawn --help`/`-h` must always render help, even under a broken config.
+    # Stop at the --argv boundary so a payload's own --help is not consumed.
     for a in out[1:]:
         if a == "--argv":
             break
         if a in ("-h", "--help"):
             return out
 
+    err = stderr if stderr is not None else sys.stderr
     # Ergonomic normalization runs FIRST: the substrate-token / -r /
     # autogen-name rewrites consider only operator-supplied argv, so config
-    # defaults injected below never fight the token form.
-    out = normalize_spawn_args(out, stderr=stderr)
-    err = stderr if stderr is not None else sys.stderr
+    # defaults injected by the verb never fight the token form.
+    out = normalize_spawn_args(out, stderr=err)
+    tail = out[1:]
 
-    if settings is None:
+    scan = _scan_projection(tail)
+    facts = {"role_resolves": False, "role_protected": None}
+    if scan["role"]:
+        facts["role_resolves"] = _role_resolves(scan["role"], None, env)
         try:
-            from fno.config import load_settings
+            from fno.agents.model_routing import PROTECTED_ROLES
 
-            settings = load_settings()
-        except Exception:
-            # A malformed config never bricks spawning (the ONE degrade-open
-            # path). A successful load yields a valid SettingsModel whose
-            # `.agents.defaults` always exists, so field access below is NOT
-            # wrapped: a schema/wiring bug there must surface, not be masked
-            # into an invisible no-op (AC5-FR).
-            return out
-    agents = settings.agents  # type: ignore[attr-defined]
-    defaults = agents.defaults
-    # Per-verb profile: the seed's leading slash-verb selects a
-    # profile layered OVER defaults, resolved field-wise into one view. A
-    # verbless `--node` spawn routes by the node's derived verb, which the
-    # seam passes as ``node_verb``; the journal keeps the real seed.
-    seed = _seed_of(out[1:])
-    profiles = getattr(agents, "profiles", None) or {}
-    known, roster_ok = _known_verb_keys(profiles, settings)
-    profile_seed = seed
-    if seed is None and node_verb:
-        profile_seed = f"/{node_verb}"
-    verb = _profile_key(profile_seed, known if roster_ok else None)
-    if verb is None:
-        # an unknown namespaced verb used to resolve crown silently.
+            if scan["role"].strip().lower() in PROTECTED_ROLES:
+                facts["role_protected"] = scan["role"].strip().lower()
+        except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
+            pass
+
+    payload = {
+        "kind": "compose",
+        "argv": list(out),
+        "node_verb": node_verb,
+        "env_node": (env or {}).get("FNO_NODE") or None,
+        "permission_builtin": SPAWN_PERMISSION_BUILTIN if apply_permission_builtin else None,
+        "scan": scan,
+        "facts": facts,
+    }
+    try:
+        from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+        answer = spawn_overlay_call(payload, timeout=90)
+    except SpawnOverlayUnavailable as exc:
         print(
-            f"fno agents spawn: seed {seed!r} names verb-shaped token "
-            f"{_verb_token(seed)!r} but no shipped footnote verb or configured "
-            f"profile answers it",
+            f"fno agents spawn: config defaults skipped (spawn-overlay unavailable: {exc})",
             file=err,
-        )
-        print("fno agents spawn: refusing; no worker launched", file=err)
-        raise SystemExit(2)
-    profile_verb = verb
-    profile = profiles.get(verb) if verb else None
-    if profile is None and verb:
-        legacy_verb = next((old for old, new in _VERB_ALIASES.items() if new == verb), None)
-        if legacy_verb:
-            profile = profiles.get(legacy_verb)
-            if profile is not None:
-                profile_verb = legacy_verb
-    # Overlay table guards: the spawn-overlay verb owns them now -
-    # an unknown harness name, or a ranking field inside an overlay, refuses
-    # the composition from the same call that resolves the rungs. Scoped to
-    # the rungs THIS spawn reads; an unrelated verb's typo must not block it.
-    lane: Optional[object] = None
-    lane_index: Optional[int] = None
-    slot_candidate: Optional[dict] = None
-    slot_chain: List[str] = []
-    grid_node_entry: Optional[dict] = None
-    grid_account_injected = False
-    # Axis occupancy scanned ONCE, before the slot resolver: a lane named on
-    # the command line changes the all-exhausted terminal (degrade, not
-    # refuse), an occupied model axis stands the no-lanes grid down, and
-    # -P/--provider counts as a named lane (it names the capped VENDOR).
-    has_harness, explicit_harness, has_model, has_effort = _scan(out[1:])
-    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
-    explicit_vendor_present = explicit_vendor is not None
-    explicit_route = _flag_present(out[1:], "--route")
-    role = _role_of(out[1:])
-    _explicit_lane = bool(has_harness or explicit_route or explicit_vendor_present)
-    explicit_substrate = _has_explicit_substrate(out[1:])
-    explicit_permission_value = _flag_value(out[1:], "--permission-mode")
-    if not explicit_permission_value and _has_permission_mode(out[1:]):
-        # --yolo/-Y are the same knob as --permission-mode; the filter must
-        # see them or it can hand a yolo spawn a harness the gate refuses.
-        explicit_permission_value = "yolo"
-    _flag_node = _flag_value(out[1:], "--node")
-    _env_node = (env or {}).get("FNO_NODE") or None
-    node_id_present = _flag_node is not None or _env_node is not None
-    node = _flag_node or None
-    if _flag_node is None:
-        try:
-            from fno.rust_binary import VerbUnavailable, verb_call
-            _slot = _seed_slot(list(out[1:]))
-            _answer = verb_call("spawn-axes", {"spawn_node": {
-                "argv": list(out), "seed_index": (_slot[0] + 1) if _slot else None,
-                "seed_form": _slot[1] if _slot else None,
-                "flag_node": None, "env_node": _env_node,
-            }}, VerbUnavailable)
-            node = _answer.get("node") or None
-        except Exception:  # noqa: BLE001 - the grid is advisory, as _grid_node
-            node = None
-    node_id_present = node_id_present or node is not None
-
-    def _above_defaults(rung: Optional[str]) -> bool:
-        return bool(rung) and rung != "agents.defaults"
-
-    def _scalar_rung(name: str) -> Optional[str]:
-        """Where a field's value would come from with no lane in play."""
-        if profile is not None and (getattr(profile, name, "") or "").strip():
-            return f"agents.profiles.{profile_verb}"
-        if (getattr(defaults, name, "") or "").strip():
-            return "agents.defaults"
-        return None
-
-    lanes_present = bool(
-        profile is not None
-        and (getattr(profile, "lanes", None) or getattr(profile, "by_difficulty", None))
-    )
-    # A profile LANE is atomic (occupies harness/model/effort); a bare FIELD
-    # occupies only its axis. `model_occupied` is the NO-LANE view gating the
-    # grid rung, which resolve_slot runs only when the verb declares no lanes.
-    model_occupied = bool(
-        has_model
-        or explicit_vendor_present
-        or explicit_route
-        or _above_defaults(_scalar_rung("model"))
-        or _above_defaults(_scalar_rung("route"))
-    )
-    slot_receipt: List[Tuple[str, str, str]] = []
-    # (axis, value, rung, reason): a config-resolved axis this spawn did NOT get.
-    suppressed: List[Tuple[str, str, str, str]] = []
-    # The slot walk's structured extras (refusal, fingerprint), empty when unset.
-    _slot_meta: dict = {}
-    # Strict inventory: the resolver runs on EVERY spawn; a typed pin outranks
-    # the declared lanes, every other axis still qualifies against them.
-    enforced = routing_enforcement_state(settings) == "enforced"
-    if lanes_present or not model_occupied or enforced:
-        if not model_occupied or enforced:
-            grid_node_entry = _grid_node(node)
-        _slot_inventory = None
-        slot_walk_armed = lanes_present or grid_node_entry or enforced
-        capacity_refresh = False
-        if slot_walk_armed:
-            try:
-                from fno import route_resolve as _rr
-
-                _slot_inventory = _rr.resolve_inventory()
-            except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
-                _slot_inventory = None
-            # The verb computes capacity itself now, and the spawn door
-            # refreshes a stale or never-probed lane reading once before the
-            # walk skips the lane (the same rule the dispatch seam follows).
-            capacity_refresh = True
-        if slot_walk_armed:
-            # blueprint/think bill planning; target never acquires frontier
-            # eligibility merely because its low-difficulty node has no plan -
-            # that model-only plan-presence inference is gone (the derived
-            # verb already routed the node to the blueprint profile).
-            grid_role: Optional[str] = None
-            if verb in ("blueprint", "think"):
-                grid_role = "planning"
-            protected_name: Optional[str] = None
-            try:
-                from fno.agents.model_routing import PROTECTED_ROLES as _PROTECTED
-
-                if role and role.strip().lower() in _PROTECTED:
-                    protected_name = role.strip().lower()
-            except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
-                protected_name = None
-            try:
-                from fno import route_resolve as _rr
-
-                slot_candidate, slot_chain, _slot_verdict = _rr.resolve_slot(
-                    profile_verb,
-                    grid_node_entry,
-                    None,
-                    inventory=_slot_inventory,
-                    settings=settings,
-                    substrate=explicit_substrate,
-                    permission_mode=explicit_permission_value,
-                    constrain_harness=(explicit_harness or (
-                        (getattr(profile, "provider", "") or "").strip() if profile is not None else ""
-                    )).strip() or None,
-                    role=grid_role,
-                    protected_role=protected_name,
-                    model_occupied=model_occupied,
-                    explicit_lane=_explicit_lane,
-                    work_verb=verb,
-                    explicit_model_value=_flag_value(out[1:], "--model", "-m") if has_model else None,
-                    explicit_route_value=_flag_value(out[1:], "--route") if explicit_route else None,
-                    explicit_vendor_value=(
-                        (explicit_vendor or "").strip() or None if explicit_vendor_present else None
-                    ),
-                    meta=_slot_meta,
-                    capacity_refresh=capacity_refresh,
-                )
-            except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
-                if enforced:
-                    print(
-                        f"fno agents spawn: routing decision unavailable "
-                        f"({_exc}); strict routing refuses without a complete decision",
-                        file=err,
-                    )
-                    print("fno agents spawn: refusing; no worker launched", file=err)
-                    raise SystemExit(2)
-                slot_candidate = None
-                slot_chain = []
-        # Chain notes print and bill; the terminal rules.
-        for _line in slot_chain:
-            if _line.startswith(("slot skip", "slot note", "slot demote")):
-                print(f"fno agents spawn: {_line}", file=err)
-                suppressed.append(("slot", "", "", _line))
-
-        def _refuse(msg: str) -> None:
-            print(msg, file=err)
-            print("fno agents spawn: refusing; no worker launched", file=err)
-            raise SystemExit(2)
-
-        if slot_chain:
-            _terminal = slot_chain[-1]
-            # Refusals arrive composed from the verb's refusal_terminal owner;
-            # the exhausted queue rides its structured payload (exit 78).
-            _refusal = _slot_meta.get("refusal") or {}
-            if _refusal.get("text"):
-                _refuse(f"fno agents spawn: {_refusal['text']}")
-            if _slot_meta.get("exhausted"):
-                print(json.dumps(_slot_meta["exhausted"]))
-                raise SystemExit(78)
-            if slot_candidate is not None and slot_candidate.get("lane_rung"):
-                lane = slot_candidate["lane_fields"]
-                lane_index = slot_candidate["lane_index"]
-                slot_receipt.append(
-                    ("slot", f"{slot_candidate['lane_rung']} {slot_candidate['lane']}", "routing")
-                )
-            elif _terminal.startswith("slot="):
-                # A pin pick (no lane_rung) lands here too: the terminal
-                # carries `row=` so the receipt names the declared row.
-                slot_receipt.append(("slot", _terminal[len("slot="):], "routing"))
-            else:
-                # The no-lanes grid path: the terminal is the grid's own
-                # vocabulary (no-inventory-declared, no-band-candidate, ...).
-                slot_receipt.append(("grid", _terminal, "routing"))
-    elif node_id_present:
-        # The model axis is taken and the verb declares no lanes: the grid
-        # stands down loudly rather than in silence.
-        slot_receipt.append(("grid", "grid=model-axis-occupied", "routing"))
-
-    # A lane is a COMPLETE coordinate: route/model stop at the lane (a codex
-    # lane inheriting a zai route builds an argv cli.py refuses); postures fall through.
-    _LANE_EXCLUSIVE = ("route", "model")
-
-    def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung: lane > profile > defaults, harness-
-        blind (the two harness rungs live in the verb's answer; this read is
-        exact whenever no overlay table exists, which gates the verb path)."""
-        if lane is not None and lane_index is not None:
-            lv = _lane_value(lane, name)
-            if lv:
-                return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
-            if name in _LANE_EXCLUSIVE:
-                return "", None
-        if profile is not None:
-            pv = (getattr(profile, name, "") or "").strip()
-            if pv:
-                return pv, f"agents.profiles.{profile_verb}"
-        dv = (getattr(defaults, name, "") or "").strip()
-        if dv:
-            return dv, "agents.defaults"
-        return "", None
-
-    cfg_harness, provider_rung = field("provider")
-    cfg_model, model_rung = field("model")
-    cfg_effort, effort_rung = field("effort")
-    cfg_substrate, substrate_rung = field("substrate")
-    cfg_permission, permission_rung = field("permission_mode")
-    if not cfg_permission and apply_permission_builtin and is_verb_seed(seed):
-        cfg_permission, permission_rung = SPAWN_PERMISSION_BUILTIN, "builtin.autonomous"
-    cfg_route, route_rung = field("route")
-    cfg_account, account_rung = field("account")
-    cfg_pane_group, pane_group_rung = field("pane_group")
-    inject: List[str] = []
-    # (axis, value, source) - source is f"{rung}.{field}"; axis is the
-    # coordinate the field actually feeds (provider feeds "harness").
-    from_config: List[Tuple[str, str, str]] = []
-    _resolved: dict = {}
-
-    effort_occupied = bool(
-        has_effort or _above_defaults(_scalar_rung("effort")) or lane is not None
-    )
-    # A grid-branch candidate (no lane_rung) is an atomic harness/model/effort
-    # TRIPLE injected below; a lane candidate feeds field() instead, one rung
-    # per field with the seam's compatibility checks intact.
-    grid_candidate: Optional[dict[str, str]] = (
-        slot_candidate
-        if slot_candidate is not None and not slot_candidate.get("lane_rung")
-        else None
-    )
-    from_config.extend(slot_receipt)
-
-    if not (
-        cfg_harness or cfg_model or cfg_effort or cfg_substrate or cfg_permission
-        or cfg_route or cfg_account or cfg_pane_group
-    ) and grid_candidate is None and not from_config and not _overlays_present(
-        defaults, profile, lane
-    ):
-        # No config field resolved at all, so any --model here was typed.
-        _check_model_vendor_mismatch(
-            out, err, env, harness_typed=bool(explicit_harness and explicit_harness.strip())
-        )
-        _emit_defaults_applied(
-            out, profile_verb, seed, locals(), from_config, suppressed,
         )
         return out
 
-    # A spawn carrying --role whose lane resolves to a real route is billed on
-    # that route: the route owns the model via env (ANTHROPIC_*), so a config
-    # --model sourced here would collide with it. This is the five-opus-workers
-    # defect - a worker believed cheap and billed expensive - so the model
-    # branch below skips injection when resolve_route returns a real route.
+    for line in answer.get("stderr") or []:
+        print(line, file=err)
+    exit_code = int(answer.get("exit") or 0)
+    if exit_code:
+        if answer.get("stdout"):
+            print(json.dumps(answer["stdout"]))
+        raise SystemExit(exit_code)
+    for event in answer.get("events") or []:
+        from fno.agents import events
 
-    # A grid candidate is an atomic harness/model/effort TRIPLE. Mark the
-    # occupied coordinates so lower default rungs cannot split or overwrite
-    # the decision; effort joins the pair only when its axis was free and the
-    # row's harness has an effort surface (the resolver omitted it otherwise).
-    if grid_candidate is not None:
-        # A pin candidate (pin_row set) is the typed model's declared row; a
-        # grid one is the difficulty grid's pick. The pin's model is already
-        # on the argv, so only the harness injects.
-        _pin_row = grid_candidate.get("pin_row") or ""
-        _src = f"routing.models.{_pin_row}" if _pin_row else "difficulty-grid"
-        inject += ["--harness", grid_candidate["harness"]]
-        if not has_model:
-            inject += ["--model", grid_candidate["model"]]
-        if _pin_row:
-            from_config.append(("harness", grid_candidate["harness"], _src))
-        else:
-            from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", _src))
-        has_harness = True
-        has_model = True
-        if grid_candidate.get("effort") and not effort_occupied:
-            inject += ["--effort", grid_candidate["effort"]]
-            from_config.append(("effort", grid_candidate["effort"], _src))
-            has_effort = True
-        # The row's route rides beside the model it belongs to; a route or
-        # vendor pinned on argv is never overwritten.
-        if (
-            grid_candidate.get("route")
-            and not explicit_route
-            and not explicit_vendor_present
-        ):
-            inject += ["--route", grid_candidate["route"]]
-            from_config.append(("route", grid_candidate["route"], _src))
-        # The capacity pick read the row account's quota; claude-only at the CLI.
-        if grid_candidate.get("account") and not _flag_present(out[1:], "--account"):
-            if grid_candidate["harness"] == "claude":
-                inject += ["--account", grid_candidate["account"]]
-                from_config.append(
-                    ("account", grid_candidate["account"], _src)
-                )
-                grid_account_injected = True
-            else:
-                print(
-                    f"fno agents spawn: account skipped (claude-only, grid "
-                    f"harness {grid_candidate['harness']!r}); "
-                    f"{grid_candidate['account']!r} ignored",
-                    file=err,
-                )
-        _resolved["v"] = grid_candidate["harness"]
-
-    # Lazy resolved-target HARNESS for the substrate/permission compatibility
-    # checks: explicit -H > the merged config `provider` field (which carries a
-    # harness) > harness inference.
-    def resolved_harness() -> Optional[str]:
-        if "v" not in _resolved:
-            if explicit_harness and explicit_harness.strip():
-                _resolved["v"] = explicit_harness.strip()
-            elif cfg_harness:
-                _resolved["v"] = cfg_harness
-            else:
-                try:
-                    from fno.dispatch_flags import resolve_dispatch_harness
-
-                    _resolved["v"] = resolve_dispatch_harness(None, env=env)[0]
-                except Exception:
-                    _resolved["v"] = None
-        return _resolved["v"]
-
-    # Explicit-flag reads needed before the harness injection below: the
-    # route-collision refusal (AC2-HP) must see whether the caller's argv is
-    # already route-shaped (-P vendor --model m, or --route v) BEFORE a
-    # config-sourced harness gets injected, so a refusal leaves the argv
-    # untouched and nothing spawns. A bare explicit -m/--model with no -P
-    # already names the model half of a route, so injecting a config route on
-    # top would carry a DIFFERENT vendor's model behind the explicit one
-    # (cmd_spawn does not reject that combination the way it rejects -P+-m
-    # against --route, so a bare -m slipped through here and reached the
-    # routed vendor's endpoint asking for a model it likely doesn't have -
-    # the exact invisible-billing shape this field exists to kill). Also
-    # covers -P/--provider + -m/--model, which carries the same two pieces of
-    # information as --route and cmd_spawn rejects two route spellings
-    # together. A bare explicit -P/--provider (vendor) with no -m is NOT yet
-    # route-shaped (AC4-EDGE): cmd_spawn rejects vendor + --route together
-    # ("two spellings of one route") BEFORE it ever reaches the "add --model"
-    # check, so a config route or a route-collision refusal here would turn a
-    # helpful "add --model" error into a confusing one on an argv the
-    # operator never paired with a route at all.
-    explicit_model_present = has_model
-    if cfg_harness and not has_harness:
-        from fno.agents.harnesses import READABLE_PROVIDERS
-
-        if cfg_harness not in READABLE_PROVIDERS:
-            # READABLE_PROVIDERS is a HARNESS roster despite its name (its own
-            # rename crosses the Rust KNOWN_PROVIDERS parity pin), so the
-            # refusal names the axis the value has to satisfy, not the roster's
-            # spelling. The config key keeps its documented `provider` spelling.
-            print(
-                f"fno agents spawn: config.{provider_rung}.provider = "
-                f"{cfg_harness!r} is not a known harness; valid: "
-                f"{', '.join(READABLE_PROVIDERS)}",
-                file=err,
-            )
-            raise SystemExit(2)
-
-        # AC2-HP: the profile is about to fill the HARNESS axis (nothing on
-        # the caller's argv set it - has_harness is False, or we would not
-        # be here). If the caller's argv is already route-shaped, that route
-        # only the claude harness can carry, and a non-claude profile harness
-        # makes it unusable. This is not a precedence bug (no explicit flag is
-        # overwritten); it is a cross-axis collision, so say everything: the
-        # config path, the value, the axis it set, and the caller's own flags
-        # in the caller's own spelling.
-        route_shaped = explicit_route or (explicit_vendor_present and explicit_model_present)
-        if route_shaped and cfg_harness != "claude":
-            if explicit_route:
-                caller_spelling = f"--route {_flag_value(out[1:], '--route')}"
-            else:
-                model_val = _flag_value(out[1:], "--model", "-m")
-                caller_spelling = f"-P {explicit_vendor} --model {model_val}"
-            print(
-                f"fno agents spawn: config.{provider_rung}.provider = {cfg_harness!r} "
-                "sets the HARNESS axis,\n"
-                "and a route only the claude harness can carry is already on your "
-                "command line\n"
-                f"({caller_spelling}).\n"
-                "Nothing you passed set the harness: -P names the model vendor, a "
-                "different axis,\n"
-                "so the profile filled it.\n"
-                f"Pass -H claude to keep your route, or clear {provider_rung}.provider.",
-                file=err,
-            )
-            raise SystemExit(2)
-
-        inject += ["--harness", cfg_harness]
-        from_config.append(("harness", cfg_harness, f"{provider_rung}.provider"))  # type: ignore[arg-type]
-
-    # Billing axes (route/account/model, ruling 4): decided by the Rust owner
-    # (crates/fno-agents/src/spawn_axes.rs): one round trip over the projected
-    # facts returns injections, receipts and skip reasons verbatim.
-    route_injected = False
-    if cfg_route or cfg_account or cfg_model:
-        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
-
-        _role_route = False
-        if cfg_model and not has_model and role:
-            _role_route = bool(_role_resolves(role, settings, env))
-        _target: Optional[str] = None
-        _target_failed = False
-        if cfg_model and not has_model and not explicit_route and not explicit_vendor_present and not _role_route:
-            from fno.dispatch_flags import resolve_dispatch_harness
-
-            try:
-                _target = (
-                    explicit_harness.strip()
-                    if explicit_harness and explicit_harness.strip()
-                    else cfg_harness or resolve_dispatch_harness(None, env=env)[0]
-                )
-            except Exception:
-                # Degrade open (AC5-FR): no target, no basis to inject.
-                _target = None
-                _target_failed = True
-        try:
-            _axes = spawn_axes_call({
-                "route": {"value": cfg_route, "rung": route_rung},
-                "account": {"value": cfg_account, "rung": account_rung},
-                "model": {"value": cfg_model, "rung": model_rung},
-                "explicit_route": explicit_route,
-                "explicit_vendor_present": explicit_vendor_present,
-                "explicit_vendor": explicit_vendor or "",
-                "explicit_model_present": explicit_model_present,
-                "has_model": has_model,
-                "grid_candidate_present": grid_candidate is not None,
-                "slot_chain": slot_chain,
-                "grid_account_injected": grid_account_injected,
-                "account_flag_present": _flag_present(out[1:], "--account"),
-                "prov": (resolved_harness() or "") if cfg_account else "",
-                "role": role, "role_resolves": _role_route,
-                "cfg_harness": cfg_harness or "",
-                "harness_target": _target, "harness_target_failed": _target_failed,
-            })
-        except SpawnAxesUnavailable as _exc:
-            # Degrade open (AC5-FR), the seam's own stance for config-sourced
-            # fields: a missing owner must not brick an otherwise valid spawn.
-            print(
-                f"fno agents spawn: billing axes skipped (spawn-axes "
-                f"unavailable: {_exc})",
-                file=err,
-            )
-            _axes = {}
-        for _line in _axes.get("messages") or []:
-            print(_line, file=err)
-        inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
-        from_config.extend([tuple(e) for e in _axes.get("applied") or []])
-        suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
-        route_injected = bool(_axes.get("route_injected"))
-
-    # The spawn-overlay verb owns the harness-keyed rungs: one
-    # round-trip answers effort/substrate/permission plus the ONE bundle and
-    # refuses a bad overlay. Gated on an overlay table (or lane args) being
-    # present, so an overlay-free spawn pays zero subprocesses and the
-    # harness-blind field() reads below answer it exactly.
-    _overlay_answer: Optional[dict] = None
-    if _overlays_present(defaults, profile, lane):
-        from fno.agents.spawn_overlay_client import (
-            SpawnOverlayUnavailable,
-            spawn_overlay_call,
-        )
-
-        _lv = (
-            lane.get("args") if isinstance(lane, Mapping) else getattr(lane, "args", None)
-        ) if lane is not None else None
-        try:
-            _overlay_answer = spawn_overlay_call(
-                {
-                    "kind": "overlay",
-                    "verb": profile_verb or "",
-                    "harness": resolved_harness() or "",
-                    "defaults": _overlay_payload(defaults) if defaults is not None else {},
-                    "profile": _overlay_payload(profile) if profile is not None else None,
-                    "lane": {"args": list(_lv)} if _lv else None,
-                    "lane_index": lane_index,
-                    "argv_tail": [str(t) for t in out[1:]],
-                }
-            )
-        except SpawnOverlayUnavailable as exc:
-            # Transport unavailable (no fno-agents binary): degrade open like
-            # every config-sourced field here. Only the verb's own VERDICT
-            # refusal below fails the spawn.
-            print(
-                f"fno agents spawn: harness-keyed defaults skipped ({exc})",
-                file=err,
-            )
-        if _overlay_answer is not None and _overlay_answer.get("refusal"):
-            print(_overlay_answer["refusal"], file=err)
-            raise SystemExit(2)
-
-    def _seamed(name: str) -> Tuple[str, Optional[str]]:
-        """Lane first (a lane is a complete coordinate), then the harness-keyed
-        answer, then the harness-blind scalars: field()'s order with the two
-        harness rungs spliced in above it."""
-        if lane is not None and lane_index is not None:
-            lv = _lane_value(lane, name)
-            if lv:
-                return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
-        entry = (_overlay_answer or {}).get("effective", {}).get(name)
-        if entry:
-            return entry["value"], entry["rung"]
-        return field(name)
-
-    if not has_effort:
-        # Effort surface depends on the RESOLVED HARNESS, not the vendor, so
-        # the value is re-read through the harness rungs HERE, after the grid
-        # or slot has settled the harness - a codex-keyed overlay
-        # effort must win on codex while the scalar still answers claude.
-        cfg_effort, effort_rung = _seamed("effort")
-
-    # Mechanical axes ride the same owner; the pane-group stays here (its
-    # placement judgment is the spawn-overlay verb's).
-    explicit_substrate = _has_explicit_substrate(out[1:])
-    _effort_reason: Optional[str] = None
-    if cfg_effort:
-        from fno.agents.mux_spawn import effort_tokens
-
-        try:
-            effort_tokens(resolved_harness() or "", cfg_effort)
-        except Exception as _exc:
-            _effort_reason = str(_exc)
-    if explicit_substrate is None:
-        cfg_substrate, substrate_rung = _seamed("substrate")
-    else:
-        cfg_substrate, substrate_rung = "", None
-    _has_permission = _has_permission_mode(out[1:])
-    if not _has_permission:
-        # Re-read through the harness rungs: an empty re-read keeps
-        # the harness-blind read alive: that is the builtin.autonomous rung
-        #, which field() cannot see.
-        h_permission, h_rung = _seamed("permission_mode")
-        if h_permission:
-            cfg_permission, permission_rung = h_permission, h_rung
-    prov = resolved_harness() or ""
-    _substrate_unknown = bool(cfg_substrate) and cfg_substrate not in _SUBSTRATES
-    _substrate_ok = bool(prov) and bool(cfg_substrate) and _substrate_compatible(cfg_substrate, prov)
-    _pane_tokens_ok = False
-    _thread_tokens_ok = False
-    if cfg_permission and prov and not _has_permission:
-        if _permission_mappable(prov, cfg_permission, "pane"):
-            _pane_tokens_ok = True
-        if _permission_mappable(prov, cfg_permission, "thread"):
-            _thread_tokens_ok = True
-    _axes = {}
-    if cfg_effort or cfg_substrate or cfg_permission:
-        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
-
-        try:
-            _axes = spawn_axes_call({
-                "effort": {"value": cfg_effort, "rung": effort_rung},
-                "has_effort": has_effort, "effort_reason": _effort_reason or "",
-                "substrate": {"value": cfg_substrate or "", "rung": substrate_rung},
-                "explicit_substrate": explicit_substrate or "",
-                "substrate_unknown": _substrate_unknown, "substrate_ok": _substrate_ok,
-                "substrate_valid_list": ", ".join(_SUBSTRATES),
-                "permission_mode": {"value": cfg_permission, "rung": permission_rung},
-                "has_permission": _has_permission, "pane_tokens_ok": _pane_tokens_ok,
-                "thread_tokens_ok": _thread_tokens_ok,
-                "prov": prov,
-            })
-        except SpawnAxesUnavailable as _exc:
-            print(
-                f"fno agents spawn: mechanical axes skipped (spawn-axes "
-                f"unavailable: {_exc})",
-                file=err,
-            )
-            _axes = {}
-    for _line in _axes.get("messages") or []:
-        print(_line, file=err)
-    inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
-    from_config.extend([tuple(e) for e in _axes.get("applied") or []])
-    suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
-    injected_substrate = _axes.get("injected_substrate") or None
-
-    # Harness bundle: the verb's ONE bundle answer (lane args >
-    # profile harness overlay > defaults harness overlay, never concatenated)
-    # lands behind the -- passthrough fence at the argv TAIL, so the caller's
-    # own pre-fence tokens stay pre-fence; a boundary the caller already typed
-    # displaces the configured bundle (the verb names it), and the off-pane
-    # gate below re-reads the final argv, so a bundle on an explicit
-    # bg/headless substrate is refused exactly like a typed one. The bundle
-    # tokens ride the axes answer's bundle_inject (argv tail), never the head
-    # inject.
-    _bundle_inject: List[str] = []
-    _pg_unavailable = ""
-    _pg_answer: Optional[dict] = None
-    _bundle_json = (_overlay_answer or {}).get("bundle")
-    _positional_present = bool(_positional_indices(out[1:]))
-    _axes = {}
-    if cfg_pane_group or isinstance(_bundle_json, dict):
-        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
-
-        _pg_rung = f"{pane_group_rung}.pane_group"
-        _pg_unavailable = ""
-        if cfg_pane_group and not _flag_present(out[1:], "--tab"):
-            # Placement judgment lives in the verb; degrade open on missing it.
-            try:
-                from fno.agents.spawn_overlay_client import (
-                    SpawnOverlayUnavailable,
-                    spawn_overlay_call,
-                )
-
-                _pg = spawn_overlay_call(
-                    {
-                        "kind": "pane-group",
-                        "group": cfg_pane_group,
-                        "rung": _pg_rung,
-                        "eff_substrate": explicit_substrate or injected_substrate or "pane",
-                        "argv_tail": [t for _, t in _spawn_tokens(out[1:])],
-                    }
-                )
-                _pg_answer = _pg
-            except SpawnOverlayUnavailable as _exc:
-                _pg_unavailable = str(_exc)
-        try:
-            _axes = spawn_axes_call({
-                "pane_group": {"value": cfg_pane_group, "rung": pane_group_rung},
-                "tab_flag_present": _flag_present(out[1:], "--tab"),
-                "pane_group_pg_rung": _pg_rung,
-                "pane_group_unavailable": _pg_unavailable,
-                "pane_group_answer": _pg_answer,
-                "bundle": _bundle_json, "positional_present": _positional_present,
-            })
-        except SpawnAxesUnavailable as _exc:
-            print(
-                f"fno agents spawn: pane/bundle skipped (spawn-axes "
-                f"unavailable: {_exc})",
-                file=err,
-            )
-            _axes = {}
-        for _line in _axes.get("messages") or []:
-            print(_line, file=err)
-        inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
-        from_config.extend([tuple(e) for e in _axes.get("applied") or []])
-        suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
-        _bundle_inject = [
-            str(t) for _pair in _axes.get("bundle_inject") or [] for t in _pair
-        ]
-        if _axes.get("out_tail_append_empty"):
-            out = [*out, ""]
-
-    if from_config:
-        # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the
-        # AXIS a field feeds (not the field name), its value, and the config
-        # path - "provider=agents.profiles.target" reads as though a provider
-        # was set to a profile, when what actually happened is harness=codex.
-        print(
-            "fno agents spawn: applied "
-            + ", ".join(f"{a}={v} ({s})" for a, v, s in from_config),
-            file=err,
-        )
-    if inject:
-        out = [out[0], *inject, *out[1:]]
-    if _bundle_inject:
-        out = [*out, *_bundle_inject]
-    if inject or _bundle_inject:
-        # injection can pin the substrate the operator left open, and
-        # the Rust-routed lane never reaches the Python CLI's own refusal, so
-        # the gate re-runs on the final argv. The helper rewrites `--substrate`
-        # in place and ignores toks[0], so `out` itself is the safe view.
-        _demote_thread_uncarried_passthrough(out, err)
-    # `from_config` is the record of what was actually INJECTED, so it is the
-    # only honest answer to "did anyone choose this model?". Reading the config
-    # value instead would refuse a typed model that merely happens to sit
-    # beside a configured one.
-    model_source = next(
-        (source for axis, _value, source in from_config if axis == "model"), None
-    )
-    _check_model_vendor_mismatch(
-        out, err, env, model_source=model_source,
-        harness_typed=bool(explicit_harness and explicit_harness.strip()),
-    )
-    _emit_defaults_applied(
-        out, profile_verb, seed, locals(),
-        from_config, suppressed,
-        fingerprint=_slot_meta.get("fingerprint", ""),
-    )
-    return out
+        events.emit("model_vendor_mismatch", **event)
+    answer_argv = [str(t) for t in answer.get("argv") or out]
+    # Injection can pin the substrate the operator left open, and the
+    # Rust-routed lane never reaches the Python CLI's own refusal, so the
+    # post-injection demote re-runs on the composed argv.
+    if answer.get("injected"):
+        _demote_thread_uncarried_passthrough(answer_argv, err)
+    return answer_argv
 
 
-def _emit_defaults_applied(
-    out: Sequence[str],
-    verb: Optional[str],
-    seed: Optional[str],
-    scope: dict,
-    applied: Sequence[Tuple[str, str, str]],
-    suppressed: Sequence[Tuple[str, str, str, str]],
-    fingerprint: str = "",
-) -> None:
-    """Journal the spawn_defaults_applied receipt (contract:
-    docs/architecture/role-based-model-routing.md). ``scope`` is the caller's
-    locals(); the call never raises - a dead journal never bricks a launch."""
-    try:
-        import os
-
-        pin = os.environ.get("FNO_EVENTS_PATH")
-        if pin:
-            path = pin
-        else:
-            from fno import paths
-
-            path = str(paths.state_dir() / "events.jsonl")
-        axes = {
-            axis: (scope.get(value_key) or "", scope.get(rung_key))
-            for axis, value_key, rung_key in (
-                ("provider", "cfg_harness", "provider_rung"),
-                ("model", "cfg_model", "model_rung"),
-                ("effort", "cfg_effort", "effort_rung"),
-                ("substrate", "cfg_substrate", "substrate_rung"),
-                ("permission_mode", "cfg_permission", "permission_rung"),
-                ("route", "cfg_route", "route_rung"),
-                ("account", "cfg_account", "account_rung"),
-                ("pane_group", "cfg_pane_group", "pane_group_rung"),
-            )
-        }
-        from fno.route_slot_client import route_slot_call
-
-        route_slot_call({
-            "op": "journal",
-            "path": path,
-            "event": {
-                "name": _flag_value(out[1:], "--name"),
-                "verb": verb,
-                "seed": seed,
-                "fingerprint": fingerprint,
-                "resolved": {axis: {"value": v, "rung": r} for axis, (v, r) in axes.items()},
-                "applied": [list(entry) for entry in applied],
-                "suppressed": [list(entry) for entry in suppressed],
-            },
-        })
-    except Exception:  # noqa: BLE001 - a dead journal never bricks a spawn
-        pass
+def _scan_projection(tail: Sequence[str]) -> dict:
+    """The scan projection the transport sends, one scanner call each. The
+    scanners answer what the OPERATOR typed; the verb owns every config
+    decision over the result."""
+    has_harness, explicit_harness, has_model, has_effort = _scan(tail)
+    explicit_vendor = _flag_value(tail, "--provider", "-P")
+    explicit_route = _flag_present(tail, "--route")
+    role = _role_of(tail)
+    has_permission = _has_permission_mode(tail)
+    permission_value = _flag_value(tail, "--permission-mode")
+    if not permission_value and has_permission:
+        # --yolo/-Y are the same knob as --permission-mode; the verb must see
+        # them or it can hand a yolo spawn a harness the gate refuses.
+        permission_value = "yolo"
+    slot = _seed_slot(tail)
+    return {
+        "has_harness": has_harness,
+        "explicit_harness": explicit_harness,
+        "has_model": has_model,
+        "has_effort": has_effort,
+        "explicit_vendor": explicit_vendor,
+        "explicit_route": explicit_route,
+        "route_value": _flag_value(tail, "--route") if explicit_route else None,
+        "model_value": _flag_value(tail, "--model", "-m") if has_model else None,
+        "role": role,
+        "explicit_substrate": _has_explicit_substrate(tail),
+        "permission_value": permission_value,
+        "has_permission": has_permission,
+        "flag_node": _flag_value(tail, "--node"),
+        "seed": _seed_of(tail),
+        "seed_index": (slot[0] + 1) if slot else None,
+        "seed_form": slot[1] if slot else None,
+        "account_flag_present": _flag_present(tail, "--account"),
+        "tab_flag_present": _flag_present(tail, "--tab"),
+        "name": _flag_value(tail, "--name"),
+        "positional_present": bool(_positional_indices(tail)),
+        "spawn_tokens": [str(t) for t in tail],
+    }
 
 
 def spawn_seam_marker() -> str:
@@ -1933,16 +1009,13 @@ def spawn_seam_marker() -> str:
 
 def routing_enforcement_state(settings: object = None) -> str:
     """The marker verdict: the config-blind binary's only record of the
-    seam's decision. Read failure degrades open; a strict seam refuses
-    upstream."""
+    seam's decision. Read through the verb's policy mode; read failure
+    degrades open, and a strict seam refuses upstream."""
+    del settings
     try:
         from fno.route_resolve import _routing_enforced
 
-        if settings is None:
-            from fno.config import load_settings
-
-            settings = load_settings()
-        return "enforced" if _routing_enforced(settings) else "unenforced"
+        return "enforced" if _routing_enforced() else "unenforced"
     except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
         return "unenforced"
 
