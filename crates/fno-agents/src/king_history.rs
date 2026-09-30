@@ -358,7 +358,11 @@ pub(crate) fn previous_beat(
                     && (!loop_only || s_str(r, "source") == Some("loop"))
             })
         });
-        return Ok(found.cloned());
+        // No row of this holder yet (or pre-holder rows only): the scope's
+        // own newest row is the baseline, exactly the pre-holder read.
+        if let Some(row) = found {
+            return Ok(Some(row.clone()));
+        }
     }
     let payload = scan(events_paths, scope)?;
     Ok(payload["events"]
@@ -1915,6 +1919,92 @@ mod verdict_tests {
     }
 
     #[test]
+    fn compaction_reading_names_transcript_and_journal_fallbacks() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "a1b2c3d4-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            "{\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-09-10T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
+
+        let mut manifest = crate::loopcheck::KingManifest::default();
+        manifest.harness_session_id = Some(session.into());
+        manifest.created_at = Some("2026-09-01T00:00:00Z".into());
+        assert_eq!(
+            compaction_reading(&manifest, "claude", 7),
+            (1, "transcript", None)
+        );
+
+        assert_eq!(
+            compaction_reading(&manifest, "codex", 7),
+            (7, "journal", None)
+        );
+
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        let (count, source, error) = compaction_reading(&manifest, "claude", 7);
+        assert_eq!((count, source), (7, "journal"));
+        assert!(error.unwrap().contains("transcript not found"));
+    }
+
+    #[test]
+    fn a_garbage_ceiling_config_refuses_the_read_instead_of_reading_absent() {
+        // Same posture the count flags had: a mistyped ceiling must not
+        // degrade into an absent bound that prints as a clean reading. The
+        // refusal is a config refusal now, exit 1 naming the key.
+        let (_pin, root, manifest, journal) = input_tree("[king]\ncompaction_ceiling = \"1O\"\n");
+        assert_eq!(
+            run_king_verdict(&verdict_args(&root, &manifest, &journal)),
+            1
+        );
+    }
+
+    #[test]
+    fn usage_failure_exit_two() {
+        assert_eq!(run_king_verdict(&[]), 2);
+        assert_eq!(run_king_verdict(&["--cwd".into(), "/tmp".into()]), 2);
+        assert_eq!(run_king_verdict(&["--nope".into()]), 2);
+        // The precomputed facts are gone on purpose: passing one is a usage
+        // failure, never a silently accepted input.
+        assert_eq!(
+            run_king_verdict(&["--inherited-undelivered".into(), "5".into()]),
+            2
+        );
+        assert_eq!(
+            run_king_verdict(&["--compaction-ceiling".into(), "3".into()]),
+            2
+        );
+        assert_eq!(run_king_verdict(&["--window".into(), "90m".into()]), 2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn journal(rows: &[Value]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut fh = std::fs::File::create(&path).unwrap();
+        for row in rows {
+            writeln!(fh, "{row}").unwrap();
+        }
+        (dir, path)
+    }
+
+    fn checkin(ts: &str, data: Value) -> Value {
+        json!({"ts": ts, "type": "reign_checkin", "source": "loop", "data": data})
+    }
+
+    #[test]
     fn hook_beat_never_writes_for_a_blank_scope() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
@@ -2009,92 +2099,6 @@ mod verdict_tests {
         // The fresh row resets the clock: the next stop writes nothing.
         assert!(!fresh);
         assert_eq!(rows_after_fresh, 2);
-    }
-
-    #[test]
-    fn compaction_reading_names_transcript_and_journal_fallbacks() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let session = "a1b2c3d4-1111-2222-3333-444455556666";
-        let transcript = project.join(format!("{session}.jsonl"));
-        std::fs::write(
-            &transcript,
-            "{\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-09-10T00:00:00Z\"}\n",
-        )
-        .unwrap();
-        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
-
-        let mut manifest = crate::loopcheck::KingManifest::default();
-        manifest.harness_session_id = Some(session.into());
-        manifest.created_at = Some("2026-09-01T00:00:00Z".into());
-        assert_eq!(
-            compaction_reading(&manifest, "claude", 7),
-            (1, "transcript", None)
-        );
-
-        assert_eq!(
-            compaction_reading(&manifest, "codex", 7),
-            (7, "journal", None)
-        );
-
-        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
-        let (count, source, error) = compaction_reading(&manifest, "claude", 7);
-        assert_eq!((count, source), (7, "journal"));
-        assert!(error.unwrap().contains("transcript not found"));
-    }
-
-    #[test]
-    fn a_garbage_ceiling_config_refuses_the_read_instead_of_reading_absent() {
-        // Same posture the count flags had: a mistyped ceiling must not
-        // degrade into an absent bound that prints as a clean reading. The
-        // refusal is a config refusal now, exit 1 naming the key.
-        let (_pin, root, manifest, journal) = input_tree("[king]\ncompaction_ceiling = \"1O\"\n");
-        assert_eq!(
-            run_king_verdict(&verdict_args(&root, &manifest, &journal)),
-            1
-        );
-    }
-
-    #[test]
-    fn usage_failure_exit_two() {
-        assert_eq!(run_king_verdict(&[]), 2);
-        assert_eq!(run_king_verdict(&["--cwd".into(), "/tmp".into()]), 2);
-        assert_eq!(run_king_verdict(&["--nope".into()]), 2);
-        // The precomputed facts are gone on purpose: passing one is a usage
-        // failure, never a silently accepted input.
-        assert_eq!(
-            run_king_verdict(&["--inherited-undelivered".into(), "5".into()]),
-            2
-        );
-        assert_eq!(
-            run_king_verdict(&["--compaction-ceiling".into(), "3".into()]),
-            2
-        );
-        assert_eq!(run_king_verdict(&["--window".into(), "90m".into()]), 2);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn journal(rows: &[Value]) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        let mut fh = std::fs::File::create(&path).unwrap();
-        for row in rows {
-            writeln!(fh, "{row}").unwrap();
-        }
-        (dir, path)
-    }
-
-    fn checkin(ts: &str, data: Value) -> Value {
-        json!({"ts": ts, "type": "reign_checkin", "source": "loop", "data": data})
     }
 
     #[test]
@@ -2375,7 +2379,16 @@ mod tests {
         // -J is accepted, then the normal required-args validation runs.
         assert_eq!(run_king_history(&args), 0);
         // Missing required args refuse with usage (2), never "unknown flag".
-        assert_eq!(run_king_history(&["-J".to_string()]), 2);
+        // --scope keeps the assert off the registry resolve, which refuses
+        // an undeclared test home instead of answering.
+        assert_eq!(
+            run_king_history(&[
+                "-J".to_string(),
+                "--scope".to_string(),
+                "x-aaaa".to_string()
+            ]),
+            2
+        );
     }
 
     #[test]

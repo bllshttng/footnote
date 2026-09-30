@@ -4471,7 +4471,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty(), "err: {err}");
         let previous = previous.expect("the newest loop row is the baseline");
         assert_eq!(s_str(&previous, "source"), Some("loop"));
