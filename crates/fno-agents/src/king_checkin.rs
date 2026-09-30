@@ -1807,19 +1807,26 @@ fn render_lines(
             let rows = territory.as_array().cloned().unwrap_or_default();
             lines.push(format!("territory: {} scopes", rows.len()));
             for row in rows.iter().take(MAX_COURT_ROWS) {
-                let kingless = if row.get("kingless").and_then(Value::as_bool) == Some(true) {
-                    " kingless"
-                } else {
-                    ""
-                };
                 lines.push(format!(
-                    "  {} rung {} mission {} live {}/{}{}",
+                    "  {} rung {} mission {} live {}/{}{}{}",
                     dash(row.get("scope")),
                     dash(row.get("rung")),
                     dash(row.get("mission")),
                     dash(row.get("live")),
                     dash(row.get("cap")),
-                    kingless,
+                    row["kingless"]
+                        .as_bool()
+                        .filter(|v| *v)
+                        .map(|_| " kingless")
+                        .unwrap_or(""),
+                    if row["membership"] == "unknown" {
+                        row["reason"]
+                            .as_str()
+                            .map(|r| format!(" unreadable ({r})"))
+                            .unwrap_or_else(|| " unreadable".to_string())
+                    } else {
+                        String::new()
+                    },
                 ));
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
@@ -3281,23 +3288,22 @@ mod tests {
     /// AC14-ERR: a failed owner read renders unmeasured with the reason.
     #[test]
     fn the_scope_line_reads_unmeasured_with_the_reason() {
-        let readings = sample_readings(
+        let mut readings = sample_readings(
             board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
                    "owned_reason": "territory: registry unreadable (x)", "rows": []}),
             cap_ok(),
             workers_none(),
         );
+        readings
+            .iter_mut()
+            .find(|reading| reading.name == "territory")
+            .unwrap()
+            .value = json!([{"scope":"x-aaaa","membership":"unknown","reason":"the graph read returned 0 nodes","rung":2,"mission":"x-aaaa","live":null,"cap":4}]);
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let line = lines
-            .iter()
-            .find(|l| l.contains("owned unmeasured"))
-            .unwrap();
-        assert_eq!(
-            line,
-            "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes"
-        );
+        assert!(lines.iter().any(|l| l == "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes")
+            && lines.iter().any(|l| l == "  x-aaaa rung 2 mission x-aaaa live -/4 unreadable (the graph read returned 0 nodes)"));
     }
 
     /// AC15-EDGE: a previous beat row that carries active_nodes but no
