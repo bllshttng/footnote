@@ -146,10 +146,7 @@ fn first_boundary_after(transcript: &Path, after_epoch: i64) -> Result<Option<St
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if row.get("subtype").and_then(|v| v.as_str()) != Some("compact_boundary") {
-            continue;
-        }
-        let Some(ts) = row.get("timestamp").and_then(|v| v.as_str()) else {
+        let Some(ts) = boundary_ts(&row) else {
             continue;
         };
         if let Some(epoch) = rfc3339_to_epoch(ts) {
