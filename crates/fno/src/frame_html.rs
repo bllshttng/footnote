@@ -387,7 +387,7 @@ pub fn frame_svg(frame: &Frame, theme: Theme) -> String {
     let cols = frame.cols as usize;
     let (w, h) = (cols as f64 * SVG_CELL_W, frame.rows as f64 * SVG_CELL_H);
     let mut out = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" xml:space=\"preserve\" \
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.1}\" height=\"{h:.1}\" viewBox=\"0 0 {w:.1} {h:.1}\" xml:space=\"preserve\" \
 font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
 <rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
         hex(theme.bg)
@@ -418,7 +418,7 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
             let run_w = (c - start) as f64 * SVG_CELL_W;
             if bg != theme.bg {
                 out.push_str(&format!(
-                    "<rect x=\"{x}\" y=\"{y}\" width=\"{run_w}\" height=\"{SVG_CELL_H}\" fill=\"{}\"/>",
+                    "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{run_w:.1}\" height=\"{SVG_CELL_H}\" fill=\"{}\"/>",
                     hex(bg)
                 ));
             }
@@ -433,7 +433,7 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
             let body: String = trimmed.chars().skip(lead).map(xml_escape).collect();
             let cells = trimmed.chars().count() - lead;
             out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" fill=\"{}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\"{}{}{}>{body}</text>",
+                "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\" textLength=\"{:.1}\" lengthAdjust=\"spacingAndGlyphs\"{}{}{}>{body}</text>",
                 x + lead as f64 * SVG_CELL_W,
                 y + SVG_CELL_H * 0.78,
                 hex(fg),
