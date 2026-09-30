@@ -321,13 +321,14 @@ fn run_held(bound_s: u64) -> i32 {
 }
 
 fn usage() {
-    eprintln!("usage: fno-agents select-read <next|undispatched|held> [--project P] [--mission M]");
+    eprintln!("usage: fno-agents select-read <next|undispatched|lane-fill|held> [--project P] [--mission M] [--max N] [--claim] [--json]");
 }
 
 pub fn run(args: &[String]) -> i32 {
     let kind = match args.first().map(String::as_str) {
         Some("next") => Kind::Next,
         Some("undispatched") => Kind::Undispatched,
+        Some("lane-fill") => Kind::LaneFill,
         Some("held") => {
             let bound_s = crate::agents_config::auto_continue_select_timeout_s(
                 &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -361,6 +362,8 @@ pub fn run(args: &[String]) -> i32 {
                 forwarded.push(value.clone());
                 index += 2;
             }
+            // The fill seam's flags ride to the door, which parses them.
+            "--claim" | "--json" | "-J" => forwarded.push(args[index].clone()),
             _ => {
                 usage();
                 return 2;
