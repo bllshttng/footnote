@@ -172,10 +172,15 @@ _ALL_TMPS+=("$TMP_NOFNO")
 rm -f "${TMP_NOFNO}/bin/fno"
 
 # Keep git/python on PATH but drop the stub dir; a PATH with no `fno` anywhere
-# is the real shape of the documented "if fno is unavailable" fallback.
+# is the real shape of the documented "if fno is unavailable" fallback. The
+# fno-agents mint double rides a second dir: the run-id mint must answer even
+# here, or init refuses before the gate leg this case exercises.
 _CLEAN_PATH="$(cd "$TMP_NOFNO" && command -v git | xargs dirname)"
+mkdir -p "${TMP_NOFNO}/agents-bin"
+cp "$SCRIPT_DIR/../../tests/helpers/fno-agents-state-path-stub.sh" "${TMP_NOFNO}/agents-bin/fno-agents"
+chmod 755 "${TMP_NOFNO}/agents-bin/fno-agents"
 (cd "$TMP_NOFNO" && env \
-  PATH="${_CLEAN_PATH}:/usr/bin:/bin" \
+  PATH="${TMP_NOFNO}/agents-bin:${_CLEAN_PATH}:/usr/bin:/bin" \
   HOME="${TMP_NOFNO}/home" \
   TARGET_START=1 \
   TARGET_INPUT="review gate probe" \

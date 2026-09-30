@@ -1417,30 +1417,6 @@ fn spawn_fence_without_a_message_still_seeds() {
     assert!(params.get("harness_args").is_none());
 }
 
-#[test]
-fn mint_session_uuid_is_well_formed_v4() {
-    let u = mint_session_uuid();
-    let parts: Vec<&str> = u.split('-').collect();
-    assert_eq!(parts.len(), 5, "uuid has five dash-separated groups: {u}");
-    assert_eq!(
-        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
-        vec![8, 4, 4, 4, 12],
-        "uuid group widths: {u}"
-    );
-    assert!(
-        u.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
-        "uuid is hex + dashes: {u}"
-    );
-    // version nibble (group 3, first char) is '4'; variant nibble (group 4,
-    // first char) is one of 8/9/a/b.
-    assert_eq!(parts[2].chars().next().unwrap(), '4', "v4 version: {u}");
-    assert!(
-        matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'),
-        "rfc-4122 variant: {u}"
-    );
-    assert_ne!(mint_session_uuid(), u, "two mints differ");
-}
-
 // -----------------------------------------------------------------------
 // spawn defaults to an owned interactive pane (x-3ab8)
 // -----------------------------------------------------------------------

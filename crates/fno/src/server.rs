@@ -4168,7 +4168,7 @@ impl Core {
         // Exact identity wins; a prefix only resolves when it is unambiguous
         // (hits a single distinct identity). An ambiguous prefix is NOT_FOUND,
         // never a silent pick of the first registry row (codex P2).
-        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| identity_exact(a, id)).collect();
+        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -4477,11 +4477,7 @@ impl Core {
         if held.len() == 1 && self.panes.contains_key(&held[0]) {
             return held.first().copied();
         }
-        let exact: Vec<&RegistryAgent> = self
-            .agents
-            .iter()
-            .filter(|a| identity_exact(a, id))
-            .collect();
+        let exact: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -9435,11 +9431,16 @@ impl Core {
                 .and_then(|row| row.effective_identity())
                 .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            // Identity is the session uuid, never the name: a rename (or a
-            // succession heir renamed after spawn) leaves the pane label
-            // stale while the uuid still names the same live session. The
-            // uuid comparison above is the whole check.
-            if (occupants.len() != 1 && viewer_row.is_none()) || registry_identity != expected {
+            // Identity is the id the pane's row answers to - its own fno_id or
+            // its harness session id, either spelling - never the name: a
+            // rename (or a succession heir renamed after spawn) leaves the
+            // pane label stale while the ids still name the same live session.
+            // The answers_to check is the whole gate.
+            let addressed = occupants
+                .first()
+                .or_else(|| viewer_row.as_ref())
+                .is_some_and(|row| row.answers_to(expected));
+            if (occupants.len() != 1 && viewer_row.is_none()) || !addressed {
                 let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
@@ -12856,11 +12857,6 @@ fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
         .max()
         .unwrap_or(1);
     persisted.max(registry_floor).max(1)
-}
-
-/// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
-fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
-    a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
 }
 
 /// Does `id` PREFIX either of row `a`'s identity spellings ? The `where`
