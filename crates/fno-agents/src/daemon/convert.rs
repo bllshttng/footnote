@@ -20,7 +20,7 @@ use std::time::Duration;
 /// change adds is paid for by moving an existing body out. The behavior is
 /// unchanged.
 pub(super) fn handle_rename(ctx: &Ctx, req: &Request) -> Response {
-    state::rename_response(&ctx.home.registry_json(), req)
+    crate::rename::respond(&ctx.home, req)
 }
 
 /// How long to wait for the agent lock before refusing. A conversion is
