@@ -890,6 +890,33 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
             source_plan_path,
             dropped,
         ) = provenance;
+        // The creating session's registry row AT BIRTH: the lane facts the
+        // activity feed's provenance view prints for a node_created row. A
+        // session no registry row holds (a human filing by hand) reads as
+        // absent, never guessed.
+        let (source_model, source_effort, source_parent, source_crown) = source_session_id
+            .as_deref()
+            .and_then(|sid| {
+                let registry = crate::state::load_registry(
+                    &crate::paths::AgentsHome::from_env().registry_json(),
+                )
+                .ok()?;
+                registry
+                    .entries
+                    .iter()
+                    .find(|e| e.harness_session_id.as_deref() == Some(sid))
+                    .map(|e| {
+                        (
+                            e.model.clone(),
+                            e.effort.clone(),
+                            e.spawned_by_session.clone(),
+                            e.crown_level
+                                .zip(e.crown_scope.clone())
+                                .map(|(level, scope)| format!("L{level} {scope}")),
+                        )
+                    })
+            })
+            .unwrap_or((None, None, None, None));
         let mut node = json!({
             "id": minted,
             "parent": args.parent,
@@ -930,6 +957,10 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
             "completion_note": Value::Null,
             "source_session_id": source_session_id,
             "source_harness": source_harness,
+            "source_model": source_model,
+            "source_effort": source_effort,
+            "source_parent_session": source_parent,
+            "source_crown": source_crown,
             "source_cwd": source_cwd,
             "source_node_id": source_node_id,
             "source_plan_path": source_plan_path,
