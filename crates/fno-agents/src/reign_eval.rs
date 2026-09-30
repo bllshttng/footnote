@@ -1327,6 +1327,9 @@ mod tests {
             fold.windows[1].wakes.get("relay_task_notification"),
             Some(&1)
         );
+        let wakes = fold.windows[1].json()["wakes"].clone();
+        assert_eq!(wakes["typed"], 1);
+        assert_eq!(wakes["machine"], 2);
         assert_eq!(fold.windows[2].tool_calls, 0);
         assert!(fold
             .entries
