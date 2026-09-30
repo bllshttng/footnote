@@ -3516,6 +3516,29 @@ event_types:
           description: "Optional. Set ONLY when the fire carried a watching intent and the idle was refused: why the watch lease or the idle posture refused. 'no_claim' = the manifest recorded no claim pair at init; 'gone'/'held_by_other'/'stale' are permanent for the session (arming another watcher cannot help); 'contended'/'write_failed' can succeed on retry; 'harness'/'not_async' = the idle posture itself refused before any lease read."
     consumers: [operator]
 
+  - name: pr_watch_draft_flip
+    description: "The pr-watch sweep flipped an open fno-bound draft PR back to ready (config.pr.open_ready's second enforcement point, decided by crates/fno-agents/src/pr_draft_ready.rs through the graph-get door)."
+    sources: [daemon, test]
+    data:
+      required: [pr, repo, node, outcome]
+      properties:
+        pr:
+          type: integer
+          description: "The flipped PR's number."
+        repo:
+          type: string
+          description: "The owner/repo slug the flip was pinned to (--repo); unknown-repo when unresolvable."
+        node:
+          type: string
+          description: "The backlog node the watched PR belongs to; empty when unbound."
+        outcome:
+          type: string
+          enum: [flipped, error]
+        error:
+          type: string
+          description: "Optional. gh's refusal text on an error outcome, bounded at 200 chars."
+    consumers: [operator]
+
   - name: control_plane_tick
     description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch, reap, retire): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
     sources: [daemon, loop, hook, test]
