@@ -933,13 +933,16 @@ Every node-bearing spawn passes the verb seam. The seam projects the
     the same way (unknown is not evidence of ``/target``; the message names
     ``fno backlog update <id> --dispatch-verb``).
 
-## _classify_lane_candidate
+## classify_lane_candidate (native)
 
 Classify one ready node for lane-fill. ``None`` = selectable, else a typed
     exclusion reason. Read-only (acquires no slot): the SINGLE per-candidate
-    truth shared by :func:`select_lane_fill` (live) and :func:`schedule_shadow`
-    (the read-only report), so the two can never disagree about why a node is
-    held back. Duplicating this sequence into a second copy is the drift the
+    truth shared by the native ``backlog lane-fill`` door (live) and the
+    ``backlog schedule-shadow`` door (the read-only report), so the two can
+    never disagree about why a node is held back. Owned by
+    ``crates/fno-agents/src/backlog/advance_fill.rs`` since the lanes/fill
+    port; the wheel's ``fno backlog lane-fill`` tombstone names the door.
+    Duplicating this sequence into a second copy is the drift the
     codebase's path-uniqueness rule exists to prevent.
 
     Guard order: peer-lane, then collision, then domain. Domain was a proxy for
@@ -960,7 +963,7 @@ Classify one ready node for lane-fill. ``None`` = selectable, else a typed
         survives only as that annotation, so the report can still explain a
         serialized unknown. That subclass is the one behavior change inside the
         class: a held domain excluded such a candidate before the reorder and
-        now it dispatches, loudly (select_lane_fill warns on the annotation),
+        now it dispatches, loudly (the live door warns on the annotation),
         with the mandatory-surface intake refusal as the standing control.
       ``unevaluated:collision-error`` the collision gate raised, so safety is
         unknown for the same reason and gets the same fail-open treatment. It is

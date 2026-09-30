@@ -803,7 +803,7 @@ def _release_lane_slot(node: str, cwd: str) -> None:
     slot for the new worker's target-init reconcile, and a post-init slot is
     pid-anchored so it frees itself on worker death anyway. What this shortens
     is the dispatch-time (pre-init, TTL-anchored) slot's linger - while it is
-    live, ``select_lane_fill`` skips the node as "owned by a peer lane", so
+    live, the native lane-fill door skips the node as "owned by a peer lane", so
     without the release a failed respawn would leave the node unselectable for
     up to the slot TTL. Best-effort, mirroring the force-release shell-out.
     """
@@ -812,8 +812,13 @@ def _release_lane_slot(node: str, cwd: str) -> None:
 
     log = logging.getLogger(__name__)
     try:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            raise RuntimeError("no fno-agents binary")
         rel = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "agents", "claim", "release", "--lane", node],
+            [str(binary), "claim", "lane-release", "--lane", node],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
         if rel.returncode != 0:

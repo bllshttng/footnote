@@ -7,6 +7,9 @@ use std::time::Instant;
 pub enum Kind {
     Next,
     Undispatched,
+    /// The parallel fill's selection: the native lane-fill door answers the
+    /// {lanes, fill} envelope the python dispatcher reads.
+    LaneFill,
     Held,
 }
 
@@ -27,6 +30,7 @@ pub struct Receipt {
 
 fn kind_name(kind: Kind) -> &'static str {
     match kind {
+        Kind::LaneFill => "lane-fill",
         Kind::Next => "next",
         Kind::Undispatched => "undispatched",
         Kind::Held => "held",
@@ -145,6 +149,9 @@ pub fn select_read(kind: Kind, args: &[String], door_exe: &OsStr, bound_s: u64) 
         }
         Kind::Undispatched => {
             cmd.args(["backlog", "undispatched", "--json"]);
+        }
+        Kind::LaneFill => {
+            cmd.args(["backlog", "lane-fill", "--json", "--claim"]);
         }
         // Held never spawns: run() answers it from the journals directly.
         Kind::Held => {}
@@ -268,7 +275,7 @@ pub fn select_read(kind: Kind, args: &[String], door_exe: &OsStr, bound_s: u64) 
                 )
             }
         },
-        Kind::Undispatched | Kind::Held => parsed,
+        Kind::Undispatched | Kind::Held | Kind::LaneFill => parsed,
     };
     receipt("ok", Some(answer), bound_s, elapsed_ms, None, None)
 }
@@ -336,6 +343,15 @@ pub fn run(args: &[String]) -> i32 {
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
+            "--max" if matches!(kind, Kind::LaneFill) => {
+                let Some(value) = args.get(index + 1) else {
+                    usage();
+                    return 2;
+                };
+                forwarded.push(args[index].clone());
+                forwarded.push(value.clone());
+                index += 2;
+            }
             "--project" | "--mission" => {
                 let Some(value) = args.get(index + 1) else {
                     usage();

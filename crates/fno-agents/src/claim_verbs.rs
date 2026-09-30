@@ -39,6 +39,18 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
     }
+    if op == "lane-acquire" {
+        return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);
+    }
+    if op == "lane-release" {
+        return crate::claim_lanes_cli::run_lane_release(&args[1..]);
+    }
+    if op == "lane-count" {
+        return crate::claim_lanes_cli::run_lane_count(&args[1..]);
+    }
+    if op == "lane-reconcile" {
+        return crate::claim_lanes_cli::run_lane_reconcile(&args[1..]);
+    }
     if op == "queue" {
         // One dispatch line: argument parsing and the arm body live in
         // claim_queue.rs, so this 2,000-line file stays flat.

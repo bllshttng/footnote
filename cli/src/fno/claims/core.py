@@ -1492,7 +1492,7 @@ def _list_claims_impl(
             counts[state] += 1
             states_by_key[key] = state
         # SUSPECT is an active, TTL-protected claim - it must count
-        # alongside LIVE so lane accounting (advance._live_lane_domains) does not
+        # alongside LIVE so the native lane accounting (the lane-count door) does not
         # under-count a slot held by a respawned worker and over-dispatch.
         if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
             out.append(status)

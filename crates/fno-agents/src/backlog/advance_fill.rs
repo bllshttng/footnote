@@ -671,3 +671,234 @@ fn parse_fill_args(args: &[String]) -> Option<FillArgs> {
     }
     Some(opts)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Isolated claims root: the dir that CONTAINS `.fno/claims`.
+    fn sandbox(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-fill-test-{name}-{}-{}",
+            std::process::id(),
+            crate::claims::now_ms()
+        ));
+        fs::create_dir_all(dir.join(".fno")).unwrap();
+        dir
+    }
+
+    fn plan_with_files(dir: &Path, name: &str, files: &[&str]) -> PathBuf {
+        let path = dir.join(name);
+        let rows: String = files
+            .iter()
+            .map(|f| format!("| `{f}` | modify |\n"))
+            .collect();
+        fs::write(
+            &path,
+            format!("# P\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n{rows}"),
+        )
+        .unwrap();
+        path
+    }
+
+    fn node(id: &str, plan: &str, domain: &str) -> Value {
+        let mut node = json!({"id": id});
+        if !plan.is_empty() {
+            node["plan_path"] = json!(plan);
+        }
+        if !domain.is_empty() {
+            node["domain"] = json!(domain);
+        }
+        node
+    }
+
+    #[test]
+    fn peer_lane_holds_back_its_node() {
+        let dir = sandbox("peer-lane");
+        let root = Some(dir.as_path());
+        acquire_lane_slot(2, "ab-held0001", None, None, None, root)
+            .unwrap()
+            .unwrap();
+        let verdict = classify_lane_candidate(
+            &node("ab-held0001", "", "code"),
+            &BTreeSet::new(),
+            &[],
+            &dir,
+            &Thresholds::default(),
+            root,
+        );
+        assert_eq!(verdict.as_deref(), Some("peer-lane"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_surface_answers_the_unevaluated_fail_open_token() {
+        let dir = sandbox("no-surface");
+        let root = Some(dir.as_path());
+        // An empty plan and a plan_path that resolves to nothing are both
+        // "the gate did not run", never a silent pass: the token is loud.
+        let missing = dir.join("missing.md").to_string_lossy().to_string();
+        for plan in ["", missing.as_str()] {
+            let verdict = classify_lane_candidate(
+                &node("ab-open0001", plan, ""),
+                &BTreeSet::new(),
+                &[],
+                &dir,
+                &Thresholds::default(),
+                root,
+            );
+            assert_eq!(
+                verdict.as_deref(),
+                Some("unevaluated:no-surface"),
+                "plan {plan:?}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn same_domain_annotation_joins_the_token() {
+        let dir = sandbox("same-domain");
+        let root = Some(dir.as_path());
+        let mut used = BTreeSet::new();
+        used.insert("code".to_string());
+        let verdict = classify_lane_candidate(
+            &node("ab-anno0001", "", "code"),
+            &used,
+            &[],
+            &dir,
+            &Thresholds::default(),
+            root,
+        );
+        assert_eq!(
+            verdict.as_deref(),
+            Some("unevaluated:no-surface+same-domain:code")
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn high_collision_holds_back_the_candidate() {
+        let dir = sandbox("high-collision");
+        let root = Some(dir.as_path());
+        let candidate = plan_with_files(&dir, "cand.md", &["a.py", "b.py", "c.py", "d.py"]);
+        let other = plan_with_files(&dir, "other.md", &["a.py", "b.py", "c.py", "z.py"]);
+        let inflight = vec![json!({
+            "id": "ab-other001", "title": "Other", "status": "ready",
+            "plan_path": other.to_string_lossy(), "created_at": "2026-01-02",
+        })];
+        let verdict = classify_lane_candidate(
+            &node("ab-cand0001", &candidate.to_string_lossy(), ""),
+            &BTreeSet::new(),
+            &inflight,
+            &dir,
+            &Thresholds::default(),
+            root,
+        );
+        assert_eq!(verdict.as_deref(), Some("high-collision:ab-other001"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clean_candidate_is_selectable() {
+        let dir = sandbox("clean");
+        let root = Some(dir.as_path());
+        let verdict = classify_lane_candidate(
+            &node("ab-clean001", "", "code"),
+            &BTreeSet::new(),
+            &[],
+            &dir,
+            &Thresholds::default(),
+            root,
+        );
+        assert!(verdict.is_none(), "no slot, no surface, no collision");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_lane_domains_reads_slot_domains() {
+        let dir = sandbox("domains");
+        let root = Some(dir.as_path());
+        for (lane, domain) in [("ab-dom0001", "code"), ("ab-dom0002", "docs")] {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("domain".to_string(), json!(domain));
+            acquire_lane_slot(4, lane, None, None, Some(metadata), root)
+                .unwrap()
+                .unwrap();
+        }
+        let domains = live_lane_domains(root).unwrap();
+        assert_eq!(
+            domains,
+            BTreeSet::from(["code".to_string(), "docs".to_string()])
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_worked_entries_joins_slots_and_node_claims() {
+        let dir = sandbox("worked");
+        let root = Some(dir.as_path());
+        acquire_lane_slot(2, "ab-lane0001", None, None, None, root)
+            .unwrap()
+            .unwrap();
+        let outcome = crate::claims::acquire(
+            "node:ab-node0002",
+            "manual-target",
+            crate::claims::AcquireOpts {
+                root: Some(dir.clone()),
+                events_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            outcome,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let graph = dir.join("graph.db");
+        crate::graph_store::seed_rows(
+            &graph,
+            &[
+                json!({"id": "ab-lane0001", "title": "Lane", "status": "in_progress"}),
+                json!({"id": "ab-node0002", "title": "Node", "status": "in_progress"}),
+                json!({"id": "ab-free0003", "title": "Free", "status": "ready"}),
+            ],
+        )
+        .unwrap();
+        let rows = live_worked_entries(root, &graph).unwrap();
+        let mut ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["ab-lane0001", "ab-node0002"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fill_report_starts_shaped_and_empty() {
+        let report = fill_report(3);
+        assert_eq!(report.get("requested"), Some(&json!(3)));
+        assert_eq!(report.get("filled"), Some(&json!(0)));
+        assert_eq!(report.get("stop"), Some(&json!("no-candidate")));
+        assert_eq!(report.get("excluded"), Some(&json!([])));
+    }
+
+    #[test]
+    fn fill_args_parse_the_wheel_spellings() {
+        let parsed = parse_fill_args(&[
+            "--max".to_string(),
+            "3".to_string(),
+            "-p".to_string(),
+            "proj".to_string(),
+            "--claim".to_string(),
+            "-J".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.max_lanes, 3);
+        assert_eq!(parsed.project.as_deref(), Some("proj"));
+        assert!(parsed.claim);
+        assert!(parsed.json);
+        assert!(parse_fill_args(&["--bogus".to_string()]).is_none());
+    }
+}
