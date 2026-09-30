@@ -56,9 +56,13 @@ def draft_argv_intent(command: Sequence[str]) -> tuple[bool, Optional[str], Opti
     if sub == "create":
         return True, "create", None
     if sub == "ready":
+        # A numberless `pr ready --draft` is gh DWIM against the current
+        # branch's PR - the same draft intent, so the subject falls back to
+        # the branch and the refusal still names a recordable door.
         for token in rest:
             if token.isdigit():
                 return True, "ready", int(token)
+        return True, "ready", None
     return False, None, None
 
 
@@ -199,7 +203,12 @@ def run_draft_flip(
         return f"spared by operator ruling at {subject}"
     if not (open_ready_fn or _open_ready)(cwd):
         return "open_ready=false; no flip"
+    # The slug is authoritative: gh resolves a bare PR number against the
+    # process cwd's repo, and a candidate with repo_dir=None would otherwise
+    # flip a same-numbered PR in whatever repo the daemon sits in.
     cmd = ["gh", "pr", "ready", str(cand.pr_number)]
+    if cand.repo_slug:
+        cmd += ["--repo", cand.repo_slug]
     try:
         result = runner(cmd, cwd=cwd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:

@@ -44,6 +44,18 @@ class TestDraftArgvIntent:
     def test_ready_with_number_is_ready_intent(self):
         assert draft_argv_intent(["pr", "ready", "7", "--draft"]) == (True, "ready", 7)
 
+    def test_numberless_ready_dwim_is_still_draft_intent(self):
+        """`gh pr ready --draft` DWIMs against the current branch's PR; the
+        subject falls back to the branch so the refusal still names a door."""
+        assert draft_argv_intent(["pr", "ready", "--draft"]) == (True, "ready", None)
+        refusal = draft_refusal(
+            ["pr", "ready", "--draft"],
+            None,
+            **_admitting(),
+        )
+        assert refusal is not None
+        assert "pr-draft:feature/x-3159" in refusal
+
     def test_non_draft_and_non_pr_commands_are_not_intent(self):
         assert draft_argv_intent(["pr", "create", "--title", "t"])[0] is False
         assert draft_argv_intent(["pr", "view", "9", "--draft"])[0] is False
@@ -237,7 +249,7 @@ class TestRunDraftFlip:
             ruling_fn=lambda _s: ("none", ""),
         )
         assert receipt == "flipped"
-        assert calls == [["gh", "pr", "ready", "7"]]
+        assert calls == [["gh", "pr", "ready", "7", "--repo", "owner/repo"]]
         assert events == [
             (
                 "pr_watch_draft_flip",
