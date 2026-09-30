@@ -4735,14 +4735,46 @@ mod tests {
 
     /// AC5-HP: a stale codex reading is refreshed once and the fresh reading
     /// decides the pick: lanes[0] codex-luna instead of the sonnet fallthrough.
+    #[test]
+    fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.starts_with("slot refresh accounts usage (")),
+            "chain: {chain:?}"
+        );
+        assert_eq!(out["candidate"]["evidence"]["window"], "window");
+    }
 
     /// AC6-EDGE: a never-probed (absent) account takes the same refresh: the
     /// most outdated case IS the never-probed case.
+    #[test]
+    fn refresh_gate_covers_a_never_probed_account() {
+        let env = CapacityEnv::new(&state_json(None), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+    }
 
     /// AC7-HP: without capacity_refresh the refresh stub never runs; the
     /// positive-control run with the flag proves the marker would be written.
     #[test]
-    fn refresh_rows() {
+    fn no_refresh_flag_means_no_probe() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
         let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
@@ -4762,38 +4794,13 @@ mod tests {
         })));
         assert_eq!(out["status"], "pick");
         assert!(marker.exists(), "the stub never ran under the flag");
+    }
 
-        let env = CapacityEnv::new(&state_json(None), None);
-        let marker = env.dir.path().join("marker");
-        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
-        std::env::set_var("FNO_BIN", &stub);
-        let out = resolve_slot_payload(&slot_env_payload(json!({
-            "capacity_refresh": true,
-        })));
-        assert_eq!(out["status"], "pick");
-        assert_eq!(out["candidate"]["lane"], "codex-luna");
-
-        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-        let marker = env.dir.path().join("marker");
-        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
-        std::env::set_var("FNO_BIN", &stub);
-        let out = resolve_slot_payload(&slot_env_payload(json!({
-            "capacity_refresh": true,
-        })));
-        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
-        assert_eq!(out["candidate"]["lane"], "codex-luna");
-        let chain = chain_of(&out);
-        assert!(
-            chain
-                .iter()
-                .any(|l| l.starts_with("slot refresh accounts usage (")),
-            "chain: {chain:?}"
-        );
-        assert_eq!(out["candidate"]["evidence"]["window"], "window");
-
-        // AC8-EDGE: the probe answers but cannot read the account
-        // (auth-unsupported): the lane is still skipped, and the chain names
-        // refresh:<reason> so the config smell is visible.
+    /// AC8-EDGE: the probe answers but cannot read the account
+    /// (auth-unsupported): the lane is still skipped, and the chain names
+    /// refresh:<reason> so the config smell is visible.
+    #[test]
+    fn a_lane_the_probe_cannot_read_stays_skipped_and_names_the_reason() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
         let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
