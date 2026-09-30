@@ -114,8 +114,7 @@ pub(super) async fn route(
     // both release back to the pane on Esc or a pane click, so the property
     // this slot protects - typing reaches the focused pane - holds by
     // default and is set aside only on request.
-    if view.feed_detail_of.is_some() || view.input_owner() == super::region_focus::RegionOwner::Feed
-    {
+    if view.feed_detail.is_some() || view.input_owner() == super::region_focus::RegionOwner::Feed {
         return Some(super::feed_view::feed_keys(view, bytes, sock_w).await);
     }
     if view.create.is_some() {

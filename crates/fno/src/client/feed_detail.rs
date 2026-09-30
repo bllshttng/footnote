@@ -1,34 +1,22 @@
-//! The provenance view for one activity row: everything known about the
-//! event, and how it is known.
+//! The provenance modal for one activity row: everything known about the
+//! event, and how it is known, on ONE Popup.
 //!
-//! The operator asked for nine fields in one order - harness, timestamp,
-//! model, effort, node, session-id, pane, parent, monitoring king - and three
-//! of them are measured to be mostly or entirely unrecorded. So the render's
-//! job is not to fill nine cells. It is to say which of three different
-//! silences each empty one is:
+//! The popup system owns selection, hit-testing and the esc chip, so the
+//! modal's action fields - node, session, pane, PR - are rows that Enter or a
+//! click acts on, and the labels read bold from the same plain-body anatomy
+//! every other modal wears. An empty field prints nothing: the modal hides
+//! what the source lacks rather than filling the row with NOT RECORDED
+//! (ruling 2026-09-29). NOT APPLICABLE survives - it is positive evidence,
+//! not an absence.
 //!
-//! - `NOT RECORDED` - the source lacks the fact. Nothing to read.
-//! - `NOT APPLICABLE` - positive evidence the concept does not apply here; a
-//!   row that records no session was never run by one, so it has no model.
-//!   The ROW decides that, never its kind: a `node_ended` on a node that ran
-//!   carries the last do or ship session, so its blank lane is NOT RECORDED.
-//! - a named live state - `not in the live roster`, `no seat`, `removed`.
-//!
-//! A blank cell reads as broken UI when the real defect is upstream, which is
-//! the whole reason this view exists rather than a wider panel column.
-//!
-//! The first six fields come from the event itself. Pane, parent and king are
-//! a LIVE lookup, and [`Destination`] is the ONE resolution the pane field, the
-//! footer and the action all read. One resolution is the point: a footer that
-//! named its action from one join while Enter fired another sent a command the
-//! footer never promised.
+//! [`Destination`] stays the ONE resolution: the session row's action and the
+//! pane row's value read it, so a row can never promise a command its action
+//! does not send.
 
 use super::*;
 use crate::feed_overlay::FeedItem;
+use crate::popup::{Anchor, Popup, PopupRow};
 use crate::proto::AgentRow;
-
-pub(crate) const NOT_RECORDED: &str = "NOT RECORDED";
-pub(crate) const NOT_APPLICABLE: &str = "NOT APPLICABLE";
 
 /// How this event's session can be reached right now, worst evidence last.
 pub(crate) enum Destination<'a> {
@@ -37,7 +25,7 @@ pub(crate) enum Destination<'a> {
     /// purpose and the recovery line is the answer.
     Recovery(&'a str),
     /// The exact `harness_session_id` matched a live roster row. This event's
-    /// own session, and the only evidence good enough for parent and king.
+    /// own session, and the only evidence good enough for parent and lead.
     Exact(&'a AgentRow),
     /// Only the row NAME or worktree matched. A name is reusable, so this
     /// reaches the node's CURRENT worker, never necessarily this event's
@@ -48,8 +36,8 @@ pub(crate) enum Destination<'a> {
     None,
 }
 
-/// Resolve [`Destination`] once. Exact identity first, because a reused name is the
-/// failure this ordering exists to avoid.
+/// Resolve [`Destination`] once. Exact identity first, because a reused name
+/// is the failure this ordering exists to avoid.
 pub(crate) fn destination<'a>(rows: &'a [AgentRow], item: &'a FeedItem) -> Destination<'a> {
     if let Some(detail) = item.detail.as_deref() {
         return Destination::Recovery(detail);
@@ -79,26 +67,12 @@ pub(crate) fn destination<'a>(rows: &'a [AgentRow], item: &'a FeedItem) -> Desti
 }
 
 /// The roster row that is provably THIS event's session. A name match is not
-/// one, so parent and king read it and nothing else.
+/// one, so parent and lead read it and nothing else.
 fn exact_row<'a>(dest: &Destination<'a>) -> Option<&'a AgentRow> {
     match dest {
         Destination::Exact(row) => Some(row),
         _ => None,
     }
-}
-
-/// True when the ROW itself records no session, so its session-shaped fields
-/// are inapplicable rather than missing. The kind is the wrong test: a
-/// `node_ended` on a node that ran carries the last do/ship session, and
-/// calling that "no session" contradicts the session the same view attaches.
-fn no_session(item: &FeedItem) -> bool {
-    item.session_id.is_none() && item.harness.is_none()
-}
-
-fn or_not_recorded(v: Option<&str>) -> String {
-    v.filter(|s| !s.is_empty())
-        .unwrap_or(NOT_RECORDED)
-        .to_string()
 }
 
 fn seat(a: &AgentRow) -> String {
@@ -111,134 +85,249 @@ fn seat(a: &AgentRow) -> String {
     }
 }
 
-/// What the pane field can honestly say. Most of these are good outcomes
-/// rather than errors.
-fn pane_value(item: &FeedItem, dest: &Destination<'_>) -> String {
-    match dest {
-        // A removal is a normal end, not a failure - but NOT APPLICABLE is
-        // positive evidence the pane concept cannot apply, and a removed
-        // session's pane can outlive its row for a day. No removal
-        // record carries the pane's stop measurement on a field of its own
-        // yet; when one does, that field - not the recovery line - prints
-        // here. Until then the honest answer is not recorded.
-        Destination::Recovery(_) => {
-            format!("{NOT_RECORDED} - the removal did not measure the pane")
-        }
-        Destination::Exact(a) => seat(a),
-        Destination::NameOnly(a) => format!("{} · the node's current worker", seat(a)),
-        Destination::SessionOnly(_) => "not in the live roster".to_string(),
-        Destination::None if no_session(item) => {
-            format!("{NOT_APPLICABLE} - no session ran it")
-        }
-        Destination::None => NOT_RECORDED.to_string(),
+/// The owner line as the modal prints it: a holder the live roster no longer
+/// holds says so, rather than naming a dead crown's handle as if it were
+/// current (the report's dead `king (...)`). The holder is the parenthesized
+/// name the owner assignment writes; a line without one passes through.
+fn live_owner(owner: &str, agents: &[AgentRow]) -> String {
+    let Some(open) = owner.rfind('(') else {
+        return owner.to_string();
+    };
+    if !owner.ends_with(')') || open + 1 >= owner.len() - 1 {
+        return owner.to_string();
+    }
+    let holder = &owner[open + 1..owner.len() - 1];
+    let live = agents.iter().any(|a| a.name == holder && !a.exited);
+    if live {
+        owner.to_string()
+    } else {
+        format!("{owner} · gone")
     }
 }
 
-/// The nine fields, in the operator's order, as `(label, value)`.
-pub(crate) fn detail_fields(
+/// What one selectable row does when Enter fires or it is clicked.
+#[derive(Debug, Clone)]
+pub(crate) enum FeedAction {
+    /// The session's own deep link, resolved ONCE at modal open (FocusPane,
+    /// attach on portal 0, or the no-pane notice).
+    Session(ChromeHit),
+    /// Open the backlog drill-down on the node.
+    Node(String),
+    /// Open the PR in the browser.
+    Pr(String),
+    /// Show the removal's recovery line as a notice.
+    Resume(String),
+}
+
+/// The open provenance modal, held on the view: the event, its popup, and the
+/// per-target action and value lists. `actions[i]`/`values[i]` answer popup
+/// target `i` (flat index) - only Entry rows contribute targets, and exactly
+/// those rows push here, so the alignment holds by construction.
+pub(crate) struct FeedDetailModal {
+    pub(crate) item: FeedItem,
+    pub(crate) popup: Popup,
+    pub(crate) actions: Vec<FeedAction>,
+    pub(crate) values: Vec<String>,
+}
+
+/// Build the modal: one Popup whose inert rows are the event's recorded
+/// fields (empty ones hidden) and whose Entry rows are its actions. The
+/// roster resolves Destination, parent, lead and the owner's liveness at
+/// open; a roster change mid-read shows on reopen.
+pub(crate) fn modal(view: &View, item: FeedItem) -> FeedDetailModal {
+    let (popup, actions, values) = build(&view.layout.agents, view.layout.active_squad, &item);
+    FeedDetailModal {
+        item,
+        popup,
+        actions,
+        values,
+    }
+}
+
+/// The modal's parts against one roster reading: the framed popup, the
+/// per-target actions, and the per-target copyable values. Free of `View`
+/// so the tests can build it from plain rows.
+pub(crate) fn build(
+    agents: &[AgentRow],
+    active_squad: u64,
     item: &FeedItem,
-    dest: &Destination<'_>,
-) -> Vec<(&'static str, String)> {
-    let row = exact_row(dest);
-    let unrun = no_session(item);
-    let session_absent = || {
-        if unrun {
-            format!("{NOT_APPLICABLE} - no session ran it")
-        } else {
-            NOT_RECORDED.to_string()
+) -> (Popup, Vec<FeedAction>, Vec<String>) {
+    let dest = destination(agents, item);
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<FeedAction> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+
+    // The event line: kind as printed, the title beside it.
+    rows.push(PopupRow::Header(format!(
+        "{} {}",
+        super::feed_view::display_kind(&item.kind),
+        item.title
+    )));
+    rows.push(PopupRow::Rule);
+
+    // One inert field row. Absent prints nothing - the ruling that retired
+    // NOT RECORDED - so the modal's height says what the source holds.
+    let info = |label: &str, value: Option<String>, rows: &mut Vec<PopupRow>| {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            rows.push(PopupRow::Info {
+                label: label.to_string(),
+                value: v,
+            });
         }
     };
-    vec![
-        (
-            "harness",
-            item.harness
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(session_absent),
-        ),
-        ("timestamp", local_ts(&item.ts)),
-        (
-            "model",
-            item.model
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(session_absent),
-        ),
-        (
-            "effort",
-            item.effort
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(session_absent),
-        ),
-        ("node", or_not_recorded(item.node.as_deref())),
-        (
-            "session-id",
-            item.session_id
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(|| match item.actor.as_deref() {
-                    // The actor is why there is no session: a mechanism acted,
-                    // and a mechanism has no session to attach to.
-                    Some(actor) => format!("{NOT_APPLICABLE} - acted by {actor}"),
-                    None => session_absent(),
-                }),
-        ),
-        ("pane", pane_value(item, dest)),
-        (
-            "parent",
-            match row.and_then(|a| {
-                a.spawned_by_session
-                    .as_deref()
-                    .map(|p| (a.spawned_by_name.as_deref(), a.lineage_kind.as_deref(), p))
-            }) {
-                // An edge resolves to the parent's registry NAME when the set
-                // holds that row: "<name> (<session>)". A PEER stays the
-                // handoff it is; a pre-v32 edge (no word yet) reads plain,
-                // like the child record it is. An edge naming a session no
-                // row holds renders the bare id - the absence is a fact the
-                // reader sees, never a fabricated name.
-                Some((name, Some("peer"), p)) => match name {
-                    Some(n) => format!("{n} ({p}) (handoff)"),
-                    None => format!("{p} (handoff)"),
-                },
-                Some((name, _, p)) => match name {
-                    Some(n) => format!("{n} ({p})"),
-                    None => p.to_string(),
-                },
-                // No exact row: the birth event's parent id when the row
-                // carries one (a removed or spawn row whose session is
-                // gone); else the birth's reason, when one was recorded.
-                None => match item.parent.as_deref() {
-                    Some(p) => p.to_string(),
-                    None => row
-                        .and_then(|a| a.lineage_reason.as_deref())
-                        .unwrap_or(NOT_RECORDED)
-                        .to_string(),
-                },
-            },
-        ),
-        (
-            "lead",
-            match row.and_then(|a| a.crown_scope.as_deref()) {
-                Some(scope) => match row.and_then(|a| a.crown_title.as_deref()) {
-                    Some(title) => title.to_string(),
-                    None => match row.and_then(|a| a.crown_level) {
-                        Some(level) => format!("L{level} {scope}"),
-                        None => scope.to_string(),
+
+    info("harness", item.harness.clone(), &mut rows);
+    info("timestamp", Some(local_ts(&item.ts)), &mut rows);
+    info("model", item.model.clone(), &mut rows);
+    info("effort", item.effort.clone(), &mut rows);
+
+    // node: a jump, not a label.
+    if let Some(node) = item.node.as_deref() {
+        rows.push(PopupRow::Entry {
+            glyph: "node".to_string(),
+            label: node.to_string(),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(FeedAction::Node(node.to_string()));
+        values.push(node.to_string());
+    }
+
+    // session-id: the attach target, or plain text when no live reach exists.
+    match &dest {
+        Destination::Exact(a) | Destination::NameOnly(a) => {
+            if let Some(sid) = item.session_id.as_deref() {
+                rows.push(PopupRow::Entry {
+                    glyph: "session-id".to_string(),
+                    label: sid.to_string(),
+                    hint: String::new(),
+                    enabled: true,
+                });
+                actions.push(FeedAction::Session(agent_hit(a, active_squad)));
+                values.push(sid.to_string());
+            }
+            // A name join reaches the node's CURRENT worker: the pane says
+            // so rather than implying this event's session sits there.
+            let seat_v = if matches!(dest, Destination::NameOnly(_)) {
+                format!("{} · the node's current worker", seat(a))
+            } else {
+                seat(a)
+            };
+            rows.push(PopupRow::Entry {
+                glyph: "pane".to_string(),
+                label: seat_v.clone(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(FeedAction::Session(agent_hit(a, active_squad)));
+            values.push(seat_v);
+        }
+        Destination::SessionOnly(sid) => {
+            rows.push(PopupRow::Entry {
+                glyph: "session-id".to_string(),
+                label: (*sid).to_string(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(FeedAction::Session(ChromeHit::Cmds(vec![
+                Command::AttachAgent {
+                    id: (*sid).to_string(),
+                    placement: PanePlacement {
+                        portal: Some(0),
+                        ..PanePlacement::default()
                     },
                 },
-                // A worker row rolling up to a titled lead carries the title.
-                None => row
-                    .and_then(|a| a.crown_title.as_deref())
-                    .unwrap_or(NOT_RECORDED)
-                    .to_string(),
-            },
+            ])));
+            values.push((*sid).to_string());
+            info(
+                "pane",
+                Some("not in the live roster".to_string()),
+                &mut rows,
+            );
+        }
+        Destination::Recovery(_) | Destination::None => {}
+    }
+
+    // The ship row's PR: open it.
+    if let Some(url) = item.url.as_deref() {
+        rows.push(PopupRow::Entry {
+            glyph: "pr".to_string(),
+            label: url.to_string(),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(FeedAction::Pr(url.to_string()));
+        values.push(url.to_string());
+    }
+
+    // parent: the exact row's named edge when one resolves, else the birth
+    // stamp the graph carried (a node_created row's creating session).
+    let parent = exact_row(&dest).and_then(|a| {
+        a.spawned_by_session
+            .as_deref()
+            .map(|p| (a.spawned_by_name.as_deref(), a.lineage_kind.as_deref(), p))
+            .map(|(name, kind, p)| match (name, kind) {
+                (Some(n), Some("peer")) => format!("{n} ({p}) (handoff)"),
+                (Some(n), _) => format!("{n} ({p})"),
+                (None, Some("peer")) => format!("{p} (handoff)"),
+                (None, _) => p.to_string(),
+            })
+    });
+    let parent = parent.or_else(|| {
+        exact_row(&dest)
+            .and_then(|a| a.lineage_reason.clone())
+            .filter(|r| !r.is_empty())
+    });
+    info("parent", parent.or_else(|| item.parent.clone()), &mut rows);
+
+    // lead: the exact row's crown, else the row's own stamp.
+    let lead = exact_row(&dest).and_then(|a| match a.crown_scope.as_deref() {
+        Some(scope) => Some(
+            a.crown_title
+                .as_deref()
+                .map(str::to_string)
+                .or_else(|| a.crown_level.map(|l| format!("L{l} {scope}")))
+                .unwrap_or_else(|| scope.to_string()),
         ),
-        ("reason", or_not_recorded(item.reason.as_deref())),
-        ("crown", or_not_recorded(item.crown.as_deref())),
-        ("owner", or_not_recorded(item.owner.as_deref())),
-    ]
+        None => a.crown_title.clone(),
+    });
+    info("lead", lead.or_else(|| item.crown.clone()), &mut rows);
+    info("reason", item.reason.clone(), &mut rows);
+    info("crown", item.crown.clone(), &mut rows);
+    info(
+        "owner",
+        item.owner.as_deref().map(|o| live_owner(o, agents)),
+        &mut rows,
+    );
+    info("actor", item.actor.clone(), &mut rows);
+    info("phase", item.phase.clone(), &mut rows);
+
+    // A removal's answer: the recovery line, as its own row.
+    if let Destination::Recovery(detail) = &dest {
+        rows.push(PopupRow::Entry {
+            glyph: "resume".to_string(),
+            label: (*detail).to_string(),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(FeedAction::Resume((*detail).to_string()));
+        values.push((*detail).to_string());
+    }
+
+    // The footer names every gesture the modal answers, including the
+    // created-node composer key the line-built view advertised.
+    let footer = if plan_node(item).is_some() {
+        "enter open · b blueprint · y copy · esc close"
+    } else if actions.is_empty() {
+        "y copy · esc close"
+    } else {
+        "enter open · y copy · esc close"
+    };
+    let popup = Popup::new(rows, Anchor::Center)
+        .title("event provenance")
+        .footer(footer)
+        .plain_body();
+    (popup, actions, values)
 }
 
 /// `YYYY-MM-DD HH:MM:SS +HH:MM` in the operator's zone; an unparseable
@@ -252,62 +341,63 @@ fn local_ts(ts: &str) -> String {
     }
 }
 
-/// The rendered body: the event line, the nine fields, then the recovery line
-/// when the row carries one. The overlay clips a line that outruns its width,
-/// so a long id can read short here; the panel row behind it carries the same
-/// id, and `--json` from the verb carries it whole.
-pub(crate) fn detail_lines(item: &FeedItem, dest: &Destination<'_>, width: usize) -> Vec<String> {
-    let mut lines = vec![format!("{}  {}", item.kind, item.title), String::new()];
-    for (label, value) in detail_fields(item, dest) {
-        push_wrapped(&mut lines, label, &value, width);
-    }
-    if let Some(actor) = item.actor.as_deref() {
-        lines.push(format!("{:<12} {}", "actor", actor));
-    }
-    if let Some(phase) = item.phase.as_deref() {
-        lines.push(format!("{:<12} {}", "phase", phase));
-    }
-    if let Destination::Recovery(detail) = dest {
-        lines.push(String::new());
-        lines.push((*detail).to_string());
-    }
-    lines
-}
-
-/// One field, wrapped: a value wider than the space after its 12-column
-/// label continues on the next line indented 13 columns, so the modal grows
-/// in height instead of clipping.
-fn push_wrapped(lines: &mut Vec<String>, label: &str, value: &str, width: usize) {
-    let budget = width.saturating_sub(13).max(8);
-    let mut first = true;
-    let mut chunk = String::new();
-    let mut chunk_w = 0usize;
-    for ch in value.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch)
-            .unwrap_or(0)
-            .max(1);
-        if chunk_w + cw > budget && !chunk.is_empty() {
-            if first {
-                lines.push(format!("{label:<12} {chunk}"));
-                first = false;
-            } else {
-                lines.push(format!("{}{chunk}", " ".repeat(13)));
+/// Enter on the modal: the selected row's action. Inspecting never closes
+/// the modal - the next field is one arrow away - and a target past the
+/// action list (never produced) acts as nothing.
+pub(crate) async fn execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let Some(m) = view.feed_detail.as_ref() else {
+        return Ok(());
+    };
+    let Some(action) = m.actions.get(m.popup.sel) else {
+        return Ok(());
+    };
+    match action {
+        FeedAction::Session(hit) => apply_hit(view, hit.clone(), sock_w).await?,
+        FeedAction::Node(id) => {
+            let id = id.clone();
+            // The drill-down lives on the experimental board: opening a node
+            // opens the board on it. Off, the notice says where the jump
+            // would land rather than pretending nothing exists.
+            if !view.experimental_backlog {
+                view.set_notice(format!(
+                    "node {id}: the backlog view is off (sideline menu)"
+                ));
+                return Ok(());
             }
-            chunk.clear();
-            chunk_w = 0;
+            View::open(view);
+            if let Some(b) = view.backlog_board.as_mut() {
+                b.detail = Some(node_detail::NodeDetailOverlay {
+                    node_id: id,
+                    trail: Vec::new(),
+                    sel: 0,
+                    scroll: 0,
+                });
+            }
+            view.feed_detail = None;
         }
-        chunk.push(ch);
-        chunk_w += cw;
+        FeedAction::Pr(url) => {
+            let url = url.clone();
+            // Off-loop for the same reason ServerMsg::OpenLink is: a cold
+            // browser launch must not stall the render loop.
+            let launched = url.clone();
+            let outcome = tokio::task::spawn_blocking(move || crate::link::open_url(&launched))
+                .await
+                .unwrap_or_else(|_| Err("opener task failed".to_string()));
+            match outcome {
+                Ok(()) => view.set_notice(format!("opened {url}")),
+                Err(e) => view.set_notice(format!("open failed: {e}")),
+            }
+        }
+        FeedAction::Resume(detail) => view.set_notice(detail.clone()),
     }
-    if first {
-        lines.push(format!("{label:<12} {chunk}"));
-    } else if !chunk.is_empty() {
-        lines.push(format!("{}{chunk}", " ".repeat(13)));
-    }
+    Ok(())
 }
 
-/// The one-line footer: what pressing Enter does, named before it is pressed.
-/// Reads the SAME [`Destination`] the action does, so the two cannot disagree.
+/// The created node a `b` can blueprint, when this row is a node_created
+/// event carrying an id.
 pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
     if item.kind != "node_created" {
         return None;
@@ -318,168 +408,103 @@ pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
         .filter(|node| !node.is_empty())
 }
 
-/// The one-line footer names the existing Enter action and, for a created
-/// node with an id, the composer's node-bound blueprint action.
-pub(crate) fn detail_footer(item: &FeedItem, dest: &Destination<'_>) -> String {
-    let enter = match dest {
-        Destination::Recovery(_) => "enter: show the resume line · esc close",
-        Destination::Exact(a) | Destination::NameOnly(a) if a.pane_id.is_some() => {
-            "enter: focus its pane · esc close"
-        }
-        Destination::Exact(_) | Destination::NameOnly(_) => {
-            "enter: reach it on portal 0 · esc close"
-        }
-        Destination::SessionOnly(_) => "enter: attach on portal 0 · esc close",
-        Destination::None => "esc close",
+/// `y` on the modal: the selected value, whole, to the clipboard - local
+/// tool first, OSC 52 to the outer terminal as fallback. The display clips
+/// a long value; the copy never does.
+pub(crate) fn copy_selected(view: &mut View) {
+    let Some(m) = view.feed_detail.as_ref() else {
+        return;
     };
-    if plan_node(item).is_some() {
-        format!("b: blueprint · {enter}")
-    } else {
-        enter.to_string()
-    }
+    let Some(value) = m.values.get(m.popup.sel) else {
+        return;
+    };
+    let value = value.clone();
+    let outcome = crate::clipboard::deliver(&value, raw_out);
+    let note = match outcome {
+        crate::clipboard::CopyOutcome::Local(_) => format!("copied {value}"),
+        crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
+            format!("copied {value}")
+        }
+        crate::clipboard::CopyOutcome::Osc52 { truncated: true } => {
+            "copied (truncated)".to_string()
+        }
+        crate::clipboard::CopyOutcome::Failed => "copy failed".to_string(),
+    };
+    view.set_notice(note);
 }
 
-/// The action Enter sends, from that same resolution.
-pub(crate) fn detail_hit(view: &View, dest: &Destination<'_>) -> Option<ChromeHit> {
-    match dest {
-        Destination::Recovery(detail) => Some(ChromeHit::Notice((*detail).to_string())),
-        Destination::Exact(row) | Destination::NameOnly(row) => {
-            Some(agent_hit(row, view.layout.active_squad))
-        }
-        Destination::SessionOnly(sid) => Some(ChromeHit::Cmds(vec![Command::AttachAgent {
-            id: (*sid).to_string(),
-            placement: PanePlacement {
-                portal: Some(0),
-                ..PanePlacement::default()
-            },
-        }])),
-        Destination::None => None,
-    }
+/// The popup's flat target under a screen cell, `None` off a target. The
+/// footer's close words are not a row target: returning them here would
+/// clamp `select` onto the last entry on a hover sweep.
+pub(crate) fn hit_at(view: &View, row: u16, col: u16) -> Option<usize> {
+    let m = view.feed_detail.as_ref()?;
+    let r = m.popup.render(view.term);
+    let (r0, c0) = r.origin;
+    let line = r.lines.get(row.checked_sub(r0 as u16)? as usize)?;
+    let cc = (col as usize).checked_sub(c0)?;
+    line.hits
+        .iter()
+        .find(|(t, off, len)| *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len)
+        .map(|(t, _, _)| *t)
 }
 
-/// Paint the provenance view. Lives here rather than in the compose pass so
-/// the render and the fields it renders read as one module.
-pub(crate) fn draw(
-    view: &View,
-    item: &FeedItem,
-    cells: &mut [Cell],
-    (rows, cols): (usize, usize),
-    origin: (usize, usize),
-    dims: (usize, usize),
-) {
-    let dest = destination(&view.layout.agents, item);
-    // The chrome's frame plus its two side pad cells.
-    let inner_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS + 2);
-    let lines = detail_lines(item, &dest, inner_w);
-    let chrome =
-        chrome::Chrome::new("event provenance", Anchor::Center).footer(detail_footer(item, &dest));
-    draw_lines_overlay(
-        cells,
-        rows,
-        cols,
-        origin,
-        dims,
-        &chrome,
-        &lines,
-        &view.theme,
-        None,
-    );
+/// Open the modal on one row, resolving the roster once; a later fold
+/// replaces the rows, never this open read.
+pub(crate) fn open_into(view: &mut View, item: FeedItem) {
+    let m = modal(view, item);
+    view.feed_detail = Some(m);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn reaped_item() -> FeedItem {
-        FeedItem {
-            ts: "2026-09-28T16:48:49Z".into(),
-            kind: "session_reaped".into(),
-            node: None,
-            cwd: None,
-            session_id: None,
-            harness: Some("codex".into()),
-            title: "jolly-finch removed".into(),
-            r#ref: None,
-            actor: Some("fno-py".into()),
-            model: None,
-            effort: None,
-            phase: None,
-            detail: None,
-            reason: Some(
-                "no unique codex rollout for this cwd after spawn, and here is a very long tail that cannot fit forty columns at all".into(),
-            ),
-            crown: Some("L2 x-eeee".into()),
-            owner: Some("king jolly-finch L2".into()),
-            parent: None,
+/// One mouse report while the modal is open: hover selects, a left click on
+/// the shared esc close target (footer words or border chip) closes, a click
+/// on a target runs that row's action, a click inside the block that hits no
+/// target is swallowed, a click off the popup dismisses. The row-menu
+/// contract, on the feed's own actions.
+pub(crate) async fn mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = hit_at(view, rep.row, rep.col) {
+                if let Some(m) = view.feed_detail.as_mut() {
+                    m.popup.select(t);
+                }
+            }
         }
-    }
-
-    // (AC11-HP) The three new fields render, and every line fits the width:
-    // a long value wraps under its label instead of clipping.
-    #[test]
-    fn the_removal_fields_render_and_wrap_at_width() {
-        let item = reaped_item();
-        let d = destination(&[], &item);
-        let lines = detail_lines(&item, &d, 40);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("reason") && l.contains("no unique codex rollout")),
-            "{lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("crown") && l.contains("L2 x-eeee")),
-            "{lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("owner") && l.contains("king jolly-finch L2")),
-            "{lines:?}"
-        );
-        // Continuation lines are indented 13 columns; the value is not lost.
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("             ") && l.contains("long tail")),
-            "the wrapped tail continues indented: {lines:?}"
-        );
-        // Every line fits 40 display columns.
-        for l in &lines {
-            assert!(
-                unicode_width::UnicodeWidthStr::width(l.as_str()) <= 40,
-                "line overflowed: {l:?}"
-            );
+        MouseKind::Press(MouseButton::Left) => {
+            let close = view
+                .feed_detail
+                .as_ref()
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col));
+            if close {
+                view.feed_detail = None;
+                return Ok(());
+            }
+            match hit_at(view, rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.feed_detail.as_mut() {
+                        m.popup.select(t);
+                    }
+                    execute_selected(view, sock_w).await?;
+                }
+                None => {
+                    if !block_contains(view, rep.row, rep.col) {
+                        view.feed_detail = None;
+                    }
+                }
+            }
         }
+        _ => {}
     }
+    Ok(())
+}
 
-    // (AC12-EDGE) Absent fields read NOT RECORDED, and a spawn row's parent
-    // survives the session's death through the row's own parent field.
-    #[test]
-    fn absent_fields_read_not_recorded_and_parent_falls_back() {
-        let mut item = reaped_item();
-        item.reason = None;
-        item.crown = None;
-        item.owner = None;
-        item.parent = Some("49a80492-388e-44a3-bd91-017be26bcaa0".into());
-        let d = destination(&[], &item);
-        let fields = detail_fields(&item, &d);
-        let by = |label: &str| {
-            fields
-                .iter()
-                .find(|(l, _)| *l == label)
-                .map(|(_, v)| v.clone())
-                .unwrap()
-        };
-        assert_eq!(by("reason"), NOT_RECORDED);
-        assert_eq!(by("crown"), NOT_RECORDED);
-        assert_eq!(by("owner"), NOT_RECORDED);
-        assert_eq!(
-            by("parent"),
-            "49a80492-388e-44a3-bd91-017be26bcaa0",
-            "the birth event's parent survives the removal"
-        );
-    }
+/// Whether a screen cell falls inside the modal's block: a click ON it that
+/// hits no target is swallowed, a click OFF it dismisses.
+pub(crate) fn block_contains(view: &View, row: u16, col: u16) -> bool {
+    view.feed_detail
+        .as_ref()
+        .is_some_and(|m| m.popup.render(view.term).contains(row, col))
 }

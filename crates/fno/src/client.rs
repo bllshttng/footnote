@@ -878,7 +878,7 @@ struct View {
     /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
     /// it is open, so an index into `feed.items` would silently re-point at a
     /// different event; the inspected event never changes under the reader.
-    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    feed_detail: Option<feed_detail::FeedDetailModal>,
     /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
     /// safety as [`View::ans_esc`]).
     feed_esc: Vec<u8>,
@@ -2005,7 +2005,7 @@ impl View {
             ans_esc: Vec::new(),
             feed: None,
             region_owner: region_focus::RegionOwner::Pane,
-            feed_detail_of: None,
+            feed_detail: None,
             feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
@@ -5269,15 +5269,8 @@ impl View {
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(item) = &self.feed_detail_of {
-            feed_detail::draw(
-                self,
-                item,
-                &mut cells,
-                (rows, cols),
-                overlay_origin,
-                overlay_dims,
-            );
+        if let Some(m) = &self.feed_detail {
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if questions::draw_detail(
             self,
             &mut cells,
@@ -6841,6 +6834,7 @@ enum TabHit {
 
 /// What a left-click on chrome resolves to: server commands to send, or a
 /// local one-line hint for a row that isn't directly actionable.
+#[derive(Debug, Clone)]
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
@@ -10068,9 +10062,9 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // Inspect first. The deep link is this view's own action, not the
+        // Inspect first: the deep link is the view's own action, not the
         // click path that opened it.
-        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
+        ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),

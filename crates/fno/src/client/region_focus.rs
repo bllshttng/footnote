@@ -114,6 +114,12 @@ pub(super) async fn mouse_pre_pass(
         {
             view.link_hover.clear();
         }
+        // The feed's provenance modal, the top surface, owns the pointer:
+        // hover selects, a click runs the row's action, off-popup dismisses.
+        if view.feed_detail.is_some() {
+            feed_detail::mouse(view, rep, sock_w).await?;
+            continue;
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
