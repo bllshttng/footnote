@@ -1963,7 +1963,12 @@ def _review_invocation_report(
         from contextlib import nullcontext
         from fno.events.log import read_events
 
-        rows = read_events(events_path)
+        try:
+            rows = read_events(events_path)
+        except ValueError:
+            # A corrupt raw-only parse degrades to an empty read; good rows
+            # are read back the moment the binary can answer again.
+            rows = []
         with nullcontext(rows) as stream:
             for event in stream:
                 data = event.get("data")
@@ -1991,10 +1996,6 @@ def _review_invocation_report(
                         attested.add(invocation_id)
     except OSError as exc:
         return [f"fno doctor: review invocations: unmeasurable ({exc})"]
-    except ValueError:
-        # A corrupt raw-only parse degrades to an empty read, the same
-        # line-by-line skip this report always did.
-        pass
 
     lost = [
         (invocation_id, event_time, data)
