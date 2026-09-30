@@ -789,6 +789,7 @@ def _cadence_settings() -> SimpleNamespace:
             enabled=False, watchdog=SimpleNamespace(
                 enabled=False, mode="report", mail_to="", reap=False),
         ),
+        pr=SimpleNamespace(open_ready=True),
         pr_watch=SimpleNamespace(
             enabled=False, interval_seconds=600, tick_timeout_seconds=500,
             max_age_days=30, retries=3, graphql_min_remaining=0,
