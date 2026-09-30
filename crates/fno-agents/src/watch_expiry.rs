@@ -356,6 +356,15 @@ pub(crate) fn message(watch: &Watch) -> String {
 }
 
 pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
+    run_pass_with(home, &mut crate::burn_watch::run_command)
+}
+
+/// `runner` is injected so replay tests record wakes instead of sending them.
+pub(crate) fn run_pass_with(
+    home: &AgentsHome,
+    runner: crate::burn_watch::Runner<'_>,
+) -> Result<(), String> {
+    let mut runner = runner;
     let now_ms = millis_now();
     let evidence = read_evidence(home, now_ms)?;
     let due = watches(&evidence)
@@ -368,7 +377,6 @@ pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
     let claims = current_node_claims(home)?;
     let emitter =
         crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon");
-    let mut runner: crate::burn_watch::Runner = &mut crate::burn_watch::run_command;
     let mut delivery_failures = 0usize;
     let mut eligibility_failures = 0usize;
     let mut receipt_failures = 0usize;

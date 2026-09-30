@@ -1016,6 +1016,82 @@ mod tests {
         assert_eq!(overdue[0].session_id, "s-legacy");
         assert!(overdue[0].overdue_ms > 0);
 
+        // Copied-store replay contract: a watch row known only through the
+        // recovered store must never wake, while a fresh live watch still
+        // wakes exactly once.
+        crate::event_store::sync(&global_events).unwrap();
+        let replay_store = crate::event_store::store_path(&global_events);
+        let db = rusqlite::Connection::open(&replay_store).unwrap();
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL);\n             INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events WHERE session_id = 's-legacy';",
+        )
+        .unwrap();
+        drop(db);
+        let mut fresh_entry = crate::state::RegistryEntry::default();
+        fresh_entry.name = "fresh-watch-owner".into();
+        fresh_entry.harness_session_id = Some("s-fresh".into());
+        fresh_entry.status = crate::AgentStatus::Live;
+        registry.entries.push(fresh_entry);
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let acquired_fresh = crate::claims::acquire(
+            "node:x-fresh",
+            "target-session:s-fresh",
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                identity: Some(("s-fresh".into(), "claude".into())),
+                root: None,
+                events_dir: Some(temp.path().join("claim-events")),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired_fresh,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let fresh_emitter = crate::events::EventEmitter::new(global_events.clone(), "daemon");
+        fresh_emitter
+            .emit(
+                "loop_check_watch_idle",
+                &serde_json::json!({
+                    "session_id": "s-fresh",
+                    "node": "x-fresh",
+                    "blocker": "ci",
+                    "expires_at_ms": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64
+                        - 1_000,
+                }),
+            )
+            .unwrap();
+        let mut replay_mails: Vec<Vec<String>> = Vec::new();
+        let woke = {
+            let replay_runner: crate::burn_watch::Runner =
+                &mut |argv: &[String], _: &str| {
+                    if argv.len() > 2 && argv[2] == "mail" {
+                        replay_mails.push(argv.to_vec());
+                    }
+                    (0, "msg-1 delivered (hosted)".to_string(), String::new())
+                };
+            crate::watch_expiry::run_pass_with(&home, replay_runner).unwrap();
+            crate::watch_expiry::run_pass_with(&home, replay_runner).unwrap();
+            replay_mails
+                .iter()
+                .map(|argv| argv[8].clone())
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(
+            woke,
+            vec!["s-fresh"],
+            "copied-store replay: recovered history stays silent, only the fresh watch wakes once"
+        );
+        let replay_text =
+            crate::event_store::journal_text(&global_events, &["loop_check_watch_idle"]);
+        assert!(
+            replay_text.contains("s-legacy"),
+            "recovered watch history stays readable"
+        );
+
         std::fs::remove_file(home.registry_json()).unwrap();
         std::fs::create_dir(home.registry_json()).unwrap();
         let registry_error = crate::watch_expiry::run_pass(&home);
