@@ -52,9 +52,11 @@ pub(super) fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
 }
 
 impl View {
-    fn worker_columns(&self) -> &[Constraint] {
+    fn worker_columns(&self, text_w: u16) -> &[Constraint] {
         if self.sideline_layout == sideline_color::SidelineLayout::List
             && (self.density == Density::Extended || self.sideline_full)
+            // Fixed cells and six gaps leave at least eight message columns.
+            && text_w >= 5 + 22 + 6 + 6 + 7 + 4 + 6 + 8
         {
             &SIDELINE_COLUMNS
         } else {
@@ -63,7 +65,7 @@ impl View {
     }
 
     pub(super) fn worker_column_rects(&self, text_w: u16) -> std::rc::Rc<[RtRect]> {
-        Layout::horizontal(self.worker_columns().iter().copied())
+        Layout::horizontal(self.worker_columns(text_w).iter().copied())
             .flex(Flex::Start)
             .spacing(1)
             .split(RtRect::new(0, 0, text_w, 1))
@@ -316,13 +318,16 @@ impl View {
                     self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
                 })
                 .collect();
-            let table = RtTable::new(table_rows, self.worker_columns().iter().copied())
-                .flex(Flex::Start)
-                .highlight_spacing(HighlightSpacing::Never)
-                // The overlay pass is the one band painter: the Table's own
-                // row highlight (REVERSED by default) would paint an INVERSE
-                // band the spec forbids inside a highlight.
-                .row_highlight_style(RtStyle::new());
+            let table = RtTable::new(
+                table_rows,
+                self.worker_columns(text_w as u16).iter().copied(),
+            )
+            .flex(Flex::Start)
+            .highlight_spacing(HighlightSpacing::Never)
+            // The overlay pass is the one band painter: the Table's own
+            // row highlight (REVERSED by default) would paint an INVERSE
+            // band the spec forbids inside a highlight.
+            .row_highlight_style(RtStyle::new());
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, table_area, &mut buf, &mut st);
             off = st.offset();
@@ -810,7 +815,11 @@ impl View {
                 )
             }
         };
-        if self.worker_columns().len() == 7 {
+        if self
+            .worker_columns(self.sideline_paint_w().saturating_sub(1) as u16)
+            .len()
+            == 7
+        {
             let (ctx, up) = match drow {
                 DisplayRow::Agent(a) => (
                     row_meter::ctx_cell(a.context_used_pct),

@@ -133,7 +133,7 @@ const COL_TIME: u16 = 6;
 
 /// The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
-const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 7 + 4 + 2 + 1;
 /// The narrowest useful extended panel: fixed status/PR/age cells, a readable
 /// agent cell, and the divider. The message cell is omitted only below its
 /// eight-column floor; age is never dropped from an admitted table.

@@ -266,6 +266,25 @@ fn sort_label_survives_every_column_configuration() {
             first_line.contains("age\u{2193}"),
             "age header visible at width {cols}: {first_line:?}"
         );
+        if cols == EXTENDED_PANEL_W {
+            assert!(
+                first_line.contains("ctx"),
+                "wide meter header: {first_line:?}"
+            );
+            assert!(
+                first_line.contains("up"),
+                "wide runtime header: {first_line:?}"
+            );
+        } else {
+            assert!(
+                !first_line.contains("ctx"),
+                "narrow identity budget: {first_line:?}"
+            );
+            assert!(
+                !first_line.contains("up"),
+                "narrow sort budget: {first_line:?}"
+            );
+        }
     }
 }
 
