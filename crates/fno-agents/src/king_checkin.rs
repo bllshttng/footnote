@@ -2465,14 +2465,14 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let trend_path = home.refusal_trend_json();
+    let trend_dir = home.refusal_trend_dir();
     let (previous_rate, second_previous_rate) =
-        crate::refusal_trend::priors(&trend_path, &ctx.scope);
+        crate::refusal_trend::priors(&trend_dir, &ctx.scope);
     mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
     // The baseline advances on the measurement the beat just printed,
     // whether or not the full row journals below.
     if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
-        crate::refusal_trend::record(&trend_path, &ctx.scope, &ts, rate);
+        crate::refusal_trend::record(&trend_dir, &ctx.scope, &ts, rate);
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
@@ -3876,9 +3876,9 @@ mod tests {
         // beat's record advances the baseline, so the label follows the
         // true direction instead of the same stale pair.
         let dir = tempfile::tempdir().unwrap();
-        let trend = dir.path().join("refusal-trend.json");
+        let trend = dir.path();
         for (n, current) in [0.175, 0.165, 0.150].iter().enumerate() {
-            let (p1, p2) = crate::refusal_trend::priors(&trend, "x-bbbb");
+            let (p1, p2) = crate::refusal_trend::priors(trend, "x-bbbb");
             let mut data: Map<String, Value> = Map::new();
             data.insert("refusal_rate".into(), json!(current));
             mark_refusal_rate_trend(&mut data, p1, p2);
@@ -3888,7 +3888,7 @@ mod tests {
                 "beat {n}: a falling series must not read RISING"
             );
             crate::refusal_trend::record(
-                &trend,
+                trend,
                 "x-bbbb",
                 &format!("2026-09-15T10:0{n}:00Z"),
                 *current,
