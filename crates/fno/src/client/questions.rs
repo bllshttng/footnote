@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn ac5_hp_the_block_header_counts_and_the_rows_cap_at_the_height() {
+    fn block_layout_rows() {
         let items: Vec<QuestionItem> = (0..9)
             .map(|i| {
                 let mut q = item(&format!("q-{i}"), true);
@@ -1147,16 +1147,10 @@ mod tests {
         assert!(more);
         assert_eq!(lines[7][0].0, " +3 more");
         assert_eq!(lines.len(), 8, "nothing paints past the height");
-    }
 
-    #[test]
-    fn ac5_edge_an_empty_fold_reserves_zero_rows() {
         let (lines, ids, _) = layout(H, false, &fold_with(vec![]));
         assert!(lines.is_empty() && ids.is_empty());
-    }
 
-    #[test]
-    fn answered_hides_behind_one_dim_count_line_by_default() {
         let mut fold = fold_with(vec![item("q-1", true)]);
         fold.answered = vec![
             AnsweredItem {
@@ -1181,10 +1175,7 @@ mod tests {
         // Shown: every fresh answer renders its own line.
         let (shown, _, _) = layout(H, true, &fold);
         assert!(shown.len() > lines.len(), "show_done expands the section");
-    }
 
-    #[test]
-    fn an_answered_only_fold_keeps_a_header_and_the_count_line() {
         let mut fold = fold_with(vec![]);
         fold.answered = vec![AnsweredItem {
             id: "q-9".into(),
@@ -1195,10 +1186,7 @@ mod tests {
         assert!(ids.is_empty(), "no open rows carry ids");
         assert_eq!(lines.len(), 2, "header plus the count line");
         assert!(lines[1][0].0.contains("1 answered"));
-    }
 
-    #[test]
-    fn rows_lead_with_the_bold_title_and_a_dim_meta_line_ready_first() {
         let mut a = item("q-a", false);
         a.title = "slow lane".into();
         let mut b = item("q-b", true);
@@ -1212,10 +1200,7 @@ mod tests {
         assert!(lines[1][1].1 & cell_flags::DIM != 0, "meta is dim");
         assert!(lines[1][1].0.contains("? -> none"), "{:?}", lines[1][1].0);
         assert_eq!(lines[2][0].0, " ? slow lane", "the not-ready row follows");
-    }
 
-    #[test]
-    fn the_default_height_is_small_four_rows() {
         assert_eq!(crate::view_store::QUESTIONS_DEFAULT_HEIGHT, 4);
         let items: Vec<QuestionItem> = (0..9).map(|i| item(&format!("q-{i}"), true)).collect();
         let (lines, ids, more) = layout(4, false, &fold_with(items));
@@ -1223,10 +1208,7 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(more);
         assert_eq!(lines[3][0].0, " +7 more");
-    }
 
-    #[test]
-    fn show_done_lists_answered_questions_after_open_ones() {
         let mut answered = item("q-old", true);
         answered.state = "answered".into();
         let (lines, ids, _) = layout(H, true, &fold_with(vec![item("q-new", true), answered]));
@@ -1240,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn ac6_hp_the_page_shows_every_recorded_context_field() {
+    fn page_rows() {
         let mut q = item("q-1", false);
         q.recommendation = Some(crate::needs_overlay::QuestionRecommendation {
             option: 1,
@@ -1275,20 +1257,14 @@ mod tests {
         ] {
             assert!(page.contains(want), "{want} missing from:\n{page}");
         }
-    }
 
-    #[test]
-    fn a_field_the_item_lacks_reads_not_recorded() {
         let mut q = item("q-2", true);
         q.blocked_because = None;
         q.unknowns = None;
         let d = Detail::open(&fold_with(vec![q.clone()]), Some("q-2")).unwrap();
         let page = question_page(&q, &d, 0);
         assert!(page.contains("NOT RECORDED"));
-    }
 
-    #[test]
-    fn the_page_marks_the_selected_option_and_none_of_these() {
         let q = item("q-1", true);
         let mut d = Detail::open(&fold_with(vec![q.clone()]), Some("q-1")).unwrap();
         d.sel = Some(2);
@@ -1300,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_walks_the_list_and_resets_the_pick() {
+    fn detail_nav_rows() {
         let items = vec![item("q-a", true), item("q-b", true), item("q-c", true)];
         let mut d = Detail::open(&fold_with(items.clone()), None).unwrap();
         assert_eq!(d.item().id, "q-a");
@@ -1310,10 +1286,7 @@ mod tests {
         d.advance(-1);
         assert_eq!(d.item().id, "q-a");
         assert_eq!(d.sel, None, "the pick resets on advance");
-    }
 
-    #[test]
-    fn open_lands_on_the_row_and_opens_the_list_on_none() {
         let items = vec![item("q-a", true), item("q-b", true)];
         let d = Detail::open(&fold_with(items), Some("q-b")).unwrap();
         assert_eq!(d.item().id, "q-b");
@@ -1323,7 +1296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn answer_keys_enter_on_question_opens_the_full_view() {
+    async fn answer_keys_rows() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(Vec::new());
         v.needs_fold = Some(Vec::new());
@@ -1338,10 +1311,7 @@ mod tests {
         assert_eq!(detail.item().id, "q-2");
         assert_eq!(v.answers, Some(0), "the overlay stays open");
         assert!(buf.is_empty());
-    }
 
-    #[tokio::test]
-    async fn answer_keys_digit_on_a_question_row_opens_the_full_view() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(Vec::new());
         v.needs_fold = Some(Vec::new());
@@ -1362,10 +1332,7 @@ mod tests {
             buf.is_empty(),
             "a question digit never sends a pane keystroke"
         );
-    }
 
-    #[tokio::test]
-    async fn answer_keys_digit_with_no_matching_question_option_bels() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(Vec::new());
         v.needs_fold = Some(Vec::new());
@@ -1382,7 +1349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_sends_the_highlighted_option_and_none_of_these_composes_words() {
+    async fn submit_rows() {
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
         // A row click opens with the page focused; a digit highlights.
@@ -1405,10 +1372,65 @@ mod tests {
                 crate::needs_overlay::AnswerPick::Words("none of these".into())
             ))
         );
+
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
+        v.open_detail_on("q-1");
+        detail_keys(&mut v, b"1", &mut Vec::new()).await.unwrap();
+        detail_keys(&mut v, b"n", &mut Vec::new()).await.unwrap();
+        assert!(v.question_detail.as_ref().unwrap().free.is_some());
+        detail_keys(&mut v, b"check legal", &mut Vec::new())
+            .await
+            .unwrap();
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        let d = v.question_detail.as_ref().unwrap();
+        assert!(d.free.is_none(), "the input closed");
+        assert_eq!(d.notes.as_deref(), Some("check legal"));
+        // Submitting composes option + notes into one words answer; the
+        // page still holds focus, so Enter sends.
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some((
+                "q-1".into(),
+                crate::needs_overlay::AnswerPick::Words("1. narrow - notes: check legal".into())
+            ))
+        );
+
+        let mut q = item("q-p", true);
+        q.options = vec![];
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![q]));
+        v.open_detail_on("q-p");
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert!(v.question_detail.as_ref().unwrap().free.is_some());
+        detail_keys(&mut v, b"do it yourself", &mut Vec::new())
+            .await
+            .unwrap();
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some((
+                "q-p".into(),
+                crate::needs_overlay::AnswerPick::Words("do it yourself".into())
+            ))
+        );
+
+        let mut q = item("q-pin", true);
+        q.kind = "pin".into();
+        q.options = vec![];
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![q]));
+        v.open_detail_on("q-pin");
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some(("q-pin".into(), crate::needs_overlay::AnswerPick::Done))
+        );
     }
 
     #[tokio::test]
-    async fn j_and_k_walk_the_options_with_none_of_these_last() {
+    async fn detail_keys_nav_rows() {
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
         v.open_detail_on("q-1");
@@ -1433,10 +1455,7 @@ mod tests {
             v.question_action,
             Some(("q-1".into(), crate::needs_overlay::AnswerPick::Option(2)))
         );
-    }
 
-    #[tokio::test]
-    async fn ctrl_d_and_ctrl_u_scroll_the_page_when_options_exist() {
         let mut q = item("q-long", true);
         q.body = Some("word ".repeat(300));
         let mut v = view_with_agents(vec![]);
@@ -1446,6 +1465,28 @@ mod tests {
         assert_eq!(v.question_detail.as_ref().unwrap().scroll, 12, "half page");
         detail_keys(&mut v, b"\x15", &mut Vec::new()).await.unwrap();
         assert_eq!(v.question_detail.as_ref().unwrap().scroll, 0);
+
+        let items = vec![item("q-a", true), item("q-b", true)];
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(items));
+        v.open_detail_on("q-a");
+        detail_keys(&mut v, b"\t", &mut Vec::new()).await.unwrap();
+        assert!(!v.question_detail.as_ref().unwrap().focus);
+        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().item().id, "q-b");
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert!(
+            v.question_detail.as_ref().unwrap().focus,
+            "Enter drills into the page"
+        );
+
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-a", true)]));
+        v.open_questions_list();
+        detail_keys(&mut v, b"\x1b", &mut Vec::new()).await.unwrap();
+        // The lone Esc rides the carry until the next chunk proves it bare.
+        detail_keys(&mut v, b"", &mut Vec::new()).await.unwrap();
+        assert!(v.question_detail.is_none());
     }
 
     #[test]
@@ -1484,109 +1525,14 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn n_opens_notes_and_enter_saves_them_into_the_pick() {
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
-        v.open_detail_on("q-1");
-        detail_keys(&mut v, b"1", &mut Vec::new()).await.unwrap();
-        detail_keys(&mut v, b"n", &mut Vec::new()).await.unwrap();
-        assert!(v.question_detail.as_ref().unwrap().free.is_some());
-        detail_keys(&mut v, b"check legal", &mut Vec::new())
-            .await
-            .unwrap();
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        let d = v.question_detail.as_ref().unwrap();
-        assert!(d.free.is_none(), "the input closed");
-        assert_eq!(d.notes.as_deref(), Some("check legal"));
-        // Submitting composes option + notes into one words answer; the
-        // page still holds focus, so Enter sends.
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            v.question_action,
-            Some((
-                "q-1".into(),
-                crate::needs_overlay::AnswerPick::Words("1. narrow - notes: check legal".into())
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn enter_on_a_no_option_question_opens_the_answer_line_and_sends_it() {
-        let mut q = item("q-p", true);
-        q.options = vec![];
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![q]));
-        v.open_detail_on("q-p");
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert!(v.question_detail.as_ref().unwrap().free.is_some());
-        detail_keys(&mut v, b"do it yourself", &mut Vec::new())
-            .await
-            .unwrap();
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            v.question_action,
-            Some((
-                "q-p".into(),
-                crate::needs_overlay::AnswerPick::Words("do it yourself".into())
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn enter_on_a_pin_sends_done() {
-        let mut q = item("q-pin", true);
-        q.kind = "pin".into();
-        q.options = vec![];
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![q]));
-        v.open_detail_on("q-pin");
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            v.question_action,
-            Some(("q-pin".into(), crate::needs_overlay::AnswerPick::Done))
-        );
-    }
-
-    #[tokio::test]
-    async fn tab_flips_to_the_list_where_j_moves_and_enter_drills() {
-        let items = vec![item("q-a", true), item("q-b", true)];
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(items));
-        v.open_detail_on("q-a");
-        detail_keys(&mut v, b"\t", &mut Vec::new()).await.unwrap();
-        assert!(!v.question_detail.as_ref().unwrap().focus);
-        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
-        assert_eq!(v.question_detail.as_ref().unwrap().item().id, "q-b");
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert!(
-            v.question_detail.as_ref().unwrap().focus,
-            "Enter drills into the page"
-        );
-    }
-
-    #[tokio::test]
-    async fn esc_closes_and_flushes_the_carry() {
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![item("q-a", true)]));
-        v.open_questions_list();
-        detail_keys(&mut v, b"\x1b", &mut Vec::new()).await.unwrap();
-        // The lone Esc rides the carry until the next chunk proves it bare.
-        detail_keys(&mut v, b"", &mut Vec::new()).await.unwrap();
-        assert!(v.question_detail.is_none());
-    }
-
     #[test]
-    fn apply_question_action_result_success_requests_refold() {
+    fn apply_result_rows() {
         let mut v = view_with_agents(vec![]);
         v.needs_want = false;
         v.apply_question_action_result(Ok("recorded, delivering".into()));
         assert!(!v.question_acting);
         assert!(v.needs_want, "success re-folds so the row leaves on refold");
-    }
 
-    #[test]
-    fn apply_question_action_result_failure_shows_notice_never_silent() {
         let mut v = view_with_agents(vec![]);
         v.needs_want = false;
         v.apply_question_action_result(Err("failed to close q-1: locked".into()));
@@ -1594,45 +1540,7 @@ mod tests {
         assert!(!v.needs_want, "a failure never triggers a re-fold");
         let notice = v.notice.as_ref().expect("failure surfaces a notice");
         assert!(notice.0.contains("failed to close q-1: locked"));
-    }
 
-    #[test]
-    fn the_toggle_toast_names_a_failed_read_with_its_reason() {
-        let mut v = view_with_agents(vec![]);
-        v.apply_questions_fold(Err("timed out after 800ms".into()));
-        assert!(v.questions_degraded);
-        v.questions_block.visible = false;
-        toggle_block(&mut v);
-        assert_eq!(
-            v.notice.as_ref().unwrap().0,
-            "questions unreadable: timed out after 800ms"
-        );
-    }
-
-    #[test]
-    fn the_toggle_toast_says_no_open_questions_when_the_fold_has_none_open() {
-        let mut v = view_with_agents(vec![]);
-        let mut q = item("q-a", true);
-        q.state = "answered".into();
-        v.apply_questions_fold(Ok(fold_with(vec![q])));
-        v.questions_block.visible = false;
-        toggle_block(&mut v);
-        assert_eq!(v.notice.as_ref().unwrap().0, "no open questions");
-    }
-
-    #[test]
-    fn the_toggle_toast_shows_only_over_a_fold_with_open_rows() {
-        let mut v = view_with_agents(vec![]);
-        v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
-        v.questions_block.visible = false;
-        toggle_block(&mut v);
-        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: shown");
-        toggle_block(&mut v);
-        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: hidden");
-    }
-
-    #[test]
-    fn apply_questions_fold_stores_the_failure_reason() {
         let mut v = view_with_agents(vec![]);
         v.apply_questions_fold(Err("events.jsonl: permission denied".into()));
         assert!(v.questions_degraded);
@@ -1646,7 +1554,36 @@ mod tests {
     }
 
     #[test]
-    fn block_rows_honors_the_toggle_and_the_height_pref() {
+    fn toggle_toast_rows() {
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Err("timed out after 800ms".into()));
+        assert!(v.questions_degraded);
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(
+            v.notice.as_ref().unwrap().0,
+            "questions unreadable: timed out after 800ms"
+        );
+
+        let mut v = view_with_agents(vec![]);
+        let mut q = item("q-a", true);
+        q.state = "answered".into();
+        v.apply_questions_fold(Ok(fold_with(vec![q])));
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "no open questions");
+
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: shown");
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: hidden");
+    }
+
+    #[test]
+    fn block_hit_rows() {
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(
             (0..9).map(|i| item(&format!("q-{i}"), true)).collect(),
@@ -1662,10 +1599,7 @@ mod tests {
         v.questions_block.height = 2;
         let b = block_rows(&v, 60).expect("the block reserves rows");
         assert_eq!(b.n, 2, "height 2: header plus one row");
-    }
 
-    #[test]
-    fn hit_at_resolves_rows_and_the_more_line() {
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(
             (0..9).map(|i| item(&format!("q-{i}"), true)).collect(),

@@ -822,9 +822,9 @@ pub(crate) fn decide_with_payload(
     const MUTE_PROBE_N: u64 = 2;
 
     // ── Watching: the lease-only idle runs ahead of every read. A
-    // <watching> tag on a harness that can self-wake idles on the tag plus a
-    // renewed claim lease: this fire reads NO PR state - the watcher's exit
-    // re-evaluates with fresh evidence. A harness that cannot idle, or a
+    // <watching> tag on a harness with a daemon-routed wake idles on the tag
+    // plus a renewed claim lease: this fire reads NO PR state - the watcher's
+    // exit re-evaluates with fresh evidence. A harness that cannot idle, or a
     // lease that will not renew, falls through with the named refusal riding
     // the ordinary done() block, so the agent still sees the actionable
     // blocker behind its own dead watch - never a dead watch, never a blind
@@ -834,6 +834,7 @@ pub(crate) fn decide_with_payload(
         ref reason,
         ref timeout,
         ref pr,
+        ref task_id,
     } = intent
     {
         let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
@@ -846,12 +847,19 @@ pub(crate) fn decide_with_payload(
         let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
         if can_idle && renewed {
             let (blocker, pr_number) = watch_target(reason, pr.as_deref());
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
             emit(
                 "loop_check_watch_idle",
                 serde_json::json!({
                     "session_id": session_id,
                     "pr": pr_number,
                     "blocker": blocker,
+                    "task_id": task_id,
+                    "expires_at_ms": watch_lease::watch_expiry_ms(timeout.as_deref(), now_ms),
                     "declared_timeout": timeout.clone().unwrap_or_default(),
                     "reason": reason,
                     "lease_ms": window_ms
@@ -1718,7 +1726,7 @@ pub(crate) fn decide_with_payload(
 
                 //: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
-                // `<watching>` tag (a loop-run child, codex/gemini, or a failed
+                // `<watching>` tag (a loop-run child, an unsupported harness, or a failed
                 // lease renewal) the fingerprint is stable, so without this guard
                 // the generic backstop reaps the wait after backstop_n fires -
                 // before the nudge cycle reaches its ceiling, terminating with a
@@ -1874,7 +1882,7 @@ pub(crate) fn decide_with_payload(
                 let block_reason = match &watching_refusal {
                     // A permanent refusal already said no watcher can help, so
                     // the arm hint the classifier appended would contradict it
-                    // inside one message. A harness that cannot self-wake is
+                    // inside one message. A harness without a daemon wake is
                     // permanent the same way: its hint can never be honored.
                     // Cut the hint, keep the blocker.
                     Some((text, kind))
