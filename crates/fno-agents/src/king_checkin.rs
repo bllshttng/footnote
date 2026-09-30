@@ -2667,6 +2667,23 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+pub(crate) fn title_rename_command(
+    harness: &str,
+    label: &str,
+    title: Option<&str>,
+) -> Option<String> {
+    if title == Some(label) {
+        return None;
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
+    let capabilities = contract.capabilities(harness).ok()?;
+    capabilities
+        .native_verbs
+        .iter()
+        .any(|verb| verb == "/rename")
+        .then(|| format!("/rename {label}"))
+}
+
 fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
     let home = crate::paths::AgentsHome::from_env();
     let registry = crate::state::load_registry(&home.registry_json())
@@ -2704,10 +2721,9 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         return Err("the live crown holder is not this session".into());
     }
     let label = row.name.as_str();
-    if row.harness_title.as_deref() == Some(label) {
+    let Some(command) = title_rename_command(harness, label, row.harness_title.as_deref()) else {
         return Ok(());
-    }
-    let command = format!("/rename {label}");
+    };
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut child = std::process::Command::new(executable)
         .args([
