@@ -71,7 +71,15 @@ impl Core {
             .collect();
         let mut flow = Flow::Continue;
         let closed = targets.len();
+        let mut skipped_typing = 0usize;
         for pid in targets {
+            // The 60s guard: no automatic path closes a pane the
+            // operator typed into in the last minute. The skip leaves the
+            // store untouched for that member and is counted in the reply.
+            if self.typed_recently(pid) {
+                skipped_typing += 1;
+                continue;
+            }
             // close_pane inherits the established close semantics: empty-tab
             // removal, portal stand-in replacement and the de-persist
             // contract all stay one code path with every other close.
@@ -109,6 +117,7 @@ impl Core {
             panes_closed: closed,
             closed_panes,
             tabs_removed,
+            skipped_typing,
         });
         flow
     }

@@ -477,3 +477,144 @@ fn a_portal_repointed_off_a_row_keeps_no_trace_of_the_old_row() {
     assert_eq!(panes_closed, 1, "the portal pane is not a retire target");
     assert!(core.panes.contains_key(&seat), "the portal survives");
 }
+
+/// The 60s guard: a pane the operator typed into within the last
+/// minute is skipped by retire, keeps running, and the reply counts it.
+#[test]
+fn retire_holds_a_pane_typed_into_this_minute() {
+    let s = StoreScratch::new("retire-guard-typed");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let members = vec![crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("g-one".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("sess-guard-one".into()),
+        pane_id: None,
+    }];
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+        &[origin.to_string_lossy().into_owned()],
+        &members,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let mut one = exited_claude_row("g-one", None);
+    one.harness = Some("codex".into());
+    one.harness_session_id = Some("sess-guard-one".into());
+    core.agents = vec![one];
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["g-one"]);
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let one_pane = core
+        .panes
+        .iter()
+        .find(|(_, e)| e.name.as_deref() == Some("g-one"))
+        .map(|(pid, _)| *pid)
+        .expect("g-one holds a pane");
+    core.last_operator_typing.insert(one_pane, Instant::now());
+
+    let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let flow = core.handle_retire_session("codex".into(), "sess-guard-one".into(), reply_tx);
+    assert!(matches!(flow, Flow::Continue));
+    let reply = reply_rx.try_recv().expect("the handler replied");
+    let ServerMsg::SessionRetired {
+        retired,
+        panes_closed,
+        skipped_typing,
+        ..
+    } = reply
+    else {
+        panic!("expected SessionRetired, got {reply:?}");
+    };
+    assert_eq!(retired, 0, "nothing tombstoned under the guard");
+    assert_eq!(panes_closed, 0, "no pane closed under the guard");
+    assert_eq!(skipped_typing, 1, "the held pane is counted");
+    assert!(
+        core.panes.contains_key(&one_pane),
+        "the typed-into pane keeps running"
+    );
+    let store = crate::squad_store::load();
+    let row = store
+        .squads
+        .iter()
+        .flat_map(|sq| sq.members.iter())
+        .find(|m| m.harness_session_id.as_deref() == Some("sess-guard-one"))
+        .expect("the member stays in the store");
+    assert!(!row.tombstone, "no tombstone under the guard");
+}
+
+/// A pane whose last typing instant is older than the window retires as
+/// before: the guard only holds recent typing, never freezes retire.
+#[test]
+fn retire_closes_a_pane_whose_typing_is_stale() {
+    let s = StoreScratch::new("retire-guard-stale");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let members = vec![crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("g-two".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("sess-guard-two".into()),
+        pane_id: None,
+    }];
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+        &[origin.to_string_lossy().into_owned()],
+        &members,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let mut one = exited_claude_row("g-two", None);
+    one.harness = Some("codex".into());
+    one.harness_session_id = Some("sess-guard-two".into());
+    core.agents = vec![one];
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["g-two"]);
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let one_pane = core
+        .panes
+        .iter()
+        .find(|(_, e)| e.name.as_deref() == Some("g-two"))
+        .map(|(pid, _)| *pid)
+        .expect("g-two holds a pane");
+    core.last_operator_typing.insert(
+        one_pane,
+        Instant::now() - std::time::Duration::from_secs(61),
+    );
+
+    let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let flow = core.handle_retire_session("codex".into(), "sess-guard-two".into(), reply_tx);
+    assert!(matches!(flow, Flow::Continue));
+    let reply = reply_rx.try_recv().expect("the handler replied");
+    let ServerMsg::SessionRetired {
+        retired,
+        panes_closed,
+        skipped_typing,
+        ..
+    } = reply
+    else {
+        panic!("expected SessionRetired, got {reply:?}");
+    };
+    assert_eq!(retired, 1, "the stale-typed member tombstoned");
+    assert_eq!(panes_closed, 1, "the stale-typed pane closed");
+    assert_eq!(skipped_typing, 0, "nothing was held");
+}
