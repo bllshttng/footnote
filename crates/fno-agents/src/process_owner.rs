@@ -4,6 +4,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 const MAX_OWNER_SIDECAR_BYTES: usize = 4096;
+#[cfg(target_os = "linux")]
 const MAX_PROCESS_ENVIRONMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
