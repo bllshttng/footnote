@@ -8,7 +8,7 @@
 use super::*;
 
 #[test]
-fn watching_ignored_codex_harness_is_audible() {
+fn watching_ignored_unsupported_harness_is_audible() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
@@ -18,7 +18,7 @@ fn watching_ignored_codex_harness_is_audible() {
     let transcript_path = cwd.join("transcript.jsonl");
     fs::write(
         &manifest_path,
-        new_manifest("sess-watching-codex", "2026-06-05T00:00:00Z", true),
+        new_manifest("sess-watching-unsupported", "2026-06-05T00:00:00Z", true),
     )
     .unwrap();
     fs::write(&transcript_path, transcript_with_watching()).unwrap();
@@ -37,14 +37,14 @@ fn watching_ignored_codex_harness_is_audible() {
         &format!("--gh-bin={}", mock.gh.display()),
         &format!("--git-bin={}", mock.git.display()),
         "--author-harness",
-        "codex",
+        "grok",
     ]);
 
     assert_eq!(code, 0);
     assert_eq!(d.decision, "block");
     assert!(
         d.message
-            .contains("watching ignored: harness codex cannot idle"),
+            .contains("watching ignored: harness grok cannot idle"),
         "discarded watching tag must be named: {}",
         d.message
     );
@@ -54,7 +54,7 @@ fn watching_ignored_codex_harness_is_audible() {
         d.message
     );
     // A harness that cannot self-wake can never honor the arm-and-tag hint,
-    // so the composed message must not prescribe it (the codex re-arm loop
+    // so the composed message must not prescribe it (the re-arm loop
     // the module doc names).
     assert!(
         !d.message.contains("Arm a harness-tracked watcher"),

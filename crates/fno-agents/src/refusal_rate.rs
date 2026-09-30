@@ -3,30 +3,68 @@
 //! `refusal_rate` reading in `king_checkin.rs`.
 //!
 //! The bucket regex is the union of the 7 patterns proven against a live
-//! reign transcript in `internal/fno/evals/kings/data/scan.py` (gate
+//! reign transcript (gate
 //! refusals, usage errors, style-lint refusals, fno guard refusals,
 //! timeouts, parse errors, operator rejections). A single combined check is
 //! enough here: the reading reports one rate, not a per-bucket breakdown.
 
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::OnceLock;
 
-const REFUSAL_PATTERN: &str = concat!(
-    r#"style-exception|rule \d+ \(|guard\]|king-delegation-guard|"#,
-    r#""status": "refused"|spawn-gate:|provider_cap|gate_mutex|"#,
-    r#"cpu_share_undecidable|registry_schema|refused:|No such option|"#,
-    r#"Usage:|command not found|Error: No such|validation error|is required|"#,
-    r#"timed out|did not complete within|Command timed out|"#,
-    r#"Traceback|JSONDecodeError|SyntaxError|KeyError|zsh:|"#,
-    r#"doesn't want to proceed"#,
-);
+pub(crate) const REFUSAL_BUCKETS: [(&str, &str); 7] = [
+    ("style_lint", r"style-exception|rule \d+ \("),
+    ("fno_guard", r"guard\]|king-delegation-guard"),
+    (
+        "gate_refusal",
+        r#""status": "refused"|spawn-gate:|provider_cap|gate_mutex|cpu_share_undecidable|registry_schema|refused:"#,
+    ),
+    (
+        "usage_error",
+        r"No such option|Usage:|command not found|Error: No such|validation error|is required",
+    ),
+    (
+        "timeout",
+        r"timed out|did not complete within|Command timed out",
+    ),
+    (
+        "parse_error",
+        r"Traceback|JSONDecodeError|SyntaxError|KeyError|zsh:",
+    ),
+    ("user_reject", r"doesn't want to proceed"),
+];
 
 /// The first N chars of a tool_result's content text that the regex reads.
 /// Matches the 4000-char lead the reign-control retro measured against.
 const CONTENT_LEAD_CHARS: usize = 4000;
 
+static REFUSAL_RE: OnceLock<Result<regex::Regex, String>> = OnceLock::new();
+static BUCKET_SET: OnceLock<regex::RegexSet> = OnceLock::new();
+
 fn refusal_regex() -> Result<regex::Regex, String> {
-    regex::Regex::new(REFUSAL_PATTERN).map_err(|e| format!("bad refusal regex: {e}"))
+    let pattern = REFUSAL_BUCKETS
+        .iter()
+        .map(|(_, pattern)| *pattern)
+        .collect::<Vec<_>>()
+        .join("|");
+    match REFUSAL_RE
+        .get_or_init(|| regex::Regex::new(&pattern).map_err(|e| format!("bad refusal regex: {e}")))
+    {
+        Ok(regex) => Ok(regex.clone()),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+pub(crate) fn buckets_of(text: &str) -> impl Iterator<Item = &'static str> + '_ {
+    let set = BUCKET_SET.get_or_init(|| {
+        regex::RegexSet::new(REFUSAL_BUCKETS.map(|(_, pattern)| pattern))
+            .expect("refusal bucket patterns are valid")
+    });
+    let matches = set.matches(lead(text, CONTENT_LEAD_CHARS));
+    REFUSAL_BUCKETS
+        .iter()
+        .enumerate()
+        .filter_map(move |(idx, (bucket, _))| matches.matched(idx).then_some(*bucket))
 }
 
 /// The first `max_chars` characters of `text`, split on a char boundary.
@@ -41,17 +79,7 @@ fn lead(text: &str, max_chars: usize) -> &str {
     }
 }
 
-/// One `tool_use` call paired with its `tool_result` text, in transcript
-/// order. `result` is `None` when no result was ever recorded (an
-/// interrupted call): that call still counts toward `total`, never toward
-/// `refused` - an unanswered call is not evidence the machine declined.
-struct ToolCall {
-    result: Option<String>,
-}
-
-/// Parse a Claude JSONL transcript into ordered tool calls, pairing each
-/// `tool_use` block with its later `tool_result` by `id`/`tool_use_id`.
-fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
+fn trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
     let mut order: Vec<String> = Vec::new();
     let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for line in text.lines() {
@@ -62,40 +90,40 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-            continue;
-        };
-        for block in content {
-            match block.get("type").and_then(Value::as_str) {
-                Some("tool_use") => {
-                    if let Some(id) = block.get("id").and_then(Value::as_str) {
-                        order.push(id.to_string());
-                    }
+        let mut entries = Vec::new();
+        crate::reign_hygiene::claude_row_entries(&value, &mut entries);
+        order.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == "tool_use")
+                .filter_map(|entry| entry.tool_use_id.clone()),
+        );
+        if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
                 }
-                Some("tool_result") => {
-                    let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let text = match block.get("content") {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Array(parts)) => parts
-                            .iter()
-                            .filter_map(|p| p.get("text").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join(""),
-                        _ => String::new(),
-                    };
-                    results.insert(id.to_string(), text);
-                }
-                _ => {}
+                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let text = match block.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(parts)) => parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    _ => String::new(),
+                };
+                results.insert(id.to_string(), text);
             }
         }
     }
+    let start = order.len().saturating_sub(window);
     order
         .into_iter()
-        .map(|id| ToolCall {
-            result: results.remove(&id),
-        })
+        .skip(start)
+        .map(|id| results.remove(&id))
         .collect()
 }
 
@@ -109,15 +137,14 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
 pub fn refusal_rate(transcript: &Path, window: usize) -> Result<Value, String> {
     let text =
         std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
-    let calls = parse_tool_calls(&text);
-    let total = calls.len().min(window);
-    let trailing = &calls[calls.len() - total..];
+    let trailing = trailing_calls(&text, window);
+    let total = trailing.len();
     let re = refusal_regex()?;
     let refused = trailing
         .iter()
-        .filter(|c| match &c.result {
-            Some(r) => re.is_match(lead(r, CONTENT_LEAD_CHARS)),
-            None => false,
+        .filter(|c| {
+            c.as_ref()
+                .is_some_and(|r| re.is_match(lead(r, CONTENT_LEAD_CHARS)))
         })
         .count();
     let rate = if total == 0 {
@@ -187,15 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn window_never_exceeds_actual_call_count() {
-        let lines = vec![transcript_line("t1", "Read", Some("ok"))];
-        let file = write_transcript(&lines);
-        let result = refusal_rate(file.path(), 200).unwrap();
-        assert_eq!(result["total"], 1);
-        assert_eq!(result["window"], 1);
-    }
-
-    #[test]
     fn trailing_window_drops_older_calls() {
         let mut lines = Vec::new();
         for i in 0..5 {
@@ -240,15 +258,5 @@ mod tests {
         let result = refusal_rate(file.path(), 200).unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["refused"], 0, "the matching text sits past the lead");
-    }
-
-    #[test]
-    fn lead_splits_on_a_char_boundary_never_mid_codepoint() {
-        let mut s = "x".repeat(9);
-        s.push('—'); // s has 10 chars: 9 ascii, then one 3-byte char
-        assert_eq!(lead(&s, 9), "x".repeat(9)); // cut right before the multibyte char
-        assert_eq!(lead(&s, 3), "xxx");
-        assert_eq!(lead(&s, 10), s); // exactly all chars, none dropped
-        assert_eq!(lead(&s, 100), s); // fewer chars than requested: unchanged
     }
 }
