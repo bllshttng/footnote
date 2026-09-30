@@ -3048,6 +3048,33 @@ event_types:
         reason:
           type: string
 
+  - name: loop_check_watch_expiry_wake
+    description: "The daemon delivered or durably queued one wake for an expired watch, after confirming its session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
+    sources: [daemon]
+    data:
+      required: [session_id, node, watch_event_id, blocker, task_id, expires_at_ms, delivered, via, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        watch_event_id:
+          type: string
+        blocker:
+          type: string
+          enum: [ci, review, merge_slot, local, unknown]
+        task_id:
+          type: [string, "null"]
+        expires_at_ms:
+          type: integer
+        delivered:
+          type: boolean
+        via:
+          type: string
+          enum: [mail, resume, durable]
+        reason:
+          type: string
+
   - name: burn_watch_escalated
     description: "The burn arm's wake budget is spent with no progress on any sampled axis: one fleet task was filed through the pr-nudge store (deduplicated on lane and key) and the arm now waits for progress or the operator. The task closes itself when progress lands."
     sources: [daemon]
@@ -4456,6 +4483,12 @@ event_types:
           type: string
           enum: [ci, review, merge_slot, local, unknown]
           description: "The blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), 'local' (a run on this machine: a test suite, a build, a review fork), or 'unknown' (any other reason; the idle verifies nothing)."
+        task_id:
+          type: [string, "null"]
+          description: "Harness task identifier from the <watching> tag, or null when the tag does not name one. Missing ids remain visible and are never guessed."
+        expires_at_ms:
+          type: integer
+          description: "Absolute Unix expiry time in milliseconds for the declared watch timeout, normalized to [5m,2h]; excludes claim-lease slack."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."

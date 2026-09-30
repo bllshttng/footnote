@@ -494,19 +494,55 @@ def _run_hook(payload: object) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
-def test_end_to_end_deny_envelope() -> None:
+@pytest.mark.parametrize(
+    "command",
+    [
+        "opencode run",
+        "with_timeout 30 opencode run",
+        (
+            "bash -c 'source scripts/lib/with-timeout.sh; "
+            "with_timeout 30 opencode run; opencode run'"
+        ),
+    ],
+)
+def test_end_to_end_deny_envelope(command: str) -> None:
     code, out = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "yes > /dev/null &"}}
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command,
+                "run_in_background": True,
+            },
+        }
     )
     assert code == 0
+    assert out.strip(), "unbounded background commands must be refused"
     decision = json.loads(out)["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "exec -a fno-" in decision["permissionDecisionReason"]
+    assert "with_timeout" in decision["permissionDecisionReason"]
 
 
-def test_end_to_end_allow_is_silent() -> None:
+@pytest.mark.parametrize(
+    ("command", "run_in_background"),
+    [
+        ("echo yes", False),
+        (
+            "bash -c 'source scripts/lib/with-timeout.sh; "
+            "with_timeout 30 opencode run'",
+            True,
+        ),
+        ("fno do pr wait 123 --until review --timeout 30m", True),
+    ],
+)
+def test_end_to_end_allow_is_silent(command: str, run_in_background: bool) -> None:
     code, out = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "echo yes"}}
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command,
+                "run_in_background": run_in_background,
+            },
+        }
     )
     assert code == 0
     assert out.strip() == ""

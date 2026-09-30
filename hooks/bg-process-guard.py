@@ -9,22 +9,20 @@ so the normal death path for an abandoned pipeline does not exist. The load
 starved a preflight holder to 0.31 seconds of CPU in 52 minutes, and that lock
 steals on `kill -0` death alone, so it never freed.
 
-This guard covers ONE of the three orphan classes that night: the process that
-cannot end on its own. Specimen 2 (a `grep -rn` at 64% CPU) and specimen 3
-(background tasks that outlived their session) are not refusable at creation
-time - a grep is a legitimate command, and nothing in the command text of
-specimen 3 marks it. Those are `fno agents orphans`' job, after the fact. The
-one marked exception is the recursive cache walk: hooks/recursive-grep-guard.py
-refuses that class at the Bash boundary when the repository holds a
-CACHEDIR.TAG-confirmed Cargo cache. See
-docs/architecture/background-process-hygiene.md.
+This guard covers the endless-process class and background Bash tasks that
+arrived without a supported wall-clock bound. A recursive grep is a legitimate
+command, and a task launched outside Bash still needs the harness's own bound;
+the after-the-fact orphan scan remains their backstop. The recursive cache walk
+has a separate exception: hooks/recursive-grep-guard.py refuses that class at
+the Bash boundary when the repository holds a CACHEDIR.TAG-confirmed Cargo
+cache. See docs/architecture/background-process-hygiene.md.
 
 Parse-only, stdlib alone. No third-party import, psutil included: a hook runs
 under whatever bare interpreter the harness hands it, and an ImportError here
 takes the guard down on every Bash call. It never inspects a live process.
 
-Fails OPEN on anything unexpected. A guard that breaks a session on its own bug
-is worse than the orphans it prevents.
+Fails OPEN on unexpected input for the legacy generator scan. A background task
+whose hard bound cannot be verified is denied instead of treated as bounded.
 """
 
 import json
@@ -377,6 +375,66 @@ def _has_bound(segment):
     # `count=` is dd's own operand, so it is safe to read positionally: it
     # cannot be a redirect target and it names no other command.
     return head == "dd" and any(a.startswith("count=") for a in _operands(argv))
+
+
+def _has_background_bound(text, depth=0):
+    """Whether a background command carries one of the supported wall bounds.
+
+    `with_timeout` only counts when its portable helper was sourced in the same
+    command text. Native `fno do pr wait` owns its own timeout flag and needs no
+    outer wrapper. Shell `-c` payloads are checked recursively like generators.
+    """
+    if depth > 2:
+        return False
+    try:
+        segments = _segments(_tokens(_strip_heredocs(text)))
+    except ValueError:
+        return False
+
+    if len(segments) == 1:
+        segment = segments[0]
+        head, argv = _head_of(segment)
+        # An enclosing shell is accepted only when its whole -c payload has a
+        # recognized bound; a later command beside the wrapper could still hang.
+        payload = _payload_of(head, argv)
+        if payload:
+            return _has_background_bound(payload, depth + 1)
+        if "|" in segment or "|&" in segment:
+            return False
+        if head == "fno" and argv[:3] == ["do", "pr", "wait"]:
+            return any(
+                (arg == "--timeout" and index + 1 < len(argv) and
+                 re.fullmatch(r"\d+[smhdSMHD]?", argv[index + 1]))
+                or re.fullmatch(r"--timeout=\d+[smhdSMHD]?", arg)
+                for index, arg in enumerate(argv)
+            )
+        return False
+
+    if len(segments) != 2 or any("|" in segment or "|&" in segment for segment in segments):
+        return False
+    source_head, source_argv = _head_of(segments[0])
+    call_head, call_argv = _head_of(segments[1])
+    sourced_helper = source_head in {"source", "."} and any(
+        arg.endswith("scripts/lib/with-timeout.sh") for arg in source_argv
+    )
+    bounded_call = (
+        call_head == "with_timeout"
+        and bool(call_argv)
+        and re.fullmatch(r"\d+", call_argv[0]) is not None
+    )
+    return sourced_helper and bounded_call
+
+
+def _background_refusal(command):
+    return (
+        "Refusing a background Bash task without a recognized hard timeout.\n\n"
+        "  %s\n\n"
+        "Use the portable helper:\n"
+        "  bash -c 'source scripts/lib/with-timeout.sh; "
+        "with_timeout 1800 <command> [args...]'\n"
+        "or a native bounded wait such as `fno do pr wait <N> --timeout 30m`."
+        % command
+    )
 
 
 def _generator_reason(head, argv):
@@ -745,9 +803,19 @@ def main():
     if input_data.get("tool_name", "") != "Bash":
         _exit_allow()
 
-    command = (input_data.get("tool_input", {}) or {}).get("command", "")
+    tool_input = input_data.get("tool_input", {}) or {}
+    command = tool_input.get("command", "")
     if not isinstance(command, str) or not command.strip():
         _exit_allow()
+
+    if tool_input.get("run_in_background") is True:
+        try:
+            bounded = _has_background_bound(command.strip())
+        except Exception:  # noqa: BLE001 -- an unverified background bound is refused
+            bounded = False
+        if not bounded:
+            _emit("deny", _background_refusal(command.strip()))
+            _exit_allow()
 
     # Denied whether or not run_in_background is set. A foreground unbounded
     # `yes` is orphaned just as surely when the session exits - that is exactly
