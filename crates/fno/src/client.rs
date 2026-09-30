@@ -518,7 +518,7 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
-    stamp_sandbox_owner(&mut cmd);
+    owner_lease::stamp_sandbox_owner(&mut cmd);
     // Config->env bridge for the interactive path. The pure-Rust mux
     // server reads no config.toml, so `config.mux.shell_integration: off` was
     // a silent no-op here (the Python spawn front-half already bridges
@@ -554,57 +554,6 @@ fn spawn_server(path: &Path) -> Result<(), String> {
     crate::process_admission::std_spawn(&mut cmd)
         .map(|_| ())
         .map_err(|e| format!("cannot spawn the mux server: {e}"))
-}
-
-/// A Codex companion session is the explicit sandbox marker for an owner-bound
-/// mux server. Ordinary shared mux launches stay ownerless. A caller may pass
-/// an outer script's pid; otherwise this client process owns the detached
-/// server for the duration of its attach.
-fn stamp_sandbox_owner(cmd: &mut std::process::Command) {
-    const OWNER_KEYS: [&str; 3] = ["FNO_OWNER_PID", "FNO_OWNER_BIRTH", "FNO_OWNER_SESSION"];
-    for key in OWNER_KEYS {
-        cmd.env_remove(key);
-    }
-    let session = std::env::var("FNO_OWNER_SESSION")
-        .ok()
-        .filter(|v| valid_owner_session(v))
-        .or_else(|| {
-            std::env::var("CODEX_COMPANION_SESSION_ID")
-                .ok()
-                .filter(|v| valid_owner_session(v))
-        });
-    let Some(session) = session else { return };
-    let owner_pid = match std::env::var("FNO_OWNER_PID") {
-        Ok(raw) => match raw.parse::<u32>() {
-            Ok(pid) if pid > 1 => pid,
-            _ => return,
-        },
-        Err(_) => std::process::id(),
-    };
-    let birth = match std::env::var("FNO_OWNER_BIRTH") {
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(birth) if birth > 0 => birth,
-            _ => return,
-        },
-        Err(_) => match crate::proto::pid_start_time(owner_pid) {
-            Some(birth) => birth,
-            None => return,
-        },
-    };
-    if crate::proto::pid_start_time(owner_pid) != Some(birth) {
-        return;
-    }
-    cmd.env("FNO_OWNER_PID", owner_pid.to_string())
-        .env("FNO_OWNER_BIRTH", birth.to_string())
-        .env("FNO_OWNER_SESSION", session);
-}
-
-fn valid_owner_session(session: &str) -> bool {
-    !session.is_empty()
-        && session.len() <= 128
-        && session
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Whether the interactive path must disable OSC 133 injection. Bounded +
@@ -13612,6 +13561,9 @@ fn exit_with_notice(notice: String) -> i32 {
 
 #[path = "client/compositor.rs"]
 mod compositor;
+
+#[path = "client/owner_lease.rs"]
+mod owner_lease;
 
 use compositor::Compositor;
 

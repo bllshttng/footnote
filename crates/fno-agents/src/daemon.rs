@@ -36,6 +36,7 @@ mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
+mod stop_by_session;
 mod stop_refusal_detail;
 pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
@@ -52,6 +53,7 @@ use self::list_rows::{
     handle_list, rendered_status_from_truth,
 };
 pub(crate) use self::list_rows::{progress_from_truth, registry_truth_handle};
+pub(crate) use self::stop_by_session::stop_session_for_home;
 mod prune_outcome;
 pub(crate) use self::prune_outcome::PruneOutcome;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
@@ -5081,26 +5083,6 @@ pub(crate) async fn stop_worker_confirmed_for_home(
         let _ = std::fs::remove_file(&sock);
     }
     down
-}
-
-/// Resolve one registry entry by harness session id and stop it through the
-/// same confirmed worker path used by `fno agents stop`.
-pub(crate) async fn stop_session_for_home(
-    home: &AgentsHome,
-    session_id: &str,
-) -> Option<(String, bool)> {
-    let registry = load_registry_offloaded(home.registry_json()).await.ok()?;
-    let mut matches = registry.entries.iter().filter(|entry| {
-        entry.harness_session_id.as_deref() == Some(session_id)
-            || entry.session_id.as_deref() == Some(session_id)
-    });
-    let entry = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    let name = entry.name.clone();
-    let stopped = stop_worker_confirmed_for_home(home, entry).await;
-    Some((name, stopped))
 }
 
 /// Probe whether the worker is still serving on its socket. PID-reuse-immune:
