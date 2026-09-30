@@ -1487,52 +1487,40 @@ class TestTickOrchestrator:
 class TestJsonLoadsGuards:
     """AC-gemini-HIGH: json.loads returning None/non-dict must not AttributeError."""
 
-    def test_fire_skill_null_json_envelope_is_failure(self, tmp_path):
-        """AC-gemini-HIGH _dispatch.py:145: json.loads('null') -> ok=False, no AttributeError."""
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "null",  # json.loads returns Python None
+            "[1, 2, 3]",  # a list root is not a dict either
+        ],
+    )
+    def test_fire_skill_shapeless_json_envelope_is_failure(self, tmp_path, stdout):
+        """AC-gemini-HIGH _dispatch.py:145: a shapeless JSON envelope -> ok=False, no AttributeError."""
         from fno.pr_watch._dispatch import fire_skill
 
         def stub_runner(cmd, **kw):
-            # json.loads('null') returns Python None
-            return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="null", stderr=""
-            )
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
         result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
-    def test_fire_skill_list_json_envelope_is_failure(self, tmp_path):
-        """AC-gemini-HIGH _dispatch.py:145: json.loads('[1,2]') -> ok=False, no AttributeError."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="[1, 2, 3]", stderr=""
-            )
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is False
-        assert result.is_error is True
-
-    def test_watermark_store_null_root_resets_to_empty(self, tmp_path):
-        """AC-gemini-HIGH _state.py:148: JSON root 'null' -> store resets to {}, no AttributeError."""
+    @pytest.mark.parametrize(
+        "root",
+        [
+            "null",
+            '["a", "b"]',
+        ],
+    )
+    def test_watermark_store_shapeless_root_resets_to_empty(self, tmp_path, root):
+        """AC-gemini-HIGH _state.py:148: a shapeless JSON root -> store resets to {}, no AttributeError."""
         from fno.pr_watch._state import WatermarkStore
 
         path = tmp_path / "state.json"
-        path.write_text("null")
+        path.write_text(root)
         store = WatermarkStore(path=path)
         result = store.load()
-        assert result == {}, f"expected empty dict after null root, got: {result!r}"
-
-    def test_watermark_store_list_root_resets_to_empty(self, tmp_path):
-        """AC-gemini-HIGH _state.py:148: JSON root '[...]' -> store resets to {}, no AttributeError."""
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "state.json"
-        path.write_text('["a", "b"]')
-        store = WatermarkStore(path=path)
-        result = store.load()
-        assert result == {}
+        assert result == {}, f"expected empty dict after {root} root, got: {result!r}"
 
 
 class TestReadPrStateJsonGuards:

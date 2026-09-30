@@ -1083,7 +1083,7 @@ fn is_pr_subject(s: &str) -> bool {
 /// `~/.fno/worktrees/<repo>/<name>`, attributed through the `<repo>` segment
 /// like the conductor layout, so a law recorded from a worktree session
 /// stamps the parent repo's project instead of refusing.
-fn resolve_project(
+pub(crate) fn resolve_project(
     cwd: Option<&std::path::Path>,
     sources: &[std::path::PathBuf],
 ) -> Result<String, String> {
@@ -1234,7 +1234,7 @@ fn expand_tilde(path: &str) -> String {
 /// `FNO_GLOBAL_SETTINGS_PATH`, like `config_read_candidates`). The
 /// `work.workspaces` map lives in the global file, so the global candidates
 /// are what make resolution work at all.
-fn settings_sources() -> Vec<std::path::PathBuf> {
+pub(crate) fn settings_sources() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         out.push(cwd.join(".fno/config.toml"));
