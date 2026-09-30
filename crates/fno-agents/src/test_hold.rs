@@ -292,7 +292,7 @@ pub fn hold_for_runaway(
     let record = fleet_incident::write_transition_with_metadata(
         &path,
         "stopped",
-        Some(&format!("machine runaway, tests yield first: {reason}")),
+        Some(&format!("tests yield first: {reason}")),
         Some(fleet_incident::MACHINE_ORIGIN),
         vec!["tests".to_string()],
         fleet_incident::RecordMetadata {

@@ -656,7 +656,8 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             let runtime = tokio::runtime::Handle::current();
             let brake_error = std::cell::RefCell::new(None);
             let tests_first = std::cell::RefCell::new(None::<String>);
-            tick_machine_watch_with_thresholds(
+            let held_first = std::cell::Cell::new(false);
+            let outcome = tick_machine_watch_with_thresholds(
                 &mut guard,
                 Ok(&sample),
                 |title, body| {
@@ -694,6 +695,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     ) {
                         Ok(Some(held)) => {
                             *tests_first.borrow_mut() = Some(held);
+                            held_first.set(true);
                             return;
                         }
                         Ok(None) => {}
@@ -705,7 +707,13 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     }
                 },
                 thresholds,
-            )
+            );
+            // The session stop rides the runaway notice, so the tests-first
+            // notice must not start the throttle that would hold it back.
+            if held_first.get() {
+                guard.last_notified = None;
+            }
+            outcome
         };
         sample.verdict = Some(outcome.verdict.clone());
         let _ = journal.append(
