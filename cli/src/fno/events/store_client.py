@@ -49,10 +49,30 @@ def resolve_native_bin() -> str:
     )
 
 
+def _state_root_for_routing() -> Optional[Path]:
+    """The canonical state root the native ``store_path`` derives: the
+    ``FNO_AGENTS_HOME`` parent when pinned, else ``HOME/.fno``, realpathed -
+    the same two env reads, the same precedence, so both sides route one
+    journal to one store."""
+    home_env = os.environ.get("FNO_AGENTS_HOME")
+    if home_env:
+        return Path(os.path.realpath(home_env)).parent
+    home = os.environ.get("HOME")
+    if not home:
+        return None
+    return Path(os.path.realpath(Path(home) / ".fno"))
+
+
 def store_db_path(events_path: Path) -> Path:
     """The store beside a journal: symlinks resolved, rotation suffixes and
     the ``.jsonl`` stem stripped, ``.db`` appended - the same resolution the
-    native store performs, so a locator names one store from either side."""
+    native store performs, so a locator names one store from either side.
+
+    A state-root journal (``events``/``decisions``/``questions`` whose parent
+    IS the derived root) routes through the layout table on the native side:
+    a migrated root answers ``db/<stem>.db``, a legacy one the sibling. The
+    reader mirrors that routing - preferring the migrated twin, then the
+    legacy sibling - so the writer's store is always the reader's store."""
     resolved = Path(events_path).resolve()
     stem = resolved.name
     if stem.endswith(".jsonl"):
@@ -60,6 +80,16 @@ def store_db_path(events_path: Path) -> Path:
     # A generation suffix (.1, .2) names the same store as the live journal.
     if stem.rsplit(".", 1)[-1].isdigit():
         stem = stem.rsplit(".", 1)[0]
+    if stem in ("events", "decisions", "questions"):
+        root = _state_root_for_routing()
+        if root is not None and resolved.parent == root:
+            migrated = root / "db" / f"{stem}.db"
+            if migrated.exists():
+                return migrated
+            legacy = root / f"{stem}.db"
+            if legacy.exists():
+                return legacy
+            return migrated
     return resolved.with_name(f"{stem}.db")
 
 
