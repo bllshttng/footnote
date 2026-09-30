@@ -1960,8 +1960,7 @@ def _forced_pane_send(
         )
         raise typer.Exit(code=1)
 
-    # Name the widened failure values, never truthiness: an "unconfirmed"
-    # composer frame must not read as a typed delivery.
+    # An "unconfirmed" composer frame must not read as a typed delivery.
     if _mux_pane_send(entry, wrapped, guarded=False) in (False, "unconfirmed"):
         _release_budget(reservation)
         # NOT "nothing was sent". One bool covers two worlds here: a refusal

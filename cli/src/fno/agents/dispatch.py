@@ -5554,9 +5554,8 @@ _CODEX_QUEUE_MARKER = "tab to queue message"
 # Substring match, so the bare word subsumes every longer spelling that
 # contains it ("queued review", "review queued"); listing those adds nothing.
 _CODEX_QUEUED_MARKERS = ("queued",)
-# Post-submit read-back (codex panes): how many extra submit/queue keys the composer
-# confirm may spend, and how many settle+read rounds a paste that has not fully
-# rendered yet gets before the first late submit key goes.
+# Composer read-back (codex panes): extra submit/queue keys, and the
+# settle+read rounds a paste that has not fully rendered gets.
 _CODEX_POST_SUBMIT_RESENDS = 2
 _CODEX_ABSORB_POLLS = 12
 _CODEX_ACTIVE_REVIEW_MARKERS = (
@@ -6036,22 +6035,17 @@ def _mux_pane_send(
         return "unconfirmed"
 
     def _codex_post_submit_outcome() -> bool | str:
-        """Read the composer back after the submit key: the codex lane
-        printed delivered while the envelope sat unsent -- the CR fires after
-        one settle, so a paste the TUI is still absorbing takes it as a
-        newline, and a claim-refused pane had no interlock to refuse the send.
-        The queue affordance beside the payload names the pane's composer as
-        still holding it, so the queue key (Tab) is what moves it; the payload
-        not visible yet means the paste is still rendering, and the lone Enter
-        after the burst is what landed it every time this reproduced. An
-        unreadable frame keeps the bytes-written verdict: it proves nothing,
-        and a durable demotion on a landed paste makes the recipient drain it
-        twice. Everything else ends unconfirmed -- the receipt never says
-        delivered over a composer that may still hold the envelope."""
-        resends = 0
-        polls = 0
-        seen_payload = False
-        hedged = False
+        # Composer read-back after the submit key: the CR fires after one
+        # settle, so a slow paste absorbs it as a newline and a mid-turn pane
+        # takes Enter as steer only; either way the envelope stays resident.
+        # The queue affordance beside the payload names the composer as still
+        # holding it (Tab moves it); not-yet-rendered polls then one late key;
+        # an affordance-less frame gets one deciding key (no-op when landed);
+        # an unreadable frame keeps the bytes-written verdict, and anything
+        # else resident ends unconfirmed -- never delivered over a composer
+        # that may still hold the envelope.
+        resends = polls = 0
+        seen_payload = hedged = False
         while True:
             time.sleep(enter_delay_s)
             screen = _read_screen()
@@ -6065,30 +6059,16 @@ def _mux_pane_send(
                 if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
                     key = "\t"
                 elif not hedged:
-                    # Visible with no affordance: landed transcript row or a
-                    # resident envelope the footer does not name. One extra
-                    # submit key decides -- no-op on a landed frame's empty
-                    # composer, the submit on a resident one.
-                    hedged = True
-                    key = submit_text[0]
+                    hedged, key = True, submit_text[0]
                 else:
-                    # The hedge moved nothing and the affordance never showed:
-                    # this is the transcript row.
                     return True
             elif seen_payload:
-                # Resident, then gone: the extra key moved it out.
                 return True
-            elif polls < _CODEX_ABSORB_POLLS:
-                continue
-            else:
+            elif polls >= _CODEX_ABSORB_POLLS:
                 key = submit_text[0]
+            else:
+                continue
             if resends >= _CODEX_POST_SUBMIT_RESENDS:
-                print(
-                    f"mux pane {pane} unconfirmed: the envelope is still in "
-                    f"the composer after {resends} extra submit keys; demoting "
-                    f"to durable",
-                    file=sys.stderr,
-                )
                 _record_failure("post-submit-unconfirmed")
                 return "unconfirmed"
             resends += 1
@@ -6208,9 +6188,7 @@ def _mux_pane_send(
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
         elif sent and not review and (getattr(entry, "harness", "") or "") == "codex":
-            # A codex pane has no transcript to confirm against, so
-            # the composer itself is the confirm; the read-back decides what
-            # the receipt may claim.
+            # No transcript to confirm against, so the composer is the confirm.
             outcome = _codex_post_submit_outcome()
         elif sent and confirm:
             # Bytes-written alone is Locked-Decision-4 banned as a hosted
