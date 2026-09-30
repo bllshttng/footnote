@@ -503,7 +503,7 @@ pub fn decisions(
     node: Option<&str>,
     decision_id: Option<&str>,
 ) -> Result<Vec<Value>, ApiError> {
-    let connection = crate::backlog::open(&store.graph)?;
+    let connection = crate::backlog::read_connection(&store.graph)?;
     let rows = match node {
         Some(node_id) => crate::backlog::decisions::node_decisions(&connection, node_id)?,
         None => {
