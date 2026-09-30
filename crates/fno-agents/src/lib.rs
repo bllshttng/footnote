@@ -193,7 +193,7 @@ pub mod heal;
 pub mod heal_pid;
 pub mod honesty_sweep;
 pub mod hook;
-mod identity;
+pub mod identity;
 pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
