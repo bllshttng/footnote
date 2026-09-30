@@ -423,6 +423,38 @@ def test_ac1_err_passing_candidate_returns_observation():
     assert obs.state in {"OPEN", "CLOSED", "MERGED", "UNKNOWN"}
 
 
+def test_is_draft_rides_the_reviews_leg_call():
+    """The draft bit comes off the same `gh pr view --json` payload - no extra
+    network call - and a missing/non-bool isDraft reads None, never a guess."""
+    cand = _make_candidate()
+
+    def runner(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and "api" in cmd:
+            payload = json.dumps({
+                "number": 42, "state": "OPEN", "merged": False,
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "created_at": "2026-06-01T00:00:00Z", "merged_at": None,
+                "merge_commit_sha": None,
+                "head": {"sha": "head-sha", "ref": "feature/test"},
+                "base": {"ref": "main"},
+            })
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
+        payload = json.dumps({
+            "number": 42, "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/42",
+            "mergedAt": None, "createdAt": "2026-06-01T00:00:00Z",
+            "isDraft": True, "reviews": [],
+        })
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
+
+    obs = read_pr_state(cand, reviewers=[], runner=runner)
+    assert obs.is_draft is True
+    # The sibling stub's payload omits isDraft entirely.
+    obs_plain = read_pr_state(cand, reviewers=[], runner=_stub_runner_ok_with_reviews)
+    assert obs_plain.is_draft is None
+
+
 # ---------------------------------------------------------------------------
 # [bot] matching: reviewer substring match, case-insensitive, strip [bot]
 # ---------------------------------------------------------------------------

@@ -79,6 +79,11 @@ class TickResult:
     quota_skip: bool = False
     quota_remaining: Optional[int] = None
     quota_reset: Optional[str] = None
+    # Draft-PR legs the sweep ran this tick (flipped, spared by an operator
+    # ruling, or failed). The leg is config.pr.open_ready's second enforcement
+    # point; the count rides the receipt so a refused flip is not silent, and
+    # the per-PR outcome lives in the pr_watch_draft_flip event.
+    draft_flips: int = 0
     # The preflight RAN but the budget was unreadable: the tick proceeded on
     # an absent instrument rather than reading the absence as a low budget.
     quota_unknown: bool = False
@@ -574,6 +579,12 @@ def tick(
     # tick() never reads settings itself, so it stays hermetic for callers
     # that inject nothing. The CLI passes the real resolved value explicitly.
     enabled: bool = True,
+    # config.pr.open_ready, resolved by the CLI (hermeticity rule above): the
+    # flip leg turns an observed OPEN + is_draft candidate back to ready
+    # unless an operator draft ruling spares it. draft_flip_fn defaults to
+    # fno.pr._draft_ready.run_draft_flip; tests inject a stub.
+    draft_flip_enabled: bool = True,
+    draft_flip_fn: Optional[Callable] = None,
 ) -> TickResult:
     """Impure tick orchestrator: discover, decide, dispatch, persist.
 
@@ -632,6 +643,7 @@ def tick(
     _graphql_remaining = (
         graphql_remaining_fn if graphql_remaining_fn is not None else _default_graphql_remaining
     )
+    _draft_flip_fn = draft_flip_fn if draft_flip_fn is not None else _default_draft_flip
 
     holder = f"pr-watch:{os.getpid()}"
 
@@ -676,6 +688,8 @@ def tick(
             graphql_min_remaining=graphql_min_remaining,
             dispatch_deadline=dispatch_deadline,
             holder=holder,
+            draft_flip_enabled=draft_flip_enabled,
+            draft_flip_fn=_draft_flip_fn,
         )
     finally:
         try:
@@ -705,6 +719,8 @@ def _run_tick(
     graphql_min_remaining,
     dispatch_deadline,
     holder,
+    draft_flip_enabled,
+    draft_flip_fn,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
     from fno.graph._reconcile import ReconcileError
@@ -864,6 +880,7 @@ def _run_tick(
 
     acted = 0
     skipped = 0
+    draft_flips = 0
     # Rich reads completed: separates "the scan reached nothing" from "the
     # scan found nothing" (scanned=0 alone cannot).
     merge_scan_scanned = 0
@@ -969,6 +986,17 @@ def _run_tick(
                 merge_scan_scanned += 1
                 SCAN_PROGRESS["sweep"] = _scan_note()
                 failed.discard(key)
+
+                # open_ready's second enforcement point: an observed draft
+                # goes back to ready unless an operator ruling spares it.
+                # A flip failure is one degraded row, never a broken sweep;
+                # the count rides the receipt so it is not silent.
+                if draft_flip_enabled and obs.state == "OPEN" and obs.is_draft:
+                    try:
+                        draft_flip_fn(cand, obs, emit=emit)
+                        draft_flips += 1
+                    except Exception as exc:  # noqa: BLE001 - one bad flip never aborts the tick
+                        log.warning("pr-watch: draft flip failed for PR #%d: %s", pr, exc)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
                 failed.add(key)
@@ -1240,6 +1268,7 @@ def _run_tick(
         "failed_count": len(failed),
         "failed": sorted(failed),
         "sweep_failures": sweep_failures,
+        "draft_flips": draft_flips,
         "listing_api": "rest",
         # The scan receipt: this tick LOOKED, and here is how many rich reads
         # completed. completed=true always - it rides a completed sweep, and
@@ -1258,6 +1287,7 @@ def _run_tick(
         skipped=skipped,
         sweep_failures=sweep_failures,
         quota_unknown=quota_unknown,
+        draft_flips=draft_flips,
     )
 
 
@@ -1540,6 +1570,12 @@ def _default_read_pr_state(
     return read_pr_state(
         candidate, reviewers=reviewers, timeout_s=min(timeout_s, max(1.0, _ritual_timeout())),
     )
+
+
+def _default_draft_flip(cand, obs, *, emit) -> str:  # pragma: no cover
+    from fno.pr._draft_ready import run_draft_flip
+
+    return run_draft_flip(cand, obs, emit=emit)
 
 
 def _noop_read_state(

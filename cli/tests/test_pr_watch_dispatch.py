@@ -4982,3 +4982,110 @@ class TestCatchupRoots:
 
         monkeypatch.setattr(sidecar_store, "load_all", _blow_up)
         assert pw._catchup_roots() == []
+
+
+# ---------------------------------------------------------------------------
+# The draft flip leg (config.pr.open_ready's second enforcement point)
+# ---------------------------------------------------------------------------
+
+
+def _seed_open(store_path, pr_number=7, now="2026-06-14T12:00:00Z"):
+    from fno.pr_watch._state import WatermarkStore
+
+    WatermarkStore(path=store_path).set(f"owner/repo#{pr_number}", {
+        "last_review_ts": now,
+        "last_seen_state": "OPEN",
+        "merge_dispatched": False,
+        "retries": 0,
+        "parked": None,
+    })
+
+
+def _draft_obs(pr_number=7, state="OPEN", is_draft=True):
+    from fno.pr_watch._discover import PrObservation
+
+    return PrObservation(
+        pr_number=pr_number,
+        state=state,
+        latest_review_ts=None,
+        opened_at="2026-06-01T00:00:00Z",
+        is_draft=is_draft,
+    )
+
+
+def _run_tick_with_flip(tmp_path, deps, flip_calls, **tick_kw):
+    from fno.pr_watch._dispatch import tick
+
+    def fake_flip(cand, obs, *, emit):
+        flip_calls.append((cand.pr_number, obs.is_draft))
+        return "flipped"
+
+    kw = dict(
+        graph_path=tmp_path / "graph.json",
+        store_path=tmp_path / "state.json",
+        discover_fn=deps["discover"],
+        read_pr_state_fn=deps["read_pr_state"],
+        read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 0),
+        fire_skill_fn=deps["fire_skill"],
+        emit=deps["emit"],
+        reviewers_for=deps["reviewers_for"],
+        claim=deps["claim"],
+        notify=deps["notify"],
+        post_merge_readiness_fn=deps["post_merge_readiness"],
+        draft_flip_fn=fake_flip,
+        now_iso="2026-06-14T12:00:00Z",
+    )
+    kw.update(tick_kw)
+    return tick(**kw)
+
+
+class TestDraftFlipLeg:
+    def test_open_draft_candidate_is_flipped_and_counted(self, tmp_path):
+        store_path = tmp_path / "state.json"
+        _seed_open(store_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(pr_number=7)], obs_map={7: _draft_obs(7)}
+        )
+        flips = []
+        result = _run_tick_with_flip(tmp_path, deps, flips)
+        assert flips == [(7, True)], "the flip leg must run for an OPEN + is_draft observation"
+        assert result.draft_flips == 1
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["draft_flips"] == 1
+
+    def test_non_draft_and_unknown_draft_observations_never_flip(self, tmp_path):
+        store_path = tmp_path / "state.json"
+        _seed_open(store_path, pr_number=7)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(pr_number=7)], obs_map={7: _draft_obs(7, is_draft=None)}
+        )
+        flips = []
+        result = _run_tick_with_flip(tmp_path, deps, flips)
+        assert flips == []
+        assert result.draft_flips == 0
+
+    def test_flip_disabled_by_config_runs_no_leg(self, tmp_path):
+        store_path = tmp_path / "state.json"
+        _seed_open(store_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(pr_number=7)], obs_map={7: _draft_obs(7)}
+        )
+        flips = []
+        result = _run_tick_with_flip(tmp_path, deps, flips, draft_flip_enabled=False)
+        assert flips == []
+        assert result.draft_flips == 0
+
+    def test_a_raising_flip_never_breaks_the_sweep(self, tmp_path):
+        store_path = tmp_path / "state.json"
+        _seed_open(store_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(pr_number=7)], obs_map={7: _draft_obs(7)}
+        )
+
+        def boom(cand, obs, *, emit):
+            raise RuntimeError("flip exploded")
+
+        result = _run_tick_with_flip(tmp_path, deps, [], draft_flip_fn=boom)
+        assert result.acted >= 0, "the tick completes past a raising flip leg"
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["completed"] is True

@@ -108,6 +108,9 @@ class PrObservation:
     # post-merge dispatcher uses, so the daemon and reconcile mark the SAME
     # merge. None on an open PR or when gh omits it.
     merge_sha: Optional[str] = None
+    # The PR's draft flag from the same gh pr view call (isDraft). None when
+    # gh omits it; the tick's draft flip leg reads OPEN + is_draft.
+    is_draft: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +328,7 @@ def read_pr_state(
     cmd = ["gh", "pr", "view", str(candidate.pr_number)]
     if repo_slug:
         cmd += ["--repo", repo_slug]
-    cmd += ["--json", "reviews,comments,createdAt,number,state,url,mergedAt"]
+    cmd += ["--json", "reviews,comments,createdAt,number,state,url,mergedAt,isDraft"]
 
     try:
         result = runner(
@@ -372,6 +375,7 @@ def read_pr_state(
         latest_review_ts=latest_review_ts,
         opened_at=opened_at,
         merge_sha=merge_state.merge_sha,
+        is_draft=row.get("isDraft") if isinstance(row.get("isDraft"), bool) else None,
     )
 
 
