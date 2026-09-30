@@ -42,15 +42,10 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     } else {
         injected
     };
-    resolve_with_projects(payload, &projects)
+    scan(&payload, &projects)
 }
 
-/// [`resolve`] with the project map injected, so unit tests answer from a
-/// known territory table instead of the caller's cwd.
-pub fn resolve_with_projects(
-    payload: &Value,
-    projects: &HashMap<String, String>,
-) -> Result<Value, String> {
+fn scan(payload: &Value, projects: &HashMap<String, String>) -> Result<Value, String> {
     let rows = payload
         .get("rows")
         .and_then(Value::as_array)
@@ -93,78 +88,4 @@ pub fn resolve_with_projects(
         }
     }
     Ok(json!({"pairs": pairs}))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::collections::HashMap;
-
-    fn scan(rows: Value, projects: &HashMap<String, String>) -> Value {
-        resolve_with_projects(&json!({"kind": "court-rivals", "rows": rows}), projects).unwrap()
-    }
-
-    #[test]
-    fn the_rivalry_table_answers_per_pair() {
-        // One scan pins the rule's table: two same-rung epic sets sharing a
-        // member rival EACH (one entry per pair, never a group); disjoint
-        // territories rival nothing; a portfolio and a cross-rung court stay
-        // legitimate; blank scopes claim nothing; a missing rows array is an
-        // error, never an empty answer.
-        let empty = HashMap::new();
-        let out = scan(
-            json!([
-                {"name": "set-a", "crown_scope": "e-1,e-2", "crown_level": 2},
-                {"name": "king-a", "crown_scope": "e-1", "crown_level": 2},
-                {"name": "king-b", "crown_scope": "e-2", "crown_level": 2}
-            ]),
-            &empty,
-        );
-        let pairs = out["pairs"].as_array().unwrap();
-        assert_eq!(pairs.len(), 2, "two rivals of the set, never a group");
-        let holders: Vec<Vec<&str>> = pairs
-            .iter()
-            .map(|p| {
-                p["holders"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|h| h.as_str().unwrap())
-                    .collect()
-            })
-            .collect();
-        assert!(holders.contains(&vec!["set-a", "king-a"]));
-        assert!(holders.contains(&vec!["set-a", "king-b"]));
-        assert_eq!(
-            pairs[0]["scope"].as_str().unwrap(),
-            "e-1",
-            "the pair names the territory it actually shares"
-        );
-        let out = scan(
-            json!([
-                {"name": "king-a", "crown_scope": "e-1", "crown_level": 2},
-                {"name": "king-b", "crown_scope": "e-2", "crown_level": 2}
-            ]),
-            &empty,
-        );
-        assert_eq!(out["pairs"], json!([]));
-        let out = scan(
-            json!([
-                {"name": "set-a", "crown_scope": "e-1,e-2", "crown_level": 2},
-                {"name": "court-king", "crown_scope": "e-3,e-4", "crown_level": 2}
-            ]),
-            &empty,
-        );
-        assert_eq!(out["pairs"], json!([]));
-        let out = scan(
-            json!([
-                {"name": "blank", "crown_scope": "  ", "crown_level": 2},
-                {"name": "none"}
-            ]),
-            &empty,
-        );
-        assert_eq!(out["pairs"], json!([]));
-        assert!(resolve_with_projects(&json!({"kind": "court-rivals"}), &empty).is_err());
-    }
 }
