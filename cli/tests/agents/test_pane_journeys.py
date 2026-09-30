@@ -16,8 +16,8 @@ from fno.paths_testing import use_tmpdir
 
 CODEX_HARNESS = "codex"
 
-def _real_mux_binaries(repo: Path) -> tuple[Path, Path]:
-    """Return binaries built by the CI cargo step, or skip without building."""
+def _real_mux_binaries(repo: Path) -> tuple[Path, Path] | None:
+    """Return binaries built by the CI cargo step when both are executable."""
     fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     worker_bin = (
         repo / "crates" / "fno-agents" / "target" / "debug" / "fno-agents-worker"
@@ -28,10 +28,7 @@ def _real_mux_binaries(repo: Path) -> tuple[Path, Path]:
         if not path.is_file() or not os.access(path, os.X_OK)
     ]
     if missing:
-        pytest.skip(
-            "CI cargo step must build executable pane journey binaries; unavailable "
-            + ", ".join(missing)
-        )
+        return None
     return fno_bin, worker_bin
 
 
@@ -43,7 +40,10 @@ def test_late_codex_identity_composes_across_every_peer_surface(
     """One derived pane identity reaches every public peer surface unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    fno_bin, worker_bin = _real_mux_binaries(repo)
+    binaries = _real_mux_binaries(repo)
+    if binaries is None:
+        pytest.skip("prebuilt fno and fno-agents-worker binaries are required")
+    fno_bin, worker_bin = binaries
 
     agents_home = tmp_path / ".fno" / "agents"
     mux_dir = Path("/tmp") / f"fno-i-{os.getpid()}-{uuid.uuid4().hex[:6]}"
@@ -263,7 +263,10 @@ def test_codex_autonomous_pane_journey_completes_without_operator_input(
     """A fake Codex pane receives its task, exits, and leaves readable output."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    fno_bin, worker_bin = _real_mux_binaries(repo)
+    binaries = _real_mux_binaries(repo)
+    if binaries is None:
+        pytest.skip("prebuilt fno and fno-agents-worker binaries are required")
+    fno_bin, worker_bin = binaries
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
