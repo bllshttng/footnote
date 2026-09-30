@@ -622,15 +622,22 @@ fn popup_lines(popup: &crate::popup::Popup) -> Vec<String> {
 }
 
 /// The popup's rendered (label, value) field pairs: Entry rows key on the
-/// glyph column, Info rows carry label and value.
+/// glyph column, Info rows carry label and value. Framed lines lead with
+/// the border cell, so the border strips before the label splits off.
 fn popup_rows(popup: &crate::popup::Popup) -> Vec<(Option<String>, String)> {
     let mut rows = Vec::new();
     for line in popup.render((40, 200)).lines {
-        let text = line.text.trim().to_string();
-        if text.is_empty() {
+        let framed = line.text.trim();
+        let body = framed
+            .strip_prefix('\u{2502}')
+            .or_else(|| framed.strip_prefix('\u{250c}'))
+            .or_else(|| framed.strip_prefix('\u{2570}'))
+            .unwrap_or(framed)
+            .trim();
+        if body.is_empty() {
             continue;
         }
-        let mut parts = text.splitn(2, char::is_whitespace);
+        let mut parts = body.splitn(2, char::is_whitespace);
         let head = parts.next().unwrap_or("").to_string();
         let tail = parts.next().unwrap_or("").trim().to_string();
         rows.push((Some(head), tail));
