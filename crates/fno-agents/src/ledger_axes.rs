@@ -143,8 +143,11 @@ fn run_locked(
         ));
     }
     let fill = fill_axes(entries, graph, registry_path);
-    let changed = fill.changed > 0;
-    if changed && !dry_run {
+    // The write carries the UPSERT too: a created/stamped row whose axes the
+    // fill cannot resolve (no sources) must still persist - the old gate
+    // (`fill.changed > 0` only) silently dropped every such row.
+    let mutated = !matches!(outcome.as_deref(), None | Some("already-present"));
+    if (mutated || fill.changed > 0) && !dry_run {
         write_ledger(ledger, &doc)?;
     }
     Ok(json!({
@@ -394,7 +397,20 @@ fn fill_axes(entries: &mut [Value], graph: &[Value], registry_path: Option<&str>
                     );
                 }
             }
-            // Source 2: the chosen graph session row. Provider is never a
+            // Source 2: the reap receipts, indexed once - a session's own
+            // final provenance outranks the graph's observed sample.
+            if AXES.iter().any(|a| axis_value(row, a).is_none()) {
+                if receipts.is_none() {
+                    receipts = Some(index_receipts(registry_path));
+                }
+                if let Some(r) = receipts.as_ref().expect("just indexed").get(sid) {
+                    fill_axis(row, "harness", r.harness.clone(), &mut counts);
+                    fill_axis(row, "provider", r.provider.clone(), &mut counts);
+                    fill_axis(row, "model", r.model.clone(), &mut counts);
+                    fill_axis(row, "effort", r.effort.clone(), &mut counts);
+                }
+            }
+            // Source 3: the chosen graph session row. Provider is never a
             // graph answer - the graph never learns the vendor axis.
             if let Some(g) = chosen {
                 fill_axis(row, "harness", g.harness.clone(), &mut counts);
@@ -402,8 +418,8 @@ fn fill_axes(entries: &mut [Value], graph: &[Value], registry_path: Option<&str>
                 fill_axis(row, "effort", g.effort.clone(), &mut counts);
             }
         }
-        // Source 3: the reap receipts, indexed once and only once a row
-        // still lacks an axis after the registry and graph passes.
+        // Receipt fallback for a row whose sid no earlier source resolved: the
+        // receipt key itself names the session.
         if AXES.iter().any(|a| axis_value(row, a).is_none()) {
             if receipts.is_none() {
                 receipts = Some(index_receipts(registry_path));
@@ -426,7 +442,7 @@ fn fill_axes(entries: &mut [Value], graph: &[Value], registry_path: Option<&str>
         }
         if AXES
             .iter()
-            .any(|a| axis_value(row, a).is_some() && !missing_before.contains(&a.to_string()))
+            .any(|a| axis_value(row, a).is_some() && missing_before.contains(&a.to_string()))
         {
             counts.changed += 1;
         }
@@ -609,7 +625,6 @@ mod tests {
     impl World {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
-            std::fs::create_dir_all(dir.path().join("reap-receipts")).unwrap();
             World { dir }
         }
         fn ledger_path(&self) -> std::path::PathBuf {
@@ -623,11 +638,12 @@ mod tests {
             std::fs::write(self.registry_path(), body).unwrap();
         }
         fn write_receipt(&self) {
-            std::fs::write(
-                self.dir.path().join("reap-receipts").join("claude-u1.json"),
-                RECEIPT_FOR_U1,
-            )
-            .unwrap();
+            // Production layout: the receipts live beside the registry, under
+            // the agents home (`<registry parent>/reap-receipts/`), and the
+            // reader derives the dir from the registry path.
+            let dir = self.registry_path().parent().unwrap().join("reap-receipts");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("claude-u1.json"), RECEIPT_FOR_U1).unwrap();
         }
         fn write_ledger(&self, entries: Value) {
             std::fs::write(
@@ -680,10 +696,11 @@ mod tests {
         let rows = w.read_entries();
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
-        // The created row's key order matches the Python writer's dict.
+        // The created row opens with the Python writer's dict order; the
+        // fill appends the four axes after it in the same write.
         let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
-            keys,
+            &keys[..12],
             [
                 "type",
                 "status",
@@ -699,6 +716,7 @@ mod tests {
                 "sessions"
             ]
         );
+        assert_eq!(&keys[12..], ["harness", "provider", "model", "effort"]);
         assert_eq!(r["completed"], "2026-07-18T00:00:00+00:00");
         assert_eq!(r["backstop"], true);
         assert_eq!(r["sessions"], json!(["u1"]));

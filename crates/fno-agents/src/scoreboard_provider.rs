@@ -147,9 +147,14 @@ fn build(
         {
             model_n += 1;
         }
+        // Attributed = all three axes present: the row is dispatchable to a
+        // concrete (harness, provider, model) lane with no fallback.
         if r.get("harness")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.is_empty())
+            && r.get("provider")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
             && r.get("model")
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.is_empty())
@@ -590,18 +595,22 @@ mod tests {
 
     #[test]
     fn non_execution_rows_and_window_cut_excluded() {
+        // Ported: only `type == "execution"` rows count, and a row outside
+        // the window (2020 against the 2026-07-03 `now`) is excluded.
         let mut rows = vec![
-            json!({"type": "cost", "completed": "2026-07-03T10:00:00", "cost_usd": 9.0}),
-            axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
-            axis_row(Some("claude"), Some("opus"), "DonePRGreen", None),
+            json!({"type": "think", "completed": "2026-07-03T10:00:00", "cost_usd": 9.0}),
+            json!({"completed": "2026-07-03T10:00:00", "cost_usd": 9.0}),
         ];
-        rows[2]["completed"] = json!("2026-06-01T10:00:00");
-        rows.push(
-            json!({"type": "execution", "completed": "2026-07-10T10:00:00", "harness": "claude"}),
-        );
+        let mut r = axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1"));
+        r["cost_usd"] = json!(5.0);
+        rows.push(r);
+        let mut old = axis_row(Some("claude"), Some("opus"), "DonePRGreen", None);
+        old["completed"] = json!("2020-01-01T00:00:00");
+        old["cost_usd"] = json!(99.0);
+        rows.push(old);
         let v = call(&rows, &graph());
-        assert_eq!(v["view"]["coverage"]["rows"], 2, "{v}");
-        assert_eq!(v["view"]["rows"][0]["runs"], 2);
+        assert_eq!(v["view"]["coverage"]["rows"], 1, "{v}");
+        assert_eq!(v["view"]["rows"][0]["spend_usd"], 5.0);
     }
 
     #[test]
@@ -631,19 +640,28 @@ mod tests {
 
     #[test]
     fn bounce_needs_causal_telemetry_and_median_rides() {
+        // Ported: a next-day fix node bounces x-1; x-2 ships clean; the
+        // wedged NoProgress row ships nothing and never enters the median.
         let mut entries = graph();
         entries.push(json!({
             "id": "x-fix", "caused_by": "x-1", "created_at": "2026-07-04T00:00:00"
         }));
         let mut r1 = axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1"));
         r1["iterations"] = json!(3);
-        let mut r2 = axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1"));
+        r1["cost_usd"] = json!(2.0);
+        let mut r2 = axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-2"));
         r2["iterations"] = json!(7);
-        let v = call(&[r1, r2], &entries);
+        r2["cost_usd"] = json!(2.0);
+        let mut wedged = axis_row(Some("claude"), Some("opus"), "NoProgress", None);
+        wedged["iterations"] = json!(99);
+        wedged["cost_usd"] = json!(1.0);
+        let v = call(&[r1, r2, wedged], &entries);
         let r = &v["view"]["rows"][0];
-        assert_eq!(r["bounce_rate_pct"], 100, "{r}");
+        assert_eq!(r["bounce_rate_pct"], 50, "{r}");
         assert_eq!(r["shipped_linked"], 2);
-        assert_eq!(r["median_iterations"], 5.0);
+        // Lower median over the shipped rows' iterations ([3, 7] -> 3), the
+        // ported `_percentile` rank.
+        assert_eq!(r["median_iterations"], 3.0, "{r}");
         let v = call(
             &[axis_row(
                 Some("claude"),
@@ -664,21 +682,43 @@ mod tests {
 
     #[test]
     fn unattributed_never_dropped_and_spend_reconciles() {
-        let rows = vec![
+        // Ported: the provider-less row lands in a visible unattributed
+        // bucket (never dropped, model unknown) and the per-bucket spend
+        // sums to the window total.
+        let mut rows = vec![
             axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
             axis_row(None, None, "NoProgress", None),
             axis_row(Some("codex"), None, "DonePRGreen", Some("x-2")),
         ];
+        rows[0]["provider"] = json!("anthropic");
+        rows[0]["cost_usd"] = json!(2.0);
+        rows[1]["cost_usd"] = json!(3.0);
+        rows[2]["provider"] = json!("openai");
+        rows[2]["cost_usd"] = json!(5.0);
         let v = call(&rows, &graph());
         let rs = v["view"]["rows"].as_array().unwrap();
         let total: f64 = rs
             .iter()
             .map(|r| r["spend_usd"].as_f64().unwrap_or(0.0))
             .sum();
-        assert!((total - 3.0).abs() < 1e-9, "spend reconciles: {v}");
-        assert_eq!(v["view"]["coverage"]["harness_pct"], 67);
-        assert_eq!(v["view"]["coverage"]["model_pct"], 67);
-        assert_eq!(v["view"]["coverage"]["attributed_pct"], 67, "{v}");
+        assert!((total - 10.0).abs() < 1e-9, "spend reconciles: {v}");
+        assert_eq!(v["view"]["coverage"]["harness_pct"], 67, "{v}");
+        // Only the opus row carries a model.
+        assert_eq!(v["view"]["coverage"]["model_pct"], 33);
+        // Attributed = the full (harness, provider, model) triple: only the
+        // claude/anthropic/opus row is dispatch-ready here.
+        assert_eq!(v["view"]["coverage"]["attributed_pct"], 33, "{v}");
+        let unattr = rs
+            .iter()
+            .find(|r| r["harness"] == "unattributed")
+            .expect("unattributed bucket kept");
+        assert_eq!(unattr["model"], "unknown");
+        assert_eq!(unattr["spend_usd"], 3.0);
+        let last = rs.last().unwrap();
+        assert_eq!(
+            last["harness"], "unattributed",
+            "unattributed sorted last: {v}"
+        );
         let last = rs.last().unwrap();
         assert_eq!(
             last["harness"], "unattributed",
@@ -710,18 +750,20 @@ mod tests {
 
     #[test]
     fn rendered_text_blank_repeats_and_coverage_lines() {
-        let rows = vec![
+        let mut rows = vec![
             axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
             axis_row(Some("claude"), Some("gpt"), "DonePRGreen", Some("x-2")),
             axis_row(None, None, "NoProgress", None),
         ];
+        rows[0]["provider"] = json!("anthropic");
+        rows[1]["provider"] = json!("anthropic");
         let v = call(&rows, &graph());
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("Coverage"), "{text}");
-        assert!(
-            text.contains("harness:") && text.contains("provider:") && text.contains("model:"),
-            "{text}"
-        );
+        // The coverage block: one line per axis, then the attributed line.
+        assert!(text.contains("harness"), "{text}");
+        assert!(text.contains("provider"), "{text}");
+        assert!(text.contains("model"), "{text}");
         assert!(text.contains("attributed:"), "{text}");
         assert!(
             text.contains("! rows below reflect"),
