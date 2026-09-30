@@ -6,6 +6,7 @@
     "w10",
     "/fno:target x-8"
   ],
+  "stub_route_slot": true,
   "config_toml": "[agents.profiles.target]\non_exhausted = \"queue\"\nlanes = [{provider = \"codex\", model = \"luna-q\"}]\n",
   "env_node": null,
   "expect": {

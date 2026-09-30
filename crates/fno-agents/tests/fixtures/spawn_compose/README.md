@@ -40,7 +40,8 @@ The capture script (kept out of the repo; its shape is the recipe):
    `ts`. The `slot-exhausted-queue` case stubs `route_slot_call` to return an
    exhausted payload, because a hermetic capture cannot plant exhausted
    account-usage state; the walk's own queue behavior stays pinned by
-   route_slot's in-file tests.
+   route_slot's in-file tests. The case carries `stub_route_slot: true`, and
+   the Rust parity run skips stub-backed cases for the same reason.
 6. Emit inputs + expect as one JSON file per case.
 
 The `slot-exhausted-queue` stub and the planted `node_row`s are the only

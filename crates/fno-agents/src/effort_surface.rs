@@ -1,7 +1,7 @@
 //! The one owner of the `--effort` surface and the substrate-compatibility
 //! vocabulary, ported from Python (`fno.agents.mux_spawn.effort_tokens` and
-//! `fno.agents.spawn_defaults._substrate_compatible`, the contained node
-//! x-9029). Python keeps bridges: the refusal strings here are printed
+//! `fno.agents.spawn_defaults._substrate_compatible`). Python keeps bridges:
+//! the refusal strings here are printed
 //! verbatim, so an edit here is the one edit. Reached as payload kind
 //! `compat` on the spawn-overlay verb; `bin/client.rs` asks it on the
 //! thread/headless lanes.
