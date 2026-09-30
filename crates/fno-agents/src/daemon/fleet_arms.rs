@@ -32,6 +32,7 @@ pub(super) struct FleetArms {
     slot_cutover: crate::slot_cutover::Arm,
     attention: crate::attention_arm::Arm,
     burn_watch: crate::burn_watch::Arm,
+    watch_expiry: crate::watch_expiry::Arm,
     // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -70,6 +71,7 @@ impl FleetArms {
             slot_cutover: crate::slot_cutover::Arm::new(opts.agents_config_cwd.clone()),
             attention: crate::attention_arm::Arm::new(opts.agents_config_cwd.clone()),
             burn_watch: crate::burn_watch::Arm::default(),
+            watch_expiry: crate::watch_expiry::Arm::default(),
             last_gc_sweep: Instant::now(),
             retire_interval_next: crate::gc::seed_retire_interval_cell(&opts.agents_config_cwd),
             gc_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -186,6 +188,7 @@ impl FleetArms {
         crate::slot_cutover::maybe_tick(&self.slot_cutover, ctx.home.clone());
         crate::attention_arm::maybe_tick(&self.attention, ctx.home.clone());
         crate::burn_watch::maybe_tick(&self.burn_watch, ctx.home.clone());
+        crate::watch_expiry::maybe_tick(&self.watch_expiry, ctx.home.clone());
         // Serve-only liveness tick: the served pair is the sweep's measurement,
         // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.
         let codex_threads_for_liveness = Arc::clone(&ctx.codex_threads);
