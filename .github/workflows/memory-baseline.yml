@@ -1,18 +1,15 @@
 name: memory-baseline
 
-# PR-owned diagnostic: dispatch-only, runs MAIN's shard 3 under the same
+# PR-owned diagnostic, PR-triggered: runs MAIN's shard 3 under the same
 # resource sampler the cli-ci pytest shards carry, so the memory curve has a
 # main-branch baseline without a main commit. The checkout pins refs/heads/main
 # and every probe line is inline here, so nothing of this diagnostic lives on
-# the branch it measures.
+# the branch it measures. DELETE THIS FILE before the PR merges: no diagnostic
+# workflow may reach main.
 
 on:
-  workflow_dispatch:
-    inputs:
-      reason:
-        description: why this baseline run was dispatched
-        required: false
-        default: ""
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: memory-baseline-main-shard
