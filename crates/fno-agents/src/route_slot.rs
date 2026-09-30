@@ -3188,7 +3188,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_rows() {
+    fn a_refused_spawn_leaves_one_routing_refusal_row() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3224,7 +3224,10 @@ mod tests {
                 .contains("capacity=exhausted")),
             "lanes: {lanes:?}"
         );
+    }
 
+    #[test]
+    fn a_queued_refusal_rows_exit_78_and_the_payload_reason() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3248,7 +3251,10 @@ mod tests {
         assert_eq!(rows[0]["exit_code"], 78);
         assert_eq!(rows[0]["reason"], "slot_exhausted");
         assert_eq!(rows[0]["gate"], "routing");
+    }
 
+    #[test]
+    fn an_admitted_spawn_and_an_audit_write_no_refusal_row() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3272,7 +3278,10 @@ mod tests {
             snap.display().to_string(),
         ]);
         assert!(journal_rows(&journal).is_empty(), "audits never journal");
+    }
 
+    #[test]
+    fn a_dead_journal_never_changes_a_refusal() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3297,7 +3306,10 @@ mod tests {
             capture_file(dir.path(), &payload(exhausted_capacity()))
         };
         assert_eq!(baseline, with_dead, "output must not depend on the journal");
+    }
 
+    #[test]
+    fn the_journal_op_keeps_its_spawn_defaults_applied_kind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = dir.path().join("j.jsonl");
         let (code, stdout, _) = capture_file(
@@ -3316,6 +3328,21 @@ mod tests {
         let rows = journal_rows(&journal);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["kind"], "spawn_defaults_applied");
+    }
+
+    #[test]
+    fn audit_accepts_both_json_spellings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snap = dir.path().join("snap.json");
+        std::fs::write(&snap, "{}").unwrap();
+        let path = snap.display().to_string();
+        let long =
+            run_route_slot_audit(&["--snapshot".to_string(), path.clone(), "--json".to_string()]);
+        let short = run_route_slot_audit(&["--snapshot".to_string(), path, "-J".to_string()]);
+        // Same snapshot, same code, empty stderr: only the flag differs.
+        assert_eq!(long, short);
+        assert_eq!(long.2, String::new());
+        assert_ne!(long.0, 2, "the flag parse must not refuse");
     }
 
     #[test]
@@ -4263,7 +4290,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_rows() {
+    fn audit_verifies_a_fresh_fully_evidenced_session() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": true, "operator_access": "local"},
@@ -4282,7 +4309,10 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
         assert_eq!(report["sessions"].as_array().unwrap().len(), 1);
+    }
 
+    #[test]
+    fn audit_names_the_boundary_when_only_a_preview_exists() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": true, "operator_access": "local"},
@@ -4298,7 +4328,10 @@ mod tests {
             .map(|v| v["boundary"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"no-launch"));
+    }
 
+    #[test]
+    fn audit_refuses_when_the_policy_is_not_armed() {
         let snapshot = json!({
             "fingerprint": "fp1",
             "policy": {"enforce_inventory": false, "operator_access": "local"},
@@ -4313,7 +4346,10 @@ mod tests {
             .map(|v| v["boundary"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"routing-not-enforced"));
+    }
 
+    #[test]
+    fn audit_names_each_missing_evidence_boundary() {
         let session = |extra: Value| {
             let mut s = json!({
                 "session_id": "s1", "name": "w1", "harness": "claude",
@@ -4392,19 +4428,10 @@ mod tests {
         let (report, code) = audit_verify(&snap(json!([s])));
         assert_eq!(code, 1);
         assert!(boundaries(&report).contains(&"view-harness-mismatch".to_string()));
+    }
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let snap = dir.path().join("snap.json");
-        std::fs::write(&snap, "{}").unwrap();
-        let path = snap.display().to_string();
-        let long =
-            run_route_slot_audit(&["--snapshot".to_string(), path.clone(), "--json".to_string()]);
-        let short = run_route_slot_audit(&["--snapshot".to_string(), path, "-J".to_string()]);
-        // Same snapshot, same code, empty stderr: only the flag differs.
-        assert_eq!(long, short);
-        assert_eq!(long.2, String::new());
-        assert_ne!(long.0, 2, "the flag parse must not refuse");
-
+    #[test]
+    fn audit_reads_a_snapshot_file_and_prints_the_marker() {
         let snapshot = concat!(
             r#"{"fingerprint": "fp1","#,
             r#" "policy": {"enforce_inventory": true, "operator_access": "local"},"#,
@@ -4434,13 +4461,19 @@ mod tests {
         let report: Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
         std::fs::remove_dir_all(&dir).ok();
+    }
 
+    #[test]
+    fn since_parser_reads_units_and_bare_seconds() {
         assert_eq!(parse_since_seconds("30m").unwrap(), 1800);
         assert_eq!(parse_since_seconds("2h").unwrap(), 7200);
         assert_eq!(parse_since_seconds("7d").unwrap(), 604800);
         assert_eq!(parse_since_seconds("90").unwrap(), 90);
         assert!(parse_since_seconds("abc").is_err());
+    }
 
+    #[test]
+    fn inventory_command_runs_inside_the_audited_project() {
         // The inventory surface resolves config from the subprocess's CWD, so
         // the audit's facts must come from the audited project, never from
         // whatever checkout happened to invoke the audit.
@@ -4454,7 +4487,10 @@ mod tests {
         );
         assert_eq!(inventory_command("").get_current_dir(), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
 
+    #[test]
+    fn loader_builds_sessions_from_the_machine_stores() {
         use crate::state::{Lineage, RegistryEntry};
 
         let dir = std::env::temp_dir().join(format!("fno-auditld-{}", std::process::id()));
