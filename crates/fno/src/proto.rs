@@ -4701,6 +4701,18 @@ mod tests {
             other => panic!("expected a fatal io error, got {other:?}"),
         }
 
+        let mut r = Dribble {
+            data: Vec::new(),
+            pos: 0,
+            chunk: 4,
+            stall: false,
+        };
+        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
+        assert!(
+            matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "idle stream must stay pollable, got {got:?}"
+        );
+
         let msg = ClientMsg::Command(Command::NewTab);
         let mut wire = encode(&msg).unwrap();
         // Two frames back to back, so a desync on the first corrupts the second.
@@ -4728,18 +4740,6 @@ mod tests {
             }
         }
         panic!("only decoded {got} of 2 frames");
-
-        let mut r = Dribble {
-            data: Vec::new(),
-            pos: 0,
-            chunk: 4,
-            stall: false,
-        };
-        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
-        assert!(
-            matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
-            "idle stream must stay pollable, got {got:?}"
-        );
     }
 
     /// A stream that delivers `give` bytes and then stalls forever.
