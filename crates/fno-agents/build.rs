@@ -30,6 +30,7 @@ fn main() {
     sync_page_reload();
     sync_spawn_phase();
     sync_slot_lanes();
+    sync_model_tiers();
     sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
@@ -357,6 +358,26 @@ fn sync_slot_lanes() {
     };
     let Some(root) = repo_root() else { return };
     let cli_copy = root.join("cli/src/fno/agents/slot_lanes.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, &bytes);
+}
+
+/// PRODUCE the downstream copy of the reachability + static tier tables.
+///
+/// Same shape as [`sync_slot_lanes`]: the canonical TOML lives in this crate
+/// (`route_gather.rs` `include_str!`s it), and `benchmarks.py` reads the byte
+/// copy as package data, so the Python tier read cannot drift from the Rust
+/// inventory fold's built-in rows.
+fn sync_model_tiers() {
+    println!("cargo:rerun-if-changed=src/model_tiers.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/model_tiers.toml");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/model_tiers.toml");
     if !cli_copy.is_file() {
         return;
     }
