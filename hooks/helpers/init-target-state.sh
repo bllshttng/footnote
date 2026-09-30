@@ -1166,43 +1166,19 @@ EOF
   _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
   _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"
 
-  # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
-  # TARGET_SESSION_ID is the absolute override (megawalk walkers
-  # pre-assign it). Otherwise mint one id per target run. CODEX_THREAD_ID is a
-  # durable conversation/claim-owner identity, but reusing it as session_id
-  # would collide with prior loop termination and finalize events when the same
-  # Codex conversation runs a second target.
-  #
-  # Provenance infix lives glued to the pid INSIDE segment 2 (never a 4th
-  # dash-segment - 3 segments is load-bearing for split('-')[0] consumers). Driver
-  # precedence: a driver-assigned TARGET_SESSION_ID already carries its tag (mw/mt)
-  # and is used verbatim; the self-mint path below glues the 2-char PROVIDER code so
-  # a direct/bg claude session reads {ts}-cl{pid}-{6hex}. Unknown/empty provider ->
-  # no infix (preserves the legacy {ts}-{pid}-{6hex} shape; never a hard error).
-  # Infix tracks the OWNED harness (PROVIDER), not a raw marker that may be
-  # inherited: a claude session carrying a foreign CODEX_THREAD_ID resolved to
-  # PROVIDER=claude above, so its session_id reads `cl`, never `cx`. A real
-  # codex session resolves PROVIDER=codex and reads `cx` all the same.
-  case "$PROVIDER" in
-    claude)   _prov_infix="cl" ;;
-    codex)    _prov_infix="cx" ;;
-    gemini)   _prov_infix="gm" ;;
-    agy)      _prov_infix="ag" ;;
-    hermes)   _prov_infix="hm" ;;
-    opencode) _prov_infix="oc" ;;
-    *)        _prov_infix="" ;;
-  esac
+  # session_id (fno_id): the run id is a random UUID minted by the one
+  # footnote mint (`fno-agents state mint-id`), never a harness session id.
+  # TARGET_SESSION_ID overrides it verbatim (megawalk walkers pre-assign it).
+  # It is minted per run: a thread-stable id would collide with prior loop
+  # termination and finalize events when the same Codex conversation runs a
+  # second target.
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
     local_session_id="$TARGET_SESSION_ID"
   else
-    local_sid_entropy="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "")"
-    if [[ -n "$local_sid_entropy" ]]; then
-      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
-    else
-      local_sid_random_a="${RANDOM:-0}"
-      local_sid_random_b="${RANDOM:-0}"
-      local_sid_entropy="$(printf '%06x' "$(( ((local_sid_random_a << 15) | local_sid_random_b) % 16777216 ))")"
-      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
+    local_session_id="$(fno-agents state mint-id 2>/dev/null || true)"
+    if [[ -z "$local_session_id" ]]; then
+      echo "init-target-state: fno-agents state mint-id answered nothing, so no run id was minted. The installed fno-agents is missing or predates this verb. Run: fno doctor update" >&2
+      exit 1
     fi
   fi
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
