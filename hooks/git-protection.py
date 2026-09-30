@@ -43,6 +43,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -1937,11 +1938,18 @@ def _guard_mark(decision, tool):
         decision = "block"
     try:
         pin = os.environ.get("FNO_EVENTS_PATH")
-        if pin:
-            path = pin
-        elif os.path.isdir(".git") or os.path.isdir(".fno"):
-            path = os.path.join(".fno", "events.jsonl")
-        else:
+        path = pin
+        if not path:
+            # The same resolver the bash transport uses: the space journal the
+            # store reads. A cwd/rev-parse guess is how guard rows landed in
+            # the checkout journal the store ignores; it stays only as the
+            # degrade for a machine where fno-agents cannot answer.
+            probe = subprocess.run(
+                ["fno-agents", "state", "path", "events"],
+                capture_output=True, text=True, timeout=5,
+            )
+            path = probe.stdout.strip() if probe.returncode == 0 else ""
+        if not path:
             root = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, timeout=5,
@@ -1952,9 +1960,13 @@ def _guard_mark(decision, tool):
             '"decision":"%s","tool":"%s"},"source":"hook"}'
             % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision, tool)
         )
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(row + "\n")
+        bin = shutil.which("fno")
+        if bin is None:
+            return
+        subprocess.run(
+            [bin, "doctor", "event", "emit-envelope", "--events", path],
+            input=row, capture_output=True, text=True, timeout=10,
+        )
     except Exception:
         pass
 
