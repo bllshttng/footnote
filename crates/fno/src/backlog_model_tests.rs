@@ -313,6 +313,72 @@ fn node_lists_children_blockers_and_live_sessions() {
         2,
         "a unique short id joins"
     );
+    let mut same_label = row(Some("distinct-session"));
+    same_label.node = Some("x-top".into());
+    let mut departed = row(Some("departed-session"));
+    departed.node = Some("x-left".into());
+    let unbound = row(Some("unbound-session"));
+    org.backlog.agents.extend([same_label, departed, unbound]);
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.leads[0].nodes[0].current.len(),
+        3,
+        "equal labels with distinct session identities stay visible"
+    );
+    assert_eq!(
+        tree.leads[0].left[0].current.len(),
+        1,
+        "recent departures retain their current worker"
+    );
+    assert_eq!(
+        tree.unowned.len(),
+        1,
+        "a joined equal label cannot conceal an unrelated worker"
+    );
+    assert_eq!(
+        tree.unowned[0].harness_session_id.as_deref(),
+        Some("unbound-session")
+    );
+    org.backlog.rows.last_mut().unwrap()["sessions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"session_id":"departed-session"}));
+    org.backlog
+        .agents
+        .iter_mut()
+        .find(|a| a.harness_session_id.as_deref() == Some("departed-session"))
+        .unwrap()
+        .node = None;
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.unowned.len(),
+        1,
+        "old wire rows join recent departures through graph sessions"
+    );
+    for pane in [None, None, Some(101), Some(102)] {
+        let mut actor = row(None);
+        actor.node = Some("x-kid1".into());
+        actor.pane_id = pane;
+        org.backlog.agents.push(actor);
+    }
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.leads[0].nodes[1].current.len(),
+        4,
+        "unknown identities never deduplicate and distinct pane identities remain visible"
+    );
+    for attach in ["attach-one", "attach-two"] {
+        let mut actor = row(None);
+        actor.node = Some("x-kid1".into());
+        actor.attach_id = Some(attach.into());
+        org.backlog.agents.push(actor);
+    }
+    let tree = crate::org_model::derive(&org, 100).unwrap();
+    assert_eq!(
+        tree.leads[0].nodes[1].current.len(),
+        6,
+        "distinct attach identities remain visible"
+    );
 }
 
 #[test]

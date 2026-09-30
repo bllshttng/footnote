@@ -112,6 +112,27 @@ fn epoch(value: Option<&str>) -> Option<u64> {
         .ok()
         .map(|v| v.timestamp().max(0) as u64)
 }
+pub(crate) fn agent_key(agent: &AgentRow) -> Option<String> {
+    let harness = agent.harness.as_deref().unwrap_or("");
+    if let Some(sid) = agent
+        .harness_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(format!("session:{}", serde_json::json!([harness, sid])));
+    }
+    if let Some(pane) = agent.pane_id {
+        return Some(format!("pane:{pane}"));
+    }
+    agent
+        .attach_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|id| format!("attach:{}", serde_json::json!([harness, id])))
+}
+fn same_agent(a: &AgentRow, b: &AgentRow) -> bool {
+    agent_key(a).zip(agent_key(b)).is_some_and(|(a, b)| a == b)
+}
 fn worker_node<'a>(agent: &AgentRow, inputs: &'a Inputs) -> Option<&'a str> {
     if let Some(node) = agent.node.as_deref() {
         return inputs
@@ -196,7 +217,7 @@ fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode
         if worker_node(agent, inputs) != Some(id)
             || current
                 .iter()
-                .any(|s| s.agent.as_ref().is_some_and(|a| a.name == agent.name))
+                .any(|s| s.agent.as_ref().is_some_and(|a| same_agent(a, agent)))
         {
             continue;
         }
@@ -317,11 +338,18 @@ pub fn derive(inputs: &OrgInputs, now: u64) -> Result<OrgTree, String> {
         .iter()
         .filter(|a| !a.exited && a.crown_level.is_none())
         .filter(|a| {
+            if worker_node(a, &inputs.backlog)
+                .and_then(|id| owners.get(id))
+                .and_then(Value::as_str)
+                .is_some_and(|owner| leads.iter().any(|lead| lead.scope == owner))
+            {
+                return false;
+            }
             !leads
                 .iter()
-                .flat_map(|l| &l.nodes)
+                .flat_map(|l| l.nodes.iter().chain(&l.left))
                 .flat_map(|n| &n.current)
-                .any(|s| s.agent.as_ref().is_some_and(|r| r.name == a.name))
+                .any(|s| s.agent.as_ref().is_some_and(|r| same_agent(r, a)))
         })
         .cloned()
         .collect();
