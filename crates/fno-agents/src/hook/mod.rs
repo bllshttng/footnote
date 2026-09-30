@@ -28,6 +28,7 @@ pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
+        Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
         Some("king-guard") => king_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
@@ -37,7 +38,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, king-guard, pipe-guard, pretooluse-bash, prompt, test-run-guard, stop or subagent-worktree-guard"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }

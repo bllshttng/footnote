@@ -145,6 +145,7 @@ pub mod disposition_gate;
 pub mod distress;
 pub mod drift;
 pub mod duration;
+pub mod effect_gate;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;

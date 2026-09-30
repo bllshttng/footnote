@@ -37,6 +37,7 @@ from fno.approvals.models import (
     Refusal,
     RefusalReason,
     RefusedError,
+    _unavailable_refusal,
     classify_effect,
     utcnow,
 )
@@ -215,57 +216,39 @@ class EffectStore:
     # -- approval lifecycle ----------------------------------------------
 
     def submit(self, request: ApprovalRequest) -> ApprovalRequest:
-        """Record one exact request. A denied effect class never becomes pending."""
-        if classify_effect(request.effect_class) is EffectDisposition.DENY:
-            _refuse(
-                RefusalReason.DENIED_EFFECT_CLASS,
-                f"effect class {request.effect_class} is denied by core policy",
-                fields=["effect_class"],
-                recovery="Denied classes need an explicit policy and adapter contract first.",
-            )
+        """Record one exact request through the Rust effect gate: the door's
+        effect-submit op owns the insert, the outbox row, and the DENY
+        refusal. The db path rides the payload so a test's tmp store stays tmp.
+        """
+        from fno.rust_binary import VerbUnavailable, verb_call
 
-        digest = request.request_digest
-        with self._write() as conn:
-            existing = conn.execute(
-                "SELECT request_digest FROM requests WHERE request_digest = ?", (digest,)
-            ).fetchone()
-            if existing is not None:
-                return request
-            conn.execute(
-                "INSERT INTO requests (request_digest, request_id, principal_id, work_order_id,"
-                " attempt_id, effect_id, effect_class, destination, action_digest, created_at,"
-                " expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    digest,
-                    request.request_id,
-                    request.principal_id,
-                    request.work_order_id,
-                    request.attempt_id,
-                    request.effect_id,
-                    request.effect_class,
-                    request.destination,
-                    request.action_digest,
-                    request.created_at.isoformat(),
-                    request.expires_at.isoformat(),
-                ),
+        payload: dict[str, Any] = {
+            "op": "effect-submit",
+            # isoformat, not model_dump's `Z` suffix: both legs digest the same string.
+            "request": {
+                **request.model_dump(mode="json"),
+                "created_at": request.created_at.isoformat(),
+                "expires_at": request.expires_at.isoformat(),
+            },
+            "db": str(self._path),
+        }
+        if self._events_path is not None:
+            payload["events_path"] = str(self._events_path)
+        try:
+            out = verb_call("authorized-merge", payload)
+        except VerbUnavailable as exc:
+            _unavailable_refusal(f"the effect store door is unavailable ({exc})")
+        if out.get("result") == "refused":
+            if out.get("reason") == "denied_effect_class":
+                _refuse(
+                    RefusalReason.DENIED_EFFECT_CLASS,
+                    out.get("detail", "the effect class is denied by core policy"),
+                    fields=["effect_class"],
+                    recovery="Denied classes need an explicit policy and adapter contract first.",
+                )
+            _unavailable_refusal(
+                out.get("detail", "the effect store door refused the request")
             )
-            self._enqueue(
-                conn,
-                "approval_requested",
-                {
-                    "request_digest": digest,
-                    "request_id": request.request_id,
-                    "principal_id": request.principal_id,
-                    "work_order_id": request.work_order_id,
-                    "attempt_id": request.attempt_id,
-                    "effect_id": request.effect_id,
-                    "effect_class": request.effect_class,
-                    "destination": request.destination,
-                    "action_digest": request.action_digest,
-                    "expires_at": request.expires_at.isoformat(),
-                },
-            )
-        self._drain()
         return request
 
     def decide(
