@@ -932,7 +932,7 @@ fn run_build_admit(args: &[String]) -> i32 {
         &holder,
         opts,
         lane_of,
-        |rows, _, w| {
+        |rows, pos, w| {
             let mut scan = |table: &[crate::census::ProcRow],
                             parent: &ParentMap|
              -> Option<OnHeld> {
@@ -964,7 +964,7 @@ fn run_build_admit(args: &[String]) -> i32 {
                 }
                 None
             };
-            wait.poll_held(rows, None, Some(&mut scan), w)
+            wait.poll_held(rows, None, pos.map(|(_, total)| total), Some(&mut scan), w)
         },
     );
     wait.clear_marker();
@@ -979,6 +979,15 @@ const FLEET_HOLD_POLL: Duration = Duration::from_secs(5);
 /// Re-print the holding line about every minute, so a long wait is never
 /// silent in a log.
 const FLEET_HOLD_REPRINT_POLLS: u32 = 12;
+const NEVER_WAIT_NUDGE_AFTER: Duration = Duration::from_secs(180);
+
+fn never_wait_nudge_after() -> Duration {
+    std::env::var("FNO_TEST_NEVER_WAIT_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(NEVER_WAIT_NUDGE_AFTER)
+}
 
 /// The tests hold at the cargo doors: while the breaker holds `tests` (or
 /// its state is unreadable, fail closed), a door waits instead of admitting,
@@ -1207,7 +1216,7 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
             Lane::Normal
         }
     };
-    let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, _, w| {
+    let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, pos, w| {
         // While this asker holds build:cargo, a slot holder parked at the
         // build door waits on the claim this asker holds; take its slot in
         // the same poll. A build holder never stays parked behind the cap
@@ -1222,7 +1231,13 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
                 }
             }
         }
-        wait.poll_held(rows, Some((cap, "cargo run slots")), None, w)
+        wait.poll_held(
+            rows,
+            Some((cap, "cargo run slots")),
+            pos.map(|(_, total)| total),
+            None,
+            w,
+        )
     });
     wait.clear_marker();
     result
@@ -1291,6 +1306,7 @@ impl CargoWait {
         &mut self,
         rows: &[(String, Option<i32>, String)],
         slot_context: Option<(usize, &'static str)>,
+        queue_depth: Option<usize>,
         scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow], &ParentMap) -> Option<OnHeld>>,
         w: Wait,
     ) -> OnHeld {
@@ -1349,6 +1365,16 @@ impl CargoWait {
             let context = slot_context
                 .map(|(cap, label)| format!("{} of {cap} {label} held by ", rows.len()))
                 .unwrap_or_default();
+            let queue = queue_depth.map_or_else(
+                || "; queue depth unavailable".to_string(),
+                |depth| format!("; queue depth {depth}"),
+            );
+            let waited = self.started.elapsed().as_secs();
+            let nudge = if Duration::from_secs(waited) >= never_wait_nudge_after() {
+                "; push now: CI is the gate (law d-50986bf8)"
+            } else {
+                ""
+            };
             let prefix = match (w.lane, w.yielding_to) {
                 (Lane::Priority, _) => "holding (priority lane); ".to_string(),
                 (_, Some(Lane::Priority)) => {
@@ -1365,10 +1391,7 @@ impl CargoWait {
                 }
                 _ => "holding; ".to_string(),
             };
-            eprintln!(
-                "cargo admission: {prefix}{context}{held}; waited {}s",
-                self.started.elapsed().as_secs()
-            );
+            eprintln!("cargo admission: {prefix}{context}{held}; waited {waited}s{queue}{nudge}");
             // The priority lever, taught once per wait: a person (or a
             // king) can give this checkout the next slot with one acquire.
             if self.last_notice.is_none() {

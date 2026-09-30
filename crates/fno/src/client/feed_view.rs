@@ -44,9 +44,6 @@ pub(crate) struct FeedOverlay {
     pub(crate) inflight: bool,
     pub(crate) want: bool,
     pub(crate) gen: u64,
-    /// True while the panel holds the keyboard. Set by `E`, cleared by Esc
-    /// and by every close, so a reopen never starts holding it.
-    pub(crate) focused: bool,
     /// Horizontal pan into the TITLE, in display columns. The timestamp, kind
     /// and node stay anchored so a panned row is still identifiable.
     pub(crate) hpan: usize,
@@ -68,7 +65,6 @@ pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay 
         inflight: false,
         want: true,
         gen,
-        focused: false,
         hpan: 0,
         last_fold: None,
     }
@@ -168,6 +164,7 @@ fn bold_kind(item: &FeedItem) -> bool {
 /// click resolver, so a row and its deep link always name the same event.
 pub(crate) fn feed_panel_rows(
     o: &FeedOverlay,
+    focused: bool,
     w: usize,
     visible_rows: usize,
     offset: usize,
@@ -177,7 +174,7 @@ pub(crate) fn feed_panel_rows(
     // ONLY place the focus key is advertised, so it degrades to a shorter
     // spelling on a narrow panel rather than being clipped away.
     let mut rows: Vec<Vec<Span>> = Vec::new();
-    rows.push(vec![Span::plain(pad_to(header_line(o.focused, w), w))]);
+    rows.push(vec![Span::plain(pad_to(header_line(focused, w), w))]);
     let visible = visible_rows.saturating_sub(2);
     let slots = display_slots(&o.items);
     for d in offset..offset + visible {
@@ -192,14 +189,20 @@ pub(crate) fn feed_panel_rows(
             Some(Slot::Item(i)) => {
                 let item = &o.items[*i];
                 // The marker lands on the hovered row, or on the selected row
-                // while the panel holds the keyboard.
+                // while the panel holds the keyboard - there it reads bold in
+                // the theme accent, so the cursor survives a glance.
+                let selected = focused && d == o.sel;
                 let marker = if d == o.sel { '▸' } else { ' ' };
                 let node = item.node.as_deref().unwrap_or("-");
                 let ts = short_ts(&item.ts);
                 let title = pan_by(&item.title, o.hpan);
                 let kind = format!("{:<16}", item.kind);
                 let mut row = vec![
-                    Span::plain(format!(" {marker} {ts} ")),
+                    Span {
+                        text: format!(" {marker} {ts} "),
+                        bold: selected,
+                        brand: selected,
+                    },
                     Span {
                         text: kind,
                         bold: bold_kind(item),
@@ -278,11 +281,12 @@ fn pad_to_spans(row: &mut Vec<Span>, w: usize) {
 #[cfg(test)]
 pub(crate) fn feed_panel_lines(
     o: &FeedOverlay,
+    focused: bool,
     w: usize,
     visible_rows: usize,
     offset: usize,
 ) -> Vec<String> {
-    feed_panel_rows(o, w, visible_rows, offset)
+    feed_panel_rows(o, focused, w, visible_rows, offset)
         .iter()
         .map(|row| row.iter().map(|s| s.text.clone()).collect())
         .collect()
@@ -537,7 +541,16 @@ impl View {
             return;
         }
         let x0 = cols - w;
-        let span_rows = feed_panel_rows(f, w - 1, rows, self.feed_offset_clamped());
+        let focused = self.input_owner() == super::region_focus::RegionOwner::Feed;
+        let span_rows = feed_panel_rows(f, focused, w - 1, rows, self.feed_offset_clamped());
+        // The selected row wears the full-width cursor band while the panel
+        // owns the keyboard: the theme's own band pair (selection surface,
+        // stamp text), the same vocabulary the backlog board bands with.
+        let band_row = if focused {
+            Some(1 + f.sel.saturating_sub(self.feed_offset_clamped()))
+        } else {
+            None
+        };
         for (r, row) in span_rows.iter().enumerate() {
             if r >= rows {
                 break;
@@ -577,8 +590,21 @@ impl View {
                     dcol += cw;
                 }
             }
+            if band_row == Some(r) {
+                let (bfg, bbg, bflags) = crate::theme::band_style(&self.theme);
+                for c in (x0 + 1)..(x0 + w) {
+                    let cell = &mut cells[r * cols + c];
+                    cell.fg = bfg;
+                    cell.bg = bbg;
+                    if cell.flags & cell_flags::WIDE_SPACER == 0 {
+                        cell.flags = bflags;
+                    }
+                }
+            }
         }
-        let border_active = self.hover_feed_border || self.feed_drag.is_some();
+        let border_active = self.hover_feed_border
+            || self.feed_drag.is_some()
+            || self.input_owner() == super::region_focus::RegionOwner::Feed;
         let (border_fg, border_flags) = if border_active {
             (self.theme.brand, cell_flags::BOLD)
         } else {
@@ -893,21 +919,18 @@ pub(crate) async fn focus(
     if view.feed.is_none() {
         toggle(view, sock_w).await?;
     }
-    if let Some(f) = view.feed.as_mut() {
-        f.focused = true;
-    }
+    view.region_owner = super::region_focus::RegionOwner::Feed;
     view.feed_esc.clear();
     Ok(())
 }
 
 /// Release the keyboard, leaving the panel open. The Esc half of `focus`.
 pub(crate) fn release(view: &mut View) -> bool {
-    match view.feed.as_mut() {
-        Some(f) if f.focused => {
-            f.focused = false;
-            true
-        }
-        _ => false,
+    if view.feed.is_some() && view.input_owner() == super::region_focus::RegionOwner::Feed {
+        view.region_owner = super::region_focus::RegionOwner::Pane;
+        true
+    } else {
+        false
     }
 }
 
@@ -933,6 +956,24 @@ pub(crate) async fn feed_keys(
             match tok {
                 ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
                     view.feed_detail_of = None;
+                }
+                ModalKey::Byte(b'b') => {
+                    let launch = view.feed_detail_of.as_ref().and_then(|item| {
+                        feed_detail::plan_node(item).map(|node| (node.to_owned(), item.cwd.clone()))
+                    });
+                    if let Some((node, cwd)) = launch {
+                        if super::sideline::show_composer(view, sock_w).await? {
+                            view.feed_detail_of = None;
+                            if let Err(err) = super::agent_launcher::open_with(
+                                view,
+                                format!("/fno:blueprint {node}"),
+                                cwd.as_deref(),
+                                node,
+                            ) {
+                                view.set_notice(err);
+                            }
+                        }
+                    }
                 }
                 ModalKey::Enter => {
                     // The deep link is the view's ACTION, never its opening

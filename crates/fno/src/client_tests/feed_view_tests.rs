@@ -20,6 +20,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         ts: "2026-09-02T18:27:06Z".into(),
         kind: "pr_created".into(),
         node: node.map(str::to_string),
+        cwd: None,
         session_id: sid.map(str::to_string),
         harness: None,
         title: "PR 1395".into(),
@@ -41,6 +42,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         ts: "2026-09-06T10:00:00Z".into(),
         kind: "session_reaped".into(),
         node: None,
+        cwd: None,
         session_id: Some(sid.into()),
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
@@ -66,7 +68,6 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
         inflight: false,
         want: false,
         gen: 0,
-        focused: false,
         hpan: 0,
         last_fold: None,
     }
@@ -124,7 +125,7 @@ fn view_with_rows(rows: Vec<AgentRow>) -> View {
 }
 
 #[test]
-fn render_rows() {
+fn lines_render_newest_first_with_marker() {
     let o = {
         let mut a = feed_item(Some("x-a"), Some("s-1"));
         a.ts = "2026-09-02T16:27:06Z".into();
@@ -134,7 +135,7 @@ fn render_rows() {
         c.ts = "2026-09-02T18:27:06Z".into();
         overlay(vec![a, b, c])
     };
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
     assert_eq!(lines.len(), ROWS);
@@ -155,7 +156,10 @@ fn render_rows() {
     assert!(lines[4].contains("x-a"));
     assert!(lines[5].trim().is_empty(), "below the last item: blank");
     assert!(lines.last().unwrap().contains("3 events"));
+}
 
+#[test]
+fn offset_windows_the_items() {
     let o = {
         let mut a = feed_item(Some("x-a"), Some("s-1"));
         a.ts = "2026-09-02T16:27:06Z".into();
@@ -167,77 +171,35 @@ fn render_rows() {
     };
     // Slot offset 1 skips the group header, so the newest row (x-c) leads
     // the window now.
-    let lines = feed_panel_lines(&o, W, ROWS, 1);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 1);
     assert!(lines[1].contains("x-c"));
     assert!(lines[2].contains("x-b"));
     assert!(lines[3].contains("x-a"));
     assert!(lines[4].trim().is_empty());
+}
 
+#[test]
+fn degraded_footer_renders_the_typed_reason() {
     // x-d15a: the failure line names the cause, never the old generic
     // "feed unavailable" sentence. Timeout names its budget; a malformed
     // body carries the projection's stderr so the cause leads the line.
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Timeout);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("timed out after 10s")));
 
     let mut o = overlay(vec![]);
     o.error = Some(crate::feed_overlay::FeedError::Exit(
         "unreadable store: graph.json".into(),
     ));
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     // At the panel's 40 columns pad_to truncates the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
-
-    let o = overlay(vec![]);
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
-    assert!(lines.iter().any(|l| l.contains("no activity")));
-    assert!(lines.last().unwrap().contains("0 events"));
-
-    // While the fold is in flight the body claims nothing: "no activity" is
-    // a statement only a settled fold has earned.
-    let mut o = overlay(vec![]);
-    o.inflight = true;
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
-    assert!(!lines.iter().any(|l| l.contains("no activity")));
-    assert!(lines.iter().any(|l| l.contains("folding...")));
-
-    let mut vacated = feed_item(Some("x-a"), None);
-    vacated.kind = "crown_vacated".into();
-    vacated.ts = "2026-09-28T16:45:58Z".into();
-    vacated.title = "warden left".into();
-    let o = overlay(vec![vacated]);
-    let rows = feed_view::feed_panel_rows(&o, W, ROWS, 0);
-    // Row 1 is the group header: every span bold.
-    assert!(
-        rows[1].iter().all(|s| s.bold),
-        "headers render bold: {:?}",
-        rows[1]
-    );
-    // Row 2 is the vacated row: its kind span is bold AND brand.
-    assert!(
-        rows[2]
-            .iter()
-            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
-        "the actionable kind is bold brand: {:?}",
-        rows[2]
-    );
-    assert!(
-        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
-        "the node id is bold: {:?}",
-        rows[2]
-    );
-    let lines = feed_panel_lines(&o, W, ROWS, 0);
-    assert!(
-        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
-        "text is unchanged: {}",
-        lines[2]
-    );
 }
 
 #[test]
-fn hit_rows() {
+fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
     // The cwd basename is the node id: the join the sideline itself uses.
     let v = view_with_rows(vec![joined_row("worker-01", Some("x-9223"), Some(7))]);
     let item = feed_item(Some("x-9223"), Some("s-ghost"));
@@ -251,7 +213,10 @@ fn hit_rows() {
         (ChromeHit::Cmds(a), ChromeHit::Cmds(b)) => assert_eq!(a, b),
         _ => panic!("both hits must be Cmds"),
     }
+}
 
+#[test]
+fn hit_on_an_unjoined_row_attaches_its_session() {
     let v = view_with_rows(vec![]);
     let item = feed_item(Some("x-nope"), Some("s-ghost"));
     let hit = feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).unwrap();
@@ -260,14 +225,52 @@ fn hit_rows() {
         id: "s-ghost".into(),
         placement: PanePlacement { portal: Some(0), ..Default::default() },
     }]));
+}
 
+#[tokio::test]
+async fn a_created_row_without_node_offers_no_deep_link_or_blueprint_composer() {
     let v = view_with_rows(vec![]);
-    let item = feed_item(Some("x-nope"), None);
+    let mut item = feed_item(None, None);
+    item.kind = "node_created".into();
     assert!(feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).is_none());
+
+    let mut v = v;
+    v.feed_detail_of = Some(item);
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        v.launcher.is_none(),
+        "missing node id cannot prefill the composer"
+    );
+    assert!(
+        v.feed_detail_of.is_some(),
+        "an ineligible detail stays open"
+    );
 }
 
 #[test]
-fn click_rows() {
+fn empty_panel_renders_an_earned_empty_notice_and_footer() {
+    let o = overlay(vec![]);
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(lines.iter().any(|l| l.contains("no activity")));
+    assert!(lines.last().unwrap().contains("0 events"));
+}
+
+#[test]
+fn folding_first_open_claims_no_activity() {
+    // While the fold is in flight the body claims nothing: "no activity" is
+    // a statement only a settled fold has earned.
+    let mut o = overlay(vec![]);
+    o.inflight = true;
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(!lines.iter().any(|l| l.contains("no activity")));
+    assert!(lines.iter().any(|l| l.contains("folding...")));
+}
+
+#[test]
+fn click_resolver_inverts_the_painter() {
     // Row 0 is the panel header, the last row is the footer; painted row 1 is
     // the group HEADER (no detail), row 2 the first item. The resolver reads
     // the same slot list the painter drew.
@@ -296,7 +299,10 @@ fn click_rows() {
     // Offset 2 scrolls the header and the newest row off: painted row 2 is
     // now the OLDEST row (slot 3 = storage 0).
     assert_eq!(feed_row_item(&items, 2, ROWS, 2), Some(0), "offset applies");
+}
 
+#[test]
+fn a_click_on_a_feed_row_opens_that_rows_provenance() {
     // The full client path: feed open, click in the panel's item rows at the
     // geometry the painter draws, hit = that row's provenance view. The deep
     // link moved to that view's own action; a click inspects, never attaches.
@@ -315,7 +321,7 @@ fn click_rows() {
                                 // same row deep-links THAT event's session: painter and resolver must
                                 // name one event, never two.
     let f = v.feed.as_ref().unwrap();
-    let lines = feed_panel_lines(f, w as usize - 1, v.term.0 as usize, 0);
+    let lines = feed_panel_lines(f, false, w as usize - 1, v.term.0 as usize, 0);
     assert!(
         lines[2].contains("x-c"),
         "top ITEM row is the newest: {}",
@@ -338,51 +344,10 @@ fn click_rows() {
     // Header and footer rows are chrome, not rows: they never deep-link.
     assert!(v.chrome_hit(0, col).is_none());
     assert!(v.chrome_hit((v.term.0 - 1) as u16, col).is_none());
-
-    let mut crown = feed_item(None, None);
-    crown.kind = "crown_vacated".into();
-    crown.ts = "2026-09-28T16:45:58Z".into();
-    crown.title = "warden left L2 e: succession".into();
-    let mut owned_a = feed_item(Some("x-a"), None);
-    owned_a.owner = Some("epic x-29a8 the epic".into());
-    owned_a.ts = "2026-09-28T17:00:00Z".into();
-    let mut owned_b = feed_item(Some("x-b"), None);
-    owned_b.owner = Some("epic x-29a8 the epic".into());
-    owned_b.ts = "2026-09-28T17:30:00Z".into();
-    let mut loose = feed_item(Some("x-c"), None);
-    loose.ts = "2026-09-28T18:00:00Z".into();
-    let items = vec![loose, owned_a, owned_b, crown];
-    let slots = feed_view::display_slots(&items);
-    // Slot shapes: crowns header + the crown row, the owner header with
-    // its rows newest first, then the other header with the loose row.
-    let shape: Vec<String> = slots
-        .iter()
-        .map(|s| match s {
-            feed_view::Slot::Header(h) => format!("H:{h}"),
-            feed_view::Slot::Item(i) => format!("I:{}", items[*i].node.as_deref().unwrap_or("?")),
-        })
-        .collect();
-    assert_eq!(
-        shape,
-        [
-            "H:crowns",
-            "I:?",
-            "H:epic x-29a8 the epic",
-            "I:x-b",
-            "I:x-a",
-            "H:other",
-            "I:x-c",
-        ],
-        "{shape:?}"
-    );
-    // A header row never resolves to a detail.
-    assert_eq!(feed_row_item(&items, 1, ROWS, 0), None, "crowns header");
-    // The first item row IS the crown row.
-    assert_eq!(feed_row_item(&items, 2, ROWS, 0), Some(3));
 }
 
 #[test]
-fn width_rows() {
+fn panel_width_is_transient_clamped_and_yields() {
     let mut v = two_pane_view(); // 30x100, Regular sideline at its canonical width
                                  // Closed: no panel, no columns.
     assert_eq!(v.feed_panel_w(), 0);
@@ -400,7 +365,10 @@ fn width_rows() {
     assert_eq!(v.panel_w(), 0);
     assert_eq!(v.feed_panel_w(), 10);
     assert_eq!(v.content_dims().1, 40);
+}
 
+#[test]
+fn drag_updates_width_and_release_persists() {
     let mut v = two_pane_view();
     v.feed = Some(overlay(vec![]));
     v.term = (30, 100);
@@ -420,7 +388,10 @@ fn width_rows() {
     assert!(v.revert_feed_drag());
     assert_eq!(v.feed_width, 40);
     assert!(!v.revert_feed_drag(), "no drag left to revert");
+}
 
+#[test]
+fn wheel_scrolls_within_the_item_count() {
     let mut v = two_pane_view();
     v.feed = Some(overlay(vec![
         feed_item(Some("x-a"), Some("s-1")),
@@ -447,7 +418,10 @@ fn width_rows() {
     assert_eq!(v.feed_offset, 11, "the clamp counts the group header");
     v.scroll_feed(false);
     assert_eq!(v.feed_offset, 10);
+}
 
+#[test]
+fn terminal_growth_reclamps_the_window() {
     let mut v = two_pane_view(); // 30 rows
     let mut items = overlay(vec![]).items;
     for i in 0..20 {
@@ -471,7 +445,10 @@ fn width_rows() {
         cells.iter().any(|c| c.c == 'x'),
         "the panel paints items, not blanks"
     );
+}
 
+#[test]
+fn a_double_width_glyph_claims_two_cells() {
     let mut v = two_pane_view();
     let mut it = feed_item(Some("x-cjk"), Some("s-cjk"));
     it.title = "世界".into(); // two CJK glyphs, each display width 2
@@ -500,9 +477,9 @@ fn width_rows() {
 // keys, so the header says how to focus and the marker does not move; a
 // focused panel takes the arrows and says so.
 #[test]
-fn header_rows() {
+fn the_header_names_the_input_state_the_panel_is_in() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    let lines = feed_panel_lines(&unfocused, W, ROWS, 0);
+    let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
         lines[0].contains("E focus"),
         "unfocused header: {}",
@@ -514,9 +491,8 @@ fn header_rows() {
         lines[0]
     );
 
-    let mut focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
-    focused.focused = true;
-    let lines = feed_panel_lines(&focused, W, ROWS, 0);
+    let focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+    let lines = feed_panel_lines(&focused, true, W, ROWS, 0);
     assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
     assert!(lines[0].contains("esc release"));
 
@@ -532,17 +508,56 @@ fn header_rows() {
             "header overflows at width {w}"
         );
     }
+}
 
+// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
+// next byte reaches the pane again.
+#[test]
+fn esc_releases_the_keyboard_without_closing_the_panel() {
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
-    v.feed.as_mut().unwrap().focused = true;
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    // The cursor band rides keyboard ownership (AC3-HP/AC4-HP): the selected
+    // row wears the theme's band pair while the feed owns typing, and the
+    // band is gone the moment the keyboard returns to the pane.
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let feed_w = v.feed_panel_w() as usize;
+    assert!(feed_w > 0, "the panel is painted with a width");
+    let x0 = cols - feed_w;
+    let sel = v.feed.as_ref().unwrap().sel;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        crate::theme::band_style(&v.theme).1,
+        "the selected row wears the band while the feed owns the keyboard"
+    );
     assert!(crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some(), "the panel stays open");
-    assert!(!v.feed.as_ref().unwrap().focused);
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane,
+        "the release returns typing to the pane"
+    );
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let x0 = cols - v.feed_panel_w() as usize;
+    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    assert_eq!(
+        band_cell.bg,
+        Color::Default,
+        "the band is gone once typing returns to the pane"
+    );
     // Releasing twice is a no-op, never a close.
     assert!(!crate::client::feed_view::release(&mut v));
     assert!(v.feed.is_some());
+}
 
+// The pan moves the TITLE only, in display columns, and never splits a wide
+// glyph: the stamp, kind and node stay anchored so a panned row is still the
+// row that was selected.
+#[test]
+fn a_pan_moves_the_title_by_display_columns() {
     assert_eq!(feed_view::pan_by("abcdef", 0), "abcdef");
     assert_eq!(feed_view::pan_by("abcdef", 2), "cdef");
     // A two-column glyph straddling the cut is dropped whole, never halved.
@@ -552,34 +567,7 @@ fn header_rows() {
         feed_view::widest_title(&[feed_item(None, None), reaped_item("s", "r")]),
         "t-d145 removed by reap".len()
     );
-
-    use crate::client::feed_view::header_line;
-    for w in 0..=80usize {
-        let unfocused = header_line(false, w);
-        assert!(
-            unfocused.starts_with(" E focus")
-                || unicode_width::UnicodeWidthStr::width(unfocused) <= w,
-            "w={w} picked {unfocused:?}"
-        );
-        let focused = header_line(true, w);
-        assert!(
-            focused.starts_with(" esc release")
-                || unicode_width::UnicodeWidthStr::width(focused) <= w,
-            "w={w} picked {focused:?}"
-        );
-    }
-    // Below every prose spelling, the fallback leads with the key, so an
-    // 8-column clip still reads "E focus" rather than a truncated label.
-    assert_eq!(header_line(false, 8), " E focus");
-    assert!(header_line(true, 8).starts_with(" esc"));
 }
-
-// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
-// next byte reaches the pane again.
-
-// The pan moves the TITLE only, in display columns, and never splits a wide
-// glyph: the stamp, kind and node stay anchored so a panned row is still the
-// row that was selected.
 
 // (AC5-HP) A removal reads as a normal outcome carrying its recovery line,
 // never as a bare attach the server refuses. (x-1b90) Its pane field is a
@@ -587,7 +575,8 @@ fn header_rows() {
 // that the removal did not measure the pane - whatever the recovery line
 // says, since no removal record carries the measurement on a field yet.
 #[test]
-fn detail_field_rows() {
+fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
+    use crate::client::feed_detail;
     let item = reaped_item(
         "00847995-e0db-47c2-ab5b-24468ba1a4f5",
         "resume: claude --resume x",
@@ -617,7 +606,7 @@ fn detail_field_rows() {
     );
     let lines = feed_detail::detail_lines(&item, &d, 60);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
-    assert!(feed_detail::detail_footer(&d).contains("resume line"));
+    assert!(feed_detail::detail_footer(&item, &d).contains("resume line"));
 
     let mut v = view_with_rows(vec![]);
     v.feed_detail_of = Some(item);
@@ -626,7 +615,13 @@ fn detail_field_rows() {
         v.feed_detail_hit(),
         Some(ChromeHit::Notice(msg)) if msg == "resume: claude --resume x"
     ));
+}
 
+// (AC5-EDGE) Pane ids allocate from zero, so pane 0 is a real seat. The join
+// is on the exact session id, never the row name a later worker can reuse.
+#[test]
+fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
+    use crate::client::feed_detail;
     let mut row = joined_row("some-other-name", None, Some(0));
     row.harness_session_id = Some("s-9".into());
     row.portal = Some(0);
@@ -652,7 +647,7 @@ fn detail_field_rows() {
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
     assert_eq!(by("lead"), "L1 e-0001");
-    assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
+    assert!(feed_detail::detail_footer(&item, &d).contains("focus its pane"));
 
     // A row whose session id does not match is NOT this event's session,
     // however its name reads: parent and king stay unrecorded, and the pane
@@ -671,7 +666,13 @@ fn detail_field_rows() {
     assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
     assert_eq!(by_other("lead"), feed_detail::NOT_RECORDED);
     assert!(by_other("pane").contains("the node's current worker"));
+}
 
+// A PEER edge names its parent as the handoff it is; a CHILD (and a
+// pre-v32 row with no word) names it plain.
+#[test]
+fn the_parent_field_labels_a_peer_edge_as_a_handoff() {
+    use crate::client::feed_detail;
     let mut row = joined_row("handoff-worker", None, None);
     row.harness_session_id = Some("s-t".into());
     row.spawned_by_session = Some("s-bp".into());
@@ -701,7 +702,38 @@ fn detail_field_rows() {
         .map(|(_, v)| v.clone())
         .unwrap();
     assert_eq!(parent, "s-bp");
+}
 
+// The panel drags narrower than any prose fits, and the caller clips from the
+// end. The key must survive that clip: it is the only place it is advertised.
+#[test]
+fn the_header_keeps_its_key_at_every_draggable_width() {
+    use crate::client::feed_view::header_line;
+    for w in 0..=80usize {
+        let unfocused = header_line(false, w);
+        assert!(
+            unfocused.starts_with(" E focus")
+                || unicode_width::UnicodeWidthStr::width(unfocused) <= w,
+            "w={w} picked {unfocused:?}"
+        );
+        let focused = header_line(true, w);
+        assert!(
+            focused.starts_with(" esc release")
+                || unicode_width::UnicodeWidthStr::width(focused) <= w,
+            "w={w} picked {focused:?}"
+        );
+    }
+    // Below every prose spelling, the fallback leads with the key, so an
+    // 8-column clip still reads "E focus" rather than a truncated label.
+    assert_eq!(header_line(false, 8), " E focus");
+    assert!(header_line(true, 8).starts_with(" esc"));
+}
+
+// An absent field says WHICH silence it is. A blank cell would teach nothing
+// and would read as broken UI when the defect is upstream.
+#[test]
+fn an_absent_field_names_its_own_kind_of_silence() {
+    use crate::client::feed_detail;
     let mut item = feed_item(Some("x-a"), None);
     item.kind = "node_created".into();
     item.harness = None;
@@ -740,11 +772,26 @@ fn detail_field_rows() {
     // Lineage is measured to be unrecorded on almost every row: say so.
     let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
     assert_eq!(parent.1, feed_detail::NOT_RECORDED);
+}
 
+// The whole render path, not just the line builder: open the provenance view
+// on a real View and read the COMPOSED frame. A field that never reaches the
+// screen is the defect this view exists to prevent, so the assertion is on
+// painted text.
+#[tokio::test]
+async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer() {
     let mut v = view_with_rows(vec![]);
     v.term = (44, 120);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    v.feed_detail_of = Some(item.clone());
+    let ordinary_text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !ordinary_text.contains("b: blueprint"),
+        "non-created rows have no blueprint action"
+    );
+    item.kind = "node_created".into();
+    item.cwd = Some("/workspace/node-project".into());
     item.harness = Some("claude".into());
     item.model = Some("glm-5.3-flash".into());
     v.feed_detail_of = Some(item);
@@ -770,7 +817,33 @@ fn detail_field_rows() {
     assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
     // The action is named before it is pressed.
     assert!(text.contains("attach on portal 0"), "footer missing");
+    assert!(text.contains("b: blueprint"), "blueprint key missing");
 
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"b", &mut writer)
+        .await
+        .unwrap();
+    let launch = v.launcher.as_ref().expect("blueprint key opens composer");
+    assert_eq!(launch.draft.message, "/fno:blueprint x-9223");
+    assert_eq!(launch.draft.node.as_deref(), Some("x-9223"));
+    assert_eq!(
+        launch
+            .draft
+            .projects
+            .get(launch.draft.project_idx)
+            .map(String::as_str),
+        Some("/workspace/node-project")
+    );
+    assert!(v.feed_detail_of.is_none(), "composer replaces feed detail");
+}
+
+// (x-9cbf) The parent field spends the derived NAME when the edge resolves
+// to a row in the set, keeps the handoff word on a PEER edge, shows the bare
+// session id when the edge names no row, and falls back to the birth's own
+// reason (or the honest silence) when the row has no edge at all.
+#[test]
+fn the_parent_field_names_the_parent_row_when_the_edge_resolves() {
+    use crate::client::feed_detail::{self, Destination};
     let item = feed_item(Some("x-a"), Some("s-1"));
     let mut child = joined_row("jn-t-x-1", None, None);
     child.spawned_by_session = Some("s-lead".into());
@@ -819,33 +892,88 @@ fn detail_field_rows() {
     assert_eq!(parent.1, feed_detail::NOT_RECORDED);
 }
 
-// (AC5-EDGE) Pane ids allocate from zero, so pane 0 is a real seat. The join
-// is on the exact session id, never the row name a later worker can reuse.
-
-// A PEER edge names its parent as the handoff it is; a CHILD (and a
-// pre-v32 row with no word) names it plain.
-
-// The panel drags narrower than any prose fits, and the caller clips from the
-// end. The key must survive that clip: it is the only place it is advertised.
-
-// An absent field says WHICH silence it is. A blank cell would teach nothing
-// and would read as broken UI when the defect is upstream.
-
-// The whole render path, not just the line builder: open the provenance view
-// on a real View and read the COMPOSED frame. A field that never reaches the
-// screen is the defect this view exists to prevent, so the assertion is on
-// painted text.
-
-// (x-9cbf) The parent field spends the derived NAME when the edge resolves
-// to a row in the set, keeps the handoff word on a PEER edge, shows the bare
-// session id when the edge names no row, and falls back to the birth's own
-// reason (or the honest silence) when the row has no edge at all.
-
 // (AC7-HP) The crowns band leads, then one header per owner ordered by
 // its newest row, then `other`; a header click resolves to no detail.
+#[test]
+fn display_slots_group_the_rows() {
+    let mut crown = feed_item(None, None);
+    crown.kind = "crown_vacated".into();
+    crown.ts = "2026-09-28T16:45:58Z".into();
+    crown.title = "warden left L2 e: succession".into();
+    let mut owned_a = feed_item(Some("x-a"), None);
+    owned_a.owner = Some("epic x-29a8 the epic".into());
+    owned_a.ts = "2026-09-28T17:00:00Z".into();
+    let mut owned_b = feed_item(Some("x-b"), None);
+    owned_b.owner = Some("epic x-29a8 the epic".into());
+    owned_b.ts = "2026-09-28T17:30:00Z".into();
+    let mut loose = feed_item(Some("x-c"), None);
+    loose.ts = "2026-09-28T18:00:00Z".into();
+    let items = vec![loose, owned_a, owned_b, crown];
+    let slots = feed_view::display_slots(&items);
+    // Slot shapes: crowns header + the crown row, the owner header with
+    // its rows newest first, then the other header with the loose row.
+    let shape: Vec<String> = slots
+        .iter()
+        .map(|s| match s {
+            feed_view::Slot::Header(h) => format!("H:{h}"),
+            feed_view::Slot::Item(i) => format!("I:{}", items[*i].node.as_deref().unwrap_or("?")),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "H:crowns",
+            "I:?",
+            "H:epic x-29a8 the epic",
+            "I:x-b",
+            "I:x-a",
+            "H:other",
+            "I:x-c",
+        ],
+        "{shape:?}"
+    );
+    // A header row never resolves to a detail.
+    assert_eq!(feed_row_item(&items, 1, ROWS, 0), None, "crowns header");
+    // The first item row IS the crown row.
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0), Some(3));
+}
 
 // (AC8-HP) The kind span goes bold in the brand colour for kinds that
 // need action; the flattened text is what the panel always drew.
+#[test]
+fn feed_panel_rows_style_the_actionable_kinds() {
+    let mut vacated = feed_item(Some("x-a"), None);
+    vacated.kind = "crown_vacated".into();
+    vacated.ts = "2026-09-28T16:45:58Z".into();
+    vacated.title = "warden left".into();
+    let o = overlay(vec![vacated]);
+    let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
+    // Row 1 is the group header: every span bold.
+    assert!(
+        rows[1].iter().all(|s| s.bold),
+        "headers render bold: {:?}",
+        rows[1]
+    );
+    // Row 2 is the vacated row: its kind span is bold AND brand.
+    assert!(
+        rows[2]
+            .iter()
+            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
+        "the actionable kind is bold brand: {:?}",
+        rows[2]
+    );
+    assert!(
+        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
+        "the node id is bold: {:?}",
+        rows[2]
+    );
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(
+        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
+        "text is unchanged: {}",
+        lines[2]
+    );
+}
 
 // (AC9-HP) Local time: a UTC stamp renders in the zone the test pins.
 #[test]

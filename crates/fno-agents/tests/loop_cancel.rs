@@ -91,9 +91,25 @@ impl Dispatcher for TerminatingDispatcher {
     }
 }
 
+/// Serializes the tests that mutate process env. The lib's
+/// `claims::test_env_lock` is #[cfg(test)]-gated, so an integration binary
+/// carries its own.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    fno_agents::event_store::journal_text(path, &[])
-        .lines()
+    // The child run pins FNO_AGENTS_HOME, so its store resolves under the
+    // fixture root; the reader derives the same pin or it falls back to the
+    // retired jsonl and reads nothing.
+    let _guard = ENV_LOCK.lock().unwrap();
+    let prior = std::env::var_os("FNO_AGENTS_HOME");
+    let pin = path.parent().unwrap_or(path).join("agents");
+    std::env::set_var("FNO_AGENTS_HOME", &pin);
+    let text = fno_agents::event_store::journal_text(path, &[]);
+    match prior {
+        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+        None => std::env::remove_var("FNO_AGENTS_HOME"),
+    }
+    text.lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }

@@ -275,6 +275,14 @@ pub fn migrate(root: &Path, apply: bool) -> Receipt {
             status,
         });
     }
+    // A stale writer's reappeared legacy event-family store imports into the
+    // published store, then parks. Dry runs skip it.
+    for (name, status) in crate::state_layout_sqlite::straggler_import(root, &stamp, apply) {
+        receipt.entries.push(Entry {
+            legacy: format!("{name} (straggler)"),
+            status,
+        });
+    }
     for row in rows() {
         match row.kind {
             // Glob rows: every root entry the pattern matches parks.
@@ -942,6 +950,39 @@ mod tests {
         let swept = crate::state_layout_sqlite::verify_sweep(&root, "ow-later");
         assert_eq!(swept.len(), 1, "{swept:?}");
         assert!(matches!(swept[0].1, Status::Moved), "{swept:?}");
+        // Branch: a reappeared legacy event-family store imports by
+        // event_id into the published store, then parks.
+        let published = root.join("db").join("events.db");
+        let mut c = rusqlite::Connection::open(&published).unwrap();
+        crate::event_store::ensure_schema(&mut c, &published).unwrap();
+        c.execute(
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}')",
+            [],
+        )
+        .unwrap();
+        drop(c);
+        let straggler = root.join("events.db");
+        let mut c = rusqlite::Connection::open(&straggler).unwrap();
+        crate::event_store::ensure_schema(&mut c, &straggler).unwrap();
+        c.execute_batch(
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}'), (2, 'e-2', x'02', 0, 'x', 't', '{}');",
+        )
+        .unwrap();
+        drop(c);
+        let receipt = migrate(&root, true);
+        let merged: Vec<_> = receipt
+            .entries
+            .iter()
+            .filter(|e| e.legacy.contains("straggler"))
+            .collect();
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert!(matches!(merged[0].status, Status::Merged), "{merged:?}");
+        let c = rusqlite::Connection::open(&published).unwrap();
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "both rows exist once");
+        assert!(!straggler.exists(), "the straggler parked");
         clean(&root);
     }
 
