@@ -73,6 +73,7 @@ Two infrastructure stops hit the runs while they were in flight. This amendment 
 - Docker. OrbStack was quit at 23:06:42Z. After that, 68 pi trials failed in `docker compose` before the agent ran. The claude-code, opencode and Terminus 2 jobs ran no trial. A trial whose environment never started is an infrastructure exclusion. When Docker answers again, `harbor jobs resume -f RuntimeError` reruns those pi trials in place. The other arms then run in the same seeded order.
 - Provider cap. When the fleet already holds every zai lane, the spawn gate refuses a Run 1 worker (`provider_cap`). The row reads `unavailable` and the worker never runs. After the lanes finish, a top-up pass reruns missing graded attempts. It stops at 3 graded attempts per task, or after 3 passes. Each refusal stays in history and is counted by reason.
 - Neither rerun touches a trial or attempt that started. A started attempt that fails is scored as it stands.
+- Stalls. A Run 1 worker that runs out its 45-minute budget started. The spawn exits 12 (opencode) or 124 (claude), and the runner files the row `unavailable` with no grade. This study scores that row as a stall: an attempt with no accepted change. run-1.md prints each lane's rate with and without stalls.
 
 ## Scope and limits
 
