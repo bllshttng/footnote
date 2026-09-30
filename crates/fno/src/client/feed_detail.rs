@@ -392,6 +392,7 @@ mod tests {
             ts: "2026-09-28T16:48:49Z".into(),
             kind: "session_reaped".into(),
             node: None,
+            cwd: None,
             session_id: None,
             harness: Some("codex".into()),
             title: "jolly-finch removed".into(),
