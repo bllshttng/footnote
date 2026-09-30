@@ -132,9 +132,6 @@ struct AppState {
     /// project-isolated bridge cannot overwrite the global page.
     rundown_republish: bool,
     fleet_html: PathBuf,
-    /// The mux session this bridge attaches to; a backlog launch names it to
-    /// the spawn door.
-    session: Arc<str>,
     /// True when the bound address is loopback, so the backlog page may act.
     /// Computed from the bound address, never from `--bind` text.
     writable: bool,
@@ -745,7 +742,6 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         rundown_html,
         rundown_republish,
         fleet_html: fleet_html_path(),
-        session: args.session.into(),
         writable,
         model: Default::default(),
         shutdown: shutdown_rx,
@@ -1792,7 +1788,6 @@ mod tests {
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2204,7 +2199,6 @@ console.log("evictedRowCount: 18 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2488,7 +2482,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: false,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2570,7 +2563,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: fleet_path,
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -2952,7 +2944,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,
@@ -3045,7 +3036,6 @@ console.log("backlog page helpers: 12 cases ok");
             rundown_html: dir.join("reign.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
-            session: Arc::<str>::from("sess"),
             writable: true,
             model: Default::default(),
             shutdown,

@@ -1563,8 +1563,8 @@ mod tests {
         );
         // A pre-birth refusal used to write nothing, so the feed showed
         // nothing for a launch the operator watched refuse.
-        let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"python","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
-        let p = project("", &[], &[], refused, "");
+        let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"daemon","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
+        let p = project("", &[], &[], refused, "", "");
         let row = p
             .rows
             .iter()
