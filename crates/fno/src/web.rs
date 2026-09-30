@@ -890,12 +890,14 @@ async fn connect_attach(socket: &Path) -> Result<(OwnedReadHalf, ServerMsg), Str
     writer.forget();
 
     let mut reader = reader;
-    let first = tokio::time::timeout(
-        Duration::from_secs(10),
+    // A busy server is still the user's server: say so once, keep waiting.
+    let first = crate::client::await_attach_reply(
         proto::read_msg::<_, ServerMsg>(&mut reader),
+        crate::client::ATTACH_BUSY_NOTICE,
+        &mut false,
+        || eprintln!("fno: server is busy, still waiting (Ctrl-C to stop; `fno mux ls`)"),
     )
     .await
-    .map_err(|_| "server did not answer the attach within 10s (wedged?); `fno mux ls`".to_string())?
     .map_err(|e| format!("attach read failed: {e}"))?;
 
     if let ServerMsg::Bye { reason } = &first {
