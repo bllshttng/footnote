@@ -23,13 +23,17 @@ impl View {
     /// The effective owner: the stored click choice, normalized so a closed
     /// or hidden region never keeps the keyboard. Every reader (key routing,
     /// flush, paint) goes through this, so close sites need no bookkeeping.
+    /// A full-screen board owns unconditionally: it covers every cell, so no
+    /// pane is reachable to hold the keyboard under it.
     pub(crate) fn input_owner(&self) -> RegionOwner {
+        if self.board_full && self.backlog_board.is_some() {
+            return RegionOwner::Board;
+        }
         match self.region_owner {
             RegionOwner::Feed if self.feed.is_some() => RegionOwner::Feed,
             RegionOwner::Board
                 if self.backlog_board.is_some()
-                    && (self.board_full
-                        || self.sideline_view == crate::view_store::SidelineView::Backlog) =>
+                    && self.sideline_view == crate::view_store::SidelineView::Backlog =>
             {
                 RegionOwner::Board
             }
