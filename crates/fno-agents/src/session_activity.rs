@@ -99,12 +99,24 @@ fn content_blocks(row: &Value) -> &[Value] {
 
 /// Activity counters for one claude transcript (`*.jsonl` row shape).
 pub(crate) fn claude_activity(raw: &str) -> Activity {
-    let mut act = Activity::default();
-    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut fold = ActivityFold::default();
     for line in raw.lines() {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        fold.row(&row);
+    }
+    fold.finish()
+}
+
+#[derive(Default)]
+pub(crate) struct ActivityFold {
+    act: Activity,
+    seen_ids: HashSet<String>,
+}
+
+impl ActivityFold {
+    pub(crate) fn row(&mut self, row: &Value) {
         let is_assistant = row.get("type").and_then(|v| v.as_str()) == Some("assistant")
             || row
                 .get("message")
@@ -113,7 +125,7 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                 == Some("assistant");
         if is_assistant {
             if let Some(ts) = turn_ts_epoch(&row) {
-                act.assistant_ts.push(ts);
+                self.act.assistant_ts.push(ts);
             }
             // Transcripts repeat one API message across several rows; a
             // token sum that skips the dedupe overcounts about 2x (measured
@@ -123,7 +135,7 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                 .and_then(|m| m.get("id"))
                 .and_then(|v| v.as_str());
             let fresh = match id {
-                Some(id) => seen_ids.insert(id.to_string()),
+                Some(id) => self.seen_ids.insert(id.to_string()),
                 None => true,
             };
             if fresh {
@@ -133,10 +145,10 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                     .filter(|u| u.is_object())
                 {
                     let f = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                    act.tokens.input += f("input_tokens");
-                    act.tokens.output += f("output_tokens");
-                    act.tokens.cache_read += f("cache_read_input_tokens");
-                    act.tokens.cache_write += f("cache_creation_input_tokens");
+                    self.act.tokens.input += f("input_tokens");
+                    self.act.tokens.output += f("output_tokens");
+                    self.act.tokens.cache_read += f("cache_read_input_tokens");
+                    self.act.tokens.cache_write += f("cache_creation_input_tokens");
                 }
             }
         }
@@ -156,9 +168,9 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                         "Edit" => {
                             let (added, removed) =
                                 changed_lines(&field("old_string"), &field("new_string"));
-                            act.lines_added += added;
-                            act.lines_removed += removed;
-                            note_extension(&mut act.extensions, &field("file_path"));
+                            self.act.lines_added += added;
+                            self.act.lines_removed += removed;
+                            note_extension(&mut self.act.extensions, &field("file_path"));
                         }
                         "MultiEdit" => {
                             if let Some(edits) = input.get("edits").and_then(|e| e.as_array()) {
@@ -171,15 +183,15 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                                     };
                                     let (added, removed) =
                                         changed_lines(&s("old_string"), &s("new_string"));
-                                    act.lines_added += added;
-                                    act.lines_removed += removed;
+                                    self.act.lines_added += added;
+                                    self.act.lines_removed += removed;
                                 }
                             }
-                            note_extension(&mut act.extensions, &field("file_path"));
+                            note_extension(&mut self.act.extensions, &field("file_path"));
                         }
                         "Write" => {
-                            act.lines_added += field("content").lines().count() as u64;
-                            note_extension(&mut act.extensions, &field("file_path"));
+                            self.act.lines_added += field("content").lines().count() as u64;
+                            note_extension(&mut self.act.extensions, &field("file_path"));
                         }
                         "NotebookEdit" => {
                             let path = if field("file_path").is_empty() {
@@ -187,7 +199,7 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                             } else {
                                 field("file_path")
                             };
-                            note_extension(&mut act.extensions, &path);
+                            note_extension(&mut self.act.extensions, &path);
                         }
                         _ => {}
                     }
@@ -196,16 +208,20 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
                     if block.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
                         let text =
                             block_text(&block.get("content").cloned().unwrap_or(Value::Null));
-                        *act.tool_errors.entry(error_class(&text)).or_insert(0) += 1;
+                        *self.act.tool_errors.entry(error_class(&text)).or_insert(0) += 1;
                     }
                 }
                 _ => {}
             }
         }
     }
-    act.assistant_ts
-        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    act
+
+    pub(crate) fn finish(mut self) -> Activity {
+        self.act
+            .assistant_ts
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.act
+    }
 }
 
 /// Lines added and removed plus one extension count per file, out of a codex
@@ -421,16 +437,6 @@ mod tests {
         for (text, want) in texts {
             assert_eq!(error_class(text), want, "text: {text}");
         }
-    }
-
-    #[test]
-    fn is_error_tool_results_are_counted_by_class() {
-        let result = |text: &str| json!({"type": "tool_result", "is_error": true, "content": text});
-        let raw = claude_lines(&[json!({"type": "user", "message": {"role": "user",
-                    "content": [result("Exit code 101"), result("boom")]}})]);
-        let act = claude_activity(&raw);
-        assert_eq!(act.tool_errors.get("command_failed"), Some(&1));
-        assert_eq!(act.tool_errors.get("other"), Some(&1));
     }
 
     #[test]

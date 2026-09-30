@@ -318,6 +318,9 @@ def _child_env(root: Path) -> dict:
     if _AMBIENT_MODE == "dirty":
         parent = poison(os.environ, _poison_fixtures(root))
     env = neutralise(parent, _sandbox())
+    # The outer runner declares its sandbox explicitly: the tripwire inside the
+    # child cannot infer provenance from a rewritten HOME.
+    env["FNO_TEST_SANDBOX"] = str(_sandbox())
     # A nested `fno doctor test` can run inside an outer xdist worker. Its child is a
     # fresh pytest controller, not that worker, so inherited transport markers
     # make pytest-xdist send session-finish over a closed channel and strand the

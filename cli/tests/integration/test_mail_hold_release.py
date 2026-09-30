@@ -67,6 +67,7 @@ def state(tmp_path, monkeypatch):
     # Set the bus override on THIS process too, so mail written here and mail
     # read by the child timer resolve to one log.
     monkeypatch.setenv("FNO_BUS_DIR", str(home / ".fno" / "bus"))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home / ".fno" / "agents"))
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["FNO_AGENTS_HOME"] = str(home / ".fno" / "agents")

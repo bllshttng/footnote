@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fno.rust_binary import VerbUnavailable, verb_call
+from fno.rust_binary import VerbUnavailable
 
 
 class SpawnOverlayUnavailable(VerbUnavailable):
@@ -23,4 +23,8 @@ def spawn_overlay_call(
     a node (a graph read) and a missing binary must not wedge a spawn either
     way.
     """
+    # Call-time import: a module-top capture can permanently hold a test's
+    # monkeypatched verb_call stub, leaking it into every later reader.
+    from fno.rust_binary import verb_call
+
     return verb_call("spawn-overlay", payload, SpawnOverlayUnavailable, timeout=timeout)

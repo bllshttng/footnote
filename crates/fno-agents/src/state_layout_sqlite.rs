@@ -604,7 +604,7 @@ pub fn straggler_import(root: &Path, stamp: &str, apply: bool) -> Vec<(String, S
 
 /// Import one straggler's events rows into the published store. The straggler
 /// migrates to v2 in place first (a v1 file carries no `event_id` to import
-/// by), then the v2 rows INSERT OR IGNORE on `seq` and `event_id` conflicts.
+/// by), then inserts distinct event identities with fresh local sequence numbers.
 fn import_straggler(legacy: &Path, new: &Path) -> Result<usize, String> {
     let mut src = {
         let c = Connection::open_with_flags(legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -644,11 +644,14 @@ fn import_straggler(legacy: &Path, new: &Path) -> Result<usize, String> {
     if src_columns != columns {
         return Err("the straggler's events columns diverge from the published store".to_string());
     }
+    let columns: Vec<String> = columns.into_iter().filter(|name| name != "seq").collect();
     let placeholders: Vec<&str> = columns.iter().map(|_| "?").collect();
+    let event_id_parameter = columns.iter().position(|name| name == "event_id").unwrap() + 1;
     let insert = format!(
-        "INSERT OR IGNORE INTO events ({}) VALUES ({})",
+        "INSERT INTO events ({}) SELECT {} WHERE NOT EXISTS (SELECT 1 FROM events WHERE event_id = ?{})",
         columns.join(", "),
-        placeholders.join(", ")
+        placeholders.join(", "),
+        event_id_parameter,
     );
     let select = format!("SELECT {} FROM events ORDER BY seq", columns.join(", "));
     let mut imported = 0usize;
@@ -660,11 +663,11 @@ fn import_straggler(legacy: &Path, new: &Path) -> Result<usize, String> {
             let as_params: Vec<Box<dyn rusqlite::types::ToSql>> = columns
                 .iter()
                 .map(|c| {
-                    let v: rusqlite::types::Value =
-                        row.get(c.as_str()).unwrap_or(rusqlite::types::Value::Null);
-                    Box::new(v) as Box<dyn rusqlite::types::ToSql>
+                    row.get::<_, rusqlite::types::Value>(c.as_str())
+                        .map(|value| Box::new(value) as Box<dyn rusqlite::types::ToSql>)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             let params: Vec<&dyn rusqlite::types::ToSql> =
                 as_params.iter().map(|b| b.as_ref()).collect();
             imported += dst

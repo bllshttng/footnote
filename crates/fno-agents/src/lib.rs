@@ -128,6 +128,7 @@ pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
+pub mod court_rivals;
 pub mod crown_alarm;
 pub mod crown_identity;
 pub mod crown_names;
@@ -178,6 +179,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -275,6 +277,7 @@ pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
+pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
@@ -287,6 +290,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_draft_ready;
 pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
@@ -295,6 +299,7 @@ pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
+pub mod process_owner;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;
@@ -320,6 +325,7 @@ pub mod refusal_rate;
 pub mod refusal_trend;
 pub mod registry_guard;
 pub mod registry_json;
+pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
 pub mod removals;
@@ -409,8 +415,11 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
+pub mod zcode;
+pub mod zcode_ask;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -1356,6 +1365,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The pr-watch sweep flipped an open fno-bound draft PR back to ready
+    // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
+    "pr_watch_draft_flip",
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
@@ -1411,6 +1423,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
     // the footprint verb killed on the daemon's behalf.
     "orphan_test_binary_reaped",
+    "orphan_owner_server_reaped",
     // Late bind (daemon-emitted, task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
@@ -1503,6 +1516,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // task through the pr-nudge store.
     "burn_watch_wake",
     "burn_watch_escalated",
+    "loop_check_watch_expiry_wake",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     //. The roots reach a spawn as an RPC param from the Python seam,

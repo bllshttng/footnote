@@ -453,28 +453,20 @@ mod tests {
 
     // AC1-HP: the name route resolves what the reverse join missed.
     #[test]
-    fn name_route_resolves_node_the_sessions_join_missed() {
+    fn route_rows() {
         let g = graph(&[("x-dddd", "done")]);
         let e = entry("target-x-dddd-gc-sweep-reap-guard-checks-ide", None);
         let route = resolve(&e, "01a078c3-not-anywhere", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-dddd"));
         assert_eq!(route.source, Some(NodeSource::Name));
-    }
 
-    // The registry field outranks the name (rule, ported).
-    #[test]
-    fn registry_field_outranks_name() {
         let g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
         let e = entry("target-x-aaaa-row", Some("x-aaaa"));
         let route = resolve(&e, "", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-aaaa"));
         assert_eq!(route.source, Some(NodeSource::Registry));
         assert_eq!(route.agreeing, vec![NodeSource::Name]);
-    }
 
-    // The sessions join outranks everything; later sources corroborate.
-    #[test]
-    fn sessions_join_outranks_and_collects_agreement() {
         let mut g = graph(&[("x-aaaa", "done")]);
         g.index.insert(
             "sid-1".to_string(),
@@ -484,12 +476,72 @@ mod tests {
         let route = resolve(&e, "SID-1", &g, None);
         assert_eq!(route.source, Some(NodeSource::Sessions));
         assert_eq!(route.agreeing, vec![NodeSource::Registry, NodeSource::Name]);
+
+        let g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        // the registry field is the conflicting witness
+        let e = entry("target-x-aaaa-row", Some("x-bbbb"));
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-bbbb"));
+        assert_eq!(route.source, Some(NodeSource::Registry));
+        assert_eq!(
+            route.conflict,
+            Some((NodeSource::Name, "x-aaaa".to_string()))
+        );
+        assert!(route.agreeing.is_empty());
+
+        let mut g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        g.index.insert(
+            "sid-set".to_string(),
+            vec![
+                ("x-aaaa".to_string(), "done".to_string()),
+                ("x-bbbb".to_string(), "done".to_string()),
+            ],
+        );
+        let e = entry("unidentified-row", Some("x-bbbb"));
+        let route = resolve(&e, "sid-set", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(route.agreeing, vec![NodeSource::Registry]);
+        assert_eq!(route.conflict, None);
+
+        let mut g = graph(&[("x-aaaa", "done"), ("x-cccc", "done")]);
+        g.index.insert(
+            "sid-conflict".to_string(),
+            vec![("x-aaaa".to_string(), "done".to_string())],
+        );
+        let mut e = entry("unidentified-row", Some("x-cccc"));
+        e.harness_session_id = Some("sid-conflict".into());
+        let route = resolve(&e, "sid-conflict", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(
+            route.conflict,
+            Some((NodeSource::Registry, "x-cccc".to_string()))
+        );
+        assert!(route.agreeing.is_empty());
+
+        let g = graph(&[("x-ffff", "done"), ("y-ffff", "done")]);
+        let e = entry("target-ffff-row", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node, None);
+        assert_eq!(route.source, None);
+        assert_eq!(route.work_state(&g.statuses), WorkState::NoProvenance);
+
+        let g = graph(&[("x-0000", "done"), ("x-ffff", "done")]);
+        let e = entry("t-x-0000-feed-timeout", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-0000"));
+        assert_eq!(route.source, Some(NodeSource::Name));
     }
+
+    // The registry field outranks the name (rule, ported).
+
+    // The sessions join outranks everything; later sources corroborate.
 
     // AC2-HP: the first user message carries the dispatch brief and names
     // the node.
     #[test]
-    fn transcript_first_resolves_when_name_cannot() {
+    fn transcript_rows() {
         let tmp = std::env::temp_dir().join(format!("node-route-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = write_transcript(
@@ -506,14 +558,7 @@ mod tests {
         let route = resolve(&e, "sid-none", &g, Some(&[path]));
         assert_eq!(route.source, Some(NodeSource::TranscriptFirst));
         std::fs::remove_dir_all(&tmp).ok();
-    }
 
-    // The operator's wrong-retirement path: head names a done node, a
-    // mid-transcript retask names an open one, and the tail goes quiet.
-    // The full backward walk answers from the retask, so the witness
-    // disagrees and holds instead of retiring on the head.
-    #[test]
-    fn a_mid_transcript_retask_names_the_newer_node() {
         let tmp = std::env::temp_dir().join(format!("node-route-retask-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let filler = "x".repeat(200);
@@ -540,11 +585,7 @@ mod tests {
             "done head plus open retask is a conflict hold"
         );
         std::fs::remove_dir_all(&tmp).ok();
-    }
 
-    // AC3-HP: a later source naming the SAME node corroborates.
-    #[test]
-    fn agreeing_source_is_recorded() {
         let tmp = std::env::temp_dir().join(format!("node-route-agree-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = write_transcript(
@@ -559,12 +600,7 @@ mod tests {
         // dispatch record has already resolved the row.
         assert!(route.agreeing.is_empty());
         std::fs::remove_dir_all(&tmp).ok();
-    }
 
-    // AC1-HP: a strong dispatch record owns the verdict; a conflicting
-    // transcript mention cannot veto it.
-    #[test]
-    fn strong_sources_ignore_conflicting_transcript_last() {
         let tmp = std::env::temp_dir().join(format!("node-route-strong-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = write_transcript(
@@ -583,138 +619,121 @@ mod tests {
         assert_eq!(route.agreeing, vec![NodeSource::Registry]);
         assert_eq!(route.conflict, None);
         std::fs::remove_dir_all(&tmp).ok();
+
+        let ids = ids_of(&[("x-aaaa", "done")]);
+        assert_eq!(
+            transcript_first(Some(&[PathBuf::from("/nonexistent/x")]), &ids),
+            None
+        );
+        assert_eq!(
+            transcript_last(Some(&[PathBuf::from("/nonexistent/x")]), &ids),
+            None
+        );
+        assert_eq!(transcript_first(None, &ids), None);
+
+        let tmp = std::env::temp_dir().join(format!("node-route-last-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_transcript(
+            &tmp,
+            &[
+                r#"{"type":"user","message":{"content":"first x-aaaa"}}"#,
+                r#"{"type":"assistant","message":{"content":"last word x-bbbb"}}"#,
+            ],
+        );
+        let ids = ids_of(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        assert_eq!(
+            transcript_last(Some(&[path]), &ids).as_deref(),
+            Some("x-bbbb")
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+
+        let tmp = std::env::temp_dir().join(format!("node-route-span-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let pad = "p".repeat(BACKWARD_CHUNK_BYTES as usize);
+        let big = String::from(r#"{"type":"assistant","message":{"content":"retasked to x-bbbb "#)
+            + &"q".repeat(BACKWARD_CHUNK_BYTES as usize * 3 / 2)
+            + r#""}}"#;
+        let path = write_transcript(
+            &tmp,
+            &[
+                r#"{"type":"user","message":{"content":"first x-aaaa"}}"#,
+                &pad,
+                &big,
+            ],
+        );
+        let ids = ids_of(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        assert_eq!(
+            transcript_last(Some(&[path]), &ids).as_deref(),
+            Some("x-bbbb")
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+
+        let tmp = std::env::temp_dir().join(format!("node-route-valve-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let blank = "q".repeat(1024);
+        let lines: Vec<String> = vec![blank; SCAN_LIMIT_BYTES as usize / 1024 * 9 / 8];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = write_transcript(&tmp, &refs);
+        let ids = ids_of(&[("x-aaaa", "done")]);
+        assert_eq!(transcript_last(Some(&[path]), &ids), None);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
+    // The operator's wrong-retirement path: head names a done node, a
+    // mid-transcript retask names an open one, and the tail goes quiet.
+    // The full backward walk answers from the retask, so the witness
+    // disagrees and holds instead of retiring on the head.
+
+    // AC3-HP: a later source naming the SAME node corroborates.
+
+    // AC1-HP: a strong dispatch record owns the verdict; a conflicting
+    // transcript mention cannot veto it.
+
     // AC4-EDGE: two witnesses that disagree are not evidence.
-    #[test]
-    fn conflicting_source_holds_the_row() {
-        let g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
-        // the registry field is the conflicting witness
-        let e = entry("target-x-aaaa-row", Some("x-bbbb"));
-        let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-bbbb"));
-        assert_eq!(route.source, Some(NodeSource::Registry));
-        assert_eq!(
-            route.conflict,
-            Some((NodeSource::Name, "x-aaaa".to_string()))
-        );
-        assert!(route.agreeing.is_empty());
-    }
 
     // AC1-HP: a session dispatched under several nodes carries one
     // sessions[] row per node, so a later strong source answering ANY of
     // them agrees with the witness. Only an answer outside the set is a
     // conflict, and `route.node` stays the first row so the work verdict
     // does not move.
-    #[test]
-    fn a_session_named_under_several_nodes_agrees_with_any_member_of_the_set() {
-        let mut g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
-        g.index.insert(
-            "sid-set".to_string(),
-            vec![
-                ("x-aaaa".to_string(), "done".to_string()),
-                ("x-bbbb".to_string(), "done".to_string()),
-            ],
-        );
-        let e = entry("unidentified-row", Some("x-bbbb"));
-        let route = resolve(&e, "sid-set", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
-        assert_eq!(route.source, Some(NodeSource::Sessions));
-        assert_eq!(route.agreeing, vec![NodeSource::Registry]);
-        assert_eq!(route.conflict, None);
-    }
 
     // AC1-EDGE: an answer outside the set is still a conflict.
-    #[test]
-    fn a_registry_answer_outside_the_sessions_set_conflicts() {
-        let mut g = graph(&[("x-aaaa", "done"), ("x-cccc", "done")]);
-        g.index.insert(
-            "sid-conflict".to_string(),
-            vec![("x-aaaa".to_string(), "done".to_string())],
-        );
-        let mut e = entry("unidentified-row", Some("x-cccc"));
-        e.harness_session_id = Some("sid-conflict".into());
-        let route = resolve(&e, "sid-conflict", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
-        assert_eq!(route.source, Some(NodeSource::Sessions));
-        assert_eq!(
-            route.conflict,
-            Some((NodeSource::Registry, "x-cccc".to_string()))
-        );
-        assert!(route.agreeing.is_empty());
-    }
 
     // AC8-EDGE: a bare hex matching two ids is ambiguous and answers
     // nothing; the cascade falls through.
-    #[test]
-    fn ambiguous_bare_hex_answers_nothing_and_falls_through() {
-        let g = graph(&[("x-ffff", "done"), ("y-ffff", "done")]);
-        let e = entry("target-ffff-row", None);
-        let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node, None);
-        assert_eq!(route.source, None);
-        assert_eq!(route.work_state(&g.statuses), WorkState::NoProvenance);
-    }
 
     // A hex-looking slug word in a later position is never read as an id
     // (rule, ported).
-    #[test]
-    fn slug_hex_in_later_position_is_ignored() {
-        let g = graph(&[("x-0000", "done"), ("x-ffff", "done")]);
-        let e = entry("t-x-0000-feed-timeout", None);
-        let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-0000"));
-        assert_eq!(route.source, Some(NodeSource::Name));
-    }
 
     // AC1-HP: a wrapper prefix no longer shifts the node token
     // out of the name route's view.
     #[test]
-    fn k_wrapped_target_row_resolves() {
+    fn wrapper_rows() {
         let g = graph(&[("x-1111", "done")]);
         let e = entry("k-t-1111-lane-reap-glm", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-1111"));
         assert_eq!(route.source, Some(NodeSource::Name));
-    }
 
-    // AC2-HP: the blueprint wrapper shape resolves too, so the fix is not
-    // shaped to one wrapper.
-    #[test]
-    fn k_wrapped_blueprint_row_resolves() {
         let g = graph(&[("x-2222", "done")]);
         let e = entry("k-bp-2222-settings-filename-opus", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-2222"));
         assert_eq!(route.source, Some(NodeSource::Name));
-    }
 
-    // AC3-EDGE: the unwrapped path that already worked still resolves.
-    #[test]
-    fn unwrapped_row_still_resolves() {
         let g = graph(&[("x-1111", "done")]);
         let e = entry("t-1111-lane-reap-glm", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-1111"));
         assert_eq!(route.source, Some(NodeSource::Name));
-    }
 
-    // AC4-EDGE: a wrapped row encoding no node answers nothing. The window
-    // rule, not a blanket match, keeps `feed` inert behind `lane`.
-    #[test]
-    fn wrapped_row_encoding_no_node_answers_nothing() {
         let g = graph(&[("x-ffff", "done")]);
         let e = entry("k-t-lane-feed-timeout", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node, None);
         assert_eq!(route.source, None);
         assert_eq!(route.work_state(&g.statuses), WorkState::NoProvenance);
-    }
 
-    // The pair arm keeps answering the census shapes it answered before
-    // the scan replaced the hard index.
-    #[test]
-    fn pair_arm_census_shapes_still_resolve() {
         let g = graph(&[("x-3333", "done"), ("x-4444", "done")]);
         let a = resolve(&entry("t-x-3333", None), "sid-none", &g, None);
         assert_eq!(a.node.as_deref(), Some("x-3333"));
@@ -722,19 +741,26 @@ mod tests {
         assert_eq!(b.node.as_deref(), Some("x-4444"));
     }
 
+    // AC2-HP: the blueprint wrapper shape resolves too, so the fix is not
+    // shaped to one wrapper.
+
+    // AC3-EDGE: the unwrapped path that already worked still resolves.
+
+    // AC4-EDGE: a wrapped row encoding no node answers nothing. The window
+    // rule, not a blanket match, keeps `feed` inert behind `lane`.
+
+    // The pair arm keeps answering the census shapes it answered before
+    // the scan replaced the hard index.
+
     // AC7-EDGE shape: no source resolves, nothing is invented.
     #[test]
-    fn no_source_resolves_to_no_provenance() {
+    fn verdict_rows() {
         let g = graph(&[("x-aaaa", "done")]);
         let e = entry("codex-turnend-probe", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route, NodeRoute::default());
         assert_eq!(route.work_state(&g.statuses), WorkState::NoProvenance);
-    }
 
-    // work_state maps the stored status, failing OPEN on a missing node.
-    #[test]
-    fn work_state_maps_status_and_fails_open() {
         let statuses = [("x-aaaa".to_string(), "done".to_string())]
             .into_iter()
             .collect();
@@ -757,81 +783,17 @@ mod tests {
         assert!(matches!(open.work_state(&statuses), WorkState::Open { .. }));
     }
 
+    // work_state maps the stored status, failing OPEN on a missing node.
+
     // A missing or unreadable transcript answers nothing and is not an error.
-    #[test]
-    fn unreadable_transcript_answers_nothing() {
-        let ids = ids_of(&[("x-aaaa", "done")]);
-        assert_eq!(
-            transcript_first(Some(&[PathBuf::from("/nonexistent/x")]), &ids),
-            None
-        );
-        assert_eq!(
-            transcript_last(Some(&[PathBuf::from("/nonexistent/x")]), &ids),
-            None
-        );
-        assert_eq!(transcript_first(None, &ids), None);
-    }
 
     // The newest naming line wins over the older line near the head.
-    #[test]
-    fn transcript_last_scans_back_over_messages() {
-        let tmp = std::env::temp_dir().join(format!("node-route-last-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_transcript(
-            &tmp,
-            &[
-                r#"{"type":"user","message":{"content":"first x-aaaa"}}"#,
-                r#"{"type":"assistant","message":{"content":"last word x-bbbb"}}"#,
-            ],
-        );
-        let ids = ids_of(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
-        assert_eq!(
-            transcript_last(Some(&[path]), &ids).as_deref(),
-            Some("x-bbbb")
-        );
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 
     // A naming line longer than one chunk spans the backward walk's
     // internal boundaries. The carried fragment must reassemble with the
     // next chunk's head, or the newest answer is lost to the older line
     // below it.
-    #[test]
-    fn a_line_spanning_chunks_still_answers() {
-        let tmp = std::env::temp_dir().join(format!("node-route-span-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let pad = "p".repeat(BACKWARD_CHUNK_BYTES as usize);
-        let big = String::from(r#"{"type":"assistant","message":{"content":"retasked to x-bbbb "#)
-            + &"q".repeat(BACKWARD_CHUNK_BYTES as usize * 3 / 2)
-            + r#""}}"#;
-        let path = write_transcript(
-            &tmp,
-            &[
-                r#"{"type":"user","message":{"content":"first x-aaaa"}}"#,
-                &pad,
-                &big,
-            ],
-        );
-        let ids = ids_of(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
-        assert_eq!(
-            transcript_last(Some(&[path]), &ids).as_deref(),
-            Some("x-bbbb")
-        );
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 
     // The cap is the valve for a transcript that names nothing: the walk
     // stops at the bound instead of reading the whole file.
-    #[test]
-    fn the_valve_stops_a_transcript_that_names_nothing() {
-        let tmp = std::env::temp_dir().join(format!("node-route-valve-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let blank = "q".repeat(1024);
-        let lines: Vec<String> = vec![blank; SCAN_LIMIT_BYTES as usize / 1024 * 9 / 8];
-        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let path = write_transcript(&tmp, &refs);
-        let ids = ids_of(&[("x-aaaa", "done")]);
-        assert_eq!(transcript_last(Some(&[path]), &ids), None);
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 }

@@ -227,10 +227,16 @@ fn retry_reads_a_marker_three_times_before_calling_it_absent() {
 
 #[test]
 fn the_watch_lease_answers_the_wait_for_ci_journey() {
-    // The control first: a harness the lease permits reads native.
-    assert_eq!(wait_for_ci_cell("claude"), ("native", String::new()));
-    // Every other harness reads absent with the refusal quoted.
-    for harness in ["codex", "opencode", "agy", "pi", "grok"] {
+    // Interactive harnesses with a daemon-routed wake read native.
+    for harness in ["claude", "codex", "opencode", "agy", "pi", "gemini"] {
+        assert_eq!(
+            wait_for_ci_cell(harness),
+            ("native", String::new()),
+            "{harness}"
+        );
+    }
+    // Unsupported harnesses read absent with the refusal quoted.
+    for harness in ["grok"] {
         let (state, refusal) = wait_for_ci_cell(harness);
         assert_eq!(state, "absent", "{harness}");
         assert!(

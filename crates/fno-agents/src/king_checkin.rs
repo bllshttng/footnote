@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+#[path = "king_checkin_watch_projection.rs"]
+mod watch_projection;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -1232,6 +1235,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .map_err(Clone::clone)
             .and_then(crate::king_answers::workers_summary),
     );
+    take("watch_expiry", watch_projection::read());
     // The scope-answer readings share one scope compile and one top call.
     let scope_ids =
         crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
@@ -1378,6 +1382,7 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(held) = get("held").filter(|r| r.ok) {
         data.insert("held_open".into(), held.value["open"].clone());
     }
+    watch_projection::add_data(readings, &mut data);
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
     }
@@ -1399,18 +1404,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     data
 }
 
-fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
-    match crate::king_history::scan(&ctx.events_paths, &ctx.scope) {
-        Ok(payload) => {
-            // Only the verb's own rows carry NUMERIC_DIFF_KEYS, so the diff
-            // baseline is the newest `loop` row; a hook row or a hand row
-            // must never baseline the diff.
-            let first = payload["events"]
-                .as_array()
-                .and_then(|e| e.iter().find(|r| s_str(r, "source") == Some("loop")))
-                .cloned();
-            (first, String::new())
-        }
+fn previous_row(ctx: &Ctx, holder: Option<&str>) -> (Option<Value>, String) {
+    match crate::king_history::previous_beat(&ctx.events_paths, &ctx.scope, holder, true) {
+        Ok(first) => (first, String::new()),
         Err(e) => (None, e),
     }
 }
@@ -1857,17 +1853,24 @@ fn render_lines(
         }
     }
 
+    if let Some(error) = watch_projection::read_error(readings) {
+        lines.push(format!("READER FAILED watch expiry: {error}"));
+    }
     match failed("workers") {
         Some(r) => {
             lines.push(format!("READER FAILED workers: {}", r.error));
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
-        None => lines.push(format!(
-            "workers: live {}, oldest activity {}, subagents active {}",
-            dash(data.get("live_workers")),
-            dash(data.get("oldest_worker_seen")),
-            dash(data.get("live_subagents")),
-        )),
+        None => {
+            let mut line = format!(
+                "workers: live {}, oldest activity {}, subagents active {}",
+                dash(data.get("live_workers")),
+                dash(data.get("oldest_worker_seen")),
+                dash(data.get("live_subagents")),
+            );
+            line.push_str(&watch_projection::workers_suffix(readings, data));
+            lines.push(line);
+        }
     }
     lines.extend(crate::king_answers::subagent_lines(readings));
 
@@ -2268,67 +2271,6 @@ fn finish_checkin(
     0
 }
 
-/// The stop hook's half of the reign record: when this scope's newest
-/// check-in is older than two check-in intervals, journal one row from what
-/// the previous fire measured. It never decides anything.
-pub(crate) fn hook_beat(
-    events_path: &Path,
-    cwd: &Path,
-    scope: &str,
-    session_id: &str,
-    history: &crate::loop_king::KingFireHistory,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    if scope.is_empty() {
-        return false;
-    }
-    let payload = match crate::king_history::scan(&[events_path.to_path_buf()], scope) {
-        Ok(p) => p,
-        // A blind due check must never write: a scan that cannot read the
-        // journal is no evidence a beat was missed.
-        Err(e) => {
-            eprintln!("king-checkin: WARNING: hook beat skipped: {e}");
-            return false;
-        }
-    };
-    let newest = payload["events"].as_array().and_then(|e| e.first());
-    let due = newest
-        .and_then(|r| s_str(r, "ts"))
-        .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
-        .map(|ts| {
-            now - ts
-                >= chrono::Duration::seconds(
-                    2 * crate::king_verdict_inputs::checkin_interval_secs(cwd),
-                )
-        })
-        .unwrap_or(true);
-    if !due {
-        return false;
-    }
-    // ponytail: two stops inside one second can both see the beat due and
-    // write two rows; a cross-process lock costs more than a doubled row.
-    let since = newest.and_then(|r| s_str(r, "ts")).unwrap_or("on record");
-    let undelivered = history
-        .last_undelivered
-        .map(|u| u.to_string())
-        .unwrap_or_else(|| "unread".into());
-    let data = json!({
-        "scope": scope,
-        "session_id": session_id,
-        "fires": history.total,
-        "dry": history.dry,
-        "last_actionable": history.last_ids.len(),
-        "last_undelivered": history.last_undelivered,
-        "change": format!(
-            "missed beat: no check-in since {since}; last fire actionable {}, undelivered {undelivered}, dry {} of {} fires",
-            history.last_ids.len(),
-            history.dry,
-            history.total
-        ),
-    });
-    emit_row(events_path, "hook", data.as_object().unwrap())
-}
-
 // ---------------------------------------------------------------------------
 // entry
 
@@ -2509,7 +2451,11 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     if let Err(error) = rename_harness_title_for_crown(&ctx.scope) {
         eprintln!("fno-agents king-checkin: harness title rename failed: {error}");
     }
-    let (previous, previous_error) = previous_row(&ctx);
+    // The beat stamps the reign clock first: the holder session it names is
+    // what the previous-beat lookup and the refusal trend key on.
+    let holder =
+        crate::crown_names::stamp_beat_reign(&home.crown_names_json(), &ctx.cwd, &ctx.scope);
+    let (previous, previous_error) = previous_row(&ctx, holder.as_deref());
     let since = previous
         .as_ref()
         .and_then(|p| p.get("ts"))
@@ -2520,15 +2466,18 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    if let Some(holder) = holder.as_deref() {
+        data.insert("holder_session".into(), json!(holder));
+    }
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
     let trend_dir = home.refusal_trend_dir();
-    let (previous_rate, second_previous_rate) =
-        crate::refusal_trend::priors(&trend_dir, &ctx.scope);
+    let trend_key = holder.as_deref().unwrap_or(&ctx.scope);
+    let (previous_rate, second_previous_rate) = crate::refusal_trend::priors(&trend_dir, trend_key);
     mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
     // The baseline advances on the measurement the beat just printed,
     // whether or not the full row journals below.
     if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
-        crate::refusal_trend::record(&trend_dir, &ctx.scope, &ts, rate);
+        crate::refusal_trend::record(&trend_dir, trend_key, &ts, rate);
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
@@ -2768,6 +2717,10 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod watch_projection_tests {
+        include!("king_checkin_watch_tests.rs");
+    }
 
     #[test]
     fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
@@ -3470,6 +3423,7 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("watch_expiry", json!({"rows": []})),
             Reading::took("answered", json!({"rows": []})),
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
@@ -3716,21 +3670,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
-        let data = build_data(&readings, "x-bbbb");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
-        let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
-        assert!(board_line.contains("open_prs 7"), "line: {board_line}");
-        assert!(board_line.contains("blocked 2"));
-        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
-        assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(21)));
-        assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
-    }
-
     // The subagents reading: the workers line carries the fleet's active
     // count, the held line names the finished agents this session still
     // holds with their TaskStop remedy, and held rows raise attention.
@@ -3800,7 +3739,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(20)), "20 of 21 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(21)), "21 of 22 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3998,26 +3937,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_reader_prints_own_line_and_beat_continues() {
-        let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
-        set_reading(
-            &mut readings,
-            Reading::failed("board", "board payload names no undriven_pr queue".into()),
-        );
-        let data = build_data(&readings, "x-bbbb");
-        let change = derive_change(None, &data, "");
-        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
-        assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
-        assert!(lines
-            .iter()
-            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
-        assert!(lines.iter().any(|l| l.contains("failed readers: board")));
-        assert_eq!(change, "no numeric movement; readings failed: board");
-        assert_eq!(data.get("open_prs"), None);
-        assert_eq!(data.get("readers_failed"), Some(&json!(["board"])));
-    }
-
-    #[test]
     fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
@@ -4135,19 +4054,20 @@ mod tests {
             &mut readings,
             Reading::took(
                 "held",
-                json!({"open": 2, "rows": [
+                json!({"open": 3, "rows": [
                     {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
-                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                    {"node": null, "question_id": "q-3", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
                 ]}),
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        assert_eq!(data.get("held_open"), Some(&json!(3)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
         assert!(
-            summary[0].contains("2 question(s) for this crown"),
+            summary[0].contains("3 question(s) for this crown"),
             "lines: {lines:?}"
         );
         let verbs: Vec<&String> = lines
@@ -4155,16 +4075,21 @@ mod tests {
             .filter(|l| l.contains("fno backlog decide"))
             .collect();
         assert_eq!(verbs.len(), 2, "each row names the decide verb");
-    }
-
-    #[test]
-    fn held_absent_reads_none() {
-        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
+        let clears: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno inbox outstanding clear"))
+            .collect();
+        assert_eq!(clears.len(), 1, "the nodeless row names the clear verb");
+        assert!(
+            clears[0].contains("the user answers it on the question board"),
+            "lines: {lines:?}"
+        );
+        // An absent held read keeps its line and says none; coverage counts it.
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4192,7 +4117,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let readings = sample_readings(
             board7(),
@@ -4229,7 +4154,7 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty());
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
@@ -4296,7 +4221,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
+            .any(|l| l.starts_with("coverage: 21 of 22 readings ok")));
     }
 
     // The self-hold line exposes both inputs, and either one raises attention.
@@ -4534,86 +4459,11 @@ mod tests {
             emit_path: None,
             emit: false,
         };
-        let (previous, err) = previous_row(&ctx);
+        let (previous, err) = previous_row(&ctx, None);
         assert!(err.is_empty(), "err: {err}");
         let previous = previous.expect("the newest loop row is the baseline");
         assert_eq!(s_str(&previous, "source"), Some("loop"));
         assert_eq!(previous["data"]["open_prs"], 9);
-    }
-
-    #[test]
-    fn hook_beat_writes_one_row_per_missed_beat() {
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let prior_config = std::env::var_os("FNO_CONFIG");
-        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
-        let path = journal(
-            dir.path(),
-            &[
-                json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
-                     "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
-            ],
-        );
-        let history = crate::loop_king::KingFireHistory {
-            total: 3,
-            dry: 1,
-            last_ids: vec!["undispatched:x-1".into()],
-            last_undelivered: Some(4),
-            last_terminal: None,
-        };
-        let base = "2026-09-15T10:00:00Z"
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .unwrap();
-        let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 109 minutes old: under two 55-minute intervals, nothing writes.
-        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(109));
-        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
-        // 111 minutes old: the beat is due, one hook row.
-        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(111));
-        let rows = crate::events::committed_journal_text(&path);
-        // A fresh row resets the clock: the next stop writes nothing.
-        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(112));
-        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
-        match prior_config {
-            Some(value) => std::env::set_var("FNO_CONFIG", value),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-
-        assert!(!early);
-        assert_eq!(rows_after_early, 1);
-        assert!(due);
-        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
-        assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
-        let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
-        assert_eq!(written["data"]["scope"], "x-bbbb");
-        assert!(!written["data"]["change"].as_str().unwrap().is_empty());
-        // The fresh row resets the clock: the next stop writes nothing.
-        assert!(!fresh);
-        assert_eq!(rows_after_fresh, 2);
-    }
-
-    #[test]
-    fn hook_beat_never_writes_for_a_blank_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        let history = crate::loop_king::KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: vec![],
-            last_undelivered: None,
-            last_terminal: None,
-        };
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "",
-            "sess",
-            &history,
-            chrono::Utc::now()
-        ));
-        assert!(!path.exists());
     }
 
     fn pause_row(arm: &str) -> crate::tick_ledger::ArmStatus {

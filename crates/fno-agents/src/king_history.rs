@@ -263,6 +263,117 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
     scan_scopes(events_paths, Some(scope))
 }
 
+/// The stop hook's half of the reign record: when this scope's newest
+/// check-in is older than two check-in intervals, journal one row from what
+/// the previous fire measured. It never decides anything.
+pub(crate) fn hook_beat(
+    events_path: &Path,
+    cwd: &Path,
+    scope: &str,
+    session_id: &str,
+    holder_session: Option<&str>,
+    history: &crate::loop_king::KingFireHistory,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if scope.is_empty() {
+        return false;
+    }
+    let payload = match crate::king_history::previous_beat(
+        &[events_path.to_path_buf()],
+        scope,
+        holder_session,
+        false,
+    ) {
+        Ok(p) => p,
+        // A blind due check must never write: a scan that cannot read the
+        // journal is no evidence a beat was missed.
+        Err(e) => {
+            eprintln!("king-checkin: WARNING: hook beat skipped: {e}");
+            return false;
+        }
+    };
+    let newest = payload
+        .as_ref()
+        .and_then(|r| r.get("ts"))
+        .and_then(Value::as_str);
+    let due = newest
+        .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        .map(|ts| {
+            now - ts
+                >= chrono::Duration::seconds(
+                    2 * crate::king_verdict_inputs::checkin_interval_secs(cwd),
+                )
+        })
+        .unwrap_or(true);
+    if !due {
+        return false;
+    }
+    // ponytail: two stops inside one second can both see the beat due and
+    // write two rows; a cross-process lock costs more than a doubled row.
+    let since = newest.unwrap_or("on record");
+    let undelivered = history
+        .last_undelivered
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "unread".into());
+    let data = json!({
+        "scope": scope,
+        "session_id": session_id,
+        "holder_session": holder_session,
+        "fires": history.total,
+        "dry": history.dry,
+        "last_actionable": history.last_ids.len(),
+        "last_undelivered": history.last_undelivered,
+        "change": format!(
+            "missed beat: no check-in since {since}; last fire actionable {}, undelivered {undelivered}, dry {} of {} fires",
+            history.last_ids.len(),
+            history.dry,
+            history.total
+        ),
+    });
+    crate::king_checkin::emit_row(events_path, "hook", data.as_object().unwrap())
+}
+
+/// The previous beat for this holder. With a session, the walk takes
+/// `scan_scopes(.., None)` newest-first across every scope and returns the
+/// first row whose `data.holder_session` names it (`source` restricted to
+/// `loop` when `loop_only`); without a session, or when none match, it
+/// returns today's result: the first such row of `scan(.., scope)`. Only
+/// the verb's own rows carry NUMERIC_DIFF_KEYS, so the diff baseline is
+/// the newest `loop` row; a hook row or a hand row must never baseline
+/// the diff.
+pub(crate) fn previous_beat(
+    events_paths: &[PathBuf],
+    scope: &str,
+    holder_session: Option<&str>,
+    loop_only: bool,
+) -> Result<Option<Value>, String> {
+    if let Some(session) = holder_session.filter(|s| !s.trim().is_empty()) {
+        let payload = scan_scopes(events_paths, None)?;
+        let found = payload["events"].as_array().and_then(|events| {
+            events.iter().find(|r| {
+                r.get("data")
+                    .and_then(|d| d.get("holder_session"))
+                    .and_then(Value::as_str)
+                    == Some(session)
+                    && (!loop_only || s_str(r, "source") == Some("loop"))
+            })
+        });
+        // No row of this holder yet (or pre-holder rows only): the scope's
+        // own newest row is the baseline, exactly the pre-holder read.
+        if let Some(row) = found {
+            return Ok(Some(row.clone()));
+        }
+    }
+    let payload = scan(events_paths, scope)?;
+    Ok(payload["events"]
+        .as_array()
+        .and_then(|e| {
+            e.iter()
+                .find(|r| !loop_only || s_str(r, "source") == Some("loop"))
+        })
+        .cloned())
+}
+
 fn render(payload: &Value) -> String {
     let mut lines: Vec<String> = Vec::new();
     for event in payload["events"].as_array().unwrap() {
@@ -836,12 +947,16 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     let checkin_interval_secs = inputs.checkin_interval_secs;
     let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
+    // The reign view: a re-scope carries the reign start and the declared
+    // term through the clock on the crown name record. The payload's
+    // `manifest` block below keeps the raw arm.
+    let reign = crate::crown_names::reign_view(&manifest);
     let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
     let crown_lineage = CrownLineage {
         inherited: inputs.crown_inherited,
         from_session: inputs.crown_from_session.clone(),
     };
-    let crown_start = manifest.created_at.clone().unwrap_or_default();
+    let crown_start = reign.created_at.clone().unwrap_or_default();
     let crown_start_ms: Option<i64> = chrono::DateTime::parse_from_rfc3339(&crown_start)
         .ok()
         .map(|dt| dt.timestamp_millis());
@@ -895,11 +1010,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         crown_age_secs,
     );
     let (compactions, compactions_source, compactions_error) =
-        compaction_reading(&manifest, &harness, readings.compactions);
+        compaction_reading(&reign, &harness, readings.compactions);
     readings.compactions = compactions;
     let term_transcript = if harness == "claude"
         && !harness_session_id.is_empty()
-        && manifest
+        && reign
             .term
             .as_deref()
             .is_some_and(|s| s.trim().starts_with("compactions:"))
@@ -911,7 +1026,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     } else {
         None
     };
-    let term_reading = crate::king_term::reading(&manifest, now, term_transcript.as_deref());
+    let term_reading = crate::king_term::reading(&reign, now, term_transcript.as_deref());
     let hygiene_transcript = hygiene_transcript_for_holder(&harness, &harness_session_id);
     let hygiene = hygiene_reading(
         &harness,
@@ -959,6 +1074,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             "value": b.value,
             "source": b.source,
         })),
+        "reign_started_at": reign.created_at,
         "term": term_reading_payload(&term_reading),
         "manifest": {
             "path": manifest_path.display().to_string(),
@@ -1033,7 +1149,7 @@ struct CrownLineage {
     from_session: Option<String>,
 }
 
-fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
     }
@@ -1774,10 +1890,32 @@ mod verdict_tests {
         // second take deadlocks (paths.rs note on declare_held).
         let (_pin, root, manifest, journal) =
             input_tree("[king]\ncheckin_interval = \"30m\"\ncompaction_ceiling = 3\n");
+        // AC1-HP: a clock in the declared agents home carries an earlier
+        // start and the declared term into the verdict read.
+        let store = crate::paths::AgentsHome::from_env().crown_names_json();
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(
+            &store,
+            json!({"version": 1, "crowns": {"x-bbbb": {
+                "name": "warden", "regnal": 1, "holder_session": "hs1",
+                "nodes": [], "updated_at": "2026-09-05T00:00:00Z",
+                "reign": {"session": "hs1", "scope": "x-old",
+                          "armed_at": "2026-09-10T00:00:00Z",
+                          "started_at": "2026-09-01T00:00:00Z",
+                          "term": "span:200h"}}}})
+            .to_string(),
+        )
+        .unwrap();
         assert_eq!(
             run_king_verdict(&verdict_args(&root, &manifest, &journal)),
             0
         );
+        let parsed =
+            crate::loopcheck::parse_king_manifest(&std::fs::read_to_string(&manifest).unwrap())
+                .unwrap();
+        let view = crate::crown_names::reign_view_in(&store, &parsed);
+        assert_eq!(view.created_at.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(view.term.as_deref(), Some("span:200h"));
     }
 
     #[test]
@@ -1867,6 +2005,103 @@ mod tests {
     }
 
     #[test]
+    fn hook_beat_never_writes_for_a_blank_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let history = crate::loop_king::KingFireHistory {
+            total: 0,
+            dry: 0,
+            last_ids: vec![],
+            last_undelivered: None,
+            last_terminal: None,
+        };
+        assert!(!hook_beat(
+            &path,
+            dir.path(),
+            "",
+            "sess",
+            None,
+            &history,
+            chrono::Utc::now()
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn hook_beat_writes_one_row_per_missed_beat() {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        let (dir, path) = journal(&[
+            json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
+                 "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
+        ]);
+        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
+        let history = crate::loop_king::KingFireHistory {
+            total: 3,
+            dry: 1,
+            last_ids: vec!["undispatched:x-1".into()],
+            last_undelivered: Some(4),
+            last_terminal: None,
+        };
+        let base = "2026-09-15T10:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let at = |mins: i64| base + chrono::Duration::minutes(mins);
+        // 109 minutes old: under two 55-minute intervals, nothing writes.
+        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", None, &history, at(109));
+        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
+        // 111 minutes old: the beat is due, one hook row.
+        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", None, &history, at(111));
+        let rows = crate::events::committed_journal_text(&path);
+        // A fresh row resets the clock: the next stop writes nothing.
+        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", None, &history, at(112));
+        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
+        // AC6-HP: a fresh beat under scope A by the same holder keeps scope
+        // B not due - the hook's due check walks by holder, not by scope.
+        let fresh_a_path = dir.path().join("events-a.jsonl");
+        std::fs::write(
+            &fresh_a_path,
+            format!(
+                "{}\n",
+                json!({"ts": format!("{at}", at = at(115).to_rfc3339()), "type": "reign_checkin",
+                     "source": "loop",
+                     "data": {"scope": "x-aaaa", "change": "beat", "holder_session": "sess"}})
+            ),
+        )
+        .unwrap();
+        let carried = hook_beat(
+            &fresh_a_path,
+            dir.path(),
+            "x-bbbb",
+            "sess",
+            Some("sess"),
+            &history,
+            at(116),
+        );
+        assert!(!carried, "the holder's fresh beat under A keeps B not due");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert!(!early);
+        assert_eq!(rows_after_early, 1);
+        assert!(due);
+        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
+        assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
+        let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
+        assert_eq!(written["data"]["scope"], "x-bbbb");
+        assert!(!written["data"]["change"].as_str().unwrap().is_empty());
+        // AC6-HP: the hook row carries the holder session it looked up by.
+        assert_eq!(written["data"]["holder_session"], json!(null));
+        // The fresh row resets the clock: the next stop writes nothing.
+        assert!(!fresh);
+        assert_eq!(rows_after_fresh, 2);
+    }
+
+    #[test]
     fn scope_optional_scan_returns_all_canonical_scopes_and_rejections() {
         let (_dir, path) = journal(&[
             checkin(
@@ -1892,6 +2127,28 @@ mod tests {
             .filter_map(|event| event["data"]["scope"].as_str())
             .collect();
         assert_eq!(scopes, ["x-bbbb", "fno"]);
+        // AC2-HP: the check-in's previous-beat lookup crosses the re-scope:
+        // a loop row under A carrying the holder's session is the baseline
+        // B reads, so "vs last beat" names A's ts.
+        let (_adir, apath) = journal(&[checkin(
+            "2026-09-10T08:00:00Z",
+            json!({"scope": "x-aaaa", "change": "beat on A", "holder_session": "sess-k"}),
+        )]);
+        let beat = previous_beat(std::slice::from_ref(&apath), "x-bbbb", Some("sess-k"), true)
+            .unwrap()
+            .expect("the holder's row under A is the baseline for B");
+        assert_eq!(beat["data"]["scope"], json!("x-aaaa"));
+        assert_eq!(beat["ts"], json!("2026-09-10T08:00:00Z"));
+        // AC5-EDGE: rows journalled before this change carry no
+        // holder_session; the lookup falls back to the scope's own newest
+        // loop row, exactly the pre-holder read.
+        let fallback = previous_beat(std::slice::from_ref(&path), "x-bbbb", Some("sess-x"), true)
+            .unwrap()
+            .map(|r| r["data"]["scope"].clone());
+        assert_eq!(fallback, Some(json!("x-bbbb")));
+        let none =
+            previous_beat(std::slice::from_ref(&apath), "x-bbbb", Some("sess-x"), true).unwrap();
+        assert_eq!(none, None);
     }
 
     #[test]
@@ -2122,7 +2379,16 @@ mod tests {
         // -J is accepted, then the normal required-args validation runs.
         assert_eq!(run_king_history(&args), 0);
         // Missing required args refuse with usage (2), never "unknown flag".
-        assert_eq!(run_king_history(&["-J".to_string()]), 2);
+        // --scope keeps the assert off the registry resolve, which refuses
+        // an undeclared test home instead of answering.
+        assert_eq!(
+            run_king_history(&[
+                "-J".to_string(),
+                "--scope".to_string(),
+                "x-aaaa".to_string()
+            ]),
+            2
+        );
     }
 
     #[test]
