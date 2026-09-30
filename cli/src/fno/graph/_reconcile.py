@@ -1454,7 +1454,7 @@ def query_pr_merge_state(
                 "row": {"info": info, **({"files": changed_files} if include_files else {})},
             },
         )
-        return PrMergeState(
+    return PrMergeState(
         number=number,
         state=state,
         url=info.get("url"),
