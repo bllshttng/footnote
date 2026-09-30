@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_rows() {
+    fn targeted_loop_pause_holds_a_due_nudge() {
         let tmp = tempfile::tempdir().unwrap();
         let home = AgentsHome::at(tmp.path());
         let row = row(false);
@@ -1057,7 +1057,10 @@ mod tests {
         });
         assert_eq!(planned[0].1, "paused");
         assert!(!status_read, "a held nudge skips the PR-status read");
+    }
 
+    #[test]
+    fn pause_after_a_durable_nudge_preserves_its_delivery_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let home = AgentsHome::at(tmp.path());
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
