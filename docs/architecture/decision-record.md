@@ -107,7 +107,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide`. Only the `operator` authority refuses an agent session there, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
-The one exception is the question clear door: `fno inbox outstanding clear` refuses every agent session on a question asked of the user, except a crown on its own ask with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
+The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A crown can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
