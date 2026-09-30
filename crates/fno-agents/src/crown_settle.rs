@@ -286,7 +286,7 @@ fn plan_with_projects(
             "scope {scope:?} overlaps territory held by live row(s) {listed}. Two live \
              crowns would rule the same members, so this spawn refuses before launch. \
              --succeed hands down only an identical crown, never part of a wider or \
-             overlapping one. Re-scope the holder (fno agents crown {first} --scope \
+             overlapping one. Re-scope the holder (fno agents org promote {first} --scope \
              <other territory>), run fno agents reconcile if it looks dead, or fno \
              agents stop {first}, then retry."
         );
@@ -341,8 +341,8 @@ fn plan_with_projects(
         ),
         Caller::Agent(_) => format!(
             "scope {scope:?} is held by live row(s) {holders:?}, not by this session, so \
-             this session cannot hand it down. Only the holder (spawn --crown --succeed \
-             from its own session) or an attended shell (spawn --crown --succeed) can \
+             this session cannot hand it down. Only the holder (spawn --promote --succeed \
+             from its own session) or an attended shell (spawn --promote --succeed) can \
              transfer it."
         ),
     };
@@ -454,10 +454,52 @@ fn apply_with_projects(
     } else {
         ("granted", Vec::new())
     };
+    // Succession re-homes the court: every live child whose CURRENT owner
+    // (the provenance owner, else the birth edge on a pre-v33 row) names a
+    // vacated holder's session follows the crown to the heir. The birth edge
+    // itself stays history - ownership is what the sideline reads.
+    let vacated_sessions: HashSet<String> = if outcome == "succeeded" {
+        occupancy
+            .holders
+            .iter()
+            .filter(|holder| planned_vacate.contains(holder.name.as_str()))
+            .filter_map(|holder| holder.session.as_deref().map(str::to_ascii_lowercase))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let reown_rows: Vec<usize> = if vacated_sessions.is_empty() {
+        Vec::new()
+    } else {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                let status = row.get("status").and_then(Value::as_str).unwrap_or("");
+                if TERMINAL_STATUSES.contains(&status) {
+                    return false;
+                }
+                if Some(row.get("name").and_then(Value::as_str).unwrap_or("")) == exclude_name {
+                    return false;
+                }
+                let owner = row
+                    .get("spawn_provenance")
+                    .and_then(|p| p.get("owner"))
+                    .and_then(|o| o.get("session_id"))
+                    .and_then(Value::as_str)
+                    .or_else(|| row.get("spawned_by_session").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_ascii_lowercase);
+                owner.is_some_and(|o| vacated_sessions.contains(&o))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    };
     Ok(json!({
         "outcome": outcome,
         "clear_terminal_rows": clear_terminal_rows,
         "vacate_rows": vacate_rows,
+        "reown_rows": reown_rows,
     }))
 }
 
@@ -576,24 +618,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_over_a_scope_it_does_not_hold_declines() {
-        let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
-            "caller": {"kind": "agent", "name": "other"},
-            "rows": [row("king-a", "fno", "busy")],
-        }))
-        .unwrap();
-        assert_eq!(out["outcome"], "declined");
-        let refusal = out["refusal"].as_str().unwrap();
-        assert!(refusal.contains("king-a"));
-        assert!(refusal.contains("--succeed"));
-    }
-
-    #[test]
     fn agent_succession_over_a_multi_holder_scope_declines() {
         // holders = ["king-a", "king-b"]; the caller matches one but not all,
         // so succession must fall through to the ordinary decline rather
-        // than succeeding a partial match.
+        // than succeeding a partial match. The refusal names the holder and
+        // the --succeed flag, the same fall-through arm a scope the caller
+        // does not hold at all takes.
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": true,
             "caller": {"kind": "agent", "name": "king-a"},
@@ -602,6 +632,9 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "declined");
         assert_eq!(out["vacate"], json!([]));
+        let refusal = out["refusal"].as_str().unwrap();
+        assert!(refusal.contains("king-a"));
+        assert!(refusal.contains("--succeed"));
     }
 
     #[test]
@@ -785,21 +818,39 @@ mod tests {
     }
 
     #[test]
-    fn apply_vacates_a_holder_with_the_same_session() {
+    fn apply_reowns_the_predecessors_live_children_on_succession() {
+        // Succession re-homes the court. A live child whose CURRENT
+        // owner (the provenance owner, else the birth edge on a pre-v33 row)
+        // names a vacated holder's session follows the crown; a child already
+        // owned by another session stays put; a terminal row never moves.
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "epic-a",
-            "caller": {"kind": "human"},
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "king-a", "harness_session_id": "sess-a"}],
                 "outcome": "succeeded", "vacate": ["king-a"],
             },
-            "rows": [{"name": "king-a", "crown_scope": "epic-a", "status": "busy",
-                      "harness_session_id": "sess-a"}],
+            "rows": [
+                {"name": "king-a", "crown_scope": "epic-a", "status": "busy",
+                 "harness_session_id": "sess-a"},
+                {"name": "w5", "status": "busy",
+                 "spawned_by_session": "sess-a",
+                 "spawn_provenance": {"owner": {"kind": "session",
+                                                "session_id": "sess-a"}}},
+                {"name": "elsewhere", "status": "busy",
+                 "spawned_by_session": "sess-a",
+                 "spawn_provenance": {"owner": {"kind": "session",
+                                                "session_id": "sess-other"}}},
+                {"name": "legacy", "status": "busy",
+                 "spawned_by_session": "sess-a"},
+                {"name": "corpse", "status": "exited",
+                 "spawned_by_session": "sess-a"}
+            ],
         }))
         .unwrap();
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate_rows"], json!([0]));
+        assert_eq!(out["reown_rows"], json!([1, 3]));
     }
 
     #[test]

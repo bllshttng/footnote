@@ -1339,10 +1339,11 @@ impl Core {
     /// agent-view arrow) without fno learning it, so the seat's stored row
     /// goes stale. Every 1s tick: a title naming one free row repoints
     /// `row_key`, `attached` and the pane name to it; a title naming no
-    /// single free row drops the claim, so no row wears a seat that shows
-    /// something else. Only claude viewer seats are followed (`entry.cmd`
-    /// gates on the attach program), and a title naming a row another
-    /// portal shows never steals it.
+    /// single free row drops the claim and relabels via
+    /// [`Self::follow_unclaimed_title`], so the border never keeps a stale
+    /// row name. Only claude viewer seats are followed
+    /// (`entry.cmd` gates on the attach program), and a title naming a row
+    /// another portal claims never steals it.
     pub(super) fn follow_portal_viewer_titles(&mut self) {
         let viewer_cmd = cmd_from_argv(&attach_base(""));
         let candidates: Vec<(u8, u64, String)> = self
@@ -1382,13 +1383,9 @@ impl Core {
                 }),
                 _ => None,
             };
-            // Skip when the seat already agrees: the one row the title names
-            // is the seated row with the attach mapping in place, or an
-            // The channel only ever holds a key a row answered: a title
-            // that names no single free row drops the attach claim and
-            // leaves the channel and the pane name alone.
             let Some(id) = claim else {
                 self.attached.retain(|_, p| *p != seat);
+                changed |= self.follow_unclaimed_title(idx, seat, &title);
                 continue;
             };
             // Skip when the seat already agrees: the one row the title
@@ -1412,6 +1409,63 @@ impl Core {
         if changed {
             self.push_layout(true);
         }
+    }
+
+    /// The label half of the follow: the screen names `title`, so
+    /// the border always names it marked unclaimed, and the channel follows
+    /// the title when exactly one live row answers it by name and no other
+    /// portal holds its attach claim - the sideline marks what the viewer
+    /// shows. Any other title (ambiguous, unknown, claimed elsewhere) is
+    /// stored marked, deepened until no live row answers it, so no row wears
+    /// this seat and a claimant elsewhere stays unpoisoned. A portal is a TV
+    /// and every row is a channel: the label never keeps a stale row.
+    fn follow_unclaimed_title(&mut self, idx: u8, seat: u64, title: &str) -> bool {
+        let live_named: Vec<&RegistryAgent> = self
+            .agents
+            .iter()
+            .filter(|a| !a.exited && a.name == title)
+            .collect();
+        let claimed_elsewhere = match live_named.as_slice() {
+            [row] => row
+                .attach_id
+                .as_deref()
+                .is_some_and(|id| match self.attached.get(id) {
+                    Some(p) => *p != seat && self.panes.contains_key(p),
+                    None => false,
+                }),
+            _ => false,
+        };
+        let marked = format!("{title}?");
+        let key = if live_named.len() == 1 && !claimed_elsewhere {
+            title.to_string()
+        } else {
+            // The marked key must answer no row: the mark exists so nothing
+            // wears the seat. A row coincidentally named into the marked
+            // form pushes the mark one character deeper.
+            let mut key = marked.clone();
+            while self
+                .agents
+                .iter()
+                .any(|a| !a.exited && row_answers_key(a, &key))
+            {
+                key.push('?');
+            }
+            key
+        };
+        let mut changed = false;
+        let portal = self.portals.get_mut(&idx).expect("candidate idx");
+        if portal.row_key != key {
+            portal.row_key = key;
+            changed = true;
+        }
+        if let Some(entry) = self.panes.get_mut(&seat) {
+            if entry.name.as_deref() != Some(marked.as_str()) {
+                entry.name = Some(marked);
+                changed = true;
+                self.notice_all(format!("portal {idx} now shows {title} (unclaimed)"));
+            }
+        }
+        changed
     }
 
     /// One-row-one-viewer, shared by the reach and the landed check: the

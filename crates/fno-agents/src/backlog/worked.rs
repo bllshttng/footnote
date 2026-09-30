@@ -878,7 +878,9 @@ fn admit(workers: &mut Vec<String>, name: &str, verdict: &str) {
 /// Open-phase nodes whose roster workers are live: the strict fold. An
 /// unreadable roster refuses (the caller renders the named refusal); the
 /// transcript listing is built once and shared across every resolution.
-fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>, String> {
+pub(crate) fn live_worked_node_ids(
+    entries: &[Value],
+) -> Result<Vec<(String, Vec<String>)>, String> {
     if !entries.iter().any(|e| !terminal_entry(e)) {
         return Ok(Vec::new());
     }
@@ -959,6 +961,57 @@ fn live_worked_node_ids(entries: &[Value]) -> Result<Vec<(String, Vec<String>)>,
 // The verb
 // ---------------------------------------------------------------------------
 
+/// The strict authority both spellings serve: the graph rows and the
+/// worked fold over them. Strict, like the python twin's
+/// read_graph_strict: a corrupt graph is an unreadable authority, never
+/// an empty fleet.
+fn authority() -> Result<(Vec<Value>, Vec<(String, Vec<String>)>), String> {
+    let graph = super::settings::graph_path();
+    let entries = crate::graph_store::read_rows_strict(&graph)
+        .map_err(|_| "the graph is unreadable".to_string())?;
+    let worked = live_worked_node_ids(&entries)?;
+    Ok((entries, worked))
+}
+
+/// The `--json` rows, in-process: the same payload `run --json` prints,
+/// without a process. The king board reads this directly because the Python
+/// worked leg is a refusing tombstone.
+pub(crate) fn json_rows() -> Result<Vec<Value>, String> {
+    let (entries, worked) = authority()?;
+    let by_id: BTreeMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
+        .collect();
+    Ok(worked
+        .iter()
+        .map(|(id, workers)| {
+            let entry = by_id.get(id.as_str()).copied();
+            let mut phases: Vec<&str> = Vec::new();
+            if let Some(sessions) = entry
+                .and_then(|e| e.get("sessions"))
+                .and_then(Value::as_array)
+            {
+                for row in sessions {
+                    let Some(phase) = row.get("phase").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if is_open_phase_row(row, phase) && !phases.contains(&phase) {
+                        phases.push(phase);
+                    }
+                }
+            }
+            json!({
+                "id": id,
+                "status": entry
+                    .and_then(|e| e.get("status").and_then(Value::as_str))
+                    .unwrap_or("unknown"),
+                "workers": workers,
+                "phases": phases,
+            })
+        })
+        .collect())
+}
+
 pub fn run(args: &[String]) -> i32 {
     let mut json_output = false;
     for arg in args {
@@ -974,15 +1027,23 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
     }
-    let graph = super::settings::graph_path();
-    // Strict, like the python twin's read_graph_strict: a corrupt graph is
-    // an unreadable authority (exit 1), never an empty fleet.
-    let Ok(entries) = crate::graph_store::read_rows_strict(&graph) else {
-        eprintln!("Error: worked authority unavailable: the graph is unreadable");
-        return 1;
-    };
-    let worked = match live_worked_node_ids(&entries) {
-        Ok(worked) => worked,
+    if json_output {
+        return match json_rows() {
+            Ok(rows) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+                );
+                0
+            }
+            Err(reason) => {
+                eprintln!("Error: worked authority unavailable: {reason}");
+                1
+            }
+        };
+    }
+    let (entries, worked) = match authority() {
+        Ok(pair) => pair,
         Err(reason) => {
             eprintln!("Error: worked authority unavailable: {reason}");
             return 1;
@@ -993,41 +1054,6 @@ pub fn run(args: &[String]) -> i32 {
         .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
         .collect();
 
-    if json_output {
-        let rows: Vec<Value> = worked
-            .iter()
-            .map(|(id, workers)| {
-                let entry = by_id.get(id.as_str()).copied();
-                let mut phases: Vec<&str> = Vec::new();
-                if let Some(sessions) = entry
-                    .and_then(|e| e.get("sessions"))
-                    .and_then(Value::as_array)
-                {
-                    for row in sessions {
-                        let Some(phase) = row.get("phase").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        if is_open_phase_row(row, phase) && !phases.contains(&phase) {
-                            phases.push(phase);
-                        }
-                    }
-                }
-                json!({
-                    "id": id,
-                    "status": entry
-                        .and_then(|e| e.get("status").and_then(Value::as_str))
-                        .unwrap_or("unknown"),
-                    "workers": workers,
-                    "phases": phases,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-        );
-        return 0;
-    }
     for (id, workers) in &worked {
         println!(
             "{id}  {}  {}",

@@ -95,7 +95,7 @@ pub(crate) fn project_from_detail(detail: &str) -> Option<&str> {
         .filter(|project| *project != "-")
 }
 
-fn enrich_next(mut node: Value, fno_py: &OsStr) -> Result<Value, String> {
+fn enrich_next(mut node: Value, door_exe: &OsStr) -> Result<Value, String> {
     let Some(object) = node.as_object_mut() else {
         return Err("fno backlog next returned an unexpected shape".to_string());
     };
@@ -115,7 +115,7 @@ fn enrich_next(mut node: Value, fno_py: &OsStr) -> Result<Value, String> {
     }
     let output = crate::bounded_cmd::output_with_timeout_result(
         {
-            let mut command = Command::new(fno_py);
+            let mut command = Command::new(door_exe);
             command.args(["backlog", "get", id]);
             command
         },
@@ -136,9 +136,9 @@ fn enrich_next(mut node: Value, fno_py: &OsStr) -> Result<Value, String> {
     Ok(node)
 }
 
-pub fn select_read(kind: Kind, args: &[String], fno_py: &OsStr, bound_s: u64) -> Receipt {
+pub fn select_read(kind: Kind, args: &[String], door_exe: &OsStr, bound_s: u64) -> Receipt {
     let started = Instant::now();
-    let mut cmd = Command::new(fno_py);
+    let mut cmd = Command::new(door_exe);
     match kind {
         Kind::Next => {
             cmd.args(["backlog", "next"]);
@@ -255,7 +255,7 @@ pub fn select_read(kind: Kind, args: &[String], fno_py: &OsStr, bound_s: u64) ->
     };
     let answer = match kind {
         Kind::Next if parsed.is_null() => parsed,
-        Kind::Next => match enrich_next(parsed, fno_py) {
+        Kind::Next => match enrich_next(parsed, door_exe) {
             Ok(node) => node,
             Err(detail) => {
                 return receipt(
@@ -353,8 +353,14 @@ pub fn run(args: &[String]) -> i32 {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let bound_s = crate::agents_config::auto_continue_select_timeout_s(&cwd);
-    let fno_py: OsString = crate::scrape::fno_py();
-    let receipt = select_read(kind, &forwarded, &fno_py, bound_s);
+    // The next/undispatched doors are native and live in THIS binary:
+    // self-exec beats any front-door resolver (a smoke or CI shard ships
+    // fno-agents with no `fno` sibling, and declared-only stays the test
+    // rule). The fallthrough keeps a resolver for exotic exec layouts.
+    let door_exe: OsString = std::env::current_exe()
+        .map(|path| path.into_os_string())
+        .unwrap_or_else(|_| crate::scrape::fno_bin());
+    let receipt = select_read(kind, &forwarded, &door_exe, bound_s);
     match serde_json::to_string(&receipt) {
         Ok(json) => {
             println!("{json}");

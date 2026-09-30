@@ -644,7 +644,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
 # King work walks the crown slot whichever verb opens its seed.
-_CROWN_VERBS = frozenset({"reign", "fno-me"})
+_CROWN_VERBS = frozenset({"lead", "reign", "fno-me"})
 
 # The one built-in answer to "what permission mode does an unattended worker
 # get". Formerly config.agents.spawn_permission_mode's default; a constant now,

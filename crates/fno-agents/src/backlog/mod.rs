@@ -24,6 +24,7 @@ pub mod get_cli;
 pub mod idea_cap;
 pub(crate) mod merge_evidence;
 pub mod model;
+pub mod next;
 pub mod node_ref;
 pub mod node_state;
 pub mod nodes;
@@ -48,6 +49,7 @@ pub mod sessions;
 pub mod settings;
 pub mod style_check;
 pub mod title_gate;
+pub mod undispatched;
 pub mod update_cli;
 pub mod worked;
 pub mod workflows;
@@ -58,9 +60,11 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The schema stamp the import writes after the blob `entries` table is
-/// dropped. Schema 4 (see schema_v4.rs) is the shape every table is born in.
+/// Schema 4 (see schema_v4.rs) is the shape every table is born in.
 pub const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION_NUMBER: u32 = 4;
+const OPEN_SETUP_VERSION: &str = "1";
+const OPEN_SETUP_VERSION_NUMBER: u32 = 1;
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -264,6 +268,12 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        .map_err(|error| error.to_string())?;
+    if !schema_needs_ensure(&connection)? {
+        return Ok(connection);
+    }
     // First opens of a new file race to switch it to WAL. Each upgrades a
     // read lock, and SQLite answers the loser busy at once, with no busy
     // handler, since waiting could deadlock. The loser goes on without
@@ -276,7 +286,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         outcome => outcome.map_err(|error| error.to_string())?,
     }
     connection
-        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        .execute_batch("PRAGMA synchronous=FULL;")
         .map_err(|error| error.to_string())?;
     connection
         .execute_batch(&graph_meta_ddl())
@@ -298,6 +308,59 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     retire_graph_json(&connection, graph)?;
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
+    stamp_meta(&connection, "open_setup_version", OPEN_SETUP_VERSION)?;
+    Ok(connection)
+}
+
+fn schema_needs_ensure(connection: &Connection) -> Result<bool, String> {
+    let versions = connection.query_row(
+        "SELECT
+             (SELECT value FROM graph_meta WHERE key = 'schema_version'),
+             (SELECT value FROM graph_meta WHERE key = 'open_setup_version')",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    );
+    let (schema, setup) = match versions {
+        Ok(versions) => versions,
+        Err(error) if error.to_string().contains("no such table") => return Ok(true),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(version_is_below(schema, SCHEMA_VERSION_NUMBER)
+        || version_is_below(setup, OPEN_SETUP_VERSION_NUMBER))
+}
+
+fn version_is_below(version: Option<String>, expected: u32) -> bool {
+    version
+        .and_then(|value| value.parse::<u32>().ok())
+        .map_or(true, |version| version < expected)
+}
+
+fn read_connection(graph: &Path) -> Result<Connection, String> {
+    crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
+    let path = database_path(graph);
+    if path.exists() {
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        if !schema_needs_ensure(&connection)? {
+            return Ok(connection);
+        }
+        drop(connection);
+    }
+    drop(open(graph)?);
+    let connection = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
     Ok(connection)
 }
 
@@ -722,7 +785,7 @@ pub fn rendered_version(graph: &Path) -> Result<Option<String>, String> {
     if !database_path(graph).exists() {
         return Ok(None);
     }
-    let connection = open(graph)?;
+    let connection = read_connection(graph)?;
     meta(&connection, "rendered_version")
 }
 
@@ -1142,7 +1205,7 @@ pub(crate) fn write_changed(
 /// Every stored node, in ordinal order, as its canonical JSON row. This is
 /// the relational export the parity compare reads.
 pub fn read_entries(graph: &Path) -> Result<Vec<Value>, String> {
-    let connection = open(graph)?;
+    let connection = read_connection(graph)?;
     export_rows(&connection)
 }
 
@@ -1154,7 +1217,7 @@ pub fn read_entries(graph: &Path) -> Result<Vec<Value>, String> {
 /// filter here is safe (STATUS_MIGRATION never produces `done` or
 /// `superseded`, and the readiness overlay passes both through).
 pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, String> {
-    let connection = open(graph)?;
+    let connection = read_connection(graph)?;
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| error.to_string())?;
@@ -1305,12 +1368,12 @@ pub fn row_versions(
     graph: &Path,
     ids: Option<&[&str]>,
 ) -> Result<std::collections::BTreeMap<String, i64>, String> {
-    let connection = open(graph)?;
+    let connection = read_connection(graph)?;
     nodes::versions(&connection, ids)
 }
 
 pub fn version(graph: &Path) -> Result<String, String> {
-    let connection = open(graph)?;
+    let connection = read_connection(graph)?;
     meta(&connection, "version")?.ok_or_else(|| "SQLite graph has no version".into())
 }
 
@@ -1470,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn backlog_schema_import_on_first_open_keeps_fixture_graphs_working() {
+    fn backlog_schema_import_keeps_fixtures_working_and_reads_pass_a_writer() {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let entries = read_entries(&graph).unwrap();
@@ -1492,6 +1555,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
+
+        let started = std::time::Instant::now();
+        connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let entries = read_entries(&graph).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!entries.is_empty());
+        connection.execute_batch("ROLLBACK;").unwrap();
     }
 
     #[test]
@@ -1507,7 +1577,8 @@ mod tests {
                  INSERT INTO entries VALUES ('ab-old', 0, '{\"id\": \"ab-old\",
                      \"slug\": \"old\", \"title\": \"Old\", \"type\": \"feature\",
                      \"status\": \"done\", \"priority\": \"p2\", \"domain\": \"code\",
-                     \"created_at\": \"2026-09-01T00:00:00+00:00\"}');",
+                     \"created_at\": \"2026-09-01T00:00:00+00:00\"}');
+                 DELETE FROM graph_meta WHERE key = 'open_setup_version';",
             )
             .unwrap();
         drop(connection);

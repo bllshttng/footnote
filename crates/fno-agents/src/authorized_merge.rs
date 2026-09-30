@@ -3364,87 +3364,94 @@ mod tests {
 
     #[test]
     fn ci_base_verdict_reads_each_branch() {
-    let runs = vec![
-        ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-        ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-        ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-    ];
-    assert_eq!(
-        ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-        ProbeOutcome::Clear
-    );
-    let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
-    assert_eq!(
-        ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
-        ProbeOutcome::Clear
-    );
-    assert_eq!(
-        ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
-        ProbeOutcome::Clear
-    );
-    let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
-    assert!(matches!(
-        ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-        ProbeOutcome::Inconclusive(_)
-    ));
-
+        let runs = (0..8)
+            .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
+            .collect::<Vec<_>>();
+        let outcome = ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs);
+        assert!(
+            matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
+        );
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Clear
+        );
+        let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
+        assert_eq!(
+            ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Clear
+        );
+        assert_eq!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
+            ProbeOutcome::Clear
+        );
+        let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
+        assert!(matches!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Inconclusive(_)
+        ));
+    }
 
     #[test]
     fn oldest_current_run_reads_each_branch() {
-    let runs = vec![
-        ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-        ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-        ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-    ];
-    assert_eq!(
-        oldest_current_run(&runs),
-        Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
-    );
-    assert_eq!(oldest_current_run(&[]), None);
-
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            oldest_current_run(&runs),
+            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
+        );
+        assert_eq!(oldest_current_run(&[]), None);
+    }
 
     #[test]
     fn stale_overlap_verdict_reads_each_branch() {
-    let outcome = stale_overlap_verdict(
-        "ci_base_stale: old run".to_string(),
-        2094,
-        Ok(crate::merge_gates::StaleOverlap {
-            ci_base_sha: "abcdefgé".to_string(),
-            landed: 1,
-            shared: Vec::new(),
-        }),
-    );
-    assert_eq!(outcome, ProbeOutcome::Clear);
-    let outcome = stale_overlap_verdict(
-        "ci_base_stale: old run".to_string(),
-        8,
-        Ok(crate::merge_gates::StaleOverlap {
-            ci_base_sha: "abcdef123456".to_string(),
-            landed: 5,
-            shared: vec![
-                "docs/guide.md".to_string(),
-                "hooks/a.json".to_string(),
-                "hooks/b.json".to_string(),
-                "hooks/c.json".to_string(),
-            ],
-        }),
-    );
-    assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdefgé".to_string(),
+                landed: 1,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 5,
+                shared: vec![
+                    "docs/guide.md".to_string(),
+                    "hooks/a.json".to_string(),
+                    "hooks/b.json".to_string(),
+                    "hooks/c.json".to_string(),
+                ],
+            }),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
         if reason.starts_with("ci_base_stale")
             && reason.contains("docs/guide.md")
             && reason.contains("hooks/a.json")
             && reason.contains("hooks/b.json")
             && reason.contains("and 1 more")
             && !reason.contains("hooks/c.json")));
-    let outcome = stale_overlap_verdict(
-        "ci_base_stale: old run".to_string(),
-        8,
-        Err("fetch failed".to_string()),
-    );
-    assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Err("fetch failed".to_string()),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
         if reason.starts_with("ci_base_stale")
             && reason.contains("file overlap unreadable (fetch failed)")));
-
+    }
 
     #[test]
     fn a_stale_ci_base_holds_a_checked_merge_with_a_remedy() {
@@ -3490,23 +3497,23 @@ mod tests {
 
     #[test]
     fn ci_base_freshness_gates_the_chain() {
-    let fake = Fake {
-        ci_base: Some(ProbeOutcome::Inconclusive("gh unavailable".to_string())),
-        ..clean()
-    };
-    let mut req = request(Effect::Merge);
-    req.require_checks = true;
-    assert_eq!(run(&fake, &req).word(), "merged");
-    let fake = Fake {
-        ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
-        fresh_ci: Some(false),
-        ..clean()
-    };
-    let mut req = request(Effect::Merge);
-    req.require_checks = true;
-    assert_eq!(run(&fake, &req).word(), "merged");
-    assert_eq!(*fake.ci_base_calls.borrow(), 0);
-
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Inconclusive("gh unavailable".to_string())),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        assert_eq!(run(&fake, &req).word(), "merged");
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+            fresh_ci: Some(false),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        assert_eq!(run(&fake, &req).word(), "merged");
+        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    }
 
     #[test]
     fn an_unbound_pr_refuses_both_effects_and_calls_no_gh() {
@@ -3966,32 +3973,32 @@ mod tests {
 
     #[test]
     fn a_ruleset_hold_holds() {
-    // The door fetched the hold's own name moments before `gh pr merge`
-    // and used to spend a failure on it. Held, not Failed: a required
-    // check that is merely pending still arrives.
-    let fake = Fake {
-        checks: Some("green".to_string()),
-        github_block: Some("smoke".to_string()),
-        ..clean()
-    };
-    let mut req = request(Effect::Merge);
-    req.require_checks = true;
-    let outcome = run(&fake, &req);
-    assert_eq!(outcome.word(), "held");
-    assert!(outcome.detail().contains("smoke"));
-    assert!(fake.gh_calls.borrow().is_empty());
-    // A ruleset hold is not a question about CI greenness. A door gated on
-    // the flag would attempt the bypass its own reader just refused.
-    let fake = Fake {
-        github_block: Some("stacked-base-guard".to_string()),
-        ..clean()
-    };
-    let req = request(Effect::Merge);
-    assert_eq!(req.require_checks, false);
-    let outcome = run(&fake, &req);
-    assert_eq!(outcome.word(), "held");
-    assert!(outcome.detail().contains("stacked-base-guard"));
-
+        // The door fetched the hold's own name moments before `gh pr merge`
+        // and used to spend a failure on it. Held, not Failed: a required
+        // check that is merely pending still arrives.
+        let fake = Fake {
+            checks: Some("green".to_string()),
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("smoke"));
+        assert!(fake.gh_calls.borrow().is_empty());
+        // A ruleset hold is not a question about CI greenness. A door gated on
+        // the flag would attempt the bypass its own reader just refused.
+        let fake = Fake {
+            github_block: Some("stacked-base-guard".to_string()),
+            ..clean()
+        };
+        let req = request(Effect::Merge);
+        assert_eq!(req.require_checks, false);
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("stacked-base-guard"));
+    }
 
     #[test]
     fn an_arm_effect_proceeds_past_a_ruleset_hold_to_the_queue() {

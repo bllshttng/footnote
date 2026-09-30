@@ -135,8 +135,9 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
-    /// Legacy wire field; the sideline uses the king's registry label instead.
-    pub crown_name: Option<String>,
+    /// (v94) The role's people title read from crown_names.json; None when
+    /// the store has none.
+    pub crown_title: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
     /// parent (a root, as far as the renderer can know). Distinct from
@@ -2004,12 +2005,31 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let crown_name = None;
+        // The people title rides the row: one tolerant store read per
+        // derive, keyed on the row's canonical scope. No record, no title -
+        // the sideline falls back to the scope.
+        let crown_titles =
+            crate::org_titles::titles(&registry_path().with_file_name("crown_names.json"));
+        let crown_title = crown_scope
+            .as_ref()
+            .and_then(|scope| crown_titles.get(scope.trim()).cloned());
+        // Succession re-homes the court: the CURRENT owner edge (the row's
+        // spawn_provenance.owner) outranks the birth edge for every sideline
+        // join - the lead label and the nest parent. The FILE keeps the birth
+        // edge as history; this projection reads who the row obeys now.
         let spawned_by_session = row
-            .get("spawned_by_session")
+            .get("spawn_provenance")
+            .and_then(|p| p.get("owner"))
+            .and_then(|o| o.get("session_id"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or_else(|| {
+                row.get("spawned_by_session")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         let lineage_kind = row
             .get("lineage_kind")
             .and_then(|v| v.as_str())
@@ -2190,7 +2210,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             updated_at,
             crown_level,
             crown_scope,
-            crown_name,
+            crown_title,
             spawned_by_session,
             lineage_kind,
             spawned_by_name: None,
@@ -2428,7 +2448,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
-            crown_name: None,
+            crown_title: None,
             spawned_by_session: None,
             lineage_kind: None,
             spawned_by_name: None,
@@ -2496,7 +2516,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            crown_name: None,
+            crown_title: None,
             spawned_by_session: r.harness_session_id.clone(),
             // A parked fork belongs to its own worker: a CHILD of it.
             lineage_kind: Some("child".into()),
@@ -2803,6 +2823,24 @@ mod tests {
                               "received_at":"2020-01-01T00:00:00Z"}}"#);
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].badge, Some(AgentBadge::Done));
+    }
+
+    #[test]
+    fn derive_rows_reads_the_owner_edge_over_the_birth_edge() {
+        // Succession re-homes the court. The FILE keeps the birth
+        // edge (the abdicated king) as history; the sideline joins the
+        // CURRENT owner, so the lead label names the heir.
+        let raw = reg(r#"{"name":"kestrel-heir","cwd":"/w","status":"live",
+                 "harness_session_id":"01a0ee3f-heir"},
+               {"name":"xfcb4-w5","cwd":"/w","status":"live",
+                 "spawned_by_session":"bf388b2e-king",
+                 "spawn_provenance":{"origin":{"kind":"session"},
+                   "owner":{"kind":"session","harness":"codex",
+                            "session_id":"01a0ee3f-heir","cwd":"/w"}}}"#);
+        let rows = merge_rows(derive_rows(&raw, NOW).unwrap(), &[]);
+        let kid = rows.iter().find(|r| r.name == "xfcb4-w5").unwrap();
+        assert_eq!(kid.spawned_by_session.as_deref(), Some("01a0ee3f-heir"));
+        assert_eq!(kid.spawned_by_name.as_deref(), Some("kestrel-heir"));
     }
 
     #[test]
@@ -4253,7 +4291,7 @@ config_dir = "~/.claude-alt"
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            crown_name: None,
+            crown_title: None,
             liveness: if exited {
                 Liveness::Dead
             } else {
