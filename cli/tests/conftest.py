@@ -17,6 +17,72 @@ import pytest
 # any test process can see (both orders pinned in test_doctor_cli_registration.py).
 import fno.doctor_cli  # noqa: F401
 
+# The CI smoke shards have twice died to an inbound SIGTERM near 69 pct with
+# pytest green, the runner reporting its own shutdown. This capture names the
+# process that received the signal: the current test, its pid, pgid, ppid and
+# the executable - nothing else (no env, no argv). Enabled only where the
+# kills happen (FNO_PYTEST_SHARD set, i.e. the CI smoke pytest step); local
+# runs are untouched. The handler writes the line to a pid-unique temp file
+# (pytest owns fd 2 from startup, so a write there dies in the capture
+# buffer; the smoke step's EXIT trap cats these files, and that trap provably
+# runs on TERM-killed jobs), best-effort to fd 2, then restores SIG_DFL and
+# re-raises the signal, so the dying exit and its 143 are preserved exactly.
+_current_test: list[str] = ["<no test started>"]
+
+
+def _sigterm_capture_path() -> str:
+    import tempfile
+
+    return os.path.join(
+        tempfile.gettempdir(), f"sigterm-capture-{os.getpid()}.log"
+    )
+
+
+def _install_sigterm_capture() -> None:
+    import signal
+
+    if not os.environ.get("FNO_PYTEST_SHARD"):
+        return
+
+    def _on_sigterm(signum: int, frame: object) -> None:  # noqa: ARG001
+        try:
+            pgid = os.getpgid(0)
+        except OSError:
+            pgid = -1
+        line = (
+            f"test={_current_test[0]} pid={os.getpid()} "
+            f"pgid={pgid} ppid={os.getppid()} exe={sys.executable}\n"
+        )
+        # A file, not stderr: pytest owns fd 2 from startup (fd capture), so
+        # a write there dies inside the capture buffer. The smoke step's EXIT
+        # trap cats these files, and that trap provably runs on TERM-killed
+        # jobs (the smoke-duration lines appear in every killed log).
+        try:
+
+            with open(_sigterm_capture_path(), "w") as fh:
+                fh.write(f"sigterm-capture: {line}")
+        except OSError:
+            pass
+        try:
+            os.write(2, f"sigterm-capture: {line}".encode())
+        except OSError:
+            pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        with open(_sigterm_capture_path(), "w") as fh:
+            fh.write(
+                f"sigterm-capture: installed pid={os.getpid()} "
+                f"ppid={os.getppid()}\n"
+            )
+    except OSError:
+        pass
+
+
+_install_sigterm_capture()
+
 
 @pytest.fixture(autouse=True)
 def _reset_project_resolve_cache():
@@ -307,6 +373,11 @@ def pytest_configure(config: pytest.Config) -> None:
     if os.environ.get("FNO_PYTEST_SHARD") and config.option.durations is None:
         config.option.durations = 15
         config.option.durations_min = 30.0
+
+
+def pytest_runtest_logstart(nodeid: str, location: object) -> None:
+    """Track the running test for the SIGTERM capture (see _install_sigterm_capture)."""
+    _current_test[0] = nodeid
 
 
 @pytest.hookimpl(tryfirst=True)

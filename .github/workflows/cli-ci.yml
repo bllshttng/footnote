@@ -460,7 +460,7 @@ jobs:
         # warning away from the real ceiling.
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true; cat /tmp/sigterm-capture-*.log 2>/dev/null || true; rm -f /tmp/sigterm-capture-*.log' EXIT
           : "$start"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/13
 
