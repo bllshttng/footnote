@@ -340,7 +340,7 @@ fn theme_terminal() -> Theme {
 
 /// The footnote brand theme, dark twin (the Telemetry palette: the token
 /// table in `internal/fno/design/brand-telemetry-palette.md`).
-fn theme_footnote_superscript() -> Theme {
+pub(crate) fn theme_footnote_superscript() -> Theme {
     Theme {
         name: "footnote-superscript",
         inherit_from: "",
@@ -360,7 +360,7 @@ fn theme_footnote_superscript() -> Theme {
 /// The footnote brand theme, light twin (Footnote Paper: the same palette
 /// with the lightness ladder flipped). The ink is the dark twin's ground:
 /// one mirror pair (e8e8e8 on 141414, 141414 on f7f7f7 paper), swapped.
-fn theme_footnote_paper() -> Theme {
+pub(crate) fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
         inherit_from: "",

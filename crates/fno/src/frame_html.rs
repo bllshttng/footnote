@@ -51,11 +51,10 @@ const XTERM_16: [(u8, u8, u8); 16] = [
     (0xff, 0xff, 0xff),
 ];
 
-/// Tomorrow Night's text on a near-black ground, the way the mux is read
-/// (and shot) in Ghostty's default dark window.
+/// Close to the common dark defaults (Tomorrow Night / One Dark family).
 pub const DARK: Theme = Theme {
     fg: (0xc5, 0xc8, 0xc6),
-    bg: (0x10, 0x10, 0x10),
+    bg: (0x1d, 0x1f, 0x21),
     name: "dark",
     ansi: XTERM_16,
 };
@@ -350,13 +349,31 @@ fn frame_body(frame: &Frame, theme: Theme) -> String {
     body
 }
 
-/// The theme a snapshot names: `dark`, `light` or `macchiato`.
+/// The theme a snapshot names: `dark` and `light` are the mux's own footnote
+/// themes, so a shot paints what the live mux paints; `macchiato` is a lens.
 pub fn theme_by_name(name: &str) -> Option<Theme> {
     match name {
-        "dark" => Some(DARK),
-        "light" => Some(LIGHT),
+        "dark" => Some(footnote(crate::theme::theme_footnote_superscript(), "dark")),
+        "light" => Some(footnote(crate::theme::theme_footnote_paper(), "light")),
         "macchiato" => Some(MACCHIATO),
         _ => None,
+    }
+}
+
+/// A mux chrome theme as a lens: its text on its ground, over its Terminal 16.
+fn footnote(t: crate::theme::Theme, name: &'static str) -> Theme {
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => unreachable!("the footnote themes are all RGB"),
+    };
+    Theme {
+        fg: rgb(t.title),
+        bg: rgb(t.base),
+        name,
+        ansi: std::array::from_fn(|i| {
+            rgb(crate::theme::terminal16_slot(i as u8, &t)
+                .expect("footnote themes define 16 slots"))
+        }),
     }
 }
 
@@ -605,7 +622,13 @@ mod tests {
             cursor_visible: true,
             scroll_offset: 0,
         };
-        for theme in [DARK, LIGHT] {
+        let dark = theme_by_name("dark").unwrap();
+        assert_eq!(
+            (dark.fg, dark.bg),
+            ((0xe8, 0xe8, 0xe8), (0x14, 0x14, 0x14)),
+            "the live mux ground"
+        );
+        for theme in [dark, theme_by_name("light").unwrap(), DARK, LIGHT] {
             let svg = frame_svg(&frame, theme);
             assert!(svg.contains(&format!("height=\"100%\" fill=\"{}\"", hex(theme.bg))));
             assert!(svg.contains(&format!("height=\"17\" fill=\"{}\"", hex(theme.fg))));

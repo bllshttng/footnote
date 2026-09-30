@@ -1028,7 +1028,7 @@ mod tests {
             "light",
         ])
         .unwrap();
-        assert!(ok.server == "demo" && ok.theme == fno::frame_html::LIGHT);
+        assert!(ok.server == "demo" && ok.theme.bg == (0xf7, 0xf7, 0xf7));
         assert!(matches!(ok.format, fno::client::snapshot::Format::Png));
         for (flag, value, named) in [
             ("--theme", "neon", "dark, light or macchiato"),

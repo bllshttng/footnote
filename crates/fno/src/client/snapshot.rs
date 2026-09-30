@@ -52,7 +52,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut out = None;
     let mut server = None;
     let mut squad = None;
-    let mut theme = frame_html::DARK;
+    let mut theme = frame_html::theme_by_name("dark").expect("dark is a snapshot theme");
     let mut format = None;
     let mut size = None;
     let mut fit = false;
