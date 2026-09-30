@@ -262,6 +262,13 @@ fn is_sidecar(legacy: &str) -> bool {
 /// -wal/-shm rows report through their base row. Called from the layout
 /// migration for every `kind = sqlite` row.
 pub fn migrate_sqlite_row(root: &Path, row: &Row, apply: bool, stamp: &str) -> Status {
+    if row.legacy == row.new {
+        return if root.join(&row.new).exists() {
+            Status::Moved
+        } else {
+            Status::Absent
+        };
+    }
     if is_sidecar(&row.legacy) {
         return sidecar_status(root, row);
     }

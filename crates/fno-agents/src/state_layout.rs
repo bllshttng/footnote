@@ -976,7 +976,7 @@ mod tests {
     fn mux_and_sqlite_rows_report_pending() {
         let root = tmp_root("pending");
         std::fs::write(root.join("mux-view.json"), b"view").unwrap();
-        std::fs::write(root.join("events.db"), b"SQLite format 3").unwrap();
+        std::fs::write(root.join("graph.db"), b"SQLite format 3").unwrap();
         std::fs::write(root.join("graph.json.lock"), b"").unwrap();
         std::fs::write(root.join("squads.json.tmp.77"), b"t").unwrap();
         let receipt = migrate(&root, false);
@@ -991,6 +991,25 @@ mod tests {
             "the mux owner parks its own tmp residue: {:?}",
             tmp.status
         );
+        for name in ["events.db", "decisions.db", "questions.db", "approvals.db"] {
+            let row = find(name).unwrap();
+            assert_eq!(row.new, name);
+            for suffix in ["", "-wal", "-shm"] {
+                let path = root.join(format!("{name}{suffix}"));
+                std::fs::write(&path, b"retained store bytes").unwrap();
+                if let Some(sidecar) = find(&format!("{name}{suffix}")) {
+                    for apply in [false, true] {
+                        assert!(matches!(
+                            crate::state_layout_sqlite::migrate_sqlite_row(
+                                &root, sidecar, apply, "identity"
+                            ),
+                            Status::Moved
+                        ));
+                        assert_eq!(std::fs::read(&path).unwrap(), b"retained store bytes");
+                    }
+                }
+            }
+        }
         clean(&root);
     }
 

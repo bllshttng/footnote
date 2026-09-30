@@ -37,16 +37,16 @@ graph-archive.json.lock	db/graph-archive.json.lock	lock	daemon
 graph-archive.json.store.sock.lock	db/graph-archive.json.store.sock.lock	lock	daemon
 relatedness.json	db/relatedness.json	overwrite	daemon
 .plan-sync-watermark-v2	db/.plan-sync-watermark-v2	overwrite	daemon
-events.db	db/events.db	sqlite	daemon
-events.db-wal	db/events.db-wal	sqlite	daemon
-events.db-shm	db/events.db-shm	sqlite	daemon
-decisions.db	db/decisions.db	sqlite	daemon
-decisions.db-wal	db/decisions.db-wal	sqlite	daemon
-decisions.db-shm	db/decisions.db-shm	sqlite	daemon
-questions.db	db/questions.db	sqlite	daemon
-questions.db-wal	db/questions.db-wal	sqlite	daemon
-questions.db-shm	db/questions.db-shm	sqlite	daemon
-approvals.db	db/approvals.db	sqlite	daemon
+events.db	events.db	sqlite	daemon
+events.db-wal	events.db-wal	sqlite	daemon
+events.db-shm	events.db-shm	sqlite	daemon
+decisions.db	decisions.db	sqlite	daemon
+decisions.db-wal	decisions.db-wal	sqlite	daemon
+decisions.db-shm	decisions.db-shm	sqlite	daemon
+questions.db	questions.db	sqlite	daemon
+questions.db-wal	questions.db-wal	sqlite	daemon
+questions.db-shm	questions.db-shm	sqlite	daemon
+approvals.db	approvals.db	sqlite	daemon
 # pages/ - regenerated renders.
 graph.md	pages/graph.md	page	daemon
 graph.html	pages/graph.html	page	daemon
