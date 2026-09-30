@@ -9375,14 +9375,11 @@ impl Core {
                 .and_then(|row| row.effective_identity())
                 .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            if (occupants.len() != 1 && viewer_row.is_none())
-                || registry_identity != expected
-                || occupants
-                    .first()
-                    .copied()
-                    .or(viewer_row)
-                    .is_some_and(|row| row.name != host)
-            {
+            // Identity is the session uuid, never the name: a rename (or a
+            // succession heir renamed after spawn) leaves the pane label
+            // stale while the uuid still names the same live session. The
+            // uuid comparison above is the whole check.
+            if (occupants.len() != 1 && viewer_row.is_none()) || registry_identity != expected {
                 let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
