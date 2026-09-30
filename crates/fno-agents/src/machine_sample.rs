@@ -649,31 +649,33 @@ mod tests {
         assert_eq!(rows[2]["name"], "ssh");
         assert_eq!(rows.len(), 3, "an empty command names no group");
 
-        let parents = top_parent_rows(&[
-            row(100, 1, "/sbin/launchd"),
-            row(101, 100, "worker-a"),
-            row(102, 100, "worker-b"),
-            row(103, 100, "worker-c"),
-        ]);
-        assert_eq!(parents[0]["pid"], 100);
-        assert_eq!(parents[0]["children"], 3);
+        let pressure_procs: Vec<_> = std::iter::once(row(1, 0, "/sbin/launchd"))
+            .chain(
+                (2..=ABSOLUTE_PROCESS_SNAPSHOT_THRESHOLD as u32).map(|pid| row(pid, 1, "worker")),
+            )
+            .collect();
+        let parents = top_parent_rows(&pressure_procs);
+        assert_eq!(parents[0]["pid"], 1);
+        assert_eq!(parents[0]["children"], 1999);
         assert_eq!(parents[0]["command"], "/sbin/launchd");
 
         let dir = tempfile::tempdir().unwrap();
         let home = crate::paths::AgentsHome::at(dir.path());
         let mut captured = 0;
-        let snapshot = maybe_capture_process_snapshot(&home, 2000, None, || {
+        let snapshot = maybe_capture_process_snapshot(&home, pressure_procs.len(), None, || {
             captured += 1;
             Ok(vec![b'x'; MAX_MACHINE_SNAPSHOT_BYTES * 2])
         })
         .unwrap();
         assert!(snapshot);
         assert_eq!(captured, 1);
-        assert!(!maybe_capture_process_snapshot(&home, 2000, None, || {
-            captured += 1;
-            Ok(Vec::new())
-        })
-        .unwrap());
+        assert!(
+            !maybe_capture_process_snapshot(&home, pressure_procs.len(), None, || {
+                captured += 1;
+                Ok(Vec::new())
+            })
+            .unwrap()
+        );
         assert_eq!(captured, 1, "one snapshot per pressure episode");
         let contents = std::fs::read(dir.path().join(MACHINE_SNAPSHOT_NAME)).unwrap();
         assert!(contents.len() <= MAX_MACHINE_SNAPSHOT_BYTES);
