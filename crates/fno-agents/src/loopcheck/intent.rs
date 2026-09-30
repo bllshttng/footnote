@@ -22,7 +22,7 @@ pub(super) enum Intent {
     None,
 }
 
-pub(super) fn extract_assistant_text(val: &Value) -> String {
+pub(crate) fn extract_assistant_text(val: &Value) -> String {
     // Try /message/content as string
     if let Some(s) = val.pointer("/message/content").and_then(|v| v.as_str()) {
         return s.to_string();

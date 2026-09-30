@@ -271,7 +271,7 @@ pub(crate) fn cached_status(
     // ONE hold probe per read: its verdict feeds both the cache-key material
     // and the payload, instead of `hold-check` spawning twice.
     let hold_state = if pr_state == "OPEN" {
-        Some(super::seams::hold_verdict(cwd, pr))
+        Some(super::seams::hold_verdict(cwd, pr, Some(&pulls)))
     } else {
         None
     };

@@ -835,7 +835,7 @@ fn r_refusal_rate() -> Result<Value, String> {
     crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
-/// The caller's own claude transcript, shared by the refusal and wake
+/// The caller's own claude transcript, shared by the check-in transcript
 /// readers. Only claude sessions keep a per-session transcript file today
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
 /// claude session whose transcript cannot be found) reads as an ordinary
@@ -843,7 +843,7 @@ fn r_refusal_rate() -> Result<Value, String> {
 pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
-        return Err("the wake and refusal readers need a claude transcript; \
+        return Err("the check-in transcript readers need a claude transcript; \
              this session's harness is not claude"
             .into());
     }
@@ -1260,6 +1260,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
+    take("repeated_asks", crate::repeated_asks::reading());
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("self_hold", {
@@ -1739,6 +1740,7 @@ fn render_lines(
     lines.extend(crate::king_answers::answered_lines(readings));
 
     lines.extend(crate::king_answers::held_lines(readings));
+    lines.extend(crate::repeated_asks::lines(readings));
 
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
@@ -2822,14 +2824,9 @@ mod tests {
     fn open_pr_total_sums_all_pages() {
         let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
         let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
-        assert_eq!(open_pr_total(&[first, second]), 107);
-    }
-
-    #[test]
-    fn open_pr_total_ignores_non_array_pages() {
         assert_eq!(
-            open_pr_total(&[json!({"unexpected": true}), json!([1, 2])]),
-            2
+            open_pr_total(&[first, second, json!({"unexpected": true}), json!([1, 2])]),
+            109
         );
     }
 
