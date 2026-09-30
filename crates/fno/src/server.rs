@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
@@ -67,6 +67,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
+mod client_read;
 mod drift_retire;
 mod grid_reconcile;
 mod human_input;
@@ -646,6 +647,14 @@ pub(crate) enum CoreMsg {
     DispatchResult {
         id: u64,
         notice: String,
+    },
+    /// The reader refused one undecodable frame from client `id` and kept the
+    /// connection (the frame was fully consumed, so the stream stays on a
+    /// boundary). Routed back so the refusal rides the reliable channel the
+    /// core owns; the read loop itself holds no write half.
+    FrameRefused {
+        id: u64,
+        reason: String,
     },
     /// (v83, ) One sideline launcher request from client `id`. The
     /// handler validates pre-birth, dedups by request id, and runs exactly
@@ -7807,6 +7816,9 @@ impl Core {
             let _ = c
                 .reliable_tx
                 .try_send(ServerMsg::Notice { text: text.into() });
+            // A refusal with no layout side effect otherwise sits queued
+            // until the next dirty frame wakes the writer.
+            c.notify.notify_one();
         }
     }
 
@@ -8774,6 +8786,7 @@ impl Core {
             backlog_lanes: self.backlog_lanes.clone(),
             backlog_stale: self.backlog_stale,
             sweep_dead_count: self.dead_sweep_count(),
+            proto: Some(crate::proto::PROTO_VERSION),
         }
     }
 
@@ -11639,6 +11652,10 @@ impl Core {
                 }
                 Flow::Continue
             }
+            CoreMsg::FrameRefused { id, reason } => {
+                self.notice(id, reason);
+                Flow::Continue
+            }
             CoreMsg::AgentLaunch { id, request } => {
                 self.agent_launch(id, request);
                 Flow::Continue
@@ -13450,214 +13467,7 @@ async fn handle_client(
     }
     let (read_half, write_half) = stream.into_split();
     tokio::spawn(client_writer(write_half, reliable_rx, dirty, notify, stats));
-    client_reader(read_half, core_tx, id).await;
-}
-
-/// Reliable inbound path: every message is awaited into the core channel.
-/// Any read error (including an abruptly killed client) deregisters the
-/// client and leaves every pane untouched (AC4-HP).
-async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id: u64) {
-    loop {
-        match read_msg::<_, ClientMsg>(&mut r).await {
-            Ok(ClientMsg::Input(bytes)) => {
-                if core_tx.send(CoreMsg::Input { id, bytes }).await.is_err() {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Resize { rows, cols }) => {
-                if core_tx
-                    .send(CoreMsg::Resize { id, rows, cols })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Command(cmd)) => {
-                if core_tx.send(CoreMsg::Command { id, cmd }).await.is_err() {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Mouse { pane, event }) => {
-                if core_tx
-                    .send(CoreMsg::Mouse { id, pane, event })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::LinkHover {
-                pane,
-                row,
-                col,
-                seq,
-            }) => {
-                if core_tx
-                    .send(CoreMsg::LinkHover {
-                        id,
-                        pane,
-                        row,
-                        col,
-                        seq,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockJump { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Jump(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockSelect { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Select(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockRerun { pane }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Rerun,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchOpen { pane, query }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Open(query),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchStep { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Step(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchClear { pane }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Clear,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::PaneAnswer {
-                pane,
-                fingerprint,
-                region_lines,
-                keystroke,
-            }) => {
-                if core_tx
-                    .send(CoreMsg::PaneAnswer {
-                        id,
-                        pane,
-                        fingerprint,
-                        region_lines,
-                        keystroke,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::DispatchNext { account }) => {
-                if core_tx
-                    .send(CoreMsg::DispatchNext { id, account })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::AgentLaunch(request)) => {
-                if core_tx
-                    .send(CoreMsg::AgentLaunch { id, request })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Detach) => {
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-            // A second Attach, a pre-Attach-only Query/KillServer, or a
-            // one-shot Control on a live connection is a protocol violation:
-            // log it (this stderr is the session log) and close rather than
-            // acting on a confused stream.
-            Ok(
-                msg @ (ClientMsg::Attach { .. }
-                | ClientMsg::Query
-                | ClientMsg::KillServer
-                | ClientMsg::Control { .. }),
-            ) => {
-                let name = match msg {
-                    ClientMsg::Attach { .. } => "Attach",
-                    ClientMsg::Query => "Query",
-                    ClientMsg::Control { .. } => "Control",
-                    _ => "KillServer",
-                };
-                eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-            Err(e) => {
-                // Includes the abrupt-close case (killed client): routine, but
-                // one log line makes a misbehaving client diagnosable.
-                if !matches!(e, crate::proto::ProtoError::Closed) {
-                    eprintln!("fno mux: client {id} read failed: {e}");
-                }
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-        }
-    }
+    client_read::client_reader(read_half, core_tx, id).await;
 }
 
 /// Count one `Frame` that actually crossed a client wire. A frame dropped by

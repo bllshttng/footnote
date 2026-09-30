@@ -495,11 +495,31 @@ fn apply_with_projects(
             .map(|(index, _)| index)
             .collect()
     };
+    // The owner block the applier stamps onto each reowned child, composed
+    // here from the heir's own identity so the one session-id rule (the
+    // payload's `heir_identity`, read like every other field) writes the
+    // block and Python only assigns it. Blank session id answers null: an
+    // unaddressable heir re-creates the orphan the reown exists to prevent.
+    let identity = payload.get("heir_identity");
+    let heir_session = identity
+        .and_then(|i| i.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let reown_owner = heir_session.map(|session_id| {
+        json!({
+            "kind": "session",
+            "harness": identity.and_then(|i| i.get("harness")).and_then(Value::as_str),
+            "session_id": session_id,
+            "cwd": identity.and_then(|i| i.get("cwd")).and_then(Value::as_str),
+        })
+    });
     Ok(json!({
         "outcome": outcome,
         "clear_terminal_rows": clear_terminal_rows,
         "vacate_rows": vacate_rows,
         "reown_rows": reown_rows,
+        "reown_owner": reown_owner,
     }))
 }
 
@@ -556,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn no_live_holder_grants_for_any_caller() {
+    fn grant_rows() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"}, "rows": [],
@@ -565,10 +585,7 @@ mod tests {
         assert_eq!(out["outcome"], "granted");
         assert_eq!(out["vacate"], json!([]));
         assert!(out["refusal"].is_null());
-    }
 
-    #[test]
-    fn agent_succession_over_its_own_crown_succeeds() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": true,
             "caller": {"kind": "agent", "name": "king-a"},
@@ -577,10 +594,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate"], json!(["king-a"]));
-    }
 
-    #[test]
-    fn human_succession_transfers_a_live_holder() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": true,
             "caller": {"kind": "human"},
@@ -589,10 +603,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate"], json!(["king-a"]));
-    }
 
-    #[test]
-    fn terminal_holder_clears_and_grants() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
@@ -601,10 +612,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["clear_terminal"], json!(["dead-king"]));
         assert_eq!(out["outcome"], "granted");
-    }
 
-    #[test]
-    fn human_without_succession_declines_naming_holder_and_flag() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
@@ -615,10 +623,7 @@ mod tests {
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("king-a"));
         assert!(refusal.contains("--succeed"));
-    }
 
-    #[test]
-    fn agent_succession_over_a_multi_holder_scope_declines() {
         // holders = ["king-a", "king-b"]; the caller matches one but not all,
         // so succession must fall through to the ordinary decline rather
         // than succeeding a partial match. The refusal names the holder and
@@ -638,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn revive_excludes_its_own_name_from_holders() {
+    fn revive_rows() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"}, "exclude_name": "heir",
@@ -647,10 +652,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["holders"], json!([]));
         assert_eq!(out["outcome"], "granted");
-    }
 
-    #[test]
-    fn missing_scope_is_an_error() {
         assert!(resolve(&json!({
             "kind": "crown-settle", "caller": {"kind": "human"}, "rows": [],
         }))
@@ -664,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn a_member_of_a_live_set_crown_declines_naming_the_rival() {
+    fn rival_rows() {
         let out = settle(
             json!({
                 "kind": "crown-settle", "scope": "epic-a", "succession": false,
@@ -679,10 +681,7 @@ mod tests {
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("king-a"));
         assert!(refusal.contains("epic-a,epic-b"));
-    }
 
-    #[test]
-    fn a_set_scope_over_one_live_member_declines_for_any_caller() {
         let rows = [row("king-a", "epic-a", "busy")];
         for caller in [
             json!({"kind": "human"}),
@@ -698,10 +697,7 @@ mod tests {
             assert_eq!(out["outcome"], "declined");
             assert_eq!(out["rivals"], json!(["king-a"]));
         }
-    }
 
-    #[test]
-    fn succession_does_not_transfer_a_rival_crown() {
         let out = settle(
             json!({
                 "kind": "crown-settle", "scope": "epic-a", "succession": true,
@@ -716,10 +712,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("--succeed hands down only an identical crown"));
-    }
 
-    #[test]
-    fn an_agents_own_wider_crown_is_its_delegation_not_a_rival() {
         let out = settle(
             json!({
                 "kind": "crown-settle", "scope": "epic-a", "succession": false,
@@ -730,10 +723,7 @@ mod tests {
         );
         assert_eq!(out["outcome"], "granted");
         assert_eq!(out["rivals"], json!([]));
-    }
 
-    #[test]
-    fn a_portfolio_crown_over_one_of_its_projects_is_a_court_not_a_rival() {
         let projects = Ok(HashMap::from([
             ("alpha".to_string(), "alpha".to_string()),
             ("beta".to_string(), "beta".to_string()),
@@ -748,10 +738,7 @@ mod tests {
         );
         assert_eq!(out["outcome"], "granted");
         assert_eq!(out["rivals"], json!([]));
-    }
 
-    #[test]
-    fn an_unreadable_project_map_fails_closed_to_raw_overlap() {
         let out = settle(
             json!({
                 "kind": "crown-settle", "scope": "alpha", "succession": false,
@@ -762,10 +749,7 @@ mod tests {
         );
         assert_eq!(out["outcome"], "declined");
         assert_eq!(out["rivals"], json!(["king-p"]));
-    }
 
-    #[test]
-    fn an_alias_spelled_same_territory_row_is_a_rival() {
         let projects = Ok(HashMap::from([
             ("alpha".to_string(), "alpha".to_string()),
             ("a".to_string(), "alpha".to_string()),
@@ -780,10 +764,7 @@ mod tests {
         );
         assert_eq!(out["outcome"], "declined");
         assert_eq!(out["rivals"], json!(["king-a"]));
-    }
 
-    #[test]
-    fn a_terminal_row_rivals_nothing() {
         let out = settle(
             json!({
                 "kind": "crown-settle", "scope": "epic-a", "succession": false,
@@ -798,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_returns_holder_identity_and_caller() {
+    fn plan_rows() {
         let caller = json!({"kind": "human"});
         let mut holder = row("king-a", "epic-a", "busy");
         holder["harness_session_id"] = json!("sess-a");
@@ -815,16 +796,14 @@ mod tests {
             }])
         );
         assert_eq!(out["caller"], json!({"kind": "human"}));
-    }
 
-    #[test]
-    fn apply_reowns_the_predecessors_live_children_on_succession() {
         // Succession re-homes the court. A live child whose CURRENT
         // owner (the provenance owner, else the birth edge on a pre-v33 row)
         // names a vacated holder's session follows the crown; a child already
         // owned by another session stays put; a terminal row never moves.
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "epic-a",
+            "heir_identity": {"harness": "codex", "session_id": "sess-heir", "cwd": "/w"},
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "king-a", "harness_session_id": "sess-a"}],
@@ -851,10 +830,9 @@ mod tests {
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate_rows"], json!([0]));
         assert_eq!(out["reown_rows"], json!([1, 3]));
-    }
+        assert_eq!(out["reown_owner"]["session_id"], "sess-heir");
+        assert_eq!(out["reown_owner"]["kind"], "session");
 
-    #[test]
-    fn apply_declines_when_a_name_is_rebound_to_another_session() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "epic-a",
             "plan": {
@@ -868,10 +846,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "declined");
         assert_eq!(out["vacate_rows"], json!([]));
-    }
 
-    #[test]
-    fn apply_indexes_terminal_rows_and_grants_when_no_holder_remains() {
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "epic-a",
             "plan": {
@@ -888,10 +863,7 @@ mod tests {
         assert_eq!(out["clear_terminal_rows"], json!([1]));
         assert_eq!(out["outcome"], "granted");
         assert_eq!(out["vacate_rows"], json!([]));
-    }
 
-    #[test]
-    fn apply_declines_for_a_rival_crown_seen_after_the_plan() {
         let out = resolve_with_projects(
             &json!({
                 "kind": "crown-settle", "scope": "epic-a",
@@ -907,10 +879,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "declined");
         assert_eq!(out["vacate_rows"], json!([]));
-    }
 
-    #[test]
-    fn apply_rejects_missing_caller_holder_ids_and_outcome() {
         let rows = json!([{
             "name": "king-a", "crown_scope": "epic-a", "status": "busy",
             "harness_session_id": "sess-a",
@@ -969,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn a_succeeded_plan_carries_the_name_with_a_regnal_bump() {
+    fn record_rows() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _reg = crown_registry(tmp.path(), agents_with_succession_rows());
         named_record_fixture(tmp.path());
@@ -1044,10 +1013,7 @@ mod tests {
         let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert!(doc["crowns"]["x-aaaa"].get("pending_succession").is_none());
-    }
 
-    #[test]
-    fn a_granted_plan_forgets_the_record_and_declined_keeps_it() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _reg = crown_registry(tmp.path(), json!([{"name": "w", "status": "exited"}]));
         named_record_fixture(tmp.path());
@@ -1068,10 +1034,7 @@ mod tests {
         let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert!(doc["crowns"].get("x-aaaa").is_none(), "{store}");
-    }
 
-    #[test]
-    fn an_unwritable_store_never_changes_the_answer() {
         let tmp = tempfile::TempDir::new().unwrap();
         // A file where the store's parent dir would be: the write fails.
         let blocker = tmp.path().join("blocker");

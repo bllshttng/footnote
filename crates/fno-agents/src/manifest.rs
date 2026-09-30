@@ -802,6 +802,9 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         "kiro" => Some(include_str!("manifests/kiro.toml")),
         "pi" => Some(include_str!("manifests/pi.toml")),
         "qodercli" => Some(include_str!("manifests/qodercli.toml")),
+        // zcode: pane-less (the headless lane is the measured one), so the
+        // manifest is deliberately rule-free; see manifests/zcode.toml.
+        "zcode" => Some(include_str!("manifests/zcode.toml")),
         _ => None,
     }
 }

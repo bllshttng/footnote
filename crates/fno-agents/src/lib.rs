@@ -128,6 +128,7 @@ pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
+pub mod court_rivals;
 pub mod crown_alarm;
 pub mod crown_identity;
 pub mod crown_names;
@@ -177,6 +178,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -274,6 +276,7 @@ pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
+pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
@@ -286,6 +289,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_draft_ready;
 pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
@@ -412,6 +416,8 @@ pub mod wake_meter;
 pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
+pub mod zcode;
+pub mod zcode_ask;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -1357,6 +1363,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The pr-watch sweep flipped an open fno-bound draft PR back to ready
+    // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
+    "pr_watch_draft_flip",
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",

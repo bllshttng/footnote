@@ -201,7 +201,9 @@ def test_unrostered_falls_through_to_fork(monkeypatch):
 
 def test_respawn_failure_falls_through_to_fork(monkeypatch):
     _allow_rung2_claim(monkeypatch)
-    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    row = _entry("exited")
+    row.harness = "claude"
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: row)
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 1)  # non-zero
     spawned = []
     monkeypatch.setattr(
@@ -211,6 +213,9 @@ def test_respawn_failure_falls_through_to_fork(monkeypatch):
     )
     ok, detail = wake_and_deliver("uuid-full", "wake")
     assert ok is True and detail == "FORK"
+    # The fork revives under the row's OWN name (dispatch_spawn Fix 3 reads
+    # same-name + same-uuid as an in-place revival), never a wake- alias.
+    assert spawned[0]["name"] == "wk-abc12345"
 
 
 def test_respawn_ok_inject_miss_does_not_create_second_worker(monkeypatch):
@@ -637,6 +642,11 @@ def test_rung2_claim_held_falls_through_to_fork(monkeypatch):
     assert ok is True and detail == "FORK"
     assert respawned == []  # never respawned: the guard was held
     assert spawned and spawned[0]["resume_session_id"] == "uuid-full"
+    # No claude harness on the row -> no name to revive; the uuid-derived
+    # wake- alias is the fallback (deterministic, so wakes still serialize).
+    from fno.harness_identity import canonical_handle
+
+    assert spawned[0]["name"] == f"wake-{canonical_handle('uuid-full')}"
 
 
 def _gated_revival(monkeypatch, registry_rows):

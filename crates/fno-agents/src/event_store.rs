@@ -178,7 +178,9 @@ fn route_state_root_store(live: &Path, stem: &str) -> Option<PathBuf> {
             derived
         }
     };
-    if live.parent() != Some(root.as_path()) {
+    let parent = live.parent()?;
+    let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    if parent != root {
         return None;
     }
     Some(crate::state_layout::place(&root, &format!("{stem}.db")))

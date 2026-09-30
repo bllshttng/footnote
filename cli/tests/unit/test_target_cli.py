@@ -839,6 +839,8 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
     session is a no-op - and a dropped grant looks exactly like no grant. Say it."""
     class _Result:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
         return _Result()
@@ -847,6 +849,12 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    # Pin the manifest root: the warning resolves it from ambient cwd/env and
+    # process caches, so a worker-mate test's leftovers can point it at a
+    # different tree and flip the verdict (order-dependent red in CI).
+    monkeypatch.setattr(
+        "fno.paths.resolve_repo_root", lambda: fake_root, raising=True
+    )
 
     manifest = fake_root / ".fno" / "target-state.md"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -864,7 +872,7 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
         '---\nattended: true\nauthority: full\n---\ntarget_claim_key: "node:x-1"\n'
     )
     monkeypatch.setattr(
-        "fno.target.orient._claim_state", lambda _k: "live", raising=False
+        "fno.target.orient._claim_state", lambda _k: "live", raising=True
     )
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
@@ -878,6 +886,8 @@ def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
     otherwise look like a working grant."""
     class _Result:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
         return _Result()
@@ -886,6 +896,10 @@ def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    # Pin the manifest root against ambient cwd/env state (see the noop test).
+    monkeypatch.setattr(
+        "fno.paths.resolve_repo_root", lambda: fake_root, raising=True
+    )
 
     manifest = fake_root / ".fno" / "target-state.md"
     manifest.parent.mkdir(parents=True, exist_ok=True)

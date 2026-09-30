@@ -53,7 +53,7 @@ fn store_path_strips_generation_suffix() {
     let _guard = crate::claims::test_env_lock().lock().unwrap();
     let prior = std::env::var_os("FNO_AGENTS_HOME");
     std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
-    let root = dir.path().to_path_buf();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::create_dir_all(root.join("db")).unwrap();
     std::fs::write(root.join("db").join("events.db"), b"SQLite format 3\0").unwrap();
     let routed = store_path(&root.join("events.jsonl"));
@@ -61,6 +61,13 @@ fn store_path_strips_generation_suffix() {
         routed,
         root.join("db").join("events.db"),
         "a migrated root answers the db/ store"
+    );
+    let alias = root.join("state-alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    assert_eq!(
+        store_path(&alias.join("events.jsonl")),
+        root.join("db").join("events.db"),
+        "a virtual journal under a symlinked root keeps the migrated store"
     );
     let space = root.join("spaces").join("proj");
     std::fs::create_dir_all(&space).unwrap();

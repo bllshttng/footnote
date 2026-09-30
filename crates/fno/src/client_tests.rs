@@ -432,6 +432,7 @@ pub(super) fn two_pane_view() -> View {
     // accent (`Indexed(3)`), which is the theme whose byte-identity the
     // lattice structure protects.
     view.theme = crate::theme::Theme::from_name("terminal").0;
+    view.server_proto = Some(crate::proto::PROTO_VERSION);
     view
 }
 
@@ -6588,8 +6589,7 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
         Command::SplitDir(Dir::Left) => {}
         other => panic!("expected SplitDir(Left) from the viewed tab's menu, got {other:?}"),
     }
-    // Stale: the view flips while a menu is open; executing a Split cell
-    // refuses instead of splitting whatever is viewed NOW.
+    // Stale: a view flip while a menu is open refuses the Split cell.
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     v.layout.squads[0].active_tab = 1;
     let sel = v
@@ -6856,7 +6856,7 @@ fn menu_labels(menu: &RowMenu) -> Vec<String> {
             PopupRow::Grid(cells) => cells[*ci].label.clone(),
             PopupRow::Entry { label, .. } | PopupRow::SwatchEntry { label, .. } => label.clone(),
             PopupRow::FullWidth(l) => l.clone(),
-            PopupRow::Header(_) | PopupRow::Rule => unreachable!("not a target"),
+            other => unreachable!("not a target: {other:?}"),
         })
         .collect()
 }

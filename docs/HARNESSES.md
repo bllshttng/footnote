@@ -23,6 +23,18 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 | pi (`@earendil-works/pi-coding-agent`) | Keeper-hosted TUI on the thread lane (spawn measured native, 2026-09-01); `pi --mode rpc` is the driving transport the same session rides. | Sequential |
 | cursor-agent (Cursor CLI agent) | fno drives the hosted TUI: a mux pane attended, the keeper-hosted thread lane dispatched. The `--print` stream is output-only; no rpc, acp, serve, or stdio transport exists. | Sequential |
 | grok CLI | fno drives its hosted TUI. Rust ACP is separate. Headless `grok -p` awaits signed-in create/resume proof. | Sequential |
+| zcode (ZCode's CLI agent) | Headless one-shot lane: fno runs `zcode -p` turns and resumes the minted `sess_<uuid>` by name. The TUI lane is unmeasured on the 3.14.3 bundle. | Sequential |
+
+### zcode
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Cannot find package '@zcode/tui'` on any TUI launch | The 3.14.3 app bundle resolves no tui package beside zcode.cjs, and the source checkout is not installed | Use the headless lane (`zcode -p`); the interactive forms stay unsupported until zcode ships the package |
+| zcode exits with the provider-config error before any turn | The bundle carries no provider config at its own paths | The `zcode` launcher exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`; `~/.zcode/cli/config.json` carries `model.main` |
+| A one-shot wrote outside its cwd | Headless yolo is unsandboxed (measured 2026-09-29) | Treat zcode workers as unsandboxed; scope the spawn cwd |
+| A looping dispatch is refused | The plugin Stop hook inside a `-p` turn is not yet measured | `fno config plugin install zcode` links the stage into `plugins.dirs`; the row flips after a live fire proves the hook |
+
+One-time setup: put a `zcode` launcher on PATH that execs `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"` and exports `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` for the built-in provider config. `~/.zcode/cli/config.json` names `model.main`. Then run `fno config plugin install zcode`.
 
 Other CLIs (Cursor's GUI editor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 

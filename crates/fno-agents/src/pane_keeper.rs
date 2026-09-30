@@ -333,7 +333,7 @@ impl Keeper {
 /// A full UUID: 36 chars with dashes at 8, 13, 18 and 23. The shape check is
 /// the point: a bare `--resume` opens a picker and a truncated handle
 /// addresses nothing, and neither may ever be read as an identity.
-fn is_full_uuid(value: &str) -> bool {
+pub(crate) fn is_full_uuid(value: &str) -> bool {
     value.len() == 36
         && value.as_bytes()[8] == b'-'
         && value.as_bytes()[13] == b'-'
