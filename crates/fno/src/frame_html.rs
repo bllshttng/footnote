@@ -401,16 +401,21 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
             let (fg, bg) = cell_colors(cell, theme);
             let flags =
                 cell.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
-            let mut text = String::new();
+            // (glyph, cells it spans): a wide glyph owns its spacer cell.
+            let mut glyphs: Vec<(char, usize)> = Vec::new();
             while c < cols {
                 let n = &frame.cells[r * cols + c];
-                if n.flags & cell_flags::WIDE_SPACER == 0 {
+                if n.flags & cell_flags::WIDE_SPACER != 0 {
+                    if let Some(last) = glyphs.last_mut() {
+                        last.1 += 1;
+                    }
+                } else {
                     let nflags =
                         n.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
                     if cell_colors(n, theme) != (fg, bg) || nflags != flags {
                         break;
                     }
-                    text.push(n.c);
+                    glyphs.push((n.c, 1));
                 }
                 c += 1;
             }
@@ -422,19 +427,18 @@ font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
                     hex(bg)
                 ));
             }
-            let trimmed = text.trim_end_matches([' ', '\0']);
-            if trimmed.is_empty() {
+            let blank = |g: &(char, usize)| g.0 == ' ' || g.0 == '\0';
+            let end = glyphs.iter().rposition(|g| !blank(g)).map_or(0, |i| i + 1);
+            let lead = glyphs[..end].iter().take_while(|g| blank(g)).count();
+            if lead == end {
                 continue;
             }
-            let lead = trimmed
-                .chars()
-                .take_while(|ch| *ch == ' ' || *ch == '\0')
-                .count();
-            let body: String = trimmed.chars().skip(lead).map(xml_escape).collect();
-            let cells = trimmed.chars().count() - lead;
+            let body: String = glyphs[lead..end].iter().map(|g| xml_escape(g.0)).collect();
+            let lead_cells: usize = glyphs[..lead].iter().map(|g| g.1).sum();
+            let cells: usize = glyphs[lead..end].iter().map(|g| g.1).sum();
             out.push_str(&format!(
                 "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\" textLength=\"{:.1}\" lengthAdjust=\"spacingAndGlyphs\"{}{}{}>{body}</text>",
-                x + lead as f64 * SVG_CELL_W,
+                x + lead_cells as f64 * SVG_CELL_W,
                 y + SVG_CELL_H * 0.78,
                 hex(fg),
                 cells as f64 * SVG_CELL_W,
