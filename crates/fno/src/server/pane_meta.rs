@@ -54,6 +54,82 @@ pub(crate) fn pane_meta(
     }
 }
 
+/// A tab's display label, from spawn-time facts only - no I/O, no
+/// subprocess on the layout path (squad.rs's origin-freeze discipline).
+/// Chain: explicit rename > registered name (`FNO_AGENT_SELF`) >
+/// `FNO_NODE` provenance > spawn-cwd basename when it differs from the squad's
+/// > command basename > the bare 1-based index (so a plain shell tab renders
+/// unchanged). `pane` is the focused pane's `(name, node, cwd, cmd)`; `None`
+/// (a reaped pane racing tree cleanup) falls through to the index - the
+/// derivation never panics on a missing pane.
+#[allow(clippy::type_complexity)]
+pub(crate) fn tab_label(
+    rename: Option<&str>,
+    pane: Option<(Option<&str>, Option<&str>, &str, Option<&str>)>,
+    squad_cwd: &str,
+    i: usize,
+) -> String {
+    if let Some(name) = rename {
+        return name.to_string();
+    }
+    if let Some((name, node, cwd, cmd)) = pane {
+        // Every derived candidate is sanitized like a rename (codex peer
+        // review): FNO_NODE values, dir names, and argv all admit control
+        // bytes, and these strings land in chrome cells. A candidate that
+        // sanitizes to empty (e.g. whitespace-only) falls through to the
+        // next source instead of rendering a blank label.
+        if let Some(name) = name {
+            let clean = sanitize_tab_name(name);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        if let Some(node) = node {
+            let clean = sanitize_tab_name(node);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        fn base(p: &str) -> &str {
+            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+        }
+        let cwd_base = base(cwd);
+        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
+            let clean = sanitize_tab_name(cwd_base);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        if let Some(cmd) = cmd {
+            let clean = sanitize_tab_name(cmd);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+    }
+    (i + 1).to_string()
+}
+
+/// The registry row's CURRENT label for one pane, joined the same way
+/// [`pane_ctx`] joins: the row whose `mux` names this session and pane. A
+/// rename rewrites only this row (the pane's `FNO_AGENT_SELF` is env, frozen
+/// at spawn), so the frame and tab chrome read it at layout time and fall
+/// back to the spawn-captured name.
+pub(crate) fn pane_registry_name(
+    agents: &[crate::agents_view::RegistryAgent],
+    session_name: &str,
+    pid: u64,
+) -> Option<String> {
+    let mux_row = |a: &&crate::agents_view::RegistryAgent| matches!(&a.mux, Some((s, p)) if s == session_name && *p == pid);
+    // A recycled pane id can leave an exited row on the same (session, pane);
+    // the live row is the one still hosting the pane.
+    agents
+        .iter()
+        .find(|a| mux_row(a) && !a.exited)
+        .or_else(|| agents.iter().find(|a| mux_row(a)))
+        .map(|a| a.name.clone())
+}
+
 /// The context reading for one pane, joined through the registry row that
 /// hosts it: the row whose `mux` names this session and pane, keyed by the
 /// same transcript identity the tail pass reads. `None` reads as "no
@@ -78,6 +154,7 @@ pub(crate) fn pane_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents_view::RegistryAgent;
 
     // AC6-HP: the builder carries the label chain plus the new fields.
     #[test]
@@ -103,5 +180,36 @@ mod tests {
         let m = pane_meta(4, None, None, "/home/u/proj", None, None, None);
         assert_eq!(m.label, "proj");
         assert_eq!((m.node, m.branch, m.ctx), (None, None, None));
+    }
+
+    // A rename rewrites the registry row; the pane's FNO_AGENT_SELF
+    // env is frozen at spawn. The chrome reads the row (live row first);
+    // the layout layer falls back to the spawn-captured name when this
+    // returns None.
+    #[test]
+    fn registry_name_reads_the_hosting_row() {
+        // A rename rewrites the registry row; the pane's FNO_AGENT_SELF
+        // env is frozen at spawn. The chrome reads the row (live row
+        // first); the layout layer falls back to the spawn-captured name
+        // when this returns None. An unhosted pane reads None.
+        let agents = vec![
+            agent("kestrel-heir", Some(("mux0", 7)), true),
+            agent("bob", Some(("mux0", 7)), false),
+        ];
+        assert_eq!(
+            pane_registry_name(&agents, "mux0", 7).as_deref(),
+            Some("bob")
+        );
+        let other = vec![agent("other", Some(("mux0", 9)), false)];
+        assert_eq!(pane_registry_name(&other, "mux0", 7), None);
+    }
+
+    fn agent(name: &str, mux: Option<(&str, u64)>, exited: bool) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            mux: mux.map(|(s, p)| (s.to_string(), p)),
+            exited,
+            ..Default::default()
+        }
     }
 }

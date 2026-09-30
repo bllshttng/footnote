@@ -17,13 +17,14 @@ supersedes the drift-check).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tests._init_space import install_state_path_stub
+from tests._init_space import STUB, install_state_path_stub
 
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent
 _INIT_SCRIPT = _REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
@@ -406,9 +407,18 @@ def _run_without_fno(tmp_path: Path, target_input: str) -> subprocess.CompletedP
     home_dir = tmp_path / "home"
     home_dir.mkdir(exist_ok=True)
     (home_dir / ".fno").mkdir(exist_ok=True)
+    # The run-id mint rides the fno-agents test double: `fno` itself stays
+    # absent, which is the degraded hold-gate leg under test, while the mint
+    # still answers (a binary-less init refuses before the mint's own error).
+    # No FNO_TEST_SPACE: the legacy $REPO_ROOT/.fno fallback stays pinned.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub_copy = bin_dir / "fno-agents"
+    shutil.copyfile(STUB, stub_copy)
+    stub_copy.chmod(0o755)
     env = {
         "HOME": str(home_dir),
-        "PATH": "/usr/bin:/bin",
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
         "TARGET_START": "1",
         "TARGET_INPUT": target_input,
         "TARGET_LOCATION_OK": "main-acknowledged",

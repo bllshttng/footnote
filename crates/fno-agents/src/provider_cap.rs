@@ -2285,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_edge_health_lock_keeps_unmeasured_lane_closed() {
+    fn health_rows() {
         let root = std::env::temp_dir().join(format!("pc-ac1-edge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let claude_home = root.join("home");
@@ -2318,12 +2318,7 @@ mod tests {
             .expect("openai:default lane");
         assert_eq!(lane.state, "closed");
         let _ = std::fs::remove_dir_all(&root);
-    }
 
-    /// AC3-HP/ERR: the specimen naive stamp parses in the record's zone, is
-    /// refused with none or an unknown zone, and an offset stamp needs no zone.
-    #[test]
-    fn ac3_reset_epoch_from_excerpt_zones_and_refusals() {
         let now = 1_789_400_000i64;
         // Specimen: "2026-09-15 18:41:02" is Singapore time -> 10:41:02Z.
         let excerpt = "API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-15 18:41:02][20260911143739fc56663065714c5e]";
@@ -2360,8 +2355,11 @@ mod tests {
         );
     }
 
+    /// AC3-HP/ERR: the specimen naive stamp parses in the record's zone, is
+    /// refused with none or an unknown zone, and an offset stamp needs no zone.
+
     #[test]
-    fn record_reset_timezones_overlays_low_to_high_priority_records() {
+    fn zone_rows() {
         let root = std::env::temp_dir().join(format!("pc-record-zones-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let global = root.join("global.toml");
@@ -2389,12 +2387,7 @@ mod tests {
         let zones = record_reset_timezones_from_candidates(&[project, global]);
         assert_eq!(zones.get("zai").map(String::as_str), Some("UTC"));
         let _ = std::fs::remove_dir_all(&root);
-    }
 
-    /// AC4-HP: a config record's route-provider zone resolves the capped
-    /// member's vendor stamp into the lane's reset, opening the lane.
-    #[test]
-    fn ac4_hp_record_zone_opens_the_lane_on_the_excerpt_stamp() {
         let root = std::env::temp_dir().join(format!("pc-ac4-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let claude_home = root.join("home");
@@ -2443,6 +2436,9 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// AC4-HP: a config record's route-provider zone resolves the capped
+    /// member's vendor stamp into the lane's reset, opening the lane.
 
     // Codex rollout fixtures copied from the measured rollout
     // (usage_limit_exceeded at 2026-09-18T19:38:21.593Z, shortened to one
@@ -2798,7 +2794,7 @@ mod tests {
         assert_eq!(lane.missing_reset_timezone, vec!["zai-main".to_string()]);
     }
     #[test]
-    fn ac2_compact_a_capped_member_that_is_compacting_is_held() {
+    fn compact_rows() {
         let root = std::env::temp_dir().join(format!("pc-cm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let home_dir = root.join("home");
@@ -2841,13 +2837,7 @@ mod tests {
         .unwrap();
         let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
         assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
-    }
 
-    /// A thread row whose sessions-dir record is missing still reads held
-    /// while compacting: the bridge-resolved transcript's stem names the full
-    /// uuid, so the compaction stamp is probed by the right key.
-    #[test]
-    fn ac2_compact_thread_row_without_sessions_record_is_held_through_the_bridge() {
         let root = std::env::temp_dir().join(format!("pc-cm2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let claude_home = root.join("home");
@@ -2887,6 +2877,10 @@ mod tests {
         assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// A thread row whose sessions-dir record is missing still reads held
+    /// while compacting: the bridge-resolved transcript's stem names the full
+    /// uuid, so the compaction stamp is probed by the right key.
     #[test]
     fn ac2_arm_config_defaults_off_and_reads_overrides() {
         // FNO_CONFIG, when set, is the ONLY config candidate; hold the env
@@ -3041,7 +3035,7 @@ mod tests {
 
     // AC2-HP: two calls root in distinct dirs, each holding its own files.
     #[test]
-    fn scan_fixture_roots_are_distinct_and_self_sufficient() {
+    fn scan_rows() {
         let (d1, s1) = scan_fixture();
         let (d2, s2) = scan_fixture();
         assert_ne!(d1.path(), d2.path(), "fixture roots must differ per call");
@@ -3052,27 +3046,7 @@ mod tests {
             assert!(s.runtime_state.is_file());
             assert!(!s.settings_candidates.is_empty());
         }
-    }
 
-    fn read_journal(home: &AgentsHome) -> Vec<String> {
-        let dir = lanes_dir(home);
-        let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with("zai_zai-main-") && name.ends_with(".jsonl") {
-                    let body = std::fs::read_to_string(e.path()).unwrap_or_default();
-                    for line in body.lines() {
-                        out.push(line.to_string());
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn ac3_short_a_ten_minute_reset_holds_without_asking() {
         let home =
             AgentsHome::at(std::env::temp_dir().join(format!("pc3s-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(home.root());
@@ -3088,10 +3062,7 @@ mod tests {
         assert_eq!(out, "wait: short-reset");
         assert!(!question_path(&home, &lane.lane).exists());
         assert!(calls.borrow().iter().all(|c| !c.starts_with("spawn:")));
-    }
 
-    #[test]
-    fn ac3_hp_asks_once_and_stops_nothing() {
         let base = std::env::temp_dir().join(format!("pc3h-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let home = AgentsHome::at(base.join("agents"));
@@ -3117,10 +3088,7 @@ mod tests {
             .filter(|l| l.contains("provider-cap:zai:zai-main"))
             .count();
         assert_eq!(asks, 1, "exactly one open question row per strand");
-    }
 
-    #[test]
-    fn ac3_sleep_acts_without_a_question_and_journals_spawn_confirmed_before_stop() {
         let home =
             AgentsHome::at(std::env::temp_dir().join(format!("pc3a-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(home.root());
@@ -3152,6 +3120,23 @@ mod tests {
         );
     }
 
+    fn read_journal(home: &AgentsHome) -> Vec<String> {
+        let dir = lanes_dir(home);
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("zai_zai-main-") && name.ends_with(".jsonl") {
+                    let body = std::fs::read_to_string(e.path()).unwrap_or_default();
+                    for line in body.lines() {
+                        out.push(line.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     // -----------------------------------------------------------------------
     // Wave 4: the reset reads the file Python writes, and a passed
     // reset survives as `returning`.
@@ -3162,7 +3147,7 @@ mod tests {
     }
 
     #[test]
-    fn ac4_path_default_scan_reads_the_file_python_writes() {
+    fn path_rows() {
         let root = std::env::temp_dir().join(format!("pc4p-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let home_dir = root.join("home");
@@ -3225,10 +3210,7 @@ mod tests {
         assert_eq!(lane.state, "open");
         assert_eq!(lane.reset_epoch, Some(9_999_999_999));
         assert_eq!(lane.reset_passed_epoch, None);
-    }
 
-    #[test]
-    fn ac4_passed_old_429s_read_returning_new_strand_reads_open() {
         let root = std::env::temp_dir().join(format!("pc4r-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let home_dir = root.join("home");
@@ -3307,6 +3289,7 @@ mod tests {
         assert_eq!(lane.state, "open");
         assert_eq!(lane.reset_epoch, None);
     }
+
     // -----------------------------------------------------------------------
     // Wave 4 return ladder: fake deps, real state files.
     // -----------------------------------------------------------------------
@@ -3349,7 +3332,7 @@ mod tests {
     }
 
     #[test]
-    fn ac4_hp_canary_survives_then_trickles_one_per_tick() {
+    fn canary_rows() {
         let home =
             AgentsHome::at(std::env::temp_dir().join(format!("pc4h-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(home.root());
@@ -3402,6 +3385,70 @@ mod tests {
             .any(|l| l.contains("return") && l.contains("complete")));
         let state = read_return_file(&home);
         assert_eq!(state["resumed"].as_array().unwrap().len(), 5);
+
+        let home =
+            AgentsHome::at(std::env::temp_dir().join(format!("pc4v-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(home.root());
+        let base = 1_000_000_000i64;
+        let lane = returning_lane_fixture(
+            vec![
+                member_fix("w-1", Some(base - 3600), true),
+                member_fix("w-2", Some(base - 3600), true),
+            ],
+            base,
+        );
+        let cfg = ProviderCapConfig {
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let deps = rec_deps(calls.clone(), true);
+        std::env::set_var("FNO_BIN", "/usr/bin/true");
+        let out = run_return_lane(&home, &lane, &cfg, base + 121, &deps);
+        assert_eq!(out, "canary-resumed");
+        let mut fresh = lane.clone();
+        fresh.members[0] = member_fix("w-1", Some(base + 200), false);
+        let out = run_return_lane(&home, &fresh, &cfg, base + 1021, &deps);
+        // Survived in ask mode outside sleep hours: announce once, then the
+        // veto window holds.
+        assert_eq!(out, "wait: veto-window");
+        let state = read_return_file(&home);
+        assert_eq!(state["veto_until"], base + 1621);
+        let out = run_return_lane(&home, &fresh, &cfg, base + 1200, &deps);
+        assert_eq!(out, "wait: veto-window");
+        std::env::remove_var("FNO_BIN");
+        // An operator wait after the announcement holds past the veto.
+        std::fs::create_dir_all(lanes_dir(&home)).unwrap();
+        std::fs::write(
+            lanes_dir(&home).join("decision-zai_zai-main.json"),
+            r#"{"answer":"wait"}"#,
+        )
+        .unwrap();
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2000, &deps);
+        assert_eq!(out, "wait: operator-wait");
+        // Dropping the wait lets the trickle move exactly one per tick.
+        std::fs::remove_file(lanes_dir(&home).join("decision-zai_zai-main.json")).unwrap();
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2001, &deps);
+        assert_eq!(out, "trickle-resumed");
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2002, &deps);
+        assert_eq!(out, "complete");
+        let calls_vec = calls.borrow();
+        assert_eq!(
+            calls_vec
+                .iter()
+                .filter(|c| c.starts_with("announce:"))
+                .count(),
+            1,
+            "announce fired exactly once: {calls_vec:?}"
+        );
+        assert_eq!(
+            calls_vec
+                .iter()
+                .filter(|c| c.starts_with("resume:"))
+                .count(),
+            2,
+            "canary + one trickle: {calls_vec:?}"
+        );
     }
 
     #[test]
@@ -3518,73 +3565,6 @@ mod tests {
                 .count(),
             1,
             "exactly one unknown verdict row: {j:?}"
-        );
-    }
-
-    #[test]
-    fn ac4_veto_announce_once_then_the_veto_and_the_wait_hold() {
-        let home =
-            AgentsHome::at(std::env::temp_dir().join(format!("pc4v-{}", std::process::id())));
-        let _ = std::fs::remove_dir_all(home.root());
-        let base = 1_000_000_000i64;
-        let lane = returning_lane_fixture(
-            vec![
-                member_fix("w-1", Some(base - 3600), true),
-                member_fix("w-2", Some(base - 3600), true),
-            ],
-            base,
-        );
-        let cfg = ProviderCapConfig {
-            mode: "ask".into(),
-            ..Default::default()
-        };
-        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
-        let deps = rec_deps(calls.clone(), true);
-        std::env::set_var("FNO_BIN", "/usr/bin/true");
-        let out = run_return_lane(&home, &lane, &cfg, base + 121, &deps);
-        assert_eq!(out, "canary-resumed");
-        let mut fresh = lane.clone();
-        fresh.members[0] = member_fix("w-1", Some(base + 200), false);
-        let out = run_return_lane(&home, &fresh, &cfg, base + 1021, &deps);
-        // Survived in ask mode outside sleep hours: announce once, then the
-        // veto window holds.
-        assert_eq!(out, "wait: veto-window");
-        let state = read_return_file(&home);
-        assert_eq!(state["veto_until"], base + 1621);
-        let out = run_return_lane(&home, &fresh, &cfg, base + 1200, &deps);
-        assert_eq!(out, "wait: veto-window");
-        std::env::remove_var("FNO_BIN");
-        // An operator wait after the announcement holds past the veto.
-        std::fs::create_dir_all(lanes_dir(&home)).unwrap();
-        std::fs::write(
-            lanes_dir(&home).join("decision-zai_zai-main.json"),
-            r#"{"answer":"wait"}"#,
-        )
-        .unwrap();
-        let out = run_return_lane(&home, &fresh, &cfg, base + 2000, &deps);
-        assert_eq!(out, "wait: operator-wait");
-        // Dropping the wait lets the trickle move exactly one per tick.
-        std::fs::remove_file(lanes_dir(&home).join("decision-zai_zai-main.json")).unwrap();
-        let out = run_return_lane(&home, &fresh, &cfg, base + 2001, &deps);
-        assert_eq!(out, "trickle-resumed");
-        let out = run_return_lane(&home, &fresh, &cfg, base + 2002, &deps);
-        assert_eq!(out, "complete");
-        let calls_vec = calls.borrow();
-        assert_eq!(
-            calls_vec
-                .iter()
-                .filter(|c| c.starts_with("announce:"))
-                .count(),
-            1,
-            "announce fired exactly once: {calls_vec:?}"
-        );
-        assert_eq!(
-            calls_vec
-                .iter()
-                .filter(|c| c.starts_with("resume:"))
-                .count(),
-            2,
-            "canary + one trickle: {calls_vec:?}"
         );
     }
 }

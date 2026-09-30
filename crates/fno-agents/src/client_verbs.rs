@@ -1105,33 +1105,7 @@ impl ResolveError {
     }
 }
 
-use crate::identity::session_handle_tier;
-
-fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
-    let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
-    if let Some(tier) = session_handle_tier(token, session_id) {
-        return Some(tier);
-    }
-    // The one optional related id addresses the row at the same tiers as the
-    // primary (: both ids stay valid forever).
-    if let Some(related) = entry.get("related_session_id").and_then(Value::as_str) {
-        if let Some(tier) = session_handle_tier(token, related) {
-            return Some(tier);
-        }
-    }
-    // A predecessor id addresses the row at the FULL tier only:
-    // succession retired it, so delivery naming A follows the row that now
-    // answers as B, while A's retired short/handle forms stay retired.
-    entry
-        .get("predecessor_session_ids")
-        .and_then(Value::as_array)
-        .and_then(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| session_handle_tier(token, id) == Some(0))
-                .then_some(0)
-        })
-}
+use crate::resolve_tier::{entry_session_tier, is_session_shaped};
 
 /// Return the single matched row, or an ambiguity error. Dedup only repeated
 /// references to the same loaded row: a corrupt registry may contain one name
@@ -1228,18 +1202,6 @@ pub(crate) fn find_agent_entry<'a>(
 // resolver through a shellout rather than growing a second store prober.
 // ---------------------------------------------------------------------------
 
-/// True for a token worth probing a harness store with -- the Rust mirror of
-/// `store_fallback.is_session_shaped`. A plain unknown NAME never probes, so a
-/// typo keeps today's refusal instead of paying for three store reads.
-fn is_session_shaped(token: &str) -> bool {
-    let token = token.trim();
-    if let Some(rest) = token.strip_prefix("ses_") {
-        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric());
-    }
-    (token.len() == 8 && token.bytes().all(|b| b.is_ascii_alphanumeric()))
-        || is_uuid_shaped(&token.to_ascii_lowercase())
-}
-
 /// [`find_agent_entry`], plus all-source resolution for session-shaped tokens.
 ///
 /// The one choke point the session-connecting verbs resolve through. Returns an
@@ -1311,10 +1273,9 @@ fn derived_short_id(session_id: &str) -> String {
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
 /// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
 /// the harness-appropriate session id comes from the manifest, claude
-/// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
-/// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
-/// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
-/// pid -> `gc_action` Keep).
+/// also records the full uuid for its dead-arm `claude --resume`. `status: Idle`,
+/// no pid, default `exec` host_mode: a registered-but-not-driven row the GC
+/// keeps (non-terminal, no confirmed-dead pid -> `gc_action` Keep).
 fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
     use crate::state::{Lineage, RegistryEntry};
     let harness = if !id.harness.is_empty() {
@@ -1341,7 +1302,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // Synthesized from an identity that arrived without a row; the lane
         // it ran on is unobserved, so the substrate stays unknown.
         substrate: None,
-        name: crate::claude_adopt::synthesized_entry_name(&session, &id.fno_id, &short),
+        name: crate::claude_adopt::synthesized_entry_name(&session, &short),
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
@@ -1395,11 +1356,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: if id.fno_id.is_empty() {
-            None
-        } else {
-            Some(id.fno_id.clone())
-        },
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
@@ -1525,9 +1481,10 @@ fn synthesize_and_adopt(
     }
     // 2. Target manifest.
     if let Ok(Some(id)) = find_manifest_for_session(session_id) {
-        let fno_id = (!id.fno_id.is_empty()).then(|| id.fno_id.clone());
+        // The manifest run id is not the row's id: the registry write mints
+        // the row its own, so no fno_id evidence rides the receipt.
         let value = persist_manifest_identity(&id, home)?;
-        return Ok((value, fno_id, AdoptSource::Manifest));
+        return Ok((value, None, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
     match heal_token(session_id, &registry_path, cross_project, None) {
@@ -3275,6 +3232,17 @@ mod tests {
             let e = find_agent_entry(&rows, tok).expect("resolves");
             assert_eq!(e["name"], "billing");
         }
+        // The row's own minted id addresses it at the full tier; a row that
+        // answers to a different mint refuses the token.
+        let mut split_row = claude_row("split", "7c5dcf5e", "7c5dcf5e-1111-4222-8333-444444444444");
+        split_row["fno_id"] = json!("0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b");
+        let fno_id = split_row["fno_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            find_agent_entry(std::slice::from_ref(&split_row), &fno_id).unwrap()["name"],
+            "split"
+        );
+        split_row["fno_id"] = json!(Value::Null);
+        assert!(find_agent_entry(std::slice::from_ref(&split_row), &fno_id).is_err());
     }
 
     #[test]
@@ -4457,11 +4425,12 @@ mod tests {
         assert_eq!(e.project_root, "/Users/x/wt");
         // codex carries no claude uuid; claude_session_uuid stays None.
         assert_eq!(e.claude_session_uuid, None);
-        assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
+        // The adopt row carries no run id: the registry write mints its own.
+        assert_eq!(e.fno_id, None);
         assert!(!e.short_id.is_empty());
-        // The name prefers the linked node id over the bare t- form (a
-        // transcript title would outrank both; this test env has none).
-        assert_eq!(e.name, "20260804T202518Z-cl99002-4e0236");
+        // The name falls back to the derivable t- form (no transcript title
+        // in this test env, and the manifest run id no longer names the row).
+        assert_eq!(e.name, "t-thread-1");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }
@@ -4505,7 +4474,11 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cwd, "/y");
-        assert_eq!(rows[0].fno_id.as_deref(), Some("run-1"));
+        // The row's id is minted at the first write and the re-upsert keeps it
+        // (the fill carries the predecessor's value); the manifest run id no
+        // longer names the row.
+        let minted = rows[0].fno_id.clone().expect("minted at the first write");
+        assert_ne!(minted, "run-1");
     }
 
     #[test]
@@ -4567,7 +4540,10 @@ mod tests {
             row.get("harness_session_id").and_then(Value::as_str),
             Some("thread-seed-1234")
         );
-        assert_eq!(fno_id, None, "seeded row carried no fno_id");
+        assert!(
+            fno_id.is_some(),
+            "the seeded row carries its write-minted id"
+        );
         let persisted = crate::state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
             persisted.entries[0].predecessor_session_ids,

@@ -22,6 +22,7 @@ use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
+use crate::main_ci::main_ci_red_run;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -404,6 +405,23 @@ pub trait Probes {
     fn live_lanes(&self, _cwd: &Path) -> usize {
         0
     }
+    /// The base branch `main`'s CI verdict, read by the king check-in's own
+    /// reduction (`main_ci::main_ci_reading`, behind a short TTL row cache):
+    /// a red object naming the failed workflow and head sha, or the
+    /// `green`/`pending` word. `Err` = the read could not answer, which never
+    /// reads as red. Default `pending` keeps the gate disarmed wherever an
+    /// impl does not read main.
+    fn main_ci_token(&self, _cwd: &Path) -> Result<Value, String> {
+        Ok(Value::String("pending".to_string()))
+    }
+    /// The main-repair exemption: `None` when this PR's node carries the
+    /// `main-repair` tag (the declared repair lands through a red main);
+    /// `Some(lane)` otherwise, the repair-lane sentence the refusal quotes.
+    /// Default `None` = exempt, so an impl that does not read the graph never
+    /// manufactures a refusal.
+    fn main_repair_hold(&self, _cwd: &Path, _facts: &PrFacts) -> Option<String> {
+        None
+    }
 }
 
 /// A cleared decision: the effect may run, pinned to this head.
@@ -476,6 +494,22 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         ProbeOutcome::Clear => {}
         ProbeOutcome::Refused(reason) => return Err(Outcome::Refused { reason }),
         ProbeOutcome::Inconclusive(reason) => return Err(Outcome::Unknown { reason }),
+    }
+
+    // The hold-while-red rule, mechanized: while main's latest settled run is
+    // red, only a PR whose node is the declared main repair may merge. The
+    // king check-in's own reduction answers, never a check count; a pending
+    // main is not red, and an unreadable verdict never manufactures a red
+    // (only a POSITIVE red holds, the checks gate's law).
+    if facts.base_ref == "main" {
+        let token = probes.main_ci_token(cwd);
+        if let Some((workflow, sha)) = token.as_ref().ok().and_then(main_ci_red_run) {
+            if let Some(lane) = probes.main_repair_hold(cwd, &facts) {
+                return Err(Outcome::Refused {
+                    reason: main_red_reason(&workflow, &sha, &lane),
+                });
+            }
+        }
     }
 
     if let Some(blocked) = probes.dispatch_hold(cwd, &facts).fail_closed() {
@@ -787,6 +821,19 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
         ProbeOutcome::Inconclusive(reason) => {
             blockers.push(Blocker::unknown("node_binding_unknown", reason));
+        }
+    }
+
+    // (3b) main red: the same refusal the effect path raises, as a blocker.
+    if facts.base_ref == "main" {
+        let token = probes.main_ci_token(cwd);
+        if let Some((workflow, sha)) = token.as_ref().ok().and_then(main_ci_red_run) {
+            if let Some(lane) = probes.main_repair_hold(cwd, facts) {
+                blockers.push(Blocker::refused(
+                    "main_red",
+                    main_red_reason(&workflow, &sha, &lane),
+                ));
+            }
         }
     }
 
@@ -1422,6 +1469,14 @@ impl Probes for RealProbes {
         node_binding_probe(cwd, facts)
     }
 
+    fn main_ci_token(&self, cwd: &Path) -> Result<Value, String> {
+        crate::main_ci::main_ci_reading_cached(cwd)
+    }
+
+    fn main_repair_hold(&self, cwd: &Path, facts: &PrFacts) -> Option<String> {
+        main_repair_hold_probe(cwd, facts)
+    }
+
     fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
         crate::gate_probes::dispatch_hold(cwd, facts)
     }
@@ -1881,6 +1936,92 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
     } else {
         err
     }
+}
+
+/// The graph tag that declares a repair lane: a node carrying it may merge
+/// through a red main, because it IS the repair.
+const MAIN_REPAIR_TAG: &str = "main-repair";
+
+/// The refusal: the red run named, then the repair lane.
+fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
+    format!(
+        "main is red: {workflow} failed at {}; merges hold while main's latest \
+         settled run is red. {lane}",
+        sha.chars().take(8).collect::<String>()
+    )
+}
+
+/// Does one graph entry carry the tag?
+fn node_carries_tag(entry: &Value, tag: &str) -> bool {
+    entry
+        .get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(|t| t == tag))
+}
+
+/// The main-repair exemption probe over the live graph: `None` when this
+/// PR's node carries the [`MAIN_REPAIR_TAG`], else the repair-lane sentence.
+fn main_repair_hold_probe(cwd: &Path, facts: &PrFacts) -> Option<String> {
+    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    match backlog_api::rows(&store) {
+        Err(e) => Some(format!(
+            "the graph is unreadable ({}) so no repair lane can be named; tag \
+             the repair node: fno backlog update <node> --tag {MAIN_REPAIR_TAG}",
+            e.0
+        )),
+        Ok(entries) => main_repair_hold_from_entries(&entries, facts),
+    }
+}
+
+/// The pure half of [`main_repair_hold_probe`], over already-read entries.
+/// The PR's node is found by the same binding keys the node-binding gate
+/// trusts; any one of them carrying the tag exempts the PR.
+fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<String> {
+    let keys = pr_binding_keys(
+        facts.number as i64,
+        &facts.head_ref,
+        Some(&facts.url),
+        facts.body.as_deref(),
+        entries,
+    );
+    let entry_of = |nid: &str| {
+        entries
+            .iter()
+            .find(|e| crate::graph_store::entry_id(e) == Some(nid))
+    };
+    let bound: Vec<&Value> = keys
+        .branch
+        .iter()
+        .chain(&keys.backrefs)
+        .chain(&keys.trailer)
+        .filter_map(|nid| entry_of(nid))
+        .collect();
+    if bound.iter().any(|e| node_carries_tag(e, MAIN_REPAIR_TAG)) {
+        return None;
+    }
+    // The lane is named within the PR's own project: another project's
+    // main-repair tag declares that project's main, never this one.
+    let project = bound
+        .iter()
+        .find_map(|e| e.get("project").and_then(Value::as_str));
+    let lanes: Vec<&str> = entries
+        .iter()
+        .filter(|e| node_carries_tag(e, MAIN_REPAIR_TAG))
+        .filter(|e| match project {
+            Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
+            None => true,
+        })
+        .filter_map(|e| crate::graph_store::entry_id(e))
+        .collect();
+    Some(if lanes.is_empty() {
+        format!(
+            "no node is declared the repair lane; tag the repair node: \
+             fno backlog update <node> --tag {MAIN_REPAIR_TAG}"
+        )
+    } else {
+        format!("the declared repair lane is {}", lanes.join(", "))
+    })
 }
 
 /// The node-binding gate over the live graph. The scope is the canonical repo
@@ -2605,6 +2746,11 @@ mod tests {
         /// Dispatch holds keyed by PR, so a test can hold a holder without
         /// holding the PR under decision.
         other_holds: RefCell<HashMap<u64, ProbeOutcome>>,
+        /// The main-ci verdict the gate reads; `None` (the default) reads the
+        /// `pending` word, so every pre-existing test keeps its behavior.
+        main_ci: Option<Result<Value, String>>,
+        /// The main-repair exemption answer; `None` (the default) reads exempt.
+        main_repair: Option<Option<String>>,
     }
 
     fn open_facts() -> PrFacts {
@@ -2823,6 +2969,14 @@ mod tests {
         fn strategy(&self, _cwd: &Path) -> String {
             "squash".to_string()
         }
+        fn main_ci_token(&self, _cwd: &Path) -> Result<Value, String> {
+            self.main_ci
+                .clone()
+                .unwrap_or_else(|| Ok(Value::String("pending".to_string())))
+        }
+        fn main_repair_hold(&self, _cwd: &Path, _facts: &PrFacts) -> Option<String> {
+            self.main_repair.clone().flatten()
+        }
         fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String), String> {
             self.gh_calls.borrow_mut().push(args.to_vec());
             if args.first().map(String::as_str) == Some("api") {
@@ -2987,38 +3141,29 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_decisions_read_is_unreadable_never_a_grant() {
-        // AC2-ERR: nonzero exit fails closed as unreadable.
+    fn an_unreadable_decisions_read_is_never_a_grant() {
+        // AC2-ERR: a nonzero exit or a malformed payload fails closed as
+        // unreadable; neither becomes a grant. One contract, two transports.
         let mut req = request(Effect::Merge);
         req.approved = Some(false);
-        let fake = Fake {
-            decisions_exit: Some(1),
-            ..clean()
-        };
-        let outcome = run(&fake, &req);
-        assert_eq!(outcome.word(), "refused");
-        assert!(
-            outcome.detail().contains("unreadable"),
-            "{}",
-            outcome.detail()
-        );
-    }
-
-    #[test]
-    fn a_malformed_decisions_payload_is_unreadable_never_a_grant() {
-        let mut req = request(Effect::Merge);
-        req.approved = Some(false);
-        let fake = Fake {
-            decisions_stdout: Some(br#"{"error":"damaged"}"#.to_vec()),
-            ..clean()
-        };
-        let outcome = run(&fake, &req);
-        assert_eq!(outcome.word(), "refused");
-        assert!(
-            outcome.detail().contains("unreadable"),
-            "{}",
-            outcome.detail()
-        );
+        for fake in [
+            Fake {
+                decisions_exit: Some(1),
+                ..clean()
+            },
+            Fake {
+                decisions_stdout: Some(br#"{"error":"damaged"}"#.to_vec()),
+                ..clean()
+            },
+        ] {
+            let outcome = run(&fake, &req);
+            assert_eq!(outcome.word(), "refused");
+            assert!(
+                outcome.detail().contains("unreadable"),
+                "{}",
+                outcome.detail()
+            );
+        }
     }
 
     #[test]
@@ -4460,6 +4605,14 @@ mod tests {
                 },
             ),
             (
+                "main_red",
+                Fake {
+                    main_ci: Some(Ok(red_main())),
+                    main_repair: Some(Some("the declared repair lane is x-fix".to_string())),
+                    ..base()
+                },
+            ),
+            (
                 "dispatch_hold",
                 Fake {
                     dispatch_hold: Some(ProbeOutcome::Refused(
@@ -4555,6 +4708,89 @@ mod tests {
         assert!(fake.take_slot_calls.borrow().is_empty());
         assert!(fake.release_slot_calls.borrow().is_empty());
         assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    /// The king check-in's red token, stubbed: the run name and the sha it
+    /// failed on. A stub verdict, never a live merge.
+    fn red_main() -> Value {
+        serde_json::json!({
+            "verdict": "red",
+            "workflow": "cli-ci",
+            "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        })
+    }
+
+    #[test]
+    fn the_main_red_gate_refuses_red_and_exempts_only_the_declared_repair() {
+        // Reproduction of 2026-09-30 (four merges landed on a red main): the
+        // merge preview walks a stubbed red main verdict, never a live merge.
+        let lane = "no node is declared the repair lane; tag the repair node \
+                    (fno backlog update <node> --tag main-repair)";
+        let refusing = Fake {
+            main_ci: Some(Ok(red_main())),
+            main_repair: Some(Some(lane.to_string())),
+            ..clean()
+        };
+        let codes: Vec<String> = preview_blockers(&refusing, &preview_request(7))
+            .into_iter()
+            .map(|b| b.code.to_string())
+            .collect();
+        assert!(
+            codes.contains(&"main_red".to_string()),
+            "the preview walked a red main with no main_red blocker: {codes:?}"
+        );
+        let err = decide(&refusing, &request(Effect::Merge)).unwrap_err();
+        assert_eq!(err.word(), "refused", "{}", err.detail());
+        let detail = err.detail();
+        assert!(detail.contains("cli-ci"), "{detail}");
+        assert!(detail.contains("deadbeef"), "{detail}");
+        assert!(detail.contains("repair lane"), "{detail}");
+
+        // The exemption: a PR whose node carries the tag is the declared
+        // repair, and it lands through the red.
+        let repair = Fake {
+            main_ci: Some(Ok(red_main())),
+            main_repair: Some(None),
+            ..clean()
+        };
+        assert!(decide(&repair, &request(Effect::Merge)).is_ok());
+
+        // A pending main is not red, and an unreadable verdict never
+        // manufactures one; the gate names main, not every base.
+        for clearing in [
+            Fake {
+                main_ci: Some(Ok(Value::String("pending".into()))),
+                main_repair: Some(Some(lane.to_string())),
+                ..clean()
+            },
+            Fake {
+                main_ci: Some(Err("gh api failed: rate limited".to_string())),
+                main_repair: Some(Some(lane.to_string())),
+                ..clean()
+            },
+            Fake {
+                facts: Some(PrFacts {
+                    base_ref: "release".to_string(),
+                    ..open_facts()
+                }),
+                main_ci: Some(Ok(red_main())),
+                ..clean()
+            },
+        ] {
+            assert!(
+                decide(&clearing, &request(Effect::Merge)).is_ok(),
+                "{}",
+                err_words(&clearing)
+            );
+        }
+    }
+
+    /// The refused word of a decide on `fake`, for a failure message.
+    fn err_words(fake: &Fake) -> String {
+        match decide(fake, &request(Effect::Merge)) {
+            Ok(_) => "authorized".to_string(),
+            Err(outcome) => format!("{}: {}", outcome.word(), outcome.detail()),
+        }
     }
 
     #[test]

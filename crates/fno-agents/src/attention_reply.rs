@@ -161,7 +161,10 @@ pub fn tick_answers(
     runner: &dyn Fn(&[String]) -> (i32, String, String),
 ) -> (u64, Vec<String>) {
     let now = now_secs();
-    let (answers, delivered) = fold_answer_rows(items);
+    let (answers, delivered) = match fold_answer_rows(items) {
+        Ok(rows) => rows,
+        Err(e) => return (0, vec![format!("ladder source unreadable: {e}")]),
+    };
     // A delivery row is the ladder's durable terminal marker: answers that
     // already carry one never re-enter the ladder, and their terminal states
     // are pruned so replies.json stays bounded.
@@ -497,16 +500,23 @@ fn transcript_len(path: &Path) -> u64 {
 /// projection has the item; words and done stand alone.
 fn fold_answer_rows(
     items: &[AttentionItem],
-) -> (
-    Vec<(String, String, String)>,
-    std::collections::HashSet<String>,
-) {
+) -> Result<
+    (
+        Vec<(String, String, String)>,
+        std::collections::HashSet<String>,
+    ),
+    String,
+> {
     let home = crate::paths::AgentsHome::from_env();
     let path = crate::provider_cap::questions_path(&home);
     let mut out: Vec<(String, String, String)> = Vec::new();
     let mut delivered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut won: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in crate::event_store::journal_text(&path, &[]).lines() {
+    let raw = crate::event_store::journal_text_checked(
+        &path,
+        &crate::event_store::EventQuery::of_types(&[]),
+    )?;
+    for line in crate::event_store::activity_text(&raw).lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -562,7 +572,7 @@ fn fold_answer_rows(
         };
         out.push((id.to_string(), sink, text));
     }
-    (out, delivered)
+    Ok((out, delivered))
 }
 
 /// Load the ladder states from `replies.json` beside the settle state.
@@ -702,6 +712,7 @@ mod tests {
 
     fn ready_item(id: &str, harness: Option<&str>, sid: Option<&str>) -> AttentionItem {
         let item = AttentionItem {
+            recovery_batch: None,
             id: id.into(),
             kind: "question".into(),
             title: "Which?".into(),
@@ -760,7 +771,7 @@ mod tests {
     fn ac2_edge_a_delivered_answer_never_reenters_the_ladder() {
         let _root = crate::paths::DeclaredRoot::declare("reply_delivered_skip");
         let items = vec![ready_item("q-done", None, Some("s1"))];
-        record_answer("q-done");
+        record_answer("q-history");
         let mut io = FakeIo {
             posture: "outstanding: q-done answered; mail to w1: delivered (hosted)".into(),
             clears: 0,
@@ -768,6 +779,23 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let runner = &|_argv: &[String]| (0, String::new(), String::new());
+        let questions = crate::provider_cap::questions_path(&crate::paths::AgentsHome::from_env());
+        crate::event_store::sync(&questions).unwrap();
+        let path = crate::event_store::store_path(&questions);
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute_batch("CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL); INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events WHERE type='attention_answer';").unwrap();
+        drop(db);
+        let (historical, _) = tick_answers(
+            &items,
+            Path::new("."),
+            state_dir.path(),
+            deadline,
+            &mut io,
+            runner,
+        );
+        assert_eq!(historical, 0, "recovered answers start no delivery ladder");
+        assert_eq!(io.clears, 0, "historical rows never clear a question");
+        record_answer("q-done");
         let (acted1, _d1) = tick_answers(
             &items,
             Path::new("."),

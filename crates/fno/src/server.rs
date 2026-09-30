@@ -1178,66 +1178,11 @@ mod argv_facts;
 
 use argv_facts::*;
 
-/// A tab's display label, from spawn-time facts only - no I/O, no
-/// subprocess on the layout path (squad.rs's origin-freeze discipline).
-/// Chain: explicit rename > registered name (`FNO_AGENT_SELF`) >
-/// `FNO_NODE` provenance > spawn-cwd basename when it differs from the squad's
-/// > command basename > the bare 1-based index (so a plain shell tab renders
-/// unchanged). `pane` is the focused pane's `(name, node, cwd, cmd)`; `None`
-/// (a reaped pane racing tree cleanup) falls through to the index - the
-/// derivation never panics on a missing pane.
-#[allow(clippy::type_complexity)]
-fn tab_label(
-    rename: Option<&str>,
-    pane: Option<(Option<&str>, Option<&str>, &str, Option<&str>)>,
-    squad_cwd: &str,
-    i: usize,
-) -> String {
-    if let Some(name) = rename {
-        return name.to_string();
-    }
-    if let Some((name, node, cwd, cmd)) = pane {
-        // Every derived candidate is sanitized like a rename (codex peer
-        // review): FNO_NODE values, dir names, and argv all admit control
-        // bytes, and these strings land in chrome cells. A candidate that
-        // sanitizes to empty (e.g. whitespace-only) falls through to the
-        // next source instead of rendering a blank label.
-        if let Some(name) = name {
-            let clean = sanitize_tab_name(name);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(node) = node {
-            let clean = sanitize_tab_name(node);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        fn base(p: &str) -> &str {
-            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
-        }
-        let cwd_base = base(cwd);
-        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
-            let clean = sanitize_tab_name(cwd_base);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(cmd) = cmd {
-            let clean = sanitize_tab_name(cmd);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-    }
-    (i + 1).to_string()
-}
-
 /// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
 /// (file-budget ratchet); re-imported so callers and tests resolve.
-use pane_meta::pane_label;
+use pane_meta::{pane_label, tab_label};
 
+mod osc_reply;
 mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
@@ -3200,13 +3145,36 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
+        let theme = osc_reply::theme_at(&cwd);
         let mut spawn_argv = argv.clone();
         if let Some(worker) = worker.as_deref() {
             if agent_self_from_argv(&spawn_argv).is_none() {
-                let mut wrapped = vec!["env".to_string(), format!("FNO_AGENT_SELF={worker}")];
+                let mut wrapped = vec![
+                    "env".to_string(),
+                    format!("COLORFGBG={}", osc_reply::colorfgbg(&theme)),
+                    format!("FNO_AGENT_SELF={worker}"),
+                ];
                 wrapped.extend(spawn_argv);
                 spawn_argv = wrapped;
             }
+        }
+        // A claude pane on a light ground launches with the plugin's shipped
+        // footnote-paper theme: the OSC 11 answer resolves `auto` to light,
+        // and the custom theme keeps the dark prompt band the stock light
+        // theme loses. `--settings` is per-session; settings.json is never
+        // touched. Skipped when the argv already names a settings file - a
+        // duplicate flag would let the theme blob win and drop the user's
+        // file (parsers take the last occurrence). Appended last: claude's
+        // parser takes flags after any positional, and the spawn argv is
+        // never a shell string.
+        if argv_runs_claude(&spawn_argv)
+            && crate::theme::is_light(&theme)
+            && !spawn_argv
+                .iter()
+                .any(|a| a == "--settings" || a.starts_with("--settings="))
+        {
+            spawn_argv.push("--settings".to_string());
+            spawn_argv.push("{\"theme\":\"custom:fno:footnote-paper\"}".to_string());
         }
         // Every spawned pane takes the keeper road in production, worker or
         // not; unit fixtures keep today's split (short-lived fixtures can
@@ -4168,7 +4136,7 @@ impl Core {
         // Exact identity wins; a prefix only resolves when it is unambiguous
         // (hits a single distinct identity). An ambiguous prefix is NOT_FOUND,
         // never a silent pick of the first registry row (codex P2).
-        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| identity_exact(a, id)).collect();
+        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -4477,11 +4445,7 @@ impl Core {
         if held.len() == 1 && self.panes.contains_key(&held[0]) {
             return held.first().copied();
         }
-        let exact: Vec<&RegistryAgent> = self
-            .agents
-            .iter()
-            .filter(|a| identity_exact(a, id))
-            .collect();
+        let exact: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -8713,50 +8677,69 @@ impl Core {
                     .tabs
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| TabMeta {
-                        id: t.id,
-                        // (US2) An explicit rename is the ONLY chosen
-                        // name; a pane-derived or ordinal label is not. The
-                        // client renders a chosen name without a forced ordinal.
-                        named: t.name.is_some(),
-                        name: tab_label(
-                            t.name.as_deref(),
-                            self.panes.get(&t.focus).map(|e| {
-                                (
-                                    e.name.as_deref(),
-                                    e.node.as_deref(),
-                                    e.cwd.as_str(),
-                                    e.cmd.as_deref(),
-                                )
-                            }),
-                            s.canonical_cwd(),
-                            i,
-                        ),
-                        // (v22) Every leaf pane of the tab, labelled from
-                        // its own entry, so the navigator can goto a pane in any
-                        // tab/squad - not just the active view the client tiles.
-                        panes: tree::leaves(&t.root)
-                            .iter()
-                            .map(|pid| {
-                                let e = self.panes.get(pid);
-                                let ctx = pane_meta::pane_ctx(
-                                    &self.agents,
-                                    &self.session_name,
-                                    &self.ctx_by_session,
-                                    *pid,
-                                );
-                                pane_meta::pane_meta(
-                                    *pid,
-                                    e.and_then(|e| e.name.as_deref()),
-                                    e.and_then(|e| e.node.as_deref()),
-                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
-                                    e.and_then(|e| e.cmd.as_deref()),
-                                    e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
-                                        .map(String::as_str),
-                                    ctx.as_deref(),
-                                )
-                            })
-                            .collect(),
+                    .map(|(i, t)| {
+                        // The registry row hosting the focus pane carries the
+                        // LIVE name (a rename rewrites the row, never the
+                        // pane's spawn-captured env), so it leads the derived
+                        // chain ahead of `FNO_AGENT_SELF`.
+                        let focus_reg = pane_meta::pane_registry_name(
+                            &self.agents,
+                            &self.session_name,
+                            t.focus,
+                        );
+                        TabMeta {
+                            id: t.id,
+                            // (US2) An explicit rename is the ONLY chosen
+                            // name; a pane-derived or ordinal label is not. The
+                            // client renders a chosen name without a forced ordinal.
+                            named: t.name.is_some(),
+                            name: tab_label(
+                                t.name.as_deref(),
+                                self.panes.get(&t.focus).map(|e| {
+                                    (
+                                        focus_reg.as_deref().or(e.name.as_deref()),
+                                        e.node.as_deref(),
+                                        e.cwd.as_str(),
+                                        e.cmd.as_deref(),
+                                    )
+                                }),
+                                s.canonical_cwd(),
+                                i,
+                            ),
+                            // (v22) Every leaf pane of the tab, labelled from
+                            // its own entry, so the navigator can goto a pane in any
+                            // tab/squad - not just the active view the client tiles.
+                            panes: tree::leaves(&t.root)
+                                .iter()
+                                .map(|pid| {
+                                    let e = self.panes.get(pid);
+                                    let ctx = pane_meta::pane_ctx(
+                                        &self.agents,
+                                        &self.session_name,
+                                        &self.ctx_by_session,
+                                        *pid,
+                                    );
+                                    let reg = pane_meta::pane_registry_name(
+                                        &self.agents,
+                                        &self.session_name,
+                                        *pid,
+                                    );
+                                    let name = reg
+                                        .as_deref()
+                                        .or_else(|| e.and_then(|e| e.name.as_deref()));
+                                    pane_meta::pane_meta(
+                                        *pid,
+                                        name,
+                                        e.and_then(|e| e.node.as_deref()),
+                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                        e.and_then(|e| e.cmd.as_deref()),
+                                        e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
+                                            .map(String::as_str),
+                                        ctx.as_deref(),
+                                    )
+                                })
+                                .collect(),
+                        }
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
@@ -9435,11 +9418,16 @@ impl Core {
                 .and_then(|row| row.effective_identity())
                 .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            // Identity is the session uuid, never the name: a rename (or a
-            // succession heir renamed after spawn) leaves the pane label
-            // stale while the uuid still names the same live session. The
-            // uuid comparison above is the whole check.
-            if (occupants.len() != 1 && viewer_row.is_none()) || registry_identity != expected {
+            // Identity is the id the pane's row answers to - its own fno_id or
+            // its harness session id, either spelling - never the name: a
+            // rename (or a succession heir renamed after spawn) leaves the
+            // pane label stale while the ids still name the same live session.
+            // The answers_to check is the whole gate.
+            let addressed = occupants
+                .first()
+                .or_else(|| viewer_row.as_ref())
+                .is_some_and(|row| row.answers_to(expected));
+            if (occupants.len() != 1 && viewer_row.is_none()) || !addressed {
                 let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
@@ -12721,6 +12709,10 @@ fn drain_pty_output(
                             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         touched.insert(pid);
                     }
+                    // A pane nobody focuses has no terminal to answer its
+                    // palette probes; the mux does, from the pane's own
+                    // ground. Focused panes ride the client loopback.
+                    core.answer_color_queries(pid, &bytes);
                 }
                 PaneChunk::Resized(rows, cols) => {
                     // The keeper's resize round trip landed: apply the VT
@@ -12856,11 +12848,6 @@ fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
         .max()
         .unwrap_or(1);
     persisted.max(registry_floor).max(1)
-}
-
-/// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
-fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
-    a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
 }
 
 /// Does `id` PREFIX either of row `a`'s identity spellings ? The `where`
