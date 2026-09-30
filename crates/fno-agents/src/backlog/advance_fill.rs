@@ -9,13 +9,11 @@
 //! the conservative twin and serializes the unevaluated instead.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::backlog::collision::{
-    find_collisions, has_file_surface, resolve_plan_path, Thresholds, HIDDEN_SHARED_OUTPUT_ROOTS,
-};
+use crate::backlog::collision::{find_collisions, has_file_surface, resolve_plan_path, Thresholds};
 use crate::claims::{self};
 use crate::lanes::{
     acquire_lane_slot, find_lane_slot, release_lane_slot, LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX,
@@ -131,7 +129,7 @@ fn classify_lane_candidate(
     })();
     match hit {
         Ok(reason) => reason,
-        Err(error) => Some(format!(
+        Err(_) => Some(format!(
             "{UNEVALUATED_PREFIX}collision-error{domain_suffix}"
         )),
     }
@@ -468,7 +466,7 @@ pub fn schedule_shadow(
         }
     };
     let graph = super::settings::graph_path();
-    let mut inflight = match live_worked_entries(claims_root, &graph) {
+    let inflight = match live_worked_entries(claims_root, &graph) {
         Ok(rows) => rows,
         Err(_) => {
             degraded.push("collision".to_string());
@@ -676,6 +674,7 @@ fn parse_fill_args(args: &[String]) -> Option<FillArgs> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     /// Isolated claims root: the dir that CONTAINS `.fno/claims`.
     fn sandbox(name: &str) -> PathBuf {
