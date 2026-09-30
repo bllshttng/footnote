@@ -107,25 +107,22 @@ mod tests {
 
     #[test]
     fn the_rivalry_table_answers_per_pair() {
-        // One scan pins the rule's table: a portfolio over two project kings
-        // rivals EACH (one entry per pair, never a group); disjoint
-        // territories rival nothing; a portfolio and a non-member court stay
+        // One scan pins the rule's table: two same-rung epic sets sharing a
+        // member rival EACH (one entry per pair, never a group); disjoint
+        // territories rival nothing; a portfolio and a cross-rung court stay
         // legitimate; blank scopes claim nothing; a missing rows array is an
         // error, never an empty answer.
-        let projects = HashMap::from([
-            ("alpha".to_string(), "alpha".to_string()),
-            ("beta".to_string(), "beta".to_string()),
-        ]);
+        let empty = HashMap::new();
         let out = scan(
             json!([
-                {"name": "portfolio", "crown_scope": "alpha,beta", "crown_level": 2},
-                {"name": "king-a", "crown_scope": "alpha", "crown_level": 0},
-                {"name": "king-b", "crown_scope": "beta", "crown_level": 0}
+                {"name": "set-a", "crown_scope": "e-1,e-2", "crown_level": 2},
+                {"name": "king-a", "crown_scope": "e-1", "crown_level": 2},
+                {"name": "king-b", "crown_scope": "e-2", "crown_level": 2}
             ]),
-            &projects,
+            &empty,
         );
         let pairs = out["pairs"].as_array().unwrap();
-        assert_eq!(pairs.len(), 2, "two rivals of the portfolio, never a group");
+        assert_eq!(pairs.len(), 2, "two rivals of the set, never a group");
         let holders: Vec<Vec<&str>> = pairs
             .iter()
             .map(|p| {
@@ -137,39 +134,37 @@ mod tests {
                     .collect()
             })
             .collect();
-        assert!(holders.contains(&vec!["portfolio", "king-a"]));
-        assert!(holders.contains(&vec!["portfolio", "king-b"]));
+        assert!(holders.contains(&vec!["set-a", "king-a"]));
+        assert!(holders.contains(&vec!["set-a", "king-b"]));
         assert_eq!(
             pairs[0]["scope"].as_str().unwrap(),
-            "alpha",
+            "e-1",
             "the pair names the territory it actually shares"
         );
         let out = scan(
             json!([
-                {"name": "king-a", "crown_scope": "alpha", "crown_level": 0},
-                {"name": "king-b", "crown_scope": "beta", "crown_level": 0}
+                {"name": "king-a", "crown_scope": "e-1", "crown_level": 2},
+                {"name": "king-b", "crown_scope": "e-2", "crown_level": 2}
             ]),
-            &projects,
+            &empty,
         );
         assert_eq!(out["pairs"], json!([]));
         let out = scan(
             json!([
-                {"name": "portfolio", "crown_scope": "alpha,beta", "crown_level": 2},
-                {"name": "court-king", "crown_scope": "e-court", "crown_level": 2}
+                {"name": "set-a", "crown_scope": "e-1,e-2", "crown_level": 2},
+                {"name": "court-king", "crown_scope": "e-3,e-4", "crown_level": 2}
             ]),
-            &projects,
+            &empty,
         );
-        // e-court resolves to no configured project; its members rival
-        // nothing the portfolio holds.
         assert_eq!(out["pairs"], json!([]));
         let out = scan(
             json!([
                 {"name": "blank", "crown_scope": "  ", "crown_level": 2},
                 {"name": "none"}
             ]),
-            &HashMap::new(),
+            &empty,
         );
         assert_eq!(out["pairs"], json!([]));
-        assert!(resolve_with_projects(&json!({"kind": "court-rivals"}), &HashMap::new()).is_err());
+        assert!(resolve_with_projects(&json!({"kind": "court-rivals"}), &empty).is_err());
     }
 }
