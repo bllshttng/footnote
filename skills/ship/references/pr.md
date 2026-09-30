@@ -1,37 +1,25 @@
----
-name: pr
-description: "Drive a PR through its lifecycle. Create runs inline, check polls for external review and implements findings, and merged runs the post-merge ritual. Use when: 'create pr', 'open pr', 'submit pr', 'check pr', 'get review', 'post merge', 'process the merged PR'."
-argument-hint: "<create|check|merged>  (create: opens a PR; check: [PR#]; merged: [PR#])  - a mode is required, there is no default"
-metadata:
-  requires:
-    binaries:
-      - "fno >= 0.1"
-      - "gh >= 2.0"
-      - "git >= 2.0"
----
+# ship pr
 
-# PR
-
-**One verb for the PR lifecycle.** `/pr` routes to the right stage of getting a change reviewed and landed.
+The `pr` mode of `/fno:ship` routes to the right stage of getting a change reviewed and landed. (The former top-level `/fno:pr` skill retired into this file on 2026-09-30; `/fno:ship pr` is the only spelling.)
 
 | Mode | What runs | Where it runs |
 |------|-----------|---------------|
-| `create` | open a PR: push the branch, generate a description from the commits, create the PR | this same context, via `references/create.md` |
+| `create` | open a PR: push the branch, generate a description from the commits, create the PR | this same context, via `create.md` |
 | `check` | poll for external review, implement findings, reply per-thread | the router's own main context |
 | `merged` | the post-merge ritual: close the backlog node, harvest retro items, file follow-ups | the router's own main context |
 
 This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's reference and follows it in this same context. No mode dispatches a worker or calls another skill at runtime.
 
-**No default mode.** Create, check, and merged are distinct lifecycle actions. A default on bare `/pr` can open the wrong PR or run a ritual against a PR that has not merged. Bare `/pr` lists the modes and stops.
+**No default mode.** Create, check, and merged are distinct lifecycle actions. A default on bare `ship pr` can open the wrong PR or run a ritual against a PR that has not merged. Bare `ship pr` lists the modes and stops.
 
 ## Step 1: Resolve the mode (ALWAYS announce it)
 
 Parse the first argument token:
 
-- **no argument** -> infer `create` only for a plain open, create, or submit request. Print `running create (inferred from the request)`. Anything else, including a bare `/pr`, prints the menu and stops with a non-zero result (dispatch nothing, open no PR). Never infer `check` or `merged`:
+- **no argument** -> infer `create` only for a plain open, create, or submit request. Print `running create (inferred from the request)`. Anything else, including a bare `ship pr`, prints the menu and stops with a non-zero result (dispatch nothing, open no PR). Never infer `check` or `merged`:
 
   ```
-  /pr needs a mode. valid modes:
+  ship pr needs a mode. valid modes:
     create       open a PR for the current branch (runs inline)
     check        poll for external review on a PR and implement it
     merged       run the post-merge ritual for a merged PR
@@ -43,9 +31,9 @@ Parse the first argument token:
 - **`merge`** -> ambiguous: one word off `merged`, and on the opposite side of the merge event. Do NOT guess. Print and stop with a non-zero result:
 
   ```
-  '/pr merge' is ambiguous - did you mean:
-    fno do pr merge   land the PR now (the merge primitive, a CLI verb)
-    /pr merged     run the post-merge ritual on an already-merged PR
+  '/fno:ship pr merge' is ambiguous - did you mean:
+    fno do pr merge        land the PR now (the merge primitive, a CLI verb)
+    /fno:ship pr merged    run the post-merge ritual on an already-merged PR
   ```
 
   If the caller meant `fno do pr merge` and the verb REFUSES, read the refusal text. It names the sanctioned override. Those levers are the superuser's. A worker escalates to the king or superuser instead of pulling one. Never route around a gate refusal. Do not synthesize a config file. Do not flip a shared config key for the call's duration. Do not export a merge-time env var. Do not export TARGET_AUTO_MERGE before any run. Agent-origin and unattended runs scrub it anyway. Two workers improvised the first three moves within sixty seconds of each other on 2026-08-19. One left a global merge switch ON machine-wide mid-merge. That exposure is not reversible the way a merge is.
@@ -124,7 +112,7 @@ fi
 
 ### 2b. Run the canonical create flow inline
 
-Load [create.md](references/create.md) and execute it in this same context. The flow is draft-first: it composes the title and body from local history before any step that can fail. It then owns validation, push, PR creation, node binding, and its result contract. On a blocked step, print the step, the reason, the title and the full body from `.fno/pr-body.md`. Say no PR was created, and end `RESULT: BLOCKED step=<step> reason=<one line> draft=.fno/pr-body.md`. Do not spawn or dispatch a worker, route create mode through a model lane, or hand off the work to another agent.
+Load [create.md](create.md) and execute it in this same context. The flow is draft-first: it composes the title and body from local history before any step that can fail. It then owns validation, push, PR creation, node binding, and its result contract. On a blocked step, print the step, the reason, the title and the full body from `.fno/pr-body.md`. Say no PR was created, and end `RESULT: BLOCKED step=<step> reason=<one line> draft=.fno/pr-body.md`. Do not spawn or dispatch a worker, route create mode through a model lane, or hand off the work to another agent.
 
 ### 2c. Mirror the local verdict and post held findings after create
 
@@ -138,15 +126,15 @@ The verdict leg defaults to the newest head-pinned attestation for HEAD. It refu
 
 ## Step 3: check mode (poll for external review)
 
-Load [check.md](references/check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
+Load [check.md](check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
 
 ## Step 4: merged mode (the post-merge ritual)
 
-Load [merged.md](references/merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply`, harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
+Load [merged.md](merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply`, harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
 
 ## Known Limitations and Deferred Work
 
-- PR reconciliation cannot prove unreadable external state. See [LIMITATIONS.md](LIMITATIONS.md).
+- PR reconciliation cannot prove unreadable external state. See [LIMITATIONS.md](../LIMITATIONS.md).
 
 ## Multi-CLI
 

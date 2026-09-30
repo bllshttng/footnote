@@ -377,14 +377,14 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
         agents_app,
         [
             "spawn", "--name", "command-c", "-H", "claude",
-            "/fno:pr check 7", "--substrate", "bg",
+            "/fno:ship pr check 7", "--substrate", "bg",
         ],
         catch_exceptions=False,
     )
 
     assert result.exit_code == 0, result.output
     receipt = json.loads(_receipt_line(result.output))
-    assert receipt["effective_message"] == "/fno:pr check 7"
+    assert receipt["effective_message"] == "/fno:ship pr check 7"
 
 
 def test_spawn_refuses_a_payload_whose_verb_the_shell_ate(workdir) -> None:

@@ -177,9 +177,9 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 | Command | What it's for |
 |---------|---------------|
 | `/fno:review` | Review a diff before you push. Default is the owned lane: one inline reviewer that emits a head-pinned attestation; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
-| `/fno:pr create` | Open a PR from your commits inline in the invoking session. |
-| `/fno:pr check` | Poll for the external review bot, then implement its feedback. |
-| `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |
+| `/fno:ship pr create` | Open a PR from your commits inline in the invoking session. |
+| `/fno:ship pr check` | Poll for the external review bot, then implement its feedback. |
+| `/fno:ship pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |
 
 `target` runs review, `pr create`, and (by default) `pr check` for you. Reach for the individual verbs when you're driving by hand or picking up a PR mid-flight.
 

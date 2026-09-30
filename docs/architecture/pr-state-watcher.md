@@ -2,7 +2,7 @@
 
 footnote automates the **merge** side of a PR's life from inside a session (`reconcile` -> `advance` on SessionStart), but the **review** side is manual and the only out-of-session merge automation was a per-repo launchd watcher that had to be installed once per repository. A `/target` session emits `MISSION COMPLETE` at PR-open + CI-green and terminates; once it dies, nothing watches the PR for a late review, and a GitHub web-button merge produces no local event at all.
 
-The PR-state watcher is **one global launchd daemon** that watches every footnote PR for both terminal events - a new review and a web merge - and fires the right action in that PR's repository: the review poll fires the headless `/fno:pr check` skill, and a newly-observed merge runs the mechanical `fno do pr ritual <pr> --autonomous` verb (directly as a subprocess, or warm-injected into the live origin session). It replaces the install-once-per-repo model with a single watcher that follows the backlog graph, so a newly-created PR in any repo is covered with zero per-repo setup.
+The PR-state watcher is **one global launchd daemon** that watches every footnote PR for both terminal events - a new review and a web merge - and fires the right action in that PR's repository: the review poll fires the headless `/fno:ship pr check` skill, and a newly-observed merge runs the mechanical `fno do pr ritual <pr> --autonomous` verb (directly as a subprocess, or warm-injected into the live origin session). It replaces the install-once-per-repo model with a single watcher that follows the backlog graph, so a newly-created PR in any repo is covered with zero per-repo setup.
 
 It is the **sole** post-merge detector. `fno backlog reconcile` no longer dispatches a ritual: it closes merged nodes, stamps plans, and advances dependents, but the merge-to-ritual handoff is the watcher's alone.
 
@@ -28,7 +28,7 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
 4. **Decide** (at most one action per PR per tick), in precedence order:
    - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno do pr ritual <n> --autonomous`. The route is warm-inject into a live origin, else the cold subprocess. The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
    - closed-without-merge, or open past the max-age window -> park (poll it no further).
-   - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`.
+   - a configured reviewer posted activity newer than the watermark -> fire `/fno:ship pr check`.
    - otherwise no-op.
 5. Advance the watermark **only after a clean dispatch**. A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification. A grant execution that a canonical guard holds consumes no retry budget - the guard is a state to wait out, not a watcher defect.
 
@@ -48,9 +48,9 @@ The coupling is enforced on both ends: arming `auto_merge.grant = dispatch` thro
 
 ### Headless fire (review poll)
 
-The review poll fires `claude --print --output-format json --dangerously-skip-permissions "/fno:pr check <n>"`, run with `cwd` set to the PR's repo, default model Haiku. The plist carries `PATH` (captured at install time) + `HOME` in `EnvironmentVariables`; authentication rides the macOS keychain OAuth, so no API key is injected, and `--bare` is never used.
+The review poll fires `claude --print --output-format json --dangerously-skip-permissions "/fno:ship pr check <n>"`, run with `cwd` set to the PR's repo, default model Haiku. The plist carries `PATH` (captured at install time) + `HOME` in `EnvironmentVariables`; authentication rides the macOS keychain OAuth, so no API key is injected, and `--bare` is never used.
 
-A merge is not a headless claude fire. It runs the mechanical `fno do pr ritual <n> --autonomous` verb as a bounded `fno-py` subprocess from the repo's canonical root (warm-injected as the identical command when the origin session is live). The verb owns the ritual's mechanical legs and its own conditional headless judgment one-shot, so the watcher never wraps the ritual in a `/fno:pr merged` LLM session or spawns a `--substrate bg` worker. Every dispatch attempt reserves a `post_merge_dispatch_receipt` (keyed by merge SHA) before acting - attribution and correlation only; route selection never reads it.
+A merge is not a headless claude fire. It runs the mechanical `fno do pr ritual <n> --autonomous` verb as a bounded `fno-py` subprocess from the repo's canonical root (warm-injected as the identical command when the origin session is live). The verb owns the ritual's mechanical legs and its own conditional headless judgment one-shot, so the watcher never wraps the ritual in a `/fno:ship pr merged` LLM session or spawns a `--substrate bg` worker. Every dispatch attempt reserves a `post_merge_dispatch_receipt` (keyed by merge SHA) before acting - attribution and correlation only; route selection never reads it.
 
 ## Install is reviewed and gated
 

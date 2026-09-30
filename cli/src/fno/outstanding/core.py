@@ -36,7 +36,7 @@ QUESTION_RENDER_CAP = 10
 QUESTION_BODY_CAP = 240
 
 EVENTS_NAME = "events.jsonl"
-# `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
+# `retro sweep-carveouts` skips this kind; /fno:ship pr merged owns it.
 BACKFILL_KIND = "backfill"
 QUESTION_EVENT = "operator_question"
 QUESTION_CLOSED_EVENT = "operator_question_closed"
@@ -917,7 +917,7 @@ def render(
         # shape) and nothing else ever tells a human what to run.
         #
         # Route by kind. `retro sweep-carveouts` SKIPS backfill rows entirely
-        # (they belong to /fno:pr merged), so prescribing it against a
+        # (they belong to /fno:ship pr merged), so prescribing it against a
         # backfill-only ledger sends the operator to a verb that clears
         # nothing and reports the same count on every later session.
         sweepable = sum(
@@ -928,7 +928,7 @@ def render(
                 "  Clear with: fno backlog retro sweep-carveouts (preview), --apply to file and consume."
             )
         if outstanding.carveout_by_kind.get(BACKFILL_KIND):
-            lines.append("  Backfill rows are handled by /fno:pr merged, not by the sweep.")
+            lines.append("  Backfill rows are handled by /fno:ship pr merged, not by the sweep.")
         lines.append("")
 
     if outstanding.questions:

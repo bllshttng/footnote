@@ -12,10 +12,10 @@
 #  1. The "Philosophy" phase table lists the Docs row BEFORE the Ship row.
 #  2. The "Prior-phase mapping" handoff table lists docs BEFORE ship (so the
 #     handoff chain matches the docs-before-ship pipeline order).
-#  3. The pipeline prose documents that docs/browser run BEFORE /pr create and
+#  3. The pipeline prose documents that docs/browser run BEFORE /fno:ship pr create and
 #     ride in any auto-merge (the anti-stranding rationale).
 #  4. ship-phase.md documents docs-before-ship as a ship precondition.
-#  5. The top-level ASCII pipeline box lists /ship-docs before /pr create.
+#  5. The top-level ASCII pipeline box lists /ship-docs before /fno:ship pr create.
 #
 # Any future edit that inverts these orderings should fail this test loudly.
 #
@@ -98,12 +98,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. The pipeline prose must document that docs/browser run BEFORE /pr create
+# 3. The pipeline prose must document that docs/browser run BEFORE /fno:ship pr create
 #    and ride in any auto-merge (the anti-stranding rationale). This replaces
 #    the removed `docs_generated` boolean-gate assertion.
 # ---------------------------------------------------------------------------
 if grep -qE 'run BEFORE .*pr create.*included in any auto-merge' "$PIPELINE_REF"; then
-    pass "Pipeline prose documents docs/browser run BEFORE /pr create and ride in any auto-merge"
+    pass "Pipeline prose documents docs/browser run BEFORE /fno:ship pr create and ride in any auto-merge"
 else
     fail "Pipeline prose missing the docs-before-/pr-create anti-stranding rationale"
 fi
@@ -122,7 +122,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # 5. Sanity: the SKILL.md top-level ASCII pipeline (inside a box-drawn block)
-#    must list /ship-docs before /pr create. Scoped to box lines inside the
+#    must list /ship-docs before /fno:ship pr create. Scoped to box lines inside the
 #    "## The Full Pipeline" section so we don't match references elsewhere.
 # ---------------------------------------------------------------------------
 PIPELINE_START=$(grep -nE '^## The Full Pipeline' "$PIPELINE_REF" | head -1 | cut -d: -f1)
@@ -136,13 +136,13 @@ else
     BOX_SHIP_DOCS=$(awk -v start="$PIPELINE_START" -v end="$PIPELINE_END" \
         'NR > start && NR < end && /^│.*\/ship-docs/ { print NR; exit }' "$PIPELINE_REF")
     BOX_PR_CREATE=$(awk -v start="$PIPELINE_START" -v end="$PIPELINE_END" \
-        'NR > start && NR < end && /^│.*\/pr create/ { print NR; exit }' "$PIPELINE_REF")
+        'NR > start && NR < end && /^│.*\/fno:ship pr create/ { print NR; exit }' "$PIPELINE_REF")
     if [[ -z "$BOX_SHIP_DOCS" || -z "$BOX_PR_CREATE" ]]; then
-        fail "Top-level ASCII pipeline: missing /ship-docs or /pr create in the box"
+        fail "Top-level ASCII pipeline: missing /ship-docs or /fno:ship pr create in the box"
     elif (( BOX_SHIP_DOCS < BOX_PR_CREATE )); then
-        pass "Top-level ASCII pipeline: /ship-docs (line $BOX_SHIP_DOCS) precedes /pr create (line $BOX_PR_CREATE)"
+        pass "Top-level ASCII pipeline: /ship-docs (line $BOX_SHIP_DOCS) precedes /fno:ship pr create (line $BOX_PR_CREATE)"
     else
-        fail "Top-level ASCII pipeline: /ship-docs (line $BOX_SHIP_DOCS) must precede /pr create (line $BOX_PR_CREATE)"
+        fail "Top-level ASCII pipeline: /ship-docs (line $BOX_SHIP_DOCS) must precede /fno:ship pr create (line $BOX_PR_CREATE)"
     fi
 fi
 

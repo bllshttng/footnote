@@ -137,7 +137,7 @@ fn install_writes_the_full_surface_and_reinstall_is_a_noop() {
     assert_eq!(render_verb_seed("/fno:think", "opencode"), "/fno:think");
     assert_eq!(command_file_name("think"), "fno:think.md");
     let s = installed("full-surface");
-    for verb in ["fno:target.md", "fno:pr.md", "fno:think.md"] {
+    for verb in ["fno:target.md", "fno:ship.md", "fno:think.md"] {
         assert!(
             s.conf.join("commands").join(verb).is_file(),
             "{verb} missing"

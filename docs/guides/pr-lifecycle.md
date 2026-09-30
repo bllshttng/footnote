@@ -13,31 +13,31 @@ Run the internal review on your working diff before anything leaves your machine
 
 The default lane works every finding angle in this session, verifies what it finds, and emits the same attestation a native review produces; it dispatches zero subagents. `peer` routes the review to a different model than wrote the code, so you catch the things one model is systematically blind to. Fix what either surfaces, then move on.
 
-## 2. Open the PR: `/fno:pr create`
+## 2. Open the PR: `/fno:ship pr create`
 
 ```
-/fno:pr create
+/fno:ship pr create
 ```
 
 This forks to a cheap Haiku worker that reads your commits and writes the PR title and description, then opens the PR with `gh`. It does not push code it didn't read or invent a description from thin air; the body reflects the actual diff. You get the PR URL back.
 
-## 3. Wait for external review, then act on it: `/fno:pr check`
+## 3. Wait for external review, then act on it: `/fno:ship pr check`
 
 If you use an external review bot (configured under `config.review.external_reviewers`, e.g. a Codex or Gemini connector), `pr check` polls for its review and implements the feedback.
 
 ```
-/fno:pr check
+/fno:ship pr check
 ```
 
 It waits for the bot to post, reads the inline findings, and for each blocking one either lands a fix commit or replies on the thread with a rationale. A finding counts as addressed once its thread has a non-bot reply and either a fix commit landed after it or the reply is an explicit `wontfix:`. This is the same bar `target` uses to decide a PR is done, so `pr check` and the autonomous loop agree on what "handled" means.
 
-## 4. After it merges: `/fno:pr merged`
+## 4. After it merges: `/fno:ship pr merged`
 
 Merging is a human action (or `auto_merge`, if you opted in). Once the PR is merged, run the post-merge ritual:
 
 ```
-/fno:pr merged          # operates on the most recent merged PR
-/fno:pr merged 123      # or name the PR number
+/fno:ship pr merged          # operates on the most recent merged PR
+/fno:ship pr merged 123      # or name the PR number
 ```
 
 It reconciles the backlog (closes the node whose PR merged, even if you merged from the GitHub UI), runs the retro to capture follow-up work, reads the merged diff, and appends a dated prose section to the project's parking-lot file. It then files any triage-worthy work it found as backlog ideas.

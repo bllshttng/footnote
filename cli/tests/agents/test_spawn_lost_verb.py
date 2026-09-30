@@ -10,7 +10,7 @@ import pytest
 from fno.agents import harness_map
 from fno.agents.harness_map import lost_verb_refusal
 
-VERBS = frozenset({"target", "blueprint", "think", "review", "execute", "fix", "pr", "tdd", "law"})
+VERBS = frozenset({"target", "blueprint", "think", "review", "execute", "fix", "pr", "tdd", "law", "ship"})
 
 
 @pytest.fixture(autouse=True)
@@ -29,7 +29,7 @@ def _expand(shell: str, payload: str) -> str:
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 @pytest.mark.parametrize(
     "payload",
-    ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1", "$fno:pr check 7"],
+    ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1"],
 )
 def test_a_real_shell_mangling_is_refused(shell, payload):
     if shutil.which(shell) is None:
@@ -38,6 +38,19 @@ def test_a_real_shell_mangling_is_refused(shell, payload):
     assert "$fno:" not in mangled, f"control: {shell} did not expand {payload!r}"
     reason = lost_verb_refusal(mangled)
     assert reason is not None, f"{shell} turned {payload!r} into {mangled!r}"
+    assert "Single-quote the payload" in reason
+
+
+def test_a_ship_seed_mangling_is_refused_by_bash():
+    # zsh reads `$fno:ship` as the multi-char `:s` modifier and expands the
+    # word to nothing, so no verb token survives for the refusal to name;
+    # bash leaves `:ship`, which the detector does catch.
+    if shutil.which("bash") is None:
+        pytest.skip("bash not installed")
+    mangled = _expand("bash", "$fno:ship pr check 7")
+    assert "$fno:" not in mangled, f"control: bash did not expand the payload ({mangled!r})"
+    reason = lost_verb_refusal(mangled)
+    assert reason is not None, f"bash turned the ship seed into {mangled!r}"
     assert "Single-quote the payload" in reason
 
 
@@ -87,7 +100,7 @@ def test_the_seam_leaves_an_intact_payload_alone():
     from fno.agents import rust_runtime
 
     rust_runtime._refuse_lost_verb_payload(
-        ["spawn", "--name", "w", "-H", "codex", "$fno:pr check 7", "--substrate", "thread"]
+        ["spawn", "--name", "w", "-H", "codex", "$fno:ship pr check 7", "--substrate", "thread"]
     )
 
 

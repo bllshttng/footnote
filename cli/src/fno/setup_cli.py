@@ -854,7 +854,7 @@ def scaffold_post_merge(
 def post_merge_cmd() -> None:
     """Scaffold config.post_merge.parking_lot_path (+ project.id) for this repo.
 
-    Prompts for the repo-relative parking-lot path the /fno:pr merged ritual
+    Prompts for the repo-relative parking-lot path the /fno:ship pr merged ritual
     writes to. Suggested-but-editable; the value is never silently derived.
     """
     from fno.config_cli import _repo_root

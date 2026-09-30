@@ -108,7 +108,7 @@ fields from the user's unquoted text (a free-form phrasing maps the same way -
 see below):
 
 - **payload** (required): a backlog node id (`ab-XXXXXXXX`, builds via `/target`),
-  an explicit slash command (`/target ...`, `/pr check 42`, dispatched per
+  an explicit slash command (`/target ...`, `/fno:ship pr check 42`, dispatched per
   harness), or any other free text - sent **verbatim as the session seed** (a
   live pane), no `/target` wrap. (: `spawn "fix the login bug"` seeds a
   session; it does NOT build. To build free text, write `spawn /target <text>`

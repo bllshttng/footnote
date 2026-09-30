@@ -584,8 +584,8 @@ def build_calibration(
 # never silently dropped (mirrors the calibration fold's honesty rule).
 
 # think/plan/execute/review/docs/ship/external are /target's own phase names;
-# ship+external both route through /pr (create vs check) so they collapse to
-# one skill id. "do" is the phase's retired spelling: ledger.json history rows
+# ship+external both route through /fno:ship pr (create vs check) so they
+# collapse to one skill id. "do" is the phase's retired spelling: ledger.json history rows
 # still carry it, so its key stays until those rows age out.
 _PHASE_TO_SKILL = {
     "think": "fno:think",
@@ -594,8 +594,8 @@ _PHASE_TO_SKILL = {
     "execute": "fno:execute",
     "review": "fno:review",
     "docs": "fno:ship-docs",
-    "ship": "fno:pr",
-    "external": "fno:pr",
+    "ship": "fno:ship",
+    "external": "fno:ship",
 }
 
 

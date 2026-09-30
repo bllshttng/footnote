@@ -1031,7 +1031,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
       fi
       if [[ "$_ADOPT" -eq 1 ]]; then
         TARGET_ADOPTED_PR="$_GUARD_PR"
-        echo "[init-target-state] ADOPTED: re-binding this session to node $_GUARD_NODE on the open PR #$_GUARD_PR (branch $_BRANCH is that PR's head). No new PR: drive this one with /fno:pr check." >&2
+        echo "[init-target-state] ADOPTED: re-binding this session to node $_GUARD_NODE on the open PR #$_GUARD_PR (branch $_BRANCH is that PR's head). No new PR: drive this one with /fno:ship pr check." >&2
       else
         cat >&2 <<EOF
 [init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
@@ -1039,7 +1039,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
 A fresh /target would redo shipped work and race a second PR against the open one.
 
 Pick ONE:
-  1) Address review on the existing PR:   /pr check
+  1) Address review on the existing PR:   /fno:ship pr check
   2) The PR is stale/abandoned and you really want a fresh run:
        TARGET_ALLOW_IN_REVIEW=1 <re-run your target command>
 

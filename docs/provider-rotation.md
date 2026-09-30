@@ -1730,5 +1730,5 @@ asymmetry:
 
 `fno do review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints
 the verdict JSON and exits `3` when unsatisfied, so a direct CLI caller is
-blocked the same way the `/pr check` skill is (no skill-only guard). See
-`skills/pr/references/check.md` Step 0c.
+blocked the same way the `/fno:ship pr check` skill is (no skill-only guard). See
+`skills/ship/references/check.md` Step 0c.

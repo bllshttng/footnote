@@ -156,7 +156,7 @@ def test_harvest_carveouts_skips_non_object_line(tmp_path: Path):
 
 
 def test_harvest_carveouts_skips_backfill(tmp_path: Path):
-    """ab-4a1a4fea: a kind:backfill carve-out is routed to /pr merged's backfill
+    """ab-4a1a4fea: a kind:backfill carve-out is routed to /fno:ship pr merged's backfill
     slot, NOT swept into generic retro triage. It must SURVIVE the harvest (never
     classified, never returned in harvested ids the caller would consume)."""
     fnodir = tmp_path / ".fno"

@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 cli = typer.Typer(
     name="pr-watch",
-    help="PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes.",
+    help="PR-state watcher: auto-fire /fno:ship pr check + /fno:ship pr merged for open-PR backlog nodes.",
     no_args_is_help=True,
 )
 
@@ -509,7 +509,7 @@ def _tick_outcome(result, tick_failed: Optional[str], timed_out: bool) -> str:
 
 @cli.command()
 def tick() -> None:
-    """Poll open-PR backlog nodes and fire /fno:pr check or /fno:pr merged.
+    """Poll open-PR backlog nodes and fire /fno:ship pr check or /fno:ship pr merged.
 
     This is the command the LaunchAgent's ProgramArguments points at.
     It builds the real adapters (claims, emit, reviewers_for, etc.) and

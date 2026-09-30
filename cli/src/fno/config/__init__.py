@@ -489,7 +489,7 @@ class BacklogBlock(BaseModel):
 class PostMergeBlock(BaseModel):
     """Post-merge ritual settings (nested under 'config.post_merge').
 
-    Drives the /fno:pr merged skill: where to write prose follow-up
+    Drives the /fno:ship pr merged skill: where to write prose follow-up
     todos after a PR merges, and whether the ritual is enabled for this repo.
 
     `parking_lot_path` is repo-relative. The vault-area name does NOT equal the
@@ -584,7 +584,7 @@ class PostMergeBlock(BaseModel):
     def _coerce_self_reap(cls, v: object) -> bool:
         """Fail-safe to false on any non-boolean value.
 
-        self_reap lets a finished /fno:pr merged background worker remove its
+        self_reap lets a finished /fno:ship pr merged background worker remove its
         own agent-view row (``fno agents rm <name>``, which the ritual calls
         in-process) at the end of the ritual.
         Default off: the ritual prints the one-keystroke reap command instead,
@@ -1149,7 +1149,7 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
 # writing `reviewers: [coderabbit]` almost always meant. Checked BEFORE difflib,
 # because `codex` is a valid value there and fuzzy matching would offer a worse
 # guess. A literal frozenset beside the validator, rather than a runtime read of
-# skills/pr/scripts/list-reviewers.sh, keeps this from becoming a second
+# skills/ship/scripts/list-reviewers.sh, keeps this from becoming a second
 # cross-language parity obligation - drift here degrades a hint, not a gate.
 _EXTERNAL_REVIEWER_VOCABULARY: frozenset[str] = frozenset(
     {"gemini", "codex", "coderabbit", "claude"}
@@ -1390,7 +1390,7 @@ class ReviewBlock(BaseModel):
     # the loader aliases the legacy config.external_reviewers (list) and the
     # singular config.external_reviewer (scalar) to it. Empty == external review
     # disabled (callers treat no entries / all-"none" as off). read by
-    # skills/pr/scripts/list-reviewers.sh.
+    # skills/ship/scripts/list-reviewers.sh.
     external_reviewers: list[str] = Field(default_factory=list)
     # Per-agent HARNESS routing for the cross-model review panel.
     # Map of agent-name -> harness (claude | codex | gemini | alternate).
@@ -2590,7 +2590,7 @@ class AutoContinueBlock(BaseModel):
     """Merge-triggered auto-continue settings (nested under 'config.auto_continue').
 
     The opt-in for merge-triggered auto-continue (node): when
-    enabled, a merge-detector (``fno backlog reconcile`` / the /pr merged skill)
+    enabled, a merge-detector (``fno backlog reconcile`` / the /fno:ship pr merged skill)
     dispatches a fresh background ``/target --no-merge`` worker for the next
     now-unblocked backlog node after a PR merges, so a merge-gated epic walks
     itself group-by-group with no manual re-invocation.
@@ -2635,7 +2635,7 @@ class KeepGoingBlock(BaseModel):
     """Autonomous keep-going engine settings (nested under 'config.keep_going').
 
     The opt-in for the autonomous keep-going engine : when enabled, the
-    autonomous ``/fno:pr merged`` ritual classifies each surviving carve-out
+    autonomous ``/fno:ship pr merged`` ritual classifies each surviving carve-out
     follow-up and DISPATCHES the next unit of work (a ``/think``, a ``/target``,
     or just a filed node) instead of only closing the merged node. This is what
     keeps the autonomous loop moving without a human in the seat.
@@ -2981,7 +2981,7 @@ class PrWatchBlock(BaseModel):
     """PR-state watcher settings (nested under 'config.pr_watch').
 
     Controls the global launchd watcher that polls open-PR backlog nodes
-    and fires headless /fno:pr check / /fno:pr merged.
+    and fires headless /fno:ship pr check / /fno:ship pr merged.
 
     Fields: enabled (operator opt-in, default False); interval_seconds
     (plist StartInterval, default 600); retries (consecutive dispatch
