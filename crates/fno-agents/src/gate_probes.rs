@@ -20,6 +20,12 @@ pub(crate) struct Run {
     pub stderr: String,
 }
 
+fn read_all<R: std::io::Read>(mut pipe: R) -> String {
+    let mut text = String::new();
+    let _ = pipe.read_to_string(&mut text);
+    text
+}
+
 fn probe_run(cmd: &mut Command, timeout: Duration) -> Option<Run> {
     let _ = cmd.stdin(std::process::Stdio::null());
     let mut child = cmd
@@ -27,34 +33,47 @@ fn probe_run(cmd: &mut Command, timeout: Duration) -> Option<Run> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .ok()?;
+    // Both pipes drain while the child runs: a child blocked on a full pipe
+    // never exits, so waiting for the exit before reading would stall every
+    // oversized capture to the deadline.
+    let mut handles = Vec::new();
+    if let Some(s) = child.stdout.take() {
+        handles.push((true, std::thread::spawn(move || read_all(s))));
+    }
+    if let Some(s) = child.stderr.take() {
+        handles.push((false, std::thread::spawn(move || read_all(s))));
+    }
     let deadline = Instant::now() + timeout;
-    loop {
+    let code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                return Some(Run {
-                    ok: status.success(),
-                    code: status.code(),
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break status.code(),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return None,
+            Err(_) => {
+                let _ = child.kill();
+                break None;
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for (is_stdout, handle) in handles {
+        if is_stdout {
+            stdout = handle.join().unwrap_or_default();
+        } else {
+            stderr = handle.join().unwrap_or_default();
         }
     }
+    Some(Run {
+        ok: code == Some(0),
+        code,
+        stdout,
+        stderr,
+    })
 }
 
 /// The one probe seam, the Python `_probe` shape: run argv, `None` when it
@@ -485,12 +504,13 @@ fn run_merge_script(top: &str, base_rev: &str, head_oid: &str, cwd: &Path) -> (S
         Some(r) => {
             let detail = format!("{}{}", r.stderr.trim(), r.stdout.trim());
             let detail = detail.trim().to_string();
+            let mut end = 200.min(detail.len());
+            while end > 0 && !detail.is_char_boundary(end) {
+                end -= 1;
+            }
             (
                 "unknown".into(),
-                format!(
-                    "merge-result probe failed: {}",
-                    &detail[..200.min(detail.len())]
-                ),
+                format!("merge-result probe failed: {}", &detail[..end]),
             )
         }
     }
