@@ -3145,7 +3145,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
-        let theme = self.mux_theme();
+        let theme = osc_reply::theme_at(&cwd);
         let mut spawn_argv = argv.clone();
         if let Some(worker) = worker.as_deref() {
             if agent_self_from_argv(&spawn_argv).is_none() {

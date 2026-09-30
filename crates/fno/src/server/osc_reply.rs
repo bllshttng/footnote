@@ -166,17 +166,15 @@ mod tests {
     }
 }
 
-impl super::Core {
-    /// The active mux theme, resolved the same ladder the client resolves:
-    /// config `mux.theme` (+ role overrides) from the SERVER's cwd, falling
-    /// to the COLORFGBG light ladder when unset. The server never colored
-    /// chrome before; the OSC query answers are the first consumer, and
-    /// query frequency (startup probes) makes the per-call config walk fine.
-    pub(super) fn mux_theme(&self) -> crate::theme::Theme {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        crate::digest_overlay::theme_for(&cwd).0
-    }
+/// The theme at a pane's own directory: the same config ladder a client
+/// launched there would walk. The SERVER's cwd names no project (a
+/// detached bootstrap lands wherever the daemonizer left it), so the
+/// pane's cwd is the truth the query answer must match.
+pub(super) fn theme_at(cwd: &str) -> crate::theme::Theme {
+    crate::digest_overlay::theme_for(std::path::Path::new(cwd)).0
+}
 
+impl super::Core {
     /// Whether an attached client FOCUSES this pane: the client loopback
     /// forwards a focused pane's real terminal replies into its stdin, so
     /// the server must not double-answer; an unfocused pane's probe would
@@ -191,15 +189,22 @@ impl super::Core {
     /// active theme's colors, written to the pane's stdin. Focused panes are
     /// skipped (the client loopback owns their replies).
     pub(super) fn answer_color_queries(&self, pid: u64, bytes: &[u8]) {
+        if let Some(reply) = self.osc_reply_for(pid, bytes) {
+            if let Some(entry) = self.panes.get(&pid) {
+                let _ = entry.pty.write_input(&reply);
+            }
+        }
+    }
+
+    /// The reply `pid`'s output demands, or `None`: a focused pane defers to
+    /// the client loopback, an unhosted pane has no ground to answer from,
+    /// and output without a query demands nothing.
+    pub(super) fn osc_reply_for(&self, pid: u64, bytes: &[u8]) -> Option<Vec<u8>> {
         if self.pane_is_focused_somewhere(pid) {
-            return;
+            return None;
         }
-        let reply = replies(bytes, &self.mux_theme());
-        if reply.is_empty() {
-            return;
-        }
-        if let Some(entry) = self.panes.get(&pid) {
-            let _ = entry.pty.write_input(&reply);
-        }
+        let entry = self.panes.get(&pid)?;
+        let reply = replies(bytes, &theme_at(&entry.cwd));
+        (!reply.is_empty()).then_some(reply)
     }
 }
