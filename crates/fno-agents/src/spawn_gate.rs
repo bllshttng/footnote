@@ -2824,7 +2824,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_review_seed_or_label_is_refused_and_other_phases_pass() {
+    fn phase_rows() {
         for seed in [
             "$fno:review high --comment",
             "/fno:review x",
@@ -2873,12 +2873,28 @@ mod tests {
             .is_none());
         }
         assert!(review_session_gate(&GateInput::default()).is_none());
+
+        let src = include_str!("spawn_gate.rs");
+        let loop_at = src
+            .find("\n    loop {\n")
+            .expect("run_gate's queue loop must be present");
+        let bind_at = src
+            .find("let mut axes_read = serde_json::Map::new();")
+            .expect("axes_read binding must be present");
+        assert!(
+            bind_at > loop_at,
+            "axes_read must reset per pass: it sits before the queue loop"
+        );
+        assert!(
+            !src[loop_at..bind_at].lines().any(|l| l.starts_with('}')),
+            "axes_read binding drifted outside the queue loop"
+        );
     }
 
     /// The no_wait specimen renders the verdict line the plan pins: axis and
     /// breach named, figures from the receipt in key order.
     #[test]
-    fn verdict_line_names_axis_and_breach_for_no_wait() {
+    fn verdict_rows() {
         let refusal = Refusal::with_receipt(
             EXIT_NO_WAIT,
             serde_json::json!({
@@ -2898,12 +2914,7 @@ mod tests {
             verdict_line(&refusal),
             "spawn-gate: refused on max_live (no_wait, exit 76): max_live=15, count=15, current_count=15"
         );
-    }
 
-    /// A territory refusal: the event's axis wins over the receipt's, and
-    /// the live_blueprints array never enters the figures.
-    #[test]
-    fn verdict_line_reads_event_axis_and_skips_arrays() {
         let refusal = Refusal::with_receipt(
             EXIT_TERRITORY_CAP,
             serde_json::json!({
@@ -2921,22 +2932,13 @@ mod tests {
             verdict_line(&refusal),
             "spawn-gate: refused on territory (territory_cap, exit 86): territory=team-x, count=3, current_count=3, max_live_per_territory=3"
         );
-    }
 
-    /// No receipt and no event: the line still names the exit.
-    #[test]
-    fn verdict_line_without_receipt_names_the_exit() {
         let refusal = Refusal::code(82);
         assert_eq!(
             verdict_line(&refusal),
             "spawn-gate: refused on unknown (unknown, exit 82)"
         );
-    }
 
-    /// A receipt-less refusal keeps its measurements in the event; the
-    /// verdict falls back to the event's scalars so the breach is named.
-    #[test]
-    fn verdict_line_falls_back_to_event_scalars() {
         let refusal = Refusal::code(EXIT_KING_SHARE)
             .ev("reason", serde_json::json!("king_share"))
             .ev("king", serde_json::json!("abc12345"))
@@ -2948,12 +2950,7 @@ mod tests {
             verdict_line(&refusal),
             "spawn-gate: refused on king_share (king_share, exit 80): king=abc12345, held=5, share=3, max_live=15, kings=2"
         );
-    }
 
-    /// The readings of an admitted spawn carry the note prefix, never the
-    /// verdict marker.
-    #[test]
-    fn ram_readings_line_is_a_note() {
         let m = MemoryReading {
             avail: Some(35.9),
             swap: Some(85.5),
@@ -2965,13 +2962,7 @@ mod tests {
             "got: {line}"
         );
         assert!(!line.starts_with("spawn-gate:"), "got: {line}");
-    }
 
-    /// The marker is the refusal wire format (advance.py and
-    /// dispatch_launch.rs both key on it). A pass-path word beside the
-    /// marker breaks the readers, so the source itself is scanned.
-    #[test]
-    fn pass_path_lines_never_carry_the_verdict_marker() {
         const NEEDLE: &str = concat!("spawn-gate", ": ");
         const BARRED: [&str; 9] = [
             "proceeding",
@@ -3001,33 +2992,30 @@ mod tests {
         }
     }
 
+    /// A territory refusal: the event's axis wins over the receipt's, and
+    /// the live_blueprints array never enters the figures.
+
+    /// No receipt and no event: the line still names the exit.
+
+    /// A receipt-less refusal keeps its measurements in the event; the
+    /// verdict falls back to the event's scalars so the breach is named.
+
+    /// The readings of an admitted spawn carry the note prefix, never the
+    /// verdict marker.
+
+    /// The marker is the refusal wire format (advance.py and
+    /// dispatch_launch.rs both key on it). A pass-path word beside the
+    /// marker breaks the readers, so the source itself is scanned.
+
     /// A refusal receipt carries only the readings of the pass that refused.
     /// No fixture can flip the CPU payload between queue
     /// passes (the test seam is one static env var), so the plan's fallback
     /// pins it structurally: the binding must sit inside run_gate's queue
     /// loop, not before it.
-    #[test]
-    fn axes_read_is_per_pass() {
-        let src = include_str!("spawn_gate.rs");
-        let loop_at = src
-            .find("\n    loop {\n")
-            .expect("run_gate's queue loop must be present");
-        let bind_at = src
-            .find("let mut axes_read = serde_json::Map::new();")
-            .expect("axes_read binding must be present");
-        assert!(
-            bind_at > loop_at,
-            "axes_read must reset per pass: it sits before the queue loop"
-        );
-        assert!(
-            !src[loop_at..bind_at].lines().any(|l| l.starts_with('}')),
-            "axes_read binding drifted outside the queue loop"
-        );
-    }
 
     /// The receipt names swap when the ceiling fires beside live swap-ins.
     #[test]
-    fn ram_floor_term_names_swap_at_the_ceiling() {
+    fn ram_floor_rows() {
         let term = ram_floor_term(
             Some(24.0),
             4.0,
@@ -3039,12 +3027,7 @@ mod tests {
         let msg = term.unwrap().1;
         assert!(msg.contains("swap"), "the failing term must be named");
         assert!(msg.contains("MiB/s"), "the message names the swap-in rate");
-    }
 
-    /// Under BOTH terms failing, available is named (the floor an operator
-    /// tunes first).
-    #[test]
-    fn ram_floor_term_names_available_under_both_terms() {
         let term = ram_floor_term(
             Some(1.0),
             4.0,
@@ -3054,11 +3037,7 @@ mod tests {
         );
         assert_eq!(term.as_ref().map(|(r, _)| *r), Some("ram_floor"));
         assert!(term.unwrap().1.contains("available"));
-    }
 
-    /// Plenty of RAM, low swap: no term.
-    #[test]
-    fn ram_floor_term_passes_with_headroom() {
         assert_eq!(
             ram_floor_term(
                 Some(24.0),
@@ -3069,44 +3048,23 @@ mod tests {
             ),
             None
         );
-    }
 
-    /// An unreadable swap read skips its term (fail open), while a failing
-    /// available term still refuses.
-    #[test]
-    fn ram_floor_term_skips_unreadable_swap() {
         assert_eq!(ram_floor_term(Some(24.0), 4.0, None, None, 90.0), None);
         assert_eq!(
             ram_floor_term(Some(1.0), 4.0, None, None, 90.0).map(|(r, _)| r),
             Some("ram_floor")
         );
-    }
 
-    /// The swap ceiling disabled (`<= 0`) never fires, whatever the machine
-    /// reads.
-    #[test]
-    fn ram_floor_term_disabled_swap_cap_never_fires() {
         assert_eq!(
             ram_floor_term(Some(24.0), 4.0, Some(100.0), Some(f64::MAX), 0.0),
             None
         );
-    }
 
-    /// Allocation alone never refuses: 94.7% against a cap of 90 with no
-    /// swap-ins admits, because macOS holds swap allocated after pressure
-    /// ends.
-    #[test]
-    fn ram_floor_term_admits_allocated_swap_with_no_swapins() {
         assert_eq!(
             ram_floor_term(Some(24.0), 4.0, Some(94.7), Some(0.0), 90.0),
             None
         );
-    }
 
-    /// The thrash shape stays refused: over-cap swap WITH live swap-ins, and
-    /// the message names both the percent and the rate.
-    #[test]
-    fn ram_floor_term_refuses_allocated_swap_with_live_swapins() {
         let term = ram_floor_term(
             Some(24.11),
             4.0,
@@ -3118,20 +3076,12 @@ mod tests {
         let msg = term.unwrap().1;
         assert!(msg.contains("92.6"), "names the swap percent");
         assert!(msg.contains("MiB/s"), "names the swap-in rate");
-    }
 
-    /// An unreadable swap-in rate fails open even with swap over the cap.
-    #[test]
-    fn ram_floor_term_skips_unreadable_swapin_rate() {
         assert_eq!(
             ram_floor_term(Some(24.0), 4.0, Some(94.7), None, 90.0),
             None
         );
-    }
 
-    /// One byte per second under the floor admits; at the floor refuses.
-    #[test]
-    fn ram_floor_term_swapin_floor_boundary() {
         let under = SWAPIN_REFUSE_BYTES_PER_S - 1.0;
         assert_eq!(
             ram_floor_term(Some(24.0), 4.0, Some(94.7), Some(under), 90.0),
@@ -3150,15 +3100,78 @@ mod tests {
         );
     }
 
+    /// Under BOTH terms failing, available is named (the floor an operator
+    /// tunes first).
+
+    /// Plenty of RAM, low swap: no term.
+
+    /// An unreadable swap read skips its term (fail open), while a failing
+    /// available term still refuses.
+
+    /// The swap ceiling disabled (`<= 0`) never fires, whatever the machine
+    /// reads.
+
+    /// Allocation alone never refuses: 94.7% against a cap of 90 with no
+    /// swap-ins admits, because macOS holds swap allocated after pressure
+    /// ends.
+
+    /// The thrash shape stays refused: over-cap swap WITH live swap-ins, and
+    /// the message names both the percent and the rate.
+
+    /// An unreadable swap-in rate fails open even with swap over the cap.
+
+    /// One byte per second under the floor admits; at the floor refuses.
+
     /// the macOS swapusage line parses to percent used; a malformed
     /// line and a zero total both read as unreadable.
     #[test]
-    fn parse_swapusage_reads_the_sysctl_line() {
+    fn parse_rows() {
         let line = "total = 18432.00M  used = 17080.75M  free = 1351.25M  (encrypted)";
         let pct = parse_swapusage(line).unwrap();
         assert!((pct - 17080.75 / 18432.0 * 100.0).abs() < 0.01);
         assert_eq!(parse_swapusage("banana"), None);
         assert_eq!(parse_swapusage("total = 0.00M  used = 0.00M"), None);
+
+        // (100000 + 200000 + 50000 + 25000) * 16384
+        assert_eq!(parse_vm_stat(VM_STAT), Some(375_000 * 16_384));
+
+        assert_eq!(parse_vm_stat(""), None);
+        assert_eq!(parse_vm_stat("something else entirely\n"), None);
+        // Header without any "Pages free" line: refuse to guess.
+        assert_eq!(
+            parse_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
+            None
+        );
+        // Garbage page count: None, not a partial sum.
+        let bad = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free: banana.\n";
+        assert_eq!(parse_vm_stat(bad), None);
+
+        let text = "MemTotal:       16384000 kB\nMemFree:         1000000 kB\n\
+MemAvailable:    8000000 kB\n";
+        assert_eq!(parse_meminfo(text), Some(8_000_000 * 1024));
+        assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
+        assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
+
+        let (pages, size) = parse_vm_stat_swapins(VM_STAT).unwrap();
+        assert_eq!(pages, 19_235_608);
+        assert_eq!(size, 16_384);
+        // Header but no Swapins line: not a swap-in reading, refuse to guess.
+        assert_eq!(
+            parse_vm_stat_swapins("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
+            None
+        );
+        assert_eq!(parse_vm_stat_swapins("Swapins: banana.\n"), None);
+
+        assert_eq!(
+            parse_proc_vmstat_pswpin("pgfault 123\npswpin 456\npswpout 789\n"),
+            Some(456)
+        );
+        assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
+
+        let key = "worker:my agent/x";
+        assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
+        assert_eq!(urldecode("bad%zz"), None);
     }
 
     const ROOTS: [&str; 1] = ["/Users/x/.fno"];
@@ -3235,7 +3248,7 @@ mod tests {
     }
 
     #[test]
-    fn undeclared_lane_is_refused_with_its_own_exit_code() {
+    fn lane_rows() {
         // An unknown harness declares nothing at all, which is the only thing
         // this gate refuses.
         assert_eq!(
@@ -3250,15 +3263,7 @@ mod tests {
                 .map(|r| r.exit_code),
             Some(EXIT_STATE_ROOT_UNGRANTED)
         );
-    }
 
-    /// The regression this gate nearly shipped. Its first trigger was "declares
-    /// no carrier", which refused every opencode pane and gemini spawn. Then an
-    /// opencode PANE worker was measured acquiring a claim and delivering mail
-    /// with no grant at all: it is unsandboxed, so it is never denied the root
-    /// and R3 does not reach it. A lane that works must not be refused.
-    #[test]
-    fn a_lane_that_needs_no_carrier_is_never_refused() {
         for (harness, substrate) in [
             ("opencode", "pane"),     // measured unsandboxed
             ("opencode", "headless"), // unmeasured, so not refused on a guess
@@ -3271,10 +3276,7 @@ mod tests {
                 "{harness}/{substrate} declares a stance, so it must pass"
             );
         }
-    }
 
-    #[test]
-    fn lanes_declaring_a_carrier_pass() {
         for (harness, substrate) in [
             ("claude", "thread"),
             ("claude", "headless"),
@@ -3288,13 +3290,7 @@ mod tests {
                 "{harness}/{substrate}"
             );
         }
-    }
 
-    /// Every harness and substrate the fleet dispatches must declare a stance.
-    /// Without this the gate's refusal is unreachable in practice and a lane
-    /// added later inherits silence instead of a loud refusal.
-    #[test]
-    fn every_shipped_lane_declares_its_stance() {
         let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
         for (name, caps) in &contract.harness {
             for substrate in ["pane", "thread", "headless"] {
@@ -3304,17 +3300,25 @@ mod tests {
                 );
             }
         }
-    }
 
-    /// The one narrow fail-open case: no root resolved means there is nothing
-    /// to grant and nothing to refuse.
-    #[test]
-    fn no_resolved_root_passes_even_on_an_ungranted_lane() {
         assert!(state_root_grant_gate("gemini", "headless", &[]).is_ok());
     }
 
+    /// The regression this gate nearly shipped. Its first trigger was "declares
+    /// no carrier", which refused every opencode pane and gemini spawn. Then an
+    /// opencode PANE worker was measured acquiring a claim and delivering mail
+    /// with no grant at all: it is unsandboxed, so it is never denied the root
+    /// and R3 does not reach it. A lane that works must not be refused.
+
+    /// Every harness and substrate the fleet dispatches must declare a stance.
+    /// Without this the gate's refusal is unreachable in practice and a lane
+    /// added later inherits silence instead of a loud refusal.
+
+    /// The one narrow fail-open case: no root resolved means there is nothing
+    /// to grant and nothing to refuse.
+
     #[test]
-    fn spawn_cap_guard_agrees_with_python_gate_fixture() {
+    fn fixture_rows() {
         // AC2-FR: this Rust guard must agree with the Python
         // should_emit_spawn_cap on every fixture row. Both read the same JSON;
         // a drift on either side fails its own assertion.
@@ -3330,76 +3334,7 @@ mod tests {
             let expect = sc["expect"].as_bool().unwrap();
             assert_eq!(spawn_cap_would_emit(get), expect, "row {name}");
         }
-    }
 
-    const VM_STAT: &str = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
-Pages free:                              100000.\n\
-Pages active:                            500000.\n\
-Pages inactive:                          200000.\n\
-Pages speculative:                        50000.\n\
-Pages throttled:                              0.\n\
-Pages wired down:                        300000.\n\
-Pages purgeable:                          25000.\n\
-Swapins: 19235608.\n\
-Swapouts: 3444531.\n";
-
-    #[test]
-    fn vm_stat_counts_free_inactive_speculative_purgeable() {
-        // (100000 + 200000 + 50000 + 25000) * 16384
-        assert_eq!(parse_vm_stat(VM_STAT), Some(375_000 * 16_384));
-    }
-
-    #[test]
-    fn vm_stat_unrecognized_shape_is_none() {
-        assert_eq!(parse_vm_stat(""), None);
-        assert_eq!(parse_vm_stat("something else entirely\n"), None);
-        // Header without any "Pages free" line: refuse to guess.
-        assert_eq!(
-            parse_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
-            None
-        );
-        // Garbage page count: None, not a partial sum.
-        let bad = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
-Pages free: banana.\n";
-        assert_eq!(parse_vm_stat(bad), None);
-    }
-
-    #[test]
-    fn meminfo_reads_memavailable_kb() {
-        let text = "MemTotal:       16384000 kB\nMemFree:         1000000 kB\n\
-MemAvailable:    8000000 kB\n";
-        assert_eq!(parse_meminfo(text), Some(8_000_000 * 1024));
-        assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
-        assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
-    }
-
-    #[test]
-    fn vm_stat_swapins_reads_the_swapins_line() {
-        let (pages, size) = parse_vm_stat_swapins(VM_STAT).unwrap();
-        assert_eq!(pages, 19_235_608);
-        assert_eq!(size, 16_384);
-        // Header but no Swapins line: not a swap-in reading, refuse to guess.
-        assert_eq!(
-            parse_vm_stat_swapins("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
-            None
-        );
-        assert_eq!(parse_vm_stat_swapins("Swapins: banana.\n"), None);
-    }
-
-    #[test]
-    fn proc_vmstat_pswpin_reads_the_pswpin_line() {
-        assert_eq!(
-            parse_proc_vmstat_pswpin("pgfault 123\npswpin 456\npswpout 789\n"),
-            Some(456)
-        );
-        assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
-    }
-
-    /// AC9: the shared fixture pins the branch this gate takes per
-    /// payload. The Python suite feeds the same file to `cpu_admission`, so
-    /// neither runtime can grow its own opinion about who gets in.
-    #[test]
-    fn admission_payload_branches_agree_with_python_fixture() {
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/tests/agents/fixtures/spawn_gate_admission.json");
         let raw = std::fs::read_to_string(&fixture_path)
@@ -3429,12 +3364,27 @@ MemAvailable:    8000000 kB\n";
         }
     }
 
+    const VM_STAT: &str = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                              100000.\n\
+Pages active:                            500000.\n\
+Pages inactive:                          200000.\n\
+Pages speculative:                        50000.\n\
+Pages throttled:                              0.\n\
+Pages wired down:                        300000.\n\
+Pages purgeable:                          25000.\n\
+Swapins: 19235608.\n\
+Swapouts: 3444531.\n";
+
+    /// AC9: the shared fixture pins the branch this gate takes per
+    /// payload. The Python suite feeds the same file to `cpu_admission`, so
+    /// neither runtime can grow its own opinion about who gets in.
+
     /// Junk, an admission-less payload, an answered failure, and no payload
     /// at all all refuse as the unreadable instrument (LD3) - never as an
     /// idle machine; the probe's own failure words travel into the sentence
     /// and the sentence names the verb that re-reads the instrument.
     #[test]
-    fn junk_and_admission_less_payloads_refuse_as_unreadable() {
+    fn instrument_rows() {
         let cases = [
             (None, Some("footprint probe fno did not answer inside 8s")),
             (Some("{}"), None),
@@ -3472,13 +3422,7 @@ MemAvailable:    8000000 kB\n";
                 cpu.payload.reason
             );
         }
-    }
 
-    /// The receipt's figure block: an unreadable instrument leaves every
-    /// figure JSON null - never a 0.0 a reader would take for a reading -
-    /// while the words (axis, detail, bound) survive intact.
-    #[test]
-    fn receipt_figures_are_null_when_the_instrument_never_answered() {
         let cpu = check_cpu_axis(
             None,
             Some("process table unavailable: timed out after 5.0s"),
@@ -3504,10 +3448,14 @@ MemAvailable:    8000000 kB\n";
         );
     }
 
+    /// The receipt's figure block: an unreadable instrument leaves every
+    /// figure JSON null - never a 0.0 a reader would take for a reading -
+    /// while the words (axis, detail, bound) survive intact.
+
     /// The periodic held reprint prints the payload's holder clause
     /// verbatim; an absent holder leaves the line exactly as before.
     #[test]
-    fn held_progress_line_prints_the_payloads_holder_verbatim() {
+    fn held_rows() {
         let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null}"#;
         let mut admission: AdmissionPayload = serde_json::from_str(raw).unwrap();
         assert_eq!(
@@ -3519,6 +3467,19 @@ MemAvailable:    8000000 kB\n";
             held_progress_line(&admission, 60),
             "still held: fleet 62.5% over 50.0%, waited 60s; top holder yes 16 procs 5.13 cores"
         );
+
+        let rows =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2"]))),
+            "; the rows charged to you are w1, w2"
+        );
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2", "w3", "w4", "w5", "w6", "w7"]))),
+            "; the rows charged to you are w1, w2, w3, w4, w5..."
+        );
+        assert_eq!(held_rows_suffix(Some(&rows(&[]))), "");
+        assert_eq!(held_rows_suffix(None), "");
     }
 
     /// Mirrors `test_no_wait_refuses_fast_when_the_mutex_is_contended` on the
@@ -4153,21 +4114,6 @@ MemAvailable:    8000000 kB\n";
 
     /// The held-rows clause names the caller's rows (never the bucket),
     /// caps at five with an ellipsis, and vanishes when there are none.
-    #[test]
-    fn held_rows_suffix_names_rows_and_caps_at_five() {
-        let rows =
-            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
-        assert_eq!(
-            held_rows_suffix(Some(&rows(&["w1", "w2"]))),
-            "; the rows charged to you are w1, w2"
-        );
-        assert_eq!(
-            held_rows_suffix(Some(&rows(&["w1", "w2", "w3", "w4", "w5", "w6", "w7"]))),
-            "; the rows charged to you are w1, w2, w3, w4, w5..."
-        );
-        assert_eq!(held_rows_suffix(Some(&rows(&[]))), "");
-        assert_eq!(held_rows_suffix(None), "");
-    }
 
     /// The refusal event carries held_rows beside held, so the rows the
     /// count came from are readable back from the spawn_gate_refused event.
@@ -4200,13 +4146,6 @@ MemAvailable:    8000000 kB\n";
             Some(&serde_json::json!(["w1", "w2"]))
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn urldecode_inverts_encode_key() {
-        let key = "worker:my agent/x";
-        assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
-        assert_eq!(urldecode("bad%zz"), None);
     }
 
     #[test]

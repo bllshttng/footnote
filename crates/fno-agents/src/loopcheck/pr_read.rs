@@ -201,17 +201,10 @@ pub(super) fn read_pr_info(
     } else {
         "pr_checks_parse"
     };
-    // An explicit PR selector for the branch-resolved gh calls:
-    // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
-    // standalone review-coverage verb can evaluate a PR from a checkout that is
-    // NOT on its branch (`fno do pr merge <n>` from canonical); None keeps the
-    // argv byte-identical to the stop hook's branch-resolved form. The one
-    // number-based call (`gh api .../pulls/<n>/comments`) already carries the
-    // number the first read returned.
-    let sel: Vec<&str> = pr_selector.into_iter().collect();
     // Read 1: PR state + number + head OID + mergeability. Reuse the caller's
     // read when it already resolved this exact selector (e.g. review-coverage
-    // pinning --pr N via read_pr_head_oid) instead of asking gh again.
+    // pinning --pr N via read_pr_head_oid) instead of asking gh again. The
+    // number feeds the selector for every later read (below).
     let Some(pr_json) = (match prefetched_pr_json {
         Some(json) => Some(json),
         None => read_pr_view(gh_bin, cwd, pr_selector)?,
@@ -232,6 +225,13 @@ pub(super) fn read_pr_info(
             .unwrap_or("none"),
     );
     let number = pr_json.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+    // Read 1 just resolved THIS branch's PR: carry its number into every
+    // later read's selector, so the REST adapter never re-resolves branch to
+    // PR (one pulls-list call per re-resolution) and never re-reads pulls/N
+    // for head/base on the same fire. An explicit pr_selector keeps winning;
+    // a fire whose read 1 carried no number keeps the branch-resolved form.
+    let number_sel: Option<String> = (number > 0).then(|| number.to_string());
+    let sel: Vec<&str> = number_sel.as_deref().or(pr_selector).into_iter().collect();
     let head_oid = pr_head_oid(&pr_json).unwrap_or_default();
     // The PR's head branch, same `gh pr view` round trip as headRefOid. The
     // scope predicate needs it: attestations are keyed to the branch they

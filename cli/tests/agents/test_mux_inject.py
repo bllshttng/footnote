@@ -307,23 +307,86 @@ def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(
     assert fake.calls == []
 
 
-def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
-    """The correction this node exists for: mail REACHES a codex pane. It landed
-    in the composer and was never submitted, because a capability table refused
-    the lane before the transport was tried. With submit_keys pinned, the text
-    and the carriage return both go."""
+_LANDED = "working\n<fno_mail>\nhi\n</fno_mail>\n"
+_RESIDENT = "working\n<fno_mail>\nhi\n</fno_mail>\ntab to queue message"
+_QUEUED = "working\n<fno_mail>\nhi\n</fno_mail>\nQueued follow-up inputs"
+_PARTIAL = "working\n<fno_mail>"
+
+
+class _ReadBackMux(FakeMux):
+    """Scripted pane reads: each `frames` entry is one frame; the last one
+    repeats once the script runs out. A None frame is an unreadable pane."""
+
+    def __init__(self, frames):
+        super().__init__()
+        self.frames = list(frames)
+        self.reads = 0
+
+    def __call__(self, argv, input=None, **kwargs):
+        if len(argv) > 3 and argv[3] == "read":
+            self.calls.append((list(argv), input))
+            frame = (
+                self.frames[self.reads]
+                if self.reads < len(self.frames)
+                else self.frames[-1]
+            )
+            self.reads += 1
+            if frame is None:
+                return subprocess.CompletedProcess(argv, 1, "", "read refused")
+            return subprocess.CompletedProcess(argv, 0, frame, "")
+        return super().__call__(argv, input=input, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "frames,expected,extra_keys",
+    [
+        pytest.param([_LANDED], True, ["\r"], id="landed-frame-spends-the-hedge"),
+        pytest.param([_RESIDENT, _QUEUED], "queued", ["\t"], id="busy-affordance-queues"),
+        pytest.param(
+            [_PARTIAL] * 12 + [_LANDED],
+            True,
+            ["\r", "\r"],
+            id="slow-paste-late-key",
+        ),
+        pytest.param([_PARTIAL], "unconfirmed", ["\r", "\r"], id="never-renders-demotes"),
+        pytest.param([None], True, [], id="unreadable-keeps-bytes-written"),
+    ],
+)
+def test_codex_mail_read_back_outcomes(frames, expected, extra_keys, monkeypatch):
+    """Mail REACHES a codex pane, and the composer read-back decides what the
+    receipt may claim. One row per branch of that decision:
+
+    - landed: the payload is visible with no queue affordance. One extra
+      submit key decides (a no-op on a landed frame's empty composer, the
+      submit on a resident one) and a second identical frame reads landed.
+    - busy: the envelope sits under ``tab to queue message`` and the old lane
+      had already printed delivered; the lane sends the queue key itself and
+      classifies the queued frame.
+    - slow paste: the CR preceded the end of typing and landed as a newline;
+      the polls ride out the render, then the late key lands it.
+    - never renders: the resend budget is spent and the send demotes to the
+      durable floor honestly -- never delivered over a composer that may
+      still hold the envelope.
+    - unreadable: the frame proves nothing in either direction, so the
+      bytes-written verdict stands and no retry key fires.
+    """
     from fno.agents.dispatch import _mux_pane_send
 
-    fake = FakeMux()
+    fake = _ReadBackMux(frames)
     _patch_mux(monkeypatch, fake)
-    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi") is True
+    # guarded=False is the shape the mail lane sends with; the read-back lives
+    # on that path.
+    result = _mux_pane_send(_mux_entry("muxed", "codex"), "hi", guarded=False)
 
-    verbs = [call[0][3] for call in fake.calls]
-    assert "send" in verbs
-    # The carriage return actually rides: without it the message renders under
-    # "tab to queue message" and sits there unsent.
-    written = "".join((call[1] or "") + " ".join(call[0]) for call in fake.calls)
-    assert "\r" in written
+    assert result == expected
+    controls = [
+        call[0][call[0].index("--text") + 1]
+        for call in fake.calls
+        if "--text" in call[0]
+    ]
+    # The initial CR always rides; the rows pin exactly what came after it.
+    assert controls[0] == "\r"
+    assert controls[1:] == extra_keys
 
 
 def test_codex_review_request_queues_only_on_positive_composer_marker(monkeypatch):

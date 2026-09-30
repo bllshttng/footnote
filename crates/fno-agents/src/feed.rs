@@ -30,7 +30,7 @@ use std::path::PathBuf;
 pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
-    /// `node_created` | `node_started` | `pr_created` | `node_ended` |
+    /// `node_created` | `node_started` | `node_shipped` | `node_ended` |
     /// `session_spawned` | `session_reaped` | `crown_granted` |
     /// `crown_vacated` | `day_boundary`
     pub kind: String,
@@ -78,6 +78,9 @@ pub struct FeedRow {
     /// The session that spawned this row's session, from the birth event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The PR URL, on a ship row. The mux's provenance action opens it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Rows plus what the projection had to skip. Malformed question lines and
@@ -315,6 +318,10 @@ pub fn project(
         // on every entry the graph holds. The creating session rides the
         // entry's source fields when the graph recorded them.
         if let Some(created) = s_field(entry, "created_at") {
+            // Model, effort, parent session and crown ride the entry's
+            // write-time source stamps (the creating session's registry row
+            // at birth). An entry from before the stamps reads them as
+            // absent, never as a current lookup.
             rows.push(FeedRow {
                 ts: created,
                 kind: "node_created".into(),
@@ -322,6 +329,10 @@ pub fn project(
                 cwd: s_field(entry, "cwd"),
                 session_id: s_field(entry, "source_session_id").filter(|s| is_session_handle(s)),
                 harness: s_field(entry, "source_harness"),
+                model: s_field(entry, "source_model"),
+                effort: s_field(entry, "source_effort"),
+                parent: s_field(entry, "source_parent_session"),
+                crown: s_field(entry, "source_crown"),
                 title: node_title.clone(),
                 ..FeedRow::default()
             });
@@ -369,7 +380,7 @@ pub fn project(
                     let url = graph_store::s_str(entry, "pr_url").unwrap_or(node_id);
                     rows.push(FeedRow {
                         ts: started.to_string(),
-                        kind: "pr_created".into(),
+                        kind: "node_shipped".into(),
                         node: Some(node_id.to_string()),
                         session_id: sid.clone(),
                         harness: harness.clone(),
@@ -378,6 +389,7 @@ pub fn project(
                         model: model.clone(),
                         effort: effort.clone(),
                         phase: Some(phase.to_string()),
+                        url: Some(url.to_string()),
                         ..FeedRow::default()
                     });
                 }
@@ -1059,6 +1071,12 @@ mod tests {
             "pr_url": "https://github.com/bllshttng/footnote/pull/1395",
             "created_at": "2026-09-01T08:00:00Z",
             "cwd": "/workspace/node-project",
+            "source_session_id": "s-do",
+            "source_harness": "claude",
+            "source_model": "claude-opus-5",
+            "source_effort": "high",
+            "source_parent_session": "s-parent",
+            "source_crown": "L2 e-0001",
             "completed_at": "2026-09-05T16:41:25Z",
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
@@ -1091,7 +1109,7 @@ mod tests {
         let p = project("", &graph_fixture(), &[], "", "", "");
         assert_eq!(
             kinds(&p.rows),
-            ["node_created", "node_started", "pr_created", "node_ended"]
+            ["node_created", "node_started", "node_shipped", "node_ended"]
         );
         let started = &p.rows[1];
         assert_eq!(started.node.as_deref(), Some("x-aaaa"));
@@ -1160,7 +1178,7 @@ mod tests {
                 "node_created",      // 09-01 08:00
                 "question_asked",    // 09-02 17:00
                 "node_started",      // 09-02 17:12
-                "pr_created",        // 09-02 18:27
+                "node_shipped",      // 09-02 18:27
                 "question_closed",   // 09-02 19:00
                 "decision_recorded", // 09-03 09:00
                 "node_ended",        // 09-05 16:41
@@ -1186,7 +1204,7 @@ mod tests {
                 | "decision_recorded"
                 | "node_created"
                 | "node_started"
-                | "pr_created"
+                | "node_shipped"
                 | "node_ended"
                 | "session_reaped"
         )));
@@ -1215,13 +1233,19 @@ mod tests {
                 "node_created",
                 "question_asked",
                 "node_started",
-                "pr_created",
+                "node_shipped",
                 "question_closed",
                 "node_ended"
             ]
         );
         let ship_rows = filter_rows(p.rows.clone(), None, Some("s-ship"), None, None, None);
-        assert_eq!(kinds(&ship_rows), ["pr_created", "node_ended"]);
+        assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
+        let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
+        assert_eq!(
+            shipped.url.as_deref(),
+            Some("https://github.com/bllshttng/footnote/pull/1395"),
+            "the ship row carries the PR URL the provenance action opens"
+        );
         let newest_two = filter_rows(p.rows, None, None, None, None, Some(2));
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
     }
@@ -1396,6 +1420,12 @@ mod tests {
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
         assert_eq!(created.node.as_deref(), Some("x-aaaa"));
+        // The birth stamps: the creating session's registry lane facts,
+        // taken at write time.
+        assert_eq!(created.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(created.effort.as_deref(), Some("high"));
+        assert_eq!(created.parent.as_deref(), Some("s-parent"));
+        assert_eq!(created.crown.as_deref(), Some("L2 e-0001"));
         let wire = serde_json::to_value(created).unwrap();
         assert_eq!(
             wire.get("cwd").and_then(Value::as_str),
