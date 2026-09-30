@@ -11,12 +11,16 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
 
+#[path = "state_recovery.rs"]
+mod recovery;
+
 /// The verbs the native surface serves. `find` joins natively only when the
 /// caller names stores explicitly (`--events`); a bare `find` keeps
 /// forwarding to Python, whose front door resolves the journals and calls
 /// back in with one `--events` per store. `audit`/`gc` join when their
 /// Python output contracts are ported (reader cutover wave).
-pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &["emit-envelope", "export", "import", "rows"];
+pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] =
+    &["emit-envelope", "export", "import", "rows", "recover"];
 
 /// Classify `fno doctor event <sub> ...` for the front door: `Some(rest)`
 /// runs natively, `None` forwards to the Python CLI.
@@ -51,6 +55,7 @@ pub fn run(args: &[OsString]) -> i32 {
         "import" => run_import(rest),
         "rows" => run_rows(rest),
         "find" => run_find(rest),
+        "recover" => recovery::run(rest),
         _ => {
             eprintln!(
                 "error: expected a subcommand (emit-envelope | export | import | rows | find)"
@@ -125,6 +130,7 @@ fn run_rows(args: &[OsString]) -> i32 {
     let mut include_rejected = false;
     let mut store_path_only = false;
     let mut legacy_fallback = false;
+    let mut mode = None;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         let tok = match tok.to_str() {
@@ -143,6 +149,9 @@ fn run_rows(args: &[OsString]) -> i32 {
             // Pre-store journals have no store to query: answer the raw
             // bytes so the caller carries no legacy reader of its own.
             "--legacy-fallback" => legacy_fallback = true,
+            "--query-json" => mode = Some("query"),
+            "--status-stream" => mode = Some("status"),
+            "--answered-questions" => mode = Some("answered"),
             _ => {}
         }
     }
@@ -159,6 +168,26 @@ fn run_rows(args: &[OsString]) -> i32 {
             serde_json::json!({"store": crate::event_store::store_path(&journal)})
         );
         return 0;
+    }
+    if let Some(mode) = mode {
+        let mut input = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+            eprintln!("read query: {e}");
+            return 1;
+        }
+        let result = serde_json::from_str::<serde_json::Value>(&input)
+            .map_err(|e| e.to_string())
+            .and_then(|query| read_projection(&journal, mode, &query));
+        return match result {
+            Ok(value) => {
+                println!("{value}");
+                0
+            }
+            Err(e) => {
+                eprintln!("event read refused: {e}");
+                1
+            }
+        };
     }
     // A journal that was never written must not gain a store as a side
     // effect of being read: absence is a fact callers distinguish. A
@@ -202,6 +231,189 @@ fn run_rows(args: &[OsString]) -> i32 {
             eprintln!("error: {e}");
             1
         }
+    }
+}
+
+fn read_projection(
+    journal: &std::path::Path,
+    mode: &str,
+    input: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::event_store::{query_events, recovery_envelope, EventQuery};
+    let store = crate::event_store::store_path(journal);
+    if mode == "status" && !store.exists() {
+        let since = input["since_ts"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                crate::event_store::parse_rfc3339_ms(s)
+                    .ok_or_else(|| "invalid since timestamp".to_string())
+            })
+            .transpose()?;
+        let read = |path: &std::path::Path| -> Result<(Vec<serde_json::Value>, usize), String> {
+            use std::io::BufRead;
+            let file = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+                Err(e) => return Err(e.to_string()),
+            };
+            let mut rows = Vec::new();
+            let mut skipped = 0;
+            for line in std::io::BufReader::new(file).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .filter(|v| {
+                        v.is_object()
+                            && v["ts"]
+                                .as_str()
+                                .and_then(crate::event_store::parse_rfc3339_ms)
+                                .is_some()
+                    }) {
+                    Some(v) => rows.push(v),
+                    None => skipped += 1,
+                }
+            }
+            Ok((rows, skipped))
+        };
+        let (active, mut skipped) = read(journal)?;
+        let first = active
+            .first()
+            .and_then(|v| v["ts"].as_str())
+            .and_then(crate::event_store::parse_rfc3339_ms);
+        let mut rows = if since.zip(first).is_some_and(|(s, f)| s > f) {
+            Vec::new()
+        } else {
+            let (rows, n) = read(&journal.with_file_name(format!(
+                "{}.1",
+                journal.file_name().unwrap_or_default().to_string_lossy()
+            )))?;
+            skipped += n;
+            rows
+        };
+        rows.extend(active);
+        rows.retain(|v| {
+            since.is_none_or(|s| {
+                v["ts"]
+                    .as_str()
+                    .and_then(crate::event_store::parse_rfc3339_ms)
+                    .is_some_and(|t| t >= s)
+            })
+        });
+        return Ok(serde_json::json!([rows, skipped]));
+    }
+    if !store.exists() {
+        return Ok(if mode == "status" {
+            serde_json::json!([[], 0])
+        } else {
+            serde_json::json!([])
+        });
+    }
+    let query = EventQuery {
+        types: input["types"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        session_id: input["session_id"].as_str().map(str::to_owned),
+        since_ms: input["since_ms"].as_i64(),
+        limit: input["limit"]
+            .as_u64()
+            .map(|n| u32::try_from(n).map_err(|_| "limit too large".to_string()))
+            .transpose()?,
+        include_rejected: input["include_rejected"].as_bool().unwrap_or(false),
+        ..Default::default()
+    };
+    let rows = query_events(journal, &query)?;
+    if mode == "answered" {
+        let asks: std::collections::HashMap<String, &crate::event_store::EventRow> = rows
+            .iter()
+            .filter(|r| r.r#type == "operator_question")
+            .filter_map(|r| {
+                Some((
+                    serde_json::from_str::<serde_json::Value>(&r.line)
+                        .ok()?
+                        .get("data")?
+                        .get("question_id")?
+                        .as_str()?
+                        .to_owned(),
+                    r,
+                ))
+            })
+            .collect();
+        let mut answers = Vec::new();
+        for row in &rows {
+            if row.r#type != "operator_question_closed" || row.history_only {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(&row.line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let data = &value["data"];
+            let Some(id) = data["question_id"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let Some(answer) = data["answer"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let ask = asks.get(id);
+            if ask.is_some_and(|a| a.history_only && row.seq < a.seq) {
+                continue;
+            }
+            let origin = ask
+                .and_then(|a| serde_json::from_str::<serde_json::Value>(&a.line).ok())
+                .unwrap_or_default();
+            answers.push(serde_json::json!({"id":id,"asker":origin["data"]["asker"],"question":origin["data"]["question"].as_str().unwrap_or(""),"answer":answer,"closed_ts":value["ts"].as_str().unwrap_or(""),"closed_by":data["closed_by"].as_str().unwrap_or("")}));
+        }
+        answers.sort_by(|a, b| {
+            (a["closed_ts"].as_str(), a["id"].as_str())
+                .cmp(&(b["closed_ts"].as_str(), b["id"].as_str()))
+        });
+        return Ok(serde_json::json!(answers));
+    }
+    let values: Vec<_> = rows
+        .iter()
+        .filter(|r| mode != "status" || !r.history_only)
+        .map(|r| {
+            if r.history_only {
+                recovery_envelope(r)
+            } else {
+                serde_json::from_str(&r.line)
+                    .unwrap_or_else(|_| serde_json::json!({"_corrupt":r.line}))
+            }
+        })
+        .collect();
+    if mode == "status" {
+        let since = input["since_ts"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                crate::event_store::parse_rfc3339_ms(s)
+                    .ok_or_else(|| "invalid since timestamp".to_string())
+            })
+            .transpose()?;
+        let values: Vec<_> = values
+            .into_iter()
+            .filter(|v| {
+                v["ts"]
+                    .as_str()
+                    .and_then(crate::event_store::parse_rfc3339_ms)
+                    .is_some_and(|t| since.is_none_or(|s| t >= s))
+            })
+            .collect();
+        Ok(serde_json::json!([values, 0]))
+    } else {
+        Ok(serde_json::json!(values))
     }
 }
 
@@ -913,6 +1125,7 @@ mod tests {
 
     #[test]
     fn classify_admits_only_native_subcommands() {
+        assert!(classify_doctor_event(&mk(&["doctor", "event", "recover", "--dry-run"])).is_some());
         assert!(classify_doctor_event(&mk(&[
             "doctor",
             "event",
@@ -935,6 +1148,7 @@ mod tests {
 
     #[test]
     fn find_routes_native_only_with_explicit_stores() {
+        recovery_and_reader_contracts();
         // Explicit stores run natively.
         assert!(classify_doctor_event(&mk(&[
             "doctor",
@@ -950,5 +1164,166 @@ mod tests {
             classify_doctor_event(&mk(&["doctor", "event", "find", "guard_decision"])).is_none()
         );
         assert!(classify_doctor_event(&mk(&["doctor", "event", "find", "--kinds"])).is_none());
+    }
+
+    fn recovery_and_reader_contracts() {
+        use crate::event_store::{append_envelope, ensure_schema, query_events, EventQuery};
+        let root = std::env::temp_dir().join(format!(
+            "fno-recovery-proof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        let stamp = root.join("backups/state-root-migration/first");
+        std::fs::create_dir_all(&stamp).unwrap();
+        for family in ["questions", "decisions", "events"] {
+            let path = root.join("db").join(format!("{family}.db"));
+            let mut c = rusqlite::Connection::open(&path).unwrap();
+            ensure_schema(&mut c, &path).unwrap();
+        }
+        for family in ["approvals", "graph-archive"] {
+            let c =
+                rusqlite::Connection::open(root.join("db").join(format!("{family}.db"))).unwrap();
+            c.execute_batch("CREATE TABLE facts(id TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                .unwrap();
+        }
+        let ask=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_question","source":"test","data":{"question_id":"q-copy","asker":"alice","question":"restore?"}}).to_string();
+        let close=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_question_closed","source":"test","data":{"question_id":"q-copy","answer":"old","closed_by":"operator"}}).to_string();
+        let q = root.join("db/questions.jsonl");
+        let src = stamp.join("questions.jsonl");
+        append_envelope(&q, &close, Some("old-answer")).unwrap();
+        append_envelope(&src, &ask, Some("missing-ask")).unwrap();
+        let control=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":1}}).to_string();
+        let historical=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":0}}).to_string();
+        let events = root.join("db/events.jsonl");
+        append_envelope(&events, &control, Some("control-one")).unwrap();
+        append_envelope(
+            &stamp.join("events.jsonl"),
+            &historical,
+            Some("missing-event"),
+        )
+        .unwrap();
+        append_envelope(&stamp.join("decisions.jsonl"),&serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_decision","source":"test","data":{"answer":"historical"}}).to_string(),Some("missing-decision")).unwrap();
+        let before = recovery::audit(&root).unwrap();
+        assert!(before.errors.is_empty(), "{:?}", before.errors);
+        assert_eq!(before.missing_by_family["questions"], 1);
+        assert_eq!(before.missing_by_family["events"], 1);
+        let source_hashes: Vec<_> = before
+            .records
+            .iter()
+            .map(|r| r["source_sha256"].clone())
+            .collect();
+        let wrong = recovery::apply(&root, "wrong-packet", &[]).unwrap_err();
+        assert!(wrong.contains("packet changed"));
+        let interrupted = rusqlite::Connection::open(root.join("db/decisions.db")).unwrap();
+        interrupted.execute_batch("CREATE TRIGGER simulate_interruption BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'copy-interruption'); END;").unwrap();
+        drop(interrupted);
+        let failed = recovery::apply(&root, &before.packet_digest, &[]).unwrap_err();
+        assert!(failed.contains("copy-interruption"));
+        let committed = rusqlite::Connection::open(root.join("db/questions.db")).unwrap();
+        assert_eq!(
+            committed
+                .query_row(
+                    "SELECT count(*) FROM recovery_history WHERE event_id='missing-ask'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1,
+            "the first family committed its marker with its row"
+        );
+        drop(committed);
+        let interrupted = rusqlite::Connection::open(root.join("db/decisions.db")).unwrap();
+        assert_eq!(
+            interrupted
+                .query_row(
+                    "SELECT count(*) FROM events WHERE event_id='missing-decision'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "the interrupted family exposed no partial rows"
+        );
+        interrupted
+            .execute_batch("DROP TRIGGER simulate_interruption")
+            .unwrap();
+        drop(interrupted);
+        let receipt = recovery::apply(&root, &before.packet_digest, &[]).unwrap();
+        assert_eq!(receipt["inserted"]["questions"], 0);
+        assert_eq!(receipt["inserted"]["decisions"], 1);
+        assert_eq!(receipt["inserted"]["events"], 1);
+        let after = recovery::audit(&root).unwrap();
+        assert!(after.zero_missing);
+        assert_eq!(
+            after
+                .records
+                .iter()
+                .map(|r| r["source_sha256"].clone())
+                .collect::<Vec<_>>(),
+            source_hashes
+        );
+        let rows = query_events(&q, &EventQuery::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].seq > rows[0].seq);
+        assert!(rows[1].history_only);
+        assert_eq!(rows[1].line, ask);
+        assert!(
+            read_projection(&q, "answered", &serde_json::json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a recovered ask must not wake an old answer"
+        );
+        let status = read_projection(
+            &events,
+            "status",
+            &serde_json::json!({"since_ts":"2026-09-30T00:00:00Z"}),
+        )
+        .unwrap();
+        assert_eq!(
+            status[0].as_array().unwrap().len(),
+            1,
+            "historical equal-timestamp rows never enter occurrence counting"
+        );
+        assert_eq!(status[0][0]["data"]["n"], 1);
+        let new_close = close.replace("\"old\"", "\"new\"");
+        append_envelope(&q, &new_close, Some("new-answer")).unwrap();
+        let answers = read_projection(&q, "answered", &serde_json::json!({})).unwrap();
+        assert_eq!(answers.as_array().unwrap().len(), 1);
+        assert_eq!(answers[0]["answer"], "new");
+        assert_eq!(answers[0]["asker"], "alice");
+        let repeated = recovery::apply(&root, &before.packet_digest, &[]).unwrap();
+        assert_eq!(repeated["inserted"]["questions"], 0);
+        let db = rusqlite::Connection::open(root.join("db/questions.db")).unwrap();
+        db.execute(
+            "DELETE FROM recovery_history WHERE event_id='missing-ask'",
+            [],
+        )
+        .unwrap();
+        db.execute("DELETE FROM events WHERE event_id='missing-ask'", [])
+            .unwrap();
+        drop(db);
+        let resumed = recovery::apply(&root, &before.packet_digest, &[]).unwrap();
+        assert_eq!(
+            resumed["inserted"]["questions"], 1,
+            "a family rollback safely resumes by approved identity"
+        );
+        let source = rusqlite::Connection::open(stamp.join("questions.db")).unwrap();
+        source
+            .execute("UPDATE events SET event_id='different-identity'", [])
+            .unwrap();
+        drop(source);
+        let conflict = recovery::audit(&root).unwrap();
+        assert!(conflict
+            .errors
+            .iter()
+            .any(|e| e.contains("row_hash conflict")));
+        assert!(!conflict.zero_missing);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
