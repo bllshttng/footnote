@@ -350,12 +350,12 @@ pub(super) async fn run_reap() -> String {
     }
 }
 
-/// Compress the sweep's partial stderr progress into one clause:
-/// rows scanned, rows removed before the deadline, and the row in flight.
-/// One line prefix (`reap: `) with a word per phase; anything unparseable
-/// degrades to "no rows scanned" in the notice rather than a guessed count.
+/// Notice formatters keep the facts they are handed: `reap_notice` maps the
+/// `reaped` array to a visible count, and `spawn_failure` keeps ENOENT,
+/// EACCES and an admission refusal distinguishable (kind, errno, resolved
+/// executable, admission reason).
 #[test]
-fn reap_notice_maps_reaped_count() {
+fn notice_formatters_keep_their_facts() {
     // AC1-HP: the reaped array length is the visible count.
     assert_eq!(
         reap_notice(r#"{"reaped":["a","b","c"],"kept_dirty":[]}"#),
@@ -369,6 +369,45 @@ fn reap_notice_maps_reaped_count() {
     // The verb exited zero, so unparseable stdout still reports success (the
     // row-vanish is authoritative), never a false failure.
     assert_eq!(reap_notice("not json"), "reap: done");
+
+    // A spawn failure must not collapse to one fixed word: the three live
+    // classes stay readable in the notice.
+    let bin = std::path::Path::new("/opt/fno/bin/fno-agents");
+    let missing = spawn_failure(
+        "re-entry plan for row",
+        bin,
+        &std::io::Error::from_raw_os_error(2),
+    );
+    let denied = spawn_failure(
+        "re-entry plan for row",
+        bin,
+        &std::io::Error::from_raw_os_error(13),
+    );
+    let refused = spawn_failure(
+        "re-entry plan for row",
+        bin,
+        &std::io::Error::other(
+            "process admission refused: count=24 ceiling=23 scope=fleet reason=over-limit",
+        ),
+    );
+    assert!(
+        missing.contains("/opt/fno/bin/fno-agents")
+            && missing.contains("kind NotFound")
+            && missing.contains("errno Some(2)"),
+        "{missing}"
+    );
+    assert!(
+        denied.contains("kind PermissionDenied") && denied.contains("errno Some(13)"),
+        "{denied}"
+    );
+    assert!(
+        refused.contains("process admission refused: count=24 ceiling=23")
+            && refused.contains("kind Other")
+            && refused.contains("errno None"),
+        "{refused}"
+    );
+    assert_ne!(missing, denied);
+    assert_ne!(denied, refused);
 }
 
 /// Compress the sweep's partial stderr progress into one clause:
@@ -746,40 +785,6 @@ mod tests {
             reap_progress_note(""),
             "no rows scanned before the deadline"
         );
-    }
-
-    #[test]
-    fn spawn_failure_keeps_failure_classes_distinct() {
-        // ENOENT (binary missing), EACCES (permission), and an admission
-        // refusal (io::Error::other, no errno) must stay distinguishable in
-        // the notice: kind, errno, resolved executable, and the admission
-        // reason all survive the format.
-        let bin = std::path::Path::new("/opt/fno/bin/fno-agents");
-        let enoent = std::io::Error::from_raw_os_error(2);
-        let eacces = std::io::Error::from_raw_os_error(13);
-        let admission = std::io::Error::other(
-            "process admission refused: count=24 ceiling=23 scope=fleet reason=over-limit",
-        );
-        let missing = spawn_failure("re-entry plan for row", bin, &enoent);
-        let denied = spawn_failure("re-entry plan for row", bin, &eacces);
-        let refused = spawn_failure("re-entry plan for row", bin, &admission);
-        assert!(missing.contains("/opt/fno/bin/fno-agents"), "{missing}");
-        assert!(
-            missing.contains("kind NotFound") && missing.contains("errno Some(2)"),
-            "{missing}"
-        );
-        assert!(
-            denied.contains("kind PermissionDenied") && denied.contains("errno Some(13)"),
-            "{denied}"
-        );
-        assert!(
-            refused.contains("process admission refused: count=24 ceiling=23")
-                && refused.contains("kind Other")
-                && refused.contains("errno None"),
-            "{refused}"
-        );
-        assert_ne!(missing, denied);
-        assert_ne!(denied, refused);
     }
 
     /// Serialized process env for the tests that pin FNO_AGENTS_BIN /
