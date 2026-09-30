@@ -1345,6 +1345,39 @@ def query_pr_merge_state(
         )
     )
 
+    # Merged-PR facts never change after the merge: a MERGED read is cached
+    # permanently in the gh-cache store and every later reconcile serves it
+    # with zero gh calls. Injected readers (tests) bypass the cache both
+    # ways, so reads and writes are keyed on the DEFAULT readers only.
+    cached = None
+    if info_reader is None:
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        try:
+            cached = verb_call(
+                "gh-cache",
+                {"op": "read", "kind": "merged", "slug": repo, "pr": pr_number},
+            ).get("row")
+        except VerbUnavailable:
+            pass
+    if isinstance(cached, dict) and isinstance(cached.get("info"), dict) and (
+        not include_files or isinstance(cached.get("files"), list)
+    ):
+        info = cached["info"]
+        try:
+            number = int(info.get("pr", pr_number))
+        except (TypeError, ValueError):
+            number = pr_number
+        return PrMergeState(
+            number=number,
+            state=info["state"],
+            url=info.get("url"),
+            merged_at=info.get("merged_at"),
+            merge_sha=info.get("merge_sha"),
+            changed_files=list(cached.get("files") or []) if include_files else [],
+            files_truncated=False,
+        )
+
     try:
         info, reason = info_reader(pr_number, repo=repo, cwd=cwd)
     except ReconcileError:
@@ -1408,7 +1441,20 @@ def query_pr_merge_state(
             kind="malformed",
         ) from exc
 
-    return PrMergeState(
+    if info_reader is None and state == "MERGED":
+        from fno.rust_binary import verb_call
+
+        verb_call(
+            "gh-cache",
+            {
+                "op": "write",
+                "kind": "merged",
+                "slug": repo,
+                "pr": pr_number,
+                "row": {"info": info, **({"files": changed_files} if include_files else {})},
+            },
+        )
+        return PrMergeState(
         number=number,
         state=state,
         url=info.get("url"),
