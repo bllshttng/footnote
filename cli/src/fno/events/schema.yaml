@@ -2850,6 +2850,19 @@ event_types:
           type: string
         zombies:
           type: integer
+
+  - name: orphan_owner_server_reaped
+    description: "An owner-bound, parentless fno mux server was killed after its owner died and the server exceeded the 600-second age floor."
+    sources: [daemon]
+    data:
+      required: [pid, owner_session, command, elapsed_seconds]
+      properties:
+        pid:
+          type: integer
+        owner_session:
+          type: string
+        command:
+          type: string
         elapsed_seconds:
           type: integer
 
@@ -3039,6 +3052,33 @@ event_types:
         node:
           type: string
         attempt:
+          type: integer
+        delivered:
+          type: boolean
+        via:
+          type: string
+          enum: [mail, resume, durable]
+        reason:
+          type: string
+
+  - name: loop_check_watch_expiry_wake
+    description: "The daemon delivered or durably queued one wake for an expired watch, after confirming its session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
+    sources: [daemon]
+    data:
+      required: [session_id, node, watch_event_id, blocker, task_id, expires_at_ms, delivered, via, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        watch_event_id:
+          type: string
+        blocker:
+          type: string
+          enum: [ci, review, merge_slot, local, unknown]
+        task_id:
+          type: [string, "null"]
+        expires_at_ms:
           type: integer
         delivered:
           type: boolean
@@ -4396,6 +4436,57 @@ event_types:
           description: "The bound row's own fno session id (the durable identity). Null when no row binds."
     consumers: [operator]
 
+  - name: pane_closed
+    retention: durable
+    description: "A mux pane was removed by any close path: operator gesture, viewer death with a parked seat, session retire, tab cascade or child death. One row per removed pane with the CloseCause enum word, so a tab vanishing under the operator names why in the activity feed."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, squad, cause, reason]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belonged to."
+        pane:
+          type: integer
+          description: "The pane id that was removed."
+        squad:
+          type: integer
+          description: "The workspace (squad) id the pane lived in."
+        cause:
+          enum: [operator, viewer_died]
+          description: "The CloseCause enum word: operator is a deliberate gesture; viewer_died is the death path (child exit, retire, reap backstop)."
+        reason:
+          type: string
+          description: "The free-text close reason verbatim (closed by operator, session retired, child exited, ...)."
+        name:
+          type: [string, "null"]
+          description: "The pane's worker name when it carried one. Null for a shell."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id when the pane hosted a row. Null when no row binds."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis when the pane hosted a row. Null when no row binds."
+    consumers: [operator]
+
+  - name: server_stopped
+    retention: durable
+    description: "The mux server exited: shutdown or natural end, one row per serve lifetime. Names a daemon-restart bounce that closed nothing, the silent case the feed could not show before."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, cause, panes]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        cause:
+          enum: [shutdown]
+          description: "Every serve-loop break is Flow::Shutdown, so the row always reads shutdown."
+        panes:
+          type: integer
+          description: "How many panes the server held at exit."
+    consumers: [operator]
+
   - name: mail_origin_classified
     retention: durable
     description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
@@ -4471,6 +4562,12 @@ event_types:
           type: string
           enum: [ci, review, merge_slot, local, unknown]
           description: "The blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), 'local' (a run on this machine: a test suite, a build, a review fork), or 'unknown' (any other reason; the idle verifies nothing)."
+        task_id:
+          type: [string, "null"]
+          description: "Harness task identifier from the <watching> tag, or null when the tag does not name one. Missing ids remain visible and are never guessed."
+        expires_at_ms:
+          type: integer
+          description: "Absolute Unix expiry time in milliseconds for the declared watch timeout, normalized to [5m,2h]; excludes claim-lease slack."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."

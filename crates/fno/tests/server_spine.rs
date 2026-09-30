@@ -39,7 +39,7 @@ impl Drop for Scratch {
     }
 }
 
-/// A server child that is always killed on test exit.
+/// A child process that is always killed on test exit.
 struct Server(Child);
 
 impl Drop for Server {
@@ -325,18 +325,88 @@ fn server_spine_losing_contender_emits_no_raise_receipt() {
 }
 
 #[test]
-fn server_spine_echo_roundtrips_via_fake_client() {
+fn server_spine_echo_roundtrips_and_owner_lifecycle() {
     // AC2-HP: keystrokes reach the PTY and the output renders, no TTY needed.
     let scratch = Scratch::new("echo");
-    let _server = spawn_server(&scratch.sock(), "/bin/sh");
+    let mut owner = Server(Command::new("sleep").arg("30").spawn().unwrap());
+    let owner_birth = fno::proto::pid_start_time(owner.0.id()).unwrap();
+    let mut server = spawn_server_with_env(
+        &scratch.sock(),
+        "/bin/sh",
+        &[
+            ("FNO_OWNER_PID", &owner.0.id().to_string()),
+            ("FNO_OWNER_BIRTH", &owner_birth.to_string()),
+            ("FNO_OWNER_SESSION", "owner-test-session"),
+            ("FNO_IDLE_EXIT_GRACE_MS", "60000"),
+        ],
+    );
     let mut stream = attach(&scratch.sock(), 24, 80);
     // First frame = full resync of the current screen.
     wait_for_frame(&mut stream, 10, |_| true);
+    let owner_sidecar = fno::proto::owner_sidecar_path(&scratch.sock());
+    assert!(
+        owner_sidecar.is_file(),
+        "owner lease is persisted beside the socket"
+    );
     send(&mut stream, &ClientMsg::Input(b"echo he\"ll\"o\r".to_vec()));
     // The typed line contains the quotes; only the OUTPUT is bare "hello".
     wait_for_frame(&mut stream, 10, |text| {
         common::screen_has_line(text, "hello")
     });
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if server.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "server outlived its dead owner");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !owner_sidecar.exists(),
+        "server teardown removes the owner lease"
+    );
+
+    let mut idle_owner = Server(Command::new("sleep").arg("30").spawn().unwrap());
+    let idle_birth = fno::proto::pid_start_time(idle_owner.0.id()).unwrap();
+    let idle_pid = idle_owner.0.id().to_string();
+    let idle_birth = idle_birth.to_string();
+    let idle_env = [
+        ("FNO_OWNER_PID", idle_pid.as_str()),
+        ("FNO_OWNER_BIRTH", idle_birth.as_str()),
+        ("FNO_OWNER_SESSION", "idle-owner-session"),
+        ("FNO_IDLE_EXIT_GRACE_MS", "5000"),
+    ];
+    let mut idle_command = server_command(&scratch.sock(), "/bin/sh", &idle_env);
+    idle_command.env_remove("FNO_E2E");
+    let mut idle_server = Server(idle_command.spawn().unwrap());
+    let mut idle_stream = attach(&scratch.sock(), 24, 80);
+    wait_for_frame(&mut idle_stream, 10, |_| true);
+    send(
+        &mut idle_stream,
+        &ClientMsg::Input(b"while true; do echo idle-owner-output; sleep 0.1; done\r".to_vec()),
+    );
+    wait_for_frame(&mut idle_stream, 10, |text| {
+        common::screen_has_line(text, "idle-owner-output")
+    });
+    send(&mut idle_stream, &ClientMsg::Detach);
+    drop(idle_stream);
+    let idle_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if idle_server.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < idle_deadline,
+            "sandbox server used pane output to extend its empty-client lifetime"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        idle_owner.0.try_wait().unwrap().is_none(),
+        "idle exit was caused by the owner"
+    );
 }
 
 #[test]

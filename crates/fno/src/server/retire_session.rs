@@ -70,6 +70,20 @@ impl Core {
             })
             .collect();
         let mut flow = Flow::Continue;
+        // The 60s guard, whole identity: typing into ANY pane of this
+        // session holds the retirement - no closes and no store tombstone -
+        // so the store can never name a member retired while one of its
+        // panes still runs. The reply counts every held pane.
+        if targets.iter().any(|pid| self.typed_recently(*pid)) {
+            let _ = reply.send(ServerMsg::SessionRetired {
+                retired: 0,
+                panes_closed: 0,
+                closed_panes: Vec::new(),
+                tabs_removed: Vec::new(),
+                skipped_typing: targets.len(),
+            });
+            return Flow::Continue;
+        }
         let closed = targets.len();
         for pid in targets {
             // close_pane inherits the established close semantics: empty-tab
@@ -109,6 +123,7 @@ impl Core {
             panes_closed: closed,
             closed_panes,
             tabs_removed,
+            skipped_typing: 0,
         });
         flow
     }

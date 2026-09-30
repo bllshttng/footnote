@@ -70,6 +70,9 @@ pub struct FeedItem {
     /// The session that spawned this row's session, from the birth event.
     #[serde(default)]
     pub parent: Option<String>,
+    /// The PR URL, on a ship row. The provenance view's PR action opens it.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Why a feed fold failed. Each variant is a different user action - retune a

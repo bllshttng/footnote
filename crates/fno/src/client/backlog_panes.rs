@@ -10,28 +10,77 @@ use crate::chrome;
 use crate::proto::Cell;
 use crate::theme::Theme;
 
+/// The three region rectangles one host rect lays out as, plus whether the
+/// panes carry frames. One home for the geometry so painting and any hit
+/// testing read the same layout (`paint` is the only painter today).
+pub(crate) struct PaneRegions {
+    pub(crate) bar: (usize, usize, usize, usize),
+    pub(crate) board: (usize, usize, usize, usize),
+    pub(crate) detail: (usize, usize, usize, usize),
+    pub(crate) framed: bool,
+}
+
+/// The layout `paint` computes for a host rect: the filter bar, the board
+/// and detail panes side by side at w >= 100 (stacked below it), under the
+/// same region heights paint has always used.
+pub(crate) fn regions(rect: (usize, usize, usize, usize)) -> PaneRegions {
+    let (top, left, h, w) = rect;
+    // Region heights: hint 2 rows, the filter bar framed around its 2-row
+    // body, the rest split between the panes.
+    let hint_h = if h >= 6 { 2 } else { 0 };
+    let bar_h = 4.min(h.saturating_sub(hint_h));
+    let panes_h = h.saturating_sub(bar_h + hint_h);
+    // Side by side at w >= 100 when the panes keep their frames; under 16
+    // rows they drop their frames so each keeps at least 3 body rows; the
+    // unframed painter has no left offset, so a short-wide rect stacks too.
+    let framed = panes_h >= 10;
+    let side_by_side = w >= 100 && framed;
+    let board_w = if side_by_side { w * 55 / 100 } else { w };
+    let detail_w = w.saturating_sub(board_w);
+    let (board, detail) = if side_by_side {
+        (
+            (top + bar_h, left, panes_h, board_w),
+            (top + bar_h, left + board_w, panes_h, detail_w),
+        )
+    } else {
+        let half = panes_h / 2;
+        (
+            (top + bar_h, left, half, w),
+            (top + bar_h + half, left, panes_h - half, w),
+        )
+    };
+    PaneRegions {
+        bar: (top, left, bar_h, w),
+        board,
+        detail,
+        framed,
+    }
+}
+
 pub(crate) fn paint(
     b: &BoardView,
     cells: &mut [Cell],
     rows: usize,
     cols: usize,
     rect: (usize, usize, usize, usize),
-    focus_pane: bool,
+    owner: bool,
     theme: &Theme,
 ) {
     let started = std::time::Instant::now();
-    let (top, left, h, w) = rect;
+    let (top, _left, h, w) = rect;
     if h == 0 || w == 0 {
         return;
     }
-    // Region heights: hint 2 rows, the filter bar framed around its 2-row
-    // body, the rest split between the panes.
     let hint_h = if h >= 6 { 2 } else { 0 };
-    let bar_h = 4.min(h.saturating_sub(hint_h));
+    let laid_out = regions(rect);
+    let bar_h = laid_out.bar.2;
     let panes_h = h.saturating_sub(bar_h + hint_h);
     if panes_h == 0 {
         return;
     }
+    // The board region holds the keyboard when the owner is the board; its
+    // detail pane takes the focus presentation while a drill-down is open.
+    let focus_pane = owner && b.detail.is_some();
     // The filter bar: framed around the capped two-row cell wrap.
     let bar_body: Vec<chrome::BodyLine> = b
         .body
@@ -50,40 +99,24 @@ pub(crate) fn paint(
         cells,
         rows,
         cols,
-        (top, left, bar_h, w),
+        laid_out.bar,
         &bar_chrome,
         &bar_body,
         None,
         None,
         theme,
     );
-    // The two panes: side by side at w >= 100, stacked below it. Under 16
-    // rows they drop their frames so each keeps at least 3 body rows; the
-    // unframed painter has no left offset, so a short-wide rect stacks too.
-    let framed = panes_h >= 10;
-    let side_by_side = w >= 100 && framed;
-    let board_w = if side_by_side { w * 55 / 100 } else { w };
-    let detail_w = w.saturating_sub(board_w);
-    let (board_rect, detail_rect) = if side_by_side {
-        (
-            (top + bar_h, left, panes_h, board_w),
-            (top + bar_h, left + board_w, panes_h, detail_w),
-        )
-    } else {
-        let half = panes_h / 2;
-        (
-            (top + bar_h, left, half, w),
-            (top + bar_h + half, left, panes_h - half, w),
-        )
-    };
+    let framed = laid_out.framed;
+    let board_rect = laid_out.board;
+    let detail_rect = laid_out.detail;
     // The board pane: the kanban render or the uncapped list, banded only
     // while the pane holds focus. Both shapes go through the paint memo
     // (the frame-cost measurement): a frame recompose re-blits the cached
     // lines instead of re-rendering every card.
     let board_inner_w = if framed {
-        board_w.saturating_sub(chrome::Chrome::FRAME_COLS)
+        board_rect.3.saturating_sub(chrome::Chrome::FRAME_COLS)
     } else {
-        board_w
+        board_rect.3
     };
     let bkey = crate::client::backlog_board::BodyKey {
         gen: b.body_gen,
@@ -109,8 +142,10 @@ pub(crate) fn paint(
         (lines, body, follow)
     });
     let follow = f2;
-    // The board pane wears the cursor band while it holds focus.
-    let band = if focus_pane { None } else { follow };
+    // The board pane wears the cursor band while the board owns the
+    // keyboard and no drill-down took it; an inactive board keeps its plain
+    // selection glyph, never the band.
+    let band = if owner && !focus_pane { follow } else { None };
     let board_chrome = chrome::Chrome::new("backlog", crate::popup::Anchor::Center)
         .tabs(vec![
             (
