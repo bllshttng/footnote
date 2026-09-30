@@ -9,7 +9,7 @@
 use super::*;
 
 use crate::client::region_focus::{mouse_pre_pass, RegionOwner};
-use crate::keys::{Event, Scanner};
+use crate::keys::Scanner;
 use crate::proto::{MouseButton, MouseKind};
 
 /// Three 19-col panes: below the 20-col frame minimum, so the seam outline
