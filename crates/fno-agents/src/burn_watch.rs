@@ -1066,13 +1066,12 @@ mod tests {
             .unwrap();
         let mut replay_mails: Vec<Vec<String>> = Vec::new();
         let woke = {
-            let replay_runner: crate::burn_watch::Runner =
-                &mut |argv: &[String], _: &str| {
-                    if argv.len() > 2 && argv[2] == "mail" {
-                        replay_mails.push(argv.to_vec());
-                    }
-                    (0, "msg-1 delivered (hosted)".to_string(), String::new())
-                };
+            let replay_runner: crate::burn_watch::Runner = &mut |argv: &[String], _: &str| {
+                if argv.len() > 2 && argv[2] == "mail" {
+                    replay_mails.push(argv.to_vec());
+                }
+                (0, "msg-1 delivered (hosted)".to_string(), String::new())
+            };
             crate::watch_expiry::run_pass_with(&home, replay_runner).unwrap();
             crate::watch_expiry::run_pass_with(&home, replay_runner).unwrap();
             replay_mails
@@ -1094,8 +1093,7 @@ mod tests {
 
         // The error-path sections below need a due watch to reach the claims
         // read; the passes above consumed the replayed watches' receipts.
-        let errorpath_emitter =
-            crate::events::EventEmitter::new(global_events.clone(), "daemon");
+        let errorpath_emitter = crate::events::EventEmitter::new(global_events.clone(), "daemon");
         errorpath_emitter
             .emit(
                 "loop_check_watch_idle",
