@@ -617,7 +617,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     _ => parsed.until = Some(parse_date(&value)?),
                 }
             }
-            "--json" => parsed.json = true,
+            flag if crate::json_output::is_flag(flag) => parsed.json = true,
             "--write" => {
                 let path = args
                     .get(i + 1)
@@ -644,7 +644,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 pub fn run(args: &[String]) -> i32 {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "fno-agents intel --windows --session <id>|--crown <scope> [--since DATE] [--until DATE] [--json] [--write [dir]]"
+            "fno-agents intel --windows --session <id>|--crown <scope> [--since DATE] [--until DATE] [--json|-J] [--write [dir]]"
         );
         return 0;
     }
