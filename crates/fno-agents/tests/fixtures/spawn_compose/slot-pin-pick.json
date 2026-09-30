@@ -1,0 +1,128 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w6",
+    "-m",
+    "gpt-pin-x",
+    "/fno:target x-4"
+  ],
+  "config_toml": "[[routing.models]]\nname = \"pin-x\"\nharness = \"codex\"\nmodel = \"gpt-pin-x\"\nband = \"high\"\n[agents.profiles.target]\nlanes = [{provider = \"codex\", model = \"luna-pin\"}]\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--harness",
+      "codex",
+      "--name",
+      "w6",
+      "-m",
+      "gpt-pin-x",
+      "/fno:target x-4"
+    ],
+    "exit": 0,
+    "journal": {
+      "applied": [
+        [
+          "slot",
+          "operator-pin-override row=pin-x harness=codex (the typed model's declared row names its harness)",
+          "routing"
+        ],
+        [
+          "harness",
+          "codex",
+          "routing.models.pin-x"
+        ]
+      ],
+      "fingerprint": "cf12555d74fb",
+      "kind": "spawn_defaults_applied",
+      "name": "w6",
+      "resolved": {
+        "account": {
+          "rung": null,
+          "value": ""
+        },
+        "effort": {
+          "rung": null,
+          "value": ""
+        },
+        "model": {
+          "rung": null,
+          "value": ""
+        },
+        "pane_group": {
+          "rung": null,
+          "value": ""
+        },
+        "permission_mode": {
+          "rung": "builtin.autonomous",
+          "value": "bypassPermissions"
+        },
+        "provider": {
+          "rung": null,
+          "value": ""
+        },
+        "route": {
+          "rung": null,
+          "value": ""
+        },
+        "substrate": {
+          "rung": null,
+          "value": ""
+        }
+      },
+      "seed": "/fno:target x-4",
+      "suppressed": [
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous",
+          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
+        ]
+      ],
+      "verb": "target"
+    },
+    "stderr": [
+      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
+      "fno agents spawn: applied slot=operator-pin-override row=pin-x harness=codex (the typed model's declared row names its harness) (routing), harness=codex (routing.models.pin-x)"
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": true,
+    "has_permission": false,
+    "model_value": "gpt-pin-x",
+    "name": "w6",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-4",
+    "seed_form": "positional",
+    "seed_index": 5,
+    "spawn_tokens": [
+      "--name",
+      "w6",
+      "-m",
+      "gpt-pin-x",
+      "/fno:target x-4"
+    ],
+    "tab_flag_present": false
+  }
+}
