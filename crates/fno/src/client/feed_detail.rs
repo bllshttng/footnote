@@ -447,6 +447,59 @@ pub(crate) fn hit_at(view: &View, row: u16, col: u16) -> Option<usize> {
         .map(|(t, _, _)| *t)
 }
 
+/// Open the modal on one row, resolving the roster once; a later fold
+/// replaces the rows, never this open read.
+pub(crate) fn open_into(view: &mut View, item: FeedItem) {
+    let m = modal(view, item);
+    view.feed_detail = Some(m);
+}
+
+/// One mouse report while the modal is open: hover selects, a left click on
+/// the shared esc close target (footer words or border chip) closes, a click
+/// on a target runs that row's action, a click inside the block that hits no
+/// target is swallowed, a click off the popup dismisses. The row-menu
+/// contract, on the feed's own actions.
+pub(crate) async fn mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = hit_at(view, rep.row, rep.col) {
+                if let Some(m) = view.feed_detail.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => {
+            let close = view
+                .feed_detail
+                .as_ref()
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col));
+            if close {
+                view.feed_detail = None;
+                return Ok(());
+            }
+            match hit_at(view, rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.feed_detail.as_mut() {
+                        m.popup.select(t);
+                    }
+                    execute_selected(view, sock_w).await?;
+                }
+                None => {
+                    if !block_contains(view, rep.row, rep.col) {
+                        view.feed_detail = None;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Whether a screen cell falls inside the modal's block: a click ON it that
 /// hits no target is swallowed, a click OFF it dismisses.
 pub(crate) fn block_contains(view: &View, row: u16, col: u16) -> bool {

@@ -9627,11 +9627,9 @@ async fn handle_stdin(
         {
             view.link_hover.clear();
         }
-        // The feed's provenance modal owns the pointer while open (hover
-        // selects, a click runs the row's action, a click off the popup
-        // dismisses) and is swallowed - it is the top surface.
+        // The feed's provenance modal, the top surface, owns the pointer.
         if view.feed_detail.is_some() {
-            feed_detail_mouse(view, rep, sock_w).await?;
+            feed_detail::mouse(view, rep, sock_w).await?;
             continue;
         }
         // US3: while the which-key modal is open, the mouse drives it
@@ -10725,13 +10723,9 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // Inspect first. The deep link is this view's own action, not the
-        // click path that opened it. The modal resolves the roster once, at
-        // open - a later fold replaces the rows, never the open read.
-        ChromeHit::OpenFeedDetail(item) => {
-            let m = feed_detail::modal(view, item);
-            view.feed_detail = Some(m);
-        }
+        // Inspect first: the deep link is the view's own action, not the
+        // click path that opened it.
+        ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
@@ -11452,52 +11446,6 @@ async fn row_menu_keys(
         }
     }
     Ok(StdinFlow::Continue)
-}
-
-/// One mouse report while the feed's provenance modal is open: hover
-/// selects, a left click on the shared esc close target (footer words or
-/// border chip) closes, a click on a target runs that row's action, a click
-/// inside the block that hits no target is swallowed, a click off the popup
-/// dismisses. The row-menu contract, on the feed's own actions.
-async fn feed_detail_mouse(
-    view: &mut View,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = feed_detail::hit_at(view, rep.row, rep.col) {
-                if let Some(m) = view.feed_detail.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            let close = match view.feed_detail.as_ref() {
-                Some(m) => view.chrome_close_hit(&m.popup, rep.row, rep.col),
-                None => false,
-            };
-            if close {
-                view.feed_detail = None;
-                return Ok(());
-            }
-            match feed_detail::hit_at(view, rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.feed_detail.as_mut() {
-                        m.popup.select(t);
-                    }
-                    feed_detail::execute_selected(view, sock_w).await?;
-                }
-                None => {
-                    if !feed_detail::block_contains(view, rep.row, rep.col) {
-                        view.feed_detail = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 /// One mouse report while the row menu is open (US2): hover selects, a
