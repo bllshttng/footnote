@@ -166,22 +166,25 @@ fn observe_opencode_reads_session_and_sums_tokens() {
         [],
     )
     .unwrap();
-    let msg = r#"{"role":"assistant","modelID":"glm-5.2","tokens":{"input":10,"output":4,"cache":{"read":6,"write":1}}}"#;
+    let msg = r#"{"role":"assistant","providerID":"zai","modelID":"glm-5.2","tokens":{"input":10,"output":4,"reasoning":3,"cache":{"read":6,"write":1}}}"#;
     conn.execute(
         "INSERT INTO message VALUES ('m1', 's1', 1700000050000, ?1)",
         [msg],
     )
     .unwrap();
-    let lane = json!({"name": "glm", "harness": "opencode", "model": "glm-5.2", "effort": "high"});
+    let lane =
+        json!({"name": "glm", "harness": "opencode", "model": "zai/glm-5.2", "effort": "high"});
     let out = observe(&observe_payload(
         lane,
         json!({"opencode_dbs": [db.to_str().unwrap()]}),
     ));
+    // The lane names provider/model and the store splits them: still ok.
     assert_eq!(out["lane_status"], "ok", "out: {out}");
-    assert_eq!(out["observed_model"], "glm-5.2");
+    assert_eq!(out["observed_model"], "zai/glm-5.2");
     assert_eq!(out["observed_session_id"], "s1");
     assert_eq!(out["usage"]["input"], 10);
-    assert_eq!(out["usage"]["output"], 4);
+    // Reasoning joins output.
+    assert_eq!(out["usage"]["output"], 7);
     assert_eq!(out["usage"]["cache_read"], 6);
     assert_eq!(out["usage"]["cache_write"], 1);
     assert_eq!(out["usage_source"], "opencode-store");

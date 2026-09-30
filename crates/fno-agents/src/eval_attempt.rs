@@ -639,7 +639,12 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
                 continue;
             }
             if let Some(m) = msg.get("modelID").and_then(Value::as_str) {
-                model = Some(m.to_string());
+                // opencode's --model names `provider/model`; the store splits
+                // the two, so a bare modelID never matches the request.
+                model = Some(match msg.get("providerID").and_then(Value::as_str) {
+                    Some(p) => format!("{p}/{m}"),
+                    None => m.to_string(),
+                });
             }
             let Some(tokens) = msg.get("tokens") else {
                 continue;
@@ -648,6 +653,8 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
             let (Some(input), Some(output)) = (num("input"), num("output")) else {
                 continue;
             };
+            // Reasoning is billed as output, and opencode counts it apart.
+            let output = output + num("reasoning").unwrap_or(0);
             let cache = tokens.get("cache");
             let cache_read = cache
                 .and_then(|c| c.get("read"))
