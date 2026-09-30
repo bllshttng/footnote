@@ -1003,6 +1003,13 @@ fn main_ci_render(v: Option<&Value>) -> String {
 
 fn r_main_ci() -> Result<Value, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    main_ci_reading(&cwd)
+}
+
+/// The same reading for any cwd, split from [`r_main_ci`] so the merge gate
+/// (`authorized_merge`) reads the main verdict of the PR's repo, not of the
+/// process directory.
+pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
     // Judge at main's current head: the branch listing has served rows from
     // five days before the head while newer runs existed, so the head's own
     // push runs are read directly and only a workflow the head never fired
