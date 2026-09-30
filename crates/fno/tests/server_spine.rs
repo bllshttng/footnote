@@ -39,7 +39,7 @@ impl Drop for Scratch {
     }
 }
 
-/// A server child that is always killed on test exit.
+/// A child process that is always killed on test exit.
 struct Server(Child);
 
 impl Drop for Server {
@@ -325,7 +325,7 @@ fn server_spine_losing_contender_emits_no_raise_receipt() {
 }
 
 #[test]
-fn server_spine_echo_roundtrips_via_fake_client() {
+fn server_spine_echo_roundtrips_and_owner_lifecycle() {
     // AC2-HP: keystrokes reach the PTY and the output renders, no TTY needed.
     let scratch = Scratch::new("echo");
     let mut owner = Server(Command::new("sleep").arg("30").spawn().unwrap());

@@ -292,9 +292,7 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
                 });
         }
     }
-    for row in table.iter().filter(|row| {
-        row.ppid == 1 && crate::process_owner::mux_server_socket(&row.command).is_some()
-    }) {
+    for row in table.iter().filter(|row| row.ppid == 1) {
         let Some(socket) = crate::process_owner::mux_server_socket(&row.command) else {
             continue;
         };
