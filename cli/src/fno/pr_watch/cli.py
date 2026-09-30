@@ -1139,7 +1139,6 @@ def tick() -> None:
                     max_retries=cfg.retries,
                     graphql_min_remaining=cfg.graphql_min_remaining,
                     enabled=tick_enabled,
-                    draft_flip_enabled=settings.pr.open_ready,
                     dispatch_deadline=time.monotonic() + slice_s,
                 )
             except TickDeadlineExceeded:

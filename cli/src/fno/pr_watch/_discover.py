@@ -108,8 +108,7 @@ class PrObservation:
     # post-merge dispatcher uses, so the daemon and reconcile mark the SAME
     # merge. None on an open PR or when gh omits it.
     merge_sha: Optional[str] = None
-    # The PR's draft flag from the same gh pr view call (isDraft). None when
-    # gh omits it; the tick's draft flip leg reads OPEN + is_draft.
+    # The PR's draft flag from the same gh pr view call; the tick's flip leg reads OPEN + is_draft.
     is_draft: Optional[bool] = None
 
 

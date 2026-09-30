@@ -65,7 +65,6 @@ from fno.config._dispatch_verbs import DispatchVerbDescriptor as DispatchVerbDes
 from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
 from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
 from fno.config._king import KingBlock
-from fno.config._pr import PrBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
@@ -3946,7 +3945,6 @@ class ConfigBlock(BaseModel):
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
-    pr: PrBlock = Field(default_factory=PrBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)
     evals: EvalsBlock = Field(default_factory=EvalsBlock)
