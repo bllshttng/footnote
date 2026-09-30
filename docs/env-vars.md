@@ -197,6 +197,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_TEST_LIVE_CARGO_CWDS` | rs | Test seam: colon-separated cwd paths that stand in for a live `lsof` scan of running cargo processes, so cargo_build_dirs tests can drive the tree-to-shard mapping without a real cargo process. |
 | `FNO_TEST_MARKER_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:97 |
 | `FNO_TEST_MODE` | py | unclear: cli/src/fno/setup/doctor.py:229 |
+| `FNO_TEST_NEVER_WAIT_AFTER_SECS` | rs | Test seam: seconds a cargo admission waiter uses before printing the CI-first push reminder (default 180), so lifecycle tests assert the nudge without waiting three minutes. |
 | `FNO_TEST_OWNED_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:109 |
 | `FNO_TEST_OWNER_BIRTH` | rs | unclear: crates/fno-agents/src/test_run.rs:145 |
 | `FNO_TEST_OWNER_PID` | rs | unclear: crates/fno-agents/src/test_run.rs:144 |

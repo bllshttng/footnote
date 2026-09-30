@@ -865,6 +865,7 @@ fn build_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Pat
         .arg(cargo_pid.to_string())
         .arg("--worktree")
         .arg(worktree)
+        .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
         .env("FNO_CLAIMS_ROOT", root)
         .env("TMPDIR", root);
     cmd
@@ -918,7 +919,10 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
     assert!(
-        stderr.contains("cargo admission: holding") && stderr.contains(&holder),
+        stderr.contains("cargo admission: holding")
+            && stderr.contains(&holder)
+            && stderr.contains("queue depth 1")
+            && stderr.contains("push now: CI is the gate (law d-50986bf8)"),
         "stderr must name the holder: {stderr}"
     );
     assert_ne!(build_holder(&root), Some(holder), "the waiter now holds");
@@ -1122,6 +1126,7 @@ fn run_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path)
         .arg(cargo_pid.to_string())
         .arg("--worktree")
         .arg(worktree)
+        .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
         .env("FNO_CLAIMS_ROOT", root)
         .env("TMPDIR", root)
         .env("FNO_CONFIG", root.join("config.toml"));
@@ -1175,6 +1180,11 @@ fn a_third_cargo_run_waits_until_a_slot_frees() {
         stderr.contains("cargo admission: holding")
             && stderr.contains("2 of 2 cargo run slots held by"),
         "stderr must name the pool count: {stderr}"
+    );
+    assert!(
+        stderr.contains("queue depth 1")
+            && stderr.contains("push now: CI is the gate (law d-50986bf8)"),
+        "stderr must tell a queued worker to push: {stderr}"
     );
     assert!(
         stderr.contains(&format!("cargo:{}:{}", tree_1.display(), holder_1.id()))
