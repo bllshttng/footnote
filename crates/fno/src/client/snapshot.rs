@@ -19,7 +19,7 @@ use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSI
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
-[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows>]";
+[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -37,6 +37,9 @@ pub struct SnapshotArgs {
     pub format: Format,
     /// `(rows, cols)` of the whole picture; live mode defaults to the server's.
     pub size: Option<(u16, u16)>,
+    /// Attach as a sizing client, so the server lays its panes out at `size`.
+    /// It resizes every pane, so it is for a throwaway server only.
+    pub fit: bool,
 }
 
 /// True when a `serve` tail asks for a snapshot rather than the web bridge.
@@ -52,6 +55,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut theme = frame_html::DARK;
     let mut format = None;
     let mut size = None;
+    let mut fit = false;
     let mut it = tail.iter();
     while let Some(a) = it.next() {
         let a = a.to_str().ok_or_else(|| USAGE.to_string())?;
@@ -63,6 +67,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
         };
         match a {
             "--snapshot" => {}
+            "--fit" => fit = true,
             "--out" => out = Some(PathBuf::from(value()?)),
             tok @ ("--server" | "--session") => {
                 crate::mux_cli::note_server_flag(tok);
@@ -106,6 +111,11 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
 session text, run scripts/ops/mux-demo-snapshot.sh"
             .to_string()
     })?;
+    if fit && size.is_none() {
+        return Err(format!(
+            "fno mux serve --snapshot: --fit needs --size\n{USAGE}"
+        ));
+    }
     // The extension names the format when the flag does not.
     let format = match format {
         Some(f) => f,
@@ -122,6 +132,7 @@ session text, run scripts/ops/mux-demo-snapshot.sh"
         theme,
         format,
         size,
+        fit,
     })
 }
 
@@ -132,7 +143,7 @@ fn parse_size(v: &str) -> Option<(u16, u16)> {
 }
 
 pub fn run(args: SnapshotArgs) -> i32 {
-    let frame = live_frame(&args.server, args.squad.as_deref(), args.size);
+    let frame = live_frame(&args.server, args.squad.as_deref(), args.size, args.fit);
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
             println!("{}", args.out.display());
@@ -217,13 +228,27 @@ fn live_frame(
     server: &str,
     squad: Option<&str>,
     size: Option<(u16, u16)>,
+    fit: bool,
 ) -> Result<Frame, String> {
     let socket = proto::socket_path(server)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut seen = runtime.block_on(observe(&socket, cwd))?;
+    // A sizing client reports the content area, as a real client does.
+    let dims = size.filter(|_| fit).map(|t| {
+        let empty = LayoutView {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+            area: (0, 0),
+            agents: Vec::new(),
+            focus_node: None,
+        };
+        View::new(t, server.into(), empty).content_dims()
+    });
+    let mut seen = runtime.block_on(observe(&socket, cwd, dims))?;
     if let Some(name) = squad {
         let target = seen
             .layout
@@ -240,7 +265,7 @@ fn live_frame(
         if target.id != seen.layout.active_squad {
             // The server picks the squad from the attach cwd.
             let cwd = target.canonical_cwd.clone();
-            seen = runtime.block_on(observe(&socket, cwd))?;
+            seen = runtime.block_on(observe(&socket, cwd, dims))?;
         }
     }
     let area = seen.layout.area;
@@ -262,10 +287,13 @@ fn live_frame(
             view.term
         }
     };
+    runtime.block_on(super::backlog_board::fold_once(&mut view));
     Ok(view.compose())
 }
 
-async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
+/// `dims` set attaches as a sizing client at that content area and reads
+/// for a settle window, so panes can redraw at the new size.
+async fn observe(socket: &Path, cwd: String, dims: Option<(u16, u16)>) -> Result<Observed, String> {
     let stream = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::net::UnixStream::connect(socket),
@@ -284,9 +312,9 @@ async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
         &ClientMsg::Attach {
             proto: PROTO_VERSION,
             build: BUILD_VERSION.to_string(),
-            // The observer sentinel: never resizes a PTY.
-            rows: 0,
-            cols: 0,
+            // (0, 0) is the observer sentinel: it never resizes a PTY.
+            rows: dims.map_or(0, |d| d.0),
+            cols: dims.map_or(0, |d| d.1),
             cwd,
         },
     )
@@ -299,11 +327,13 @@ async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
     let mut layout = None;
     let mut frames = HashMap::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let settle = dims.map(|_| Instant::now() + Duration::from_millis(2500));
     loop {
         // Once the layout is in, wait only briefly for its panes' frames.
-        let wait = match &layout {
-            None => deadline.saturating_duration_since(Instant::now()),
-            Some(_) => Duration::from_millis(400),
+        let wait = match (&layout, settle) {
+            (Some(_), Some(t)) => t.saturating_duration_since(Instant::now()),
+            (None, _) => deadline.saturating_duration_since(Instant::now()),
+            (Some(_), None) => Duration::from_millis(400),
         };
         let msg =
             match tokio::time::timeout(wait, proto::read_msg::<_, ServerMsg>(&mut reader)).await {
@@ -341,7 +371,7 @@ async fn observe(socket: &Path, cwd: String) -> Result<Observed, String> {
             }
             _ => {}
         }
-        if let Some(l) = &layout {
+        if let (Some(l), None) = (&layout, settle) {
             if l.panes.iter().all(|(id, _)| frames.contains_key(id)) {
                 break;
             }

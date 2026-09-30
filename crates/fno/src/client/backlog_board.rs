@@ -494,6 +494,20 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
     });
 }
 
+/// One gather, applied at once, for `fno mux serve --snapshot`, which has
+/// no run loop to kick the fold. Opens the board only where a client would:
+/// the sideline shows the backlog and the view is enabled.
+pub(crate) async fn fold_once(view: &mut View) {
+    if view.sideline_view != crate::view_store::SidelineView::Backlog || !view.experimental_backlog
+    {
+        return;
+    }
+    backlog_board_open_fresh(view);
+    let inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let gen = view.backlog_board.as_ref().map_or(0, |b| b.gen);
+    apply_fold(view, gen, BoardMsg::Gathered { inputs });
+}
+
 /// A fold landed: apply only to the still-open, same-generation board
 /// (the feed fold's contract, one consumer in the run loop).
 pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
