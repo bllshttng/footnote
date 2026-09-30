@@ -773,6 +773,7 @@ mod tests {
                 "plan {plan:?}"
             );
         }
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -819,6 +820,7 @@ mod tests {
             root,
         );
         assert_eq!(verdict.as_deref(), Some("high-collision:ab-other001"));
+        restore_claims_root(prior);
         fs::remove_dir_all(&dir).ok();
     }
 
