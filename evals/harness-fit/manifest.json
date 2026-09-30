@@ -60,6 +60,7 @@
     "scope": "work a machine restart killed in flight; no grade or rule changes",
     "restart": "machine boot 2026-09-30T12:21:17Z; last Harbor log write 10:43:47Z; last Run 1 row 09:43:11Z",
     "run_0": "a trial that wrote no result is run again by harbor jobs resume; a trial that wrote a result stands; unrun arms run in the same seeded order",
+    "resume_token": "harbor stores the token masked in the job config; the first resume (14:13Z to 14:33Z) sent it masked; 4 reruns ended in HTTP 401 with zero tokens and 4 were in setup; none reached the model; all 8 are parked and run again; an opencode job that started out of order was stopped before any agent ran and starts fresh after the claude-code arm",
     "run_1": "the opencode lane finishes through the top-up script in one pass; the zcode lane runs next; then the top-up runs its 3 passes over the claude and opencode lanes"
   }
 }
