@@ -1375,6 +1375,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Spawn coordinator: the durable accepted record written BEFORE
     // any backend launch; not a birth, correlated to it by spawn_id.
     "agent_spawn_accepted",
+    // A launch the spawn gate or the dispatch door refused before any
+    // worker existed; the feed projects it so a refused launch shows.
+    "agent_spawn_refused",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
