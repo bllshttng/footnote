@@ -102,6 +102,8 @@ pub struct Recommendation {
 /// share, so they do not follow this repo's rust naming beyond serde defaults.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AttentionItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_batch: Option<String>,
     pub id: String,
     /// `question` (someone waits) | `pin` (an action left for the user) | `mine`.
     pub kind: String,
@@ -374,6 +376,10 @@ fn item_from_question_row(row: &Value, ts: &str) -> Option<AttentionItem> {
         })
     });
     let mut item = AttentionItem {
+        recovery_batch: row
+            .get("_recovery_batch")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         id: qid.to_string(),
         kind: kind.to_string(),
         title,
@@ -432,6 +438,7 @@ fn item_from_note(slug: &str, text: &str) -> Option<AttentionItem> {
         })
         .collect();
     let mut item = AttentionItem {
+        recovery_batch: None,
         id: format!("note-{slug}"),
         kind: "question".to_string(),
         title: esc.title.clone(),
@@ -496,6 +503,7 @@ fn mine_items(lane_text: &str) -> Vec<AttentionItem> {
             continue;
         }
         out.push(AttentionItem {
+            recovery_batch: None,
             id: format!("mine-{:016x}", fnv1a(rest)),
             kind: "mine".to_string(),
             title: rest.to_string(),

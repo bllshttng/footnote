@@ -3143,22 +3143,6 @@ fn agent_name_validation() {
 }
 
 #[test]
-fn uuid_v4_shape_and_uniqueness() {
-    let a = uuid_v4();
-    let b = uuid_v4();
-    assert_ne!(a, b);
-    assert_eq!(a.len(), 36);
-    let parts: Vec<&str> = a.split('-').collect();
-    assert_eq!(
-        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
-        vec![8, 4, 4, 4, 12]
-    );
-    // version nibble is 4; variant nibble is 8/9/a/b.
-    assert_eq!(&a[14..15], "4");
-    assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
-}
-
-#[test]
 fn short_id_derivation_dedups() {
     let mut reg = state::Registry::default();
     assert_eq!(derive_short_id("worker-A", &reg), "workerA");
@@ -3361,8 +3345,7 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
     registry.entries.push(predecessor);
 
     assert_eq!(
-        apply_session_transition(&mut registry, "worker", "session-b", Some(false), "", "",)
-            .unwrap(),
+        apply_session_transition(&mut registry, "worker", "session-b", Some(false), "",).unwrap(),
         state::SessionTransition::Succession
     );
     assert_eq!(registry.entries.len(), 1);
@@ -3379,7 +3362,6 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
             "session-c",
             Some(true),
             "worker-branch",
-            "thread-c",
         )
         .unwrap(),
         state::SessionTransition::Branch
@@ -3397,8 +3379,9 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         registry.entries[1].forked_from_session_id.as_deref(),
         Some("session-b")
     );
-    assert_eq!(registry.entries[1].fno_id.as_deref(), Some("thread-c"));
-    assert_ne!(registry.entries[0].fno_id, registry.entries[1].fno_id);
+    // The transition itself stamps no id: the branch leaves with None and the
+    // registry write mints one (the write-time fill covers that contract).
+    assert_eq!(registry.entries[1].fno_id, None);
 
     assert_eq!(
         apply_session_transition(
@@ -3407,7 +3390,6 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
             "session-d",
             Some(true),
             "worker-branch",
-            "thread-d",
         )
         .unwrap(),
         state::SessionTransition::Branch
@@ -3415,9 +3397,12 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
     let second_branch = registry
         .entries
         .iter()
-        .find(|entry| entry.fno_id.as_deref() == Some("thread-d"))
+        .find(|entry| entry.harness_session_id.as_deref() == Some("session-d"))
         .expect("second branch row");
     assert_eq!(second_branch.name, "worker-branch-2");
+    // Both branches read None at the transition; distinct mints land at the
+    // write (covered by the update_registry fill test).
+    assert_eq!(second_branch.fno_id, None);
 }
 
 // ── x-8739: the sweep settles a stale open do row on a settled node ──

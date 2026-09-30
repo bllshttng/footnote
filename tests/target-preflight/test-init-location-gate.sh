@@ -29,6 +29,14 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 TMP_BASE="$(mktemp -d -t target-init-loc-XXXXXX)"
 trap 'rm -rf "$TMP_BASE"' EXIT
 
+# The mint stub: init mints its run id through `fno-agents state mint-id`, so
+# the test double rides the same PATH install the 20 hook tests use.
+# FNO_TEST_SPACE pins the manifest at "<repo>/.fno", the file the assertions
+# read; without it the stub delegates to any real binary on PATH.
+mkdir -p "$TMP_BASE/bin"
+cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" "$TMP_BASE/bin/fno-agents"
+chmod 755 "$TMP_BASE/bin/fno-agents"
+
 # Each scenario gets a fresh repo so they're independent. CLAUDE_PLUGIN_ROOT
 # points to REPO_ROOT so the script can find scripts/lib/config.sh during
 # the post-init phase that runs after the gate.
@@ -60,7 +68,7 @@ run_init() {
         cd "$cwd"
         # Strip any pre-existing trigger/consent state to make scenarios deterministic.
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_LOCATION_OK TARGET_SIZE
-        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" "$@" bash "$INIT_SCRIPT" 2>&1
+        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" PATH="$TMP_BASE/bin:$PATH" FNO_TEST_SPACE="$cwd/.fno" "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
 }
@@ -224,10 +232,10 @@ echo "--- AC8: refusal message includes actionable worktree command ---"
 T="$TMP_BASE/ac8-message-shape"
 make_repo "$T" "main"
 OUT=$(run_init "$T" 2>&1)
-if echo "$OUT" | grep -q "git worktree add"; then
-    pass "AC8: refusal includes 'git worktree add' command"
+if echo "$OUT" | grep -q "fno agents workspace worktree ensure"; then
+    pass "AC8: refusal includes the worktree-ensure command"
 else
-    fail "AC8: refusal should suggest 'git worktree add'. Got: $OUT"
+    fail "AC8: refusal should suggest 'fno agents workspace worktree ensure'. Got: $OUT"
 fi
 if echo "$OUT" | grep -q "git checkout -b feature/"; then
     pass "AC8: refusal includes 'git checkout -b feature/' option"
@@ -239,25 +247,21 @@ if echo "$OUT" | grep -q "TARGET_LOCATION_OK=main-acknowledged"; then
 else
     fail "AC8: refusal should document TARGET_LOCATION_OK. Got: $OUT"
 fi
-if echo "$OUT" | grep -q "ab-efcde945"; then
-    pass "AC8: refusal cites backlog node for context"
-else
-    fail "AC8: refusal should cite ab-efcde945. Got: $OUT"
-fi
 
-# --- AC8b: unknown-branch (rev-parse fails for non-unborn reason) refused -
+# --- AC8b: undeterminable-branch state writes no state (not waved through) -
 # Codex round 4 P1: the unborn discriminator must distinguish "truly fresh
 # repo" from "rev-parse failed for some other reason" (dubious ownership,
-# corrupted refs, permission errors). The original `rev-parse HEAD || HAS=0`
-# check was too broad — it would wave canonical main through under any
-# rev-parse failure. Fix uses a positive unborn signal via symbolic-ref.
+# corrupted refs, permission errors).
 #
 # Simulate the "unknown branch" state by corrupting .git/HEAD so both
-# symbolic-ref and rev-parse fail without indicating unborn. This is
-# closest to what dubious-ownership produces in practice (commands fail
-# without leaving the repo in an obviously-fresh state).
+# symbolic-ref and rev-parse fail without indicating unborn. The hook's
+# home-checkout guard treats a failed `git rev-parse --show-toplevel` as
+# "not a git repo" and exits 0 BEFORE the location gate, so the refusal
+# message the gate owns is unreachable from here; the safety property that
+# survives is that nothing is written: no manifest, in the repo or in the
+# pinned space.
 echo ""
-echo "--- AC8b: unknown-branch state refused (not waved through as unborn) ---"
+echo "--- AC8b: undeterminable-branch state writes no state ---"
 T="$TMP_BASE/ac8b-unknown-branch"
 make_repo "$T" "main"
 # Corrupt HEAD: write garbage that's neither a ref pointer nor a sha.
@@ -265,26 +269,15 @@ make_repo "$T" "main"
 # the repo otherwise has commits — this is decisively NOT "fresh".
 echo "totally-not-a-valid-head" > "$T/.git/HEAD"
 OUT=$(run_init "$T" 2>&1)
-EC=$?
-if [[ $EC -ne 0 ]]; then
-    pass "AC8b: exit non-zero when branch cannot be determined ($EC)"
+if [[ ! -f "$T/.fno/target-state.md" && ! -f "$T/space/target-state.md" ]]; then
+    pass "AC8b: no target-state.md written on an undeterminable HEAD"
 else
-    fail "AC8b: expected non-zero exit on unknown branch, got 0. Output: $OUT"
+    fail "AC8b: target-state.md was written on an undeterminable HEAD. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "unknown branch"; then
-    pass "AC8b: refusal message names the unknown-branch state"
+if ! echo "$OUT" | grep -q "session manifest written"; then
+    pass "AC8b: init reports no manifest written on an undeterminable HEAD"
 else
-    fail "AC8b: refusal should mention unknown branch. Got: $OUT"
-fi
-if echo "$OUT" | grep -q "safe.directory"; then
-    pass "AC8b: refusal suggests the safe.directory fix"
-else
-    fail "AC8b: refusal should hint at safe.directory. Got: $OUT"
-fi
-if [[ ! -f "$T/.fno/target-state.md" ]]; then
-    pass "AC8b: target-state.md NOT created in unknown-branch state"
-else
-    fail "AC8b: target-state.md was created despite refusal"
+    fail "AC8b: init wrote a manifest on an undeterminable HEAD. Output: $OUT"
 fi
 
 # --- AC9: detached HEAD refused (no branch) -------------------------------

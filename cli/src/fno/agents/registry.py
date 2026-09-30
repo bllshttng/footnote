@@ -579,10 +579,10 @@ class AgentEntry:
     # Rust's RegistryEntry mirrors it as additive-optional passthrough, or the
     # daemon would drop a Python-stamped path on its next read-modify-write.
     route_settings_path: Optional[str] = None
-    # v13: durable fno identity. Adopted target orphans carry their
-    # target run id; pane rows carry the bound harness id, or the unique registry
-    # name when the harness exposes none. Identity-adjacent only; never a
-    # liveness or ownership claim. Rust mirrors it as additive-optional
+    # v13: footnote's own id for this session: a random UUID minted at the
+    # row's first write (through the one Rust mint), stable across succession,
+    # never a harness session id and never a target run id. Rows written before
+    # the mint keep the value they hold. Rust mirrors it as additive-optional
     # passthrough so the daemon's read-modify-write keeps it.
     fno_id: Optional[str] = None
     # v14: this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
@@ -726,6 +726,10 @@ def mint_agent_entry(
     """
     if kwargs.get("origin") == "spawn" and not spawned_by_session and not lineage_reason:
         raise ValueError("origin=spawn row needs spawned_by_session or lineage_reason")
+    if not kwargs.get("fno_id"):
+        from fno.rust_binary import mint_fno_id
+
+        kwargs["fno_id"] = mint_fno_id()
     return AgentEntry(
         harness_session_id=harness_session_id,
         spawned_by_session=spawned_by_session,
@@ -1899,16 +1903,9 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                         f"claude_short_id={legacy_short!r}; keeping short_id",
                         file=sys.stderr,
                     )
-            # Thread-ref backfill: a claude thread row is minted before its
-            # session uuid exists, so `fno_id` lands empty and no write site
-            # ever fills it -- the observation seam back-fills
-            # harness_session_id and short_id and stops there. For a thread row
-            # the two ids are the same value (75 of the 79 populated rows carry
-            # exactly that), so adopt it here, where every reader passes. A row
-            # that HAS a thread ref keeps it: a branch is minted with its own,
-            # and a succession keeps its stable one.
-            if not row.get("fno_id") and row.get("harness_session_id"):
-                row = {**row, "fno_id": row["harness_session_id"]}
+            # No fno_id backfill: a row's id is minted at birth (mint_agent_entry)
+            # or stays empty until the next runtime write mints one; no harness
+            # id is ever copied into it.
             # `session_id` is a computed @property on AgentEntry, not an init field.
             # A Rust PTY row may serialize it (Rust skips it when None, so this only
             # fires for a row that recorded one); passing it to AgentEntry(**row)
@@ -2297,8 +2294,8 @@ def _mint_branch_row(
 
     The one live predecessor keeps its row, name, crown, and every live ref;
     the branch carries only the new session id: a fresh name under the
-    ``<name>-branch-<handle>`` convention, a distinct ``fno_id`` (the branch's
-    own session id), no crown (authority is not duplicated by a fork), and no
+    ``<name>-branch-<handle>`` convention, its own freshly minted ``fno_id``,
+    no crown (authority is not duplicated by a fork), and no
     transport/lifecycle state copied from A. ``related_session_id`` is cleared
     too: A's historical ids are A's history, not the branch's.
     """
@@ -2310,6 +2307,8 @@ def _mint_branch_row(
         suffix += 1
     # A claude branch is born bg-routable: hex-guarded like its siblings.
     lead = claude_transport_short_id(session_id)
+    from fno.rust_binary import mint_fno_id
+
     branch = replace(
         entry,
         name=branch_name,
@@ -2338,7 +2337,7 @@ def _mint_branch_row(
         crown_level=None,
         crown_scope=None,
         crown_grantor=None,
-        fno_id=session_id,
+        fno_id=mint_fno_id(),
     )
     entries.append(branch)
     return branch

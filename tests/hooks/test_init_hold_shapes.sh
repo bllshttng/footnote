@@ -31,6 +31,13 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 TMP_BASE="$(mktemp -d -t target-init-hold-XXXXXX)"
 trap 'rm -rf "$TMP_BASE"' EXIT
 
+# The mint stub rides PATH FIRST so init's run-id mint (`fno-agents state
+# mint-id`) answers in the free-text cases; `fno` itself stays absent, which is
+# the degraded branch under test.
+mkdir -p "$TMP_BASE/bin"
+cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" "$TMP_BASE/bin/fno-agents"
+chmod 755 "$TMP_BASE/bin/fno-agents"
+
 make_repo() {
     local dir="$1"
     mkdir -p "$dir/space"
@@ -56,7 +63,7 @@ run_no_fno() {
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH FNO_TARGET_INIT_GATED
         env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
-            PATH="/usr/bin:/bin" "$@" bash "$INIT_SCRIPT" 2>&1
+            PATH="$TMP_BASE/bin:/usr/bin:/bin" "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
 }

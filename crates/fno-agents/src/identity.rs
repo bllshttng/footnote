@@ -1,5 +1,23 @@
 //! Harness-session address rules shared by every Rust producer and resolver.
 
+/// Footnote's one session-id mint: a random v4 UUID in 8-4-4-4-12 form.
+/// Errors when the OS gives no randomness; there is no clock fallback.
+pub fn mint_fno_id() -> Result<String, String> {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).map_err(|e| format!("could not mint an fno_id: {e}"))?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
 /// The generated canonical handle: the harness's own short-id (the first eight
 /// of the session id). A mail address is this short-id OR the full session id;
 /// on a short-id collision, resolution fails closed and asks for the full id.
@@ -128,7 +146,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{canonical_handle, legacy_suffix_handle};
+    use super::{canonical_handle, legacy_suffix_handle, mint_fno_id};
 
     fn session_id_strategy() -> impl Strategy<Value = Vec<String>> {
         let uuid_lower_pattern = [
@@ -182,6 +200,17 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).expect("Python canonical_handle returned JSON")
+    }
+
+    #[test]
+    fn mint_fno_id_is_well_formed_v4_and_unique() {
+        let re = regex::Regex::new(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
+        .unwrap();
+        let a = mint_fno_id().expect("mint succeeds when the OS has randomness");
+        assert!(re.is_match(&a), "not a v4 UUID: {a}");
+        assert_ne!(a, mint_fno_id().unwrap(), "two mints must differ");
     }
 
     #[test]

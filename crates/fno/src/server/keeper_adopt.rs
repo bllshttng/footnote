@@ -68,7 +68,7 @@ impl Core {
                 continue;
             };
             attempted = true;
-            let permit = match crate::process_admission::admit_fleet() {
+            let permit = match crate::process_admission::admit_shell_pane() {
                 Ok(permit) => permit,
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&rc_dir);

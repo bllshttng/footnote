@@ -893,7 +893,7 @@ mod tests {
     // Asserting the BUILT ARGV (not a snapshot) is the point: a snapshot
     // test passes on any machine where claude is absent.
     #[test]
-    fn the_agents_snapshot_argv_is_not_duplicated() {
+    fn snapshot_rows() {
         let command = all_agents_command(None);
         assert_eq!(command.get_program().to_string_lossy(), "claude");
         let argv: Vec<String> = command
@@ -914,45 +914,35 @@ mod tests {
             Some(std::path::Path::new("/")),
             "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
-    }
 
-    // A session that died while blocked keeps its `blocked` row with no
-    // pid and no process. In a listing that carries pids the missing pid
-    // is the death witness; the state alone reads live and lies.
-    #[test]
-    fn a_pid_less_blocked_row_reads_dead_when_the_listing_carries_pids() {
         let dead = ClaudeAgentRow::new("deadbeef", Some("blocked"));
         let live_peer = ClaudeAgentRow::new("c0ffee00", Some("working")).with_pid(Some(5001));
         let snapshot = ClaudeAgentsSnapshot::known(vec![dead.clone(), live_peer]);
         assert!(snapshot.carries_pids());
         assert!(!dead.has_live_process(snapshot.carries_pids()));
-    }
 
-    #[test]
-    fn the_same_row_with_a_pid_reads_live() {
         let row = ClaudeAgentRow::new("deadbeef", Some("blocked")).with_pid(Some(5001));
         let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
         assert!(snapshot.carries_pids());
         assert!(row.has_live_process(snapshot.carries_pids()));
-    }
 
-    #[test]
-    fn a_done_row_with_a_pid_still_reads_dead() {
         let row = ClaudeAgentRow::new("deadbeef", Some("done")).with_pid(Some(5001));
         let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
         assert!(snapshot.carries_pids());
         assert!(!row.has_live_process(snapshot.carries_pids()));
-    }
 
-    // An older claude whose listing omits the pid field everywhere keeps
-    // today's state-only reading: absence of the column is not death.
-    #[test]
-    fn a_listing_without_pids_keeps_the_state_only_reading() {
         let row = ClaudeAgentRow::new("deadbeef", Some("blocked"));
         let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
         assert!(!snapshot.carries_pids());
         assert!(row.has_live_process(snapshot.carries_pids()));
     }
+
+    // A session that died while blocked keeps its `blocked` row with no
+    // pid and no process. In a listing that carries pids the missing pid
+    // is the death witness; the state alone reads live and lies.
+
+    // An older claude whose listing omits the pid field everywhere keeps
+    // today's state-only reading: absence of the column is not death.
 
     #[test]
     fn pinned_agents_reader_uses_the_plan_config_dir() {
@@ -1053,7 +1043,7 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_confirmed_roster_shape() {
+    fn roster_parse_rows() {
         let r = ClaudeRoster::parse(SAMPLE.as_bytes()).expect("parse");
         assert_eq!(r.proto, 1);
         assert_eq!(r.supervisor_pid, Some(4242));
@@ -1065,6 +1055,43 @@ mod tests {
         assert_eq!(w.cli_version.as_deref(), Some("2.1.195"));
         assert_eq!(w.cwd, "/Users/x/code/proj");
         assert_eq!(w.pty_auth.as_deref(), Some("cccc3333dddd4444"));
+
+        // Regression: before the lenient deserializer this errored, zeroing the
+        // roster (mail-inject + every roster consumer saw zero claude workers).
+        let r = ClaudeRoster::parse(SAMPLE_STRING_PROCSTART.as_bytes())
+            .expect("string procStart must not fail the whole-roster parse");
+        assert_eq!(r.workers.len(), 2, "both workers survive the drift");
+        let w = &r.workers["6269e385"];
+        assert_eq!(w.session_id, "6269e385-1111-2222-3333-444455556666");
+        assert_eq!(w.pid, Some(6001));
+        // An unparseable date string degrades to None, not a parse failure.
+        assert_eq!(w.proc_start, None);
+        assert_eq!(w.cwd, "/Users/bb16/code/footnote/footnote");
+
+        // number -> Some
+        let num = r#"{"workers":{"a":{"sessionId":"a-1","procStart":12345}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(num.as_bytes()).unwrap().workers["a"].proc_start,
+            Some(12345)
+        );
+        // numeric string -> Some (a future CLI could quote the epoch)
+        let numstr = r#"{"workers":{"a":{"sessionId":"a-1","procStart":"12345"}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(numstr.as_bytes()).unwrap().workers["a"].proc_start,
+            Some(12345)
+        );
+        // explicit null -> None
+        let null = r#"{"workers":{"a":{"sessionId":"a-1","procStart":null}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(null.as_bytes()).unwrap().workers["a"].proc_start,
+            None
+        );
+        // absent -> None (the #[serde(default)] path)
+        let absent = r#"{"workers":{"a":{"sessionId":"a-1"}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(absent.as_bytes()).unwrap().workers["a"].proc_start,
+            None
+        );
     }
 
     // The live claude-code (>=2.1.195) roster shape: `procStart` is a human DATE
@@ -1094,75 +1121,23 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_roster_with_string_procstart_drift() {
-        // Regression: before the lenient deserializer this errored, zeroing the
-        // roster (mail-inject + every roster consumer saw zero claude workers).
-        let r = ClaudeRoster::parse(SAMPLE_STRING_PROCSTART.as_bytes())
-            .expect("string procStart must not fail the whole-roster parse");
-        assert_eq!(r.workers.len(), 2, "both workers survive the drift");
-        let w = &r.workers["6269e385"];
-        assert_eq!(w.session_id, "6269e385-1111-2222-3333-444455556666");
-        assert_eq!(w.pid, Some(6001));
-        // An unparseable date string degrades to None, not a parse failure.
-        assert_eq!(w.proc_start, None);
-        assert_eq!(w.cwd, "/Users/bb16/code/footnote/footnote");
-    }
-
-    #[test]
-    fn lenient_procstart_accepts_number_numeric_string_and_null() {
-        // number -> Some
-        let num = r#"{"workers":{"a":{"sessionId":"a-1","procStart":12345}}}"#;
-        assert_eq!(
-            ClaudeRoster::parse(num.as_bytes()).unwrap().workers["a"].proc_start,
-            Some(12345)
-        );
-        // numeric string -> Some (a future CLI could quote the epoch)
-        let numstr = r#"{"workers":{"a":{"sessionId":"a-1","procStart":"12345"}}}"#;
-        assert_eq!(
-            ClaudeRoster::parse(numstr.as_bytes()).unwrap().workers["a"].proc_start,
-            Some(12345)
-        );
-        // explicit null -> None
-        let null = r#"{"workers":{"a":{"sessionId":"a-1","procStart":null}}}"#;
-        assert_eq!(
-            ClaudeRoster::parse(null.as_bytes()).unwrap().workers["a"].proc_start,
-            None
-        );
-        // absent -> None (the #[serde(default)] path)
-        let absent = r#"{"workers":{"a":{"sessionId":"a-1"}}}"#;
-        assert_eq!(
-            ClaudeRoster::parse(absent.as_bytes()).unwrap().workers["a"].proc_start,
-            None
-        );
-    }
-
-    #[test]
-    fn short_id_is_first_hex_segment() {
+    fn shape_rows() {
         let r = ClaudeRoster::parse(SAMPLE.as_bytes()).unwrap();
         assert_eq!(r.workers["a1b2c3d4"].short_id(), "a1b2c3d4");
         assert_eq!(r.workers["ee99ff00"].short_id(), "ee99ff00");
-    }
 
-    #[test]
-    fn dedup_is_deterministic_by_session_id() {
         let r = ClaudeRoster::parse(SAMPLE.as_bytes()).unwrap();
         let w = r.workers_deduped();
         assert_eq!(w.len(), 2);
         // Sorted by session_id: a1b2... before ee99...
         assert_eq!(w[0].short_id(), "a1b2c3d4");
         assert_eq!(w[1].short_id(), "ee99ff00");
-    }
 
-    #[test]
-    fn find_by_session_or_short() {
         let r = ClaudeRoster::parse(SAMPLE.as_bytes()).unwrap();
         assert!(r.find("a1b2c3d4").is_some());
         assert!(r.find("ee99ff00-7777-8888-9999-aaaabbbbcccc").is_some());
         assert!(r.find("nope").is_none());
-    }
 
-    #[test]
-    fn malformed_roster_is_error() {
         assert!(ClaudeRoster::parse(b"{ not json").is_err());
     }
 
@@ -1217,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_control_sock_none_when_absent() {
+    fn sock_rows() {
         let base = std::env::temp_dir().join(format!(
             "fno-ctrlsock-none-{}-{}",
             std::process::id(),
@@ -1243,10 +1218,7 @@ mod tests {
         };
         assert!(w.resolve_control_sock().is_none());
         std::fs::remove_dir_all(&base).ok();
-    }
 
-    #[test]
-    fn all_agents_reader_keeps_background_rows_and_skips_interactive() {
         let stdout = br#"[
           {"kind":"background","id":"aaaa1111","state":"stopped"},
           {"kind":"interactive","name":"operator"},
@@ -1269,19 +1241,13 @@ mod tests {
         assert_eq!(rows[1].short_id, "bbbb2222");
         assert_eq!(rows[1].state.as_deref(), Some("working"));
         assert!(warnings.is_empty());
-    }
 
-    #[test]
-    fn all_agents_timeout_is_unknown_not_successful_empty() {
         let snapshot = read_all_agents_with(|| Err("timed out after 15s".to_string()));
         let ClaudeAgentsSnapshot::Unknown { warnings, .. } = snapshot else {
             panic!("a timeout must not prove an empty agent list");
         };
         assert!(warnings.iter().any(|warning| warning.contains("timed out")));
-    }
 
-    #[test]
-    fn all_agents_partial_parse_cannot_prove_a_row_absent() {
         let snapshot = parse_all_agents(
             br#"[
               {"kind":"background","id":"aaaa1111","state":"stopped"},
@@ -1296,17 +1262,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(!warnings.is_empty());
         assert!(snapshot.find("aaaa1111").is_some());
-    }
 
-    #[test]
-    fn all_agents_zero_parsed_stays_unknown() {
         let snapshot = parse_all_agents(br#"[{"kind":"background"}]"#);
         assert!(matches!(snapshot, ClaudeAgentsSnapshot::Unknown { .. }));
         assert!(snapshot.warning_text().contains("0 of 1"));
-    }
 
-    #[test]
-    fn all_agents_rows_carry_pid_when_emitted() {
         let snapshot = parse_all_agents(
             br#"[
               {"kind":"background","id":"aaaa1111","state":"done","pid":65340},
