@@ -402,7 +402,7 @@ pub(crate) fn header_line(focused: bool, order: FeedOrder, w: usize) -> String {
                 " FEED FOCUSED · up/down row · enter details · o order: {order_word} · esc release"
             ),
             format!(" FOCUSED · arrows move · enter details · o {order_word} · esc release"),
-            format!(" FOCUSED · enter details · o {order_word} · esc release"),
+            format!(" FOCUSED · o {order_word} · esc release"),
             " esc release".to_string(),
         ]
     } else {

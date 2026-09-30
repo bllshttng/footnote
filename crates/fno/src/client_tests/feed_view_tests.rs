@@ -637,10 +637,12 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
     assert!(labels.iter().any(|l| l == "resume"), "{labels:?}");
 }
 
-/// The popup's rendered body lines, for label-level assertions.
+/// The popup's rendered body lines, for label-level assertions. The wide
+/// viewport keeps long values whole: the real modal clips them, `y` copies
+/// whole, and these tests read the field content, not the clip.
 fn popup_lines(popup: &crate::popup::Popup) -> Vec<String> {
     popup
-        .render((40, 200))
+        .render((80, 200))
         .lines
         .iter()
         .map(|l| l.text.clone())
@@ -652,14 +654,18 @@ fn popup_lines(popup: &crate::popup::Popup) -> Vec<String> {
 /// the border cell, so the border strips before the label splits off.
 fn popup_rows(popup: &crate::popup::Popup) -> Vec<(Option<String>, String)> {
     let mut rows = Vec::new();
-    for line in popup.render((40, 200)).lines {
+    for line in popup.render((80, 200)).lines {
         let framed = line.text.trim();
-        let body = framed
+        let mut body = framed
             .strip_prefix('\u{2502}')
             .or_else(|| framed.strip_prefix('\u{250c}'))
             .or_else(|| framed.strip_prefix('\u{2570}'))
             .unwrap_or(framed)
-            .trim();
+            .to_string();
+        if let Some(stripped) = body.strip_suffix('\u{2502}') {
+            body = stripped.to_string();
+        }
+        let body = body.trim();
         if body.is_empty() {
             continue;
         }
@@ -894,12 +900,15 @@ fn the_parent_field_names_the_parent_row_when_the_edge_resolves() {
     assert_eq!(by_parent(&child), "s-lead (handoff)");
 
     // No edge: the birth's reason stands in for the parent it could not name.
+    // The popup caps its width and ellipsizes, so a long reason may clip in
+    // the render; the head of the real string must show.
     child.spawned_by_session = None;
     child.lineage_kind = None;
     child.lineage_reason = Some("daemon mint: spawn request carried no parent edge".into());
-    assert_eq!(
-        by_parent(&child),
-        "daemon mint: spawn request carried no parent edge"
+    let shown = by_parent(&child);
+    assert!(
+        shown.starts_with("daemon mint: spawn request carried no parent"),
+        "the birth's reason stands in: {shown}"
     );
 
     // No edge and no reason: the field hides (item.parent rides in its

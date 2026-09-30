@@ -6856,9 +6856,7 @@ fn menu_labels(menu: &RowMenu) -> Vec<String> {
             PopupRow::Grid(cells) => cells[*ci].label.clone(),
             PopupRow::Entry { label, .. } | PopupRow::SwatchEntry { label, .. } => label.clone(),
             PopupRow::FullWidth(l) => l.clone(),
-            PopupRow::Header(_) | PopupRow::Rule | PopupRow::Info { .. } => {
-                unreachable!("not a target")
-            }
+            other => unreachable!("not a target: {other:?}"),
         })
         .collect()
 }

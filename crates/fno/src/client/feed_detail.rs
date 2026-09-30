@@ -269,6 +269,7 @@ pub(crate) fn build(
             .map(|(name, kind, p)| match (name, kind) {
                 (Some(n), Some("peer")) => format!("{n} ({p}) (handoff)"),
                 (Some(n), _) => format!("{n} ({p})"),
+                (None, Some("peer")) => format!("{p} (handoff)"),
                 (None, _) => p.to_string(),
             })
     });
