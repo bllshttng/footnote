@@ -273,7 +273,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn last_20_replies_name_each_ask_repeated_three_times_once_per_reply() {
+    fn asks_rows() {
         let named = NamedTempFile::new().unwrap();
         let transcript = named.path().to_path_buf();
         let mut file = named.reopen().unwrap();
@@ -316,10 +316,7 @@ mod tests {
                 {"text":"reply yes to all four on the model-catalog questions", "count":4},
             ])
         );
-    }
 
-    #[test]
-    fn lines_name_each_repeat_with_both_remedies_none_and_a_failed_read() {
         let repeated = Reading::took(
             "repeated_asks",
             json!({"replies":20,"asks":[{"text":"reply f90d build or drop", "count":3}]}),
