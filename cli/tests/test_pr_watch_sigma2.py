@@ -508,9 +508,10 @@ class TestPrObservationMergedFieldRemoved:
         import dataclasses
 
         # Verify the construction in _discover.py doesn't still pass merged=
-        # by checking the field set is as expected
+        # by checking the field set is as expected (is_draft rides the same
+        # gh pr view call; the flip leg reads OPEN + is_draft).
         field_names = {f.name for f in dataclasses.fields(PrObservation)}
-        expected = {"pr_number", "state", "latest_review_ts", "opened_at", "merge_sha"}
+        expected = {"pr_number", "state", "latest_review_ts", "opened_at", "merge_sha", "is_draft"}
         assert "merged" not in field_names, "merged bool must stay removed"
         assert field_names == expected, (
             f"PrObservation fields mismatch. Expected {expected}, got {field_names}"
