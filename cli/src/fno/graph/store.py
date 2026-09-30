@@ -621,31 +621,26 @@ class _ExecClient(_Keeper):
         pass  # one-shot: nothing resident to shut down
 
 
-class _SkewTolerant:
-    """Prefers the resident keeper; re-serves a request through the one-shot
-    exec when the resident keeper is an OLD binary that refuses the method.
-
-    A rebuild the resident keeper never picked up leaves a live socket
-    answering `unknown store method` for every new keeper method (measured
-    2026-09-30: reconcile's ledger_backstop through a stale resident). The
-    exec transport runs the CURRENT resolved worker, so one retry heals the
-    skew without touching the caller. Any other error propagates.
+class _SkewTolerant(_Keeper):
+    """A resident keeper that may predate this tree's methods: an
+    unknown-method refusal re-serves the request through the one-shot exec
+    transport, which runs the CURRENT resolved worker (measured 2026-09-30:
+    reconcile's ledger_backstop through a resident built before it). Any
+    other error propagates. Everything else - sock identity, typed helpers,
+    shutdown - is the keeper's own.
     """
 
-    def __init__(self, keeper: _Keeper, path: Path) -> None:
-        self._keeper = keeper
-        self._path = Path(path)
+    def __init__(self, sock: Path, path: Path, **kwargs) -> None:
+        super().__init__(sock, **kwargs)
+        self.path = Path(path)
 
     def request(self, method: str, params: dict) -> Any:
         try:
-            return self._keeper.request(method, params)
+            return super().request(method, params)
         except RuntimeError as exc:
             if "unknown store method" not in str(exc):
                 raise
-            return _ExecClient(self._path).request(method, params)
-
-    def shutdown(self) -> None:
-        self._keeper.shutdown()
+            return _ExecClient(self.path).request(method, params)
 
 
 def shutdown_keeper(path: Path) -> None:
@@ -679,11 +674,11 @@ def _client_for(path: Path, *, spawn: bool = True) -> "_SkewTolerant | _ExecClie
     """
     path = Path(path)
     sock = store_socket_for(path)
-    keeper = _Keeper(sock)
+    keeper = _SkewTolerant(sock, path)
     try:
         probe = keeper._connect()
         probe.close()
-        return _SkewTolerant(keeper, path)
+        return keeper
     except StoreUnavailable as exc:
         if not spawn or exc.state not in (STATE_ABSENT, STATE_NO_LISTENER):
             raise
