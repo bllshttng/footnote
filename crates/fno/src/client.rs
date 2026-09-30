@@ -591,6 +591,9 @@ fn stamp_sandbox_owner(cmd: &mut std::process::Command) {
             None => return,
         },
     };
+    if crate::proto::pid_start_time(owner_pid) != Some(birth) {
+        return;
+    }
     cmd.env("FNO_OWNER_PID", owner_pid.to_string())
         .env("FNO_OWNER_BIRTH", birth.to_string())
         .env("FNO_OWNER_SESSION", session);
