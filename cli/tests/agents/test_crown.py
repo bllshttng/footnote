@@ -408,8 +408,7 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
     succeeded_plan = plan_for([caller, child], succession=True)
     rows, outcome, vacated = settle_spawn_crown(
         [caller, child], scope="epic-x", plan=succeeded_plan,
-        heir="heir",
-        heir_owner={"kind": "session", "harness": "codex", "session_id": "heir-sess", "cwd": "/w"},
+        heir="heir", heir_harness="codex", heir_session="heir-sess", heir_cwd="/w",
     )
     assert outcome == "succeeded"
     assert [r.crown_scope for r in rows] == [None, None]

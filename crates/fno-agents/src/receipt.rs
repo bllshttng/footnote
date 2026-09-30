@@ -414,14 +414,41 @@ fn store_root_for(harness: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Requested/observed model provenance from the row's axis fields, in the
-/// shape (a bare model is two facts; the basis travels beside it).
+/// shape (a bare model is two facts; the basis travels beside it). Present
+/// whenever ANY of model, provider or effort is: a row with a provider and no
+/// model still proves its vendor, an absent value stays absent.
 fn model_provenance_of(e: &state::RegistryEntry) -> Option<serde_json::Value> {
-    let model = e.model.as_deref()?;
-    let mut out = serde_json::json!({ "model": model });
-    if let Some(basis) = e.model_basis.as_deref() {
-        out["basis"] = serde_json::Value::String(basis.to_string());
+    let model = e.model.as_deref();
+    let effort = e.effort.as_deref().or(e.requested_effort.as_deref());
+    if model.is_none() && e.provider.is_none() && effort.is_none() {
+        return None;
     }
-    Some(out)
+    let mut out = serde_json::Map::new();
+    if let Some(model) = model {
+        out.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
+    if let Some(provider) = e.provider.as_deref() {
+        out.insert(
+            "provider".to_string(),
+            serde_json::Value::String(provider.to_string()),
+        );
+    }
+    if let Some(effort) = effort {
+        out.insert(
+            "effort".to_string(),
+            serde_json::Value::String(effort.to_string()),
+        );
+    }
+    if let Some(basis) = e.model_basis.as_deref() {
+        out.insert(
+            "basis".to_string(),
+            serde_json::Value::String(basis.to_string()),
+        );
+    }
+    Some(serde_json::Value::Object(out))
 }
 
 /// Stage the removal accounting for one row a write path is about to drop:
@@ -716,7 +743,9 @@ mod tests {
 
     #[test]
     fn decide_reap_receipt_answers_file_and_receipt_for_a_good_row() {
-        let row = sample_row("goodrow");
+        let mut row = sample_row("goodrow");
+        row.provider = Some("anthropic".to_string());
+        row.effort = Some("high".to_string());
         let ask = json!({"row": row, "removed_by": "probe"});
         let answer = decide_reap_receipt(&ask);
         assert!(answer.get("refused").is_none(), "{answer}");
@@ -726,6 +755,19 @@ mod tests {
         assert_eq!(
             answer["receipt"]["resume"], "claude --resume goodrow-session",
             "a row with no model keeps the bare form"
+        );
+        let provenance = &answer["receipt"]["model_provenance"];
+        assert_eq!(provenance["provider"], "anthropic");
+        assert_eq!(provenance["effort"], "high");
+        assert!(
+            provenance.get("model").is_none(),
+            "an absent model stays absent: {provenance}"
+        );
+
+        let plain = decide_reap_receipt(&json!({"row": sample_row("plainrow")}));
+        assert!(
+            plain["receipt"]["model_provenance"].is_null(),
+            "a row with none of the axes gets no provenance object: {plain}"
         );
     }
 

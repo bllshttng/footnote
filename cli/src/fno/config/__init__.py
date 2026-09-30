@@ -294,9 +294,10 @@ RENDER_TARGETS_TABLE_TYPO_MSG = (
 class RenderTargetConfig(BaseModel):
     """One auto-rendered backlog projection (``config.backlog.render_targets[]``).
 
-    Public projections use the shared title leak gate; ``local`` is explicitly
-    private and retains full-detail links. ``scope`` names one project or
-    ``all``. ``project`` remains accepted as a compatibility spelling.
+    ``local`` (the default) renders the unified board page; ``backlog`` and
+    ``roadmap`` name retired public HTML projections and warn-skip. ``scope``
+    names one project or ``all``. ``project`` remains accepted as a
+    compatibility spelling.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -304,7 +305,7 @@ class RenderTargetConfig(BaseModel):
     path: str
     project: str | None = None
     scope: str | None = None
-    projection: str = "backlog"
+    projection: str = "local"
 
     @model_validator(mode="before")
     @classmethod

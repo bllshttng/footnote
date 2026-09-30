@@ -4389,9 +4389,9 @@ fn render_reply(
 ) -> i32 {
     match reply {
         ServerMsg::PaneList { mut panes } => {
-            // `pane ls --fno-id <id>` filters to panes carrying that id.
+            // `pane ls --fno-id` keeps panes answering to either id spelling.
             if let Some(want) = ls_fno_id {
-                panes.retain(|p| p.fno_id.as_deref() == Some(want));
+                panes.retain(|p| p.answers_id(want));
             }
             if json {
                 // Each row carries `fno_id_state` beside the raw

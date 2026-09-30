@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -532,7 +531,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
 
 # --- view ---
 
-def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch):
+def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC1-HP: fno graph view rerenders HTML and echoes the path."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -547,7 +546,7 @@ def test_ac1_hp_graph_view_renders_html_and_prints_path(tmp_graph, tmp_path, mon
     assert "<html" in text
 
 
-def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch):
+def test_ac2_err_graph_view_empty_graph_still_renders(tmp_graph, tmp_path, monkeypatch, native_board_render):
     """AC2-ERR: view on an empty graph produces an HTML shell, not an error."""
     monkeypatch.setenv("FNO_NO_OPEN", "1")
     html_path = tmp_path / "graph.html"
@@ -1262,36 +1261,6 @@ def test_legacy_entry_without_additional_prs_loads_with_default(tmp_graph):
     ]}))
     data = json.loads(_native_get("ab-12345678"))
     assert not data.get("additional_prs")
-
-
-def test_render_html_renders_non_http_pr_url_as_plain_text(tmp_path):
-    """REGRESSION (Codex P2 on PR #316), carried onto the dashboard renderer.
-
-    A pr_url without a scheme ('github.com/x/y/pull/542') must never become an
-    anchor - it would resolve as a relative link. It must also stay VISIBLE as
-    escaped text; silently dropping it is the original defect.
-    """
-    from fno.graph.render_html import render_graph_html
-
-    entry = {
-        "id": "ab-abcdabcd", "title": "Multi", "priority": "p2",
-        "type": "feature", "domain": "code", "parent": None,
-        "plan_path": "x.md",
-        "pr_number": 542, "pr_url": "github.com/x/y/pull/542",
-        "created_at": "2026-01-01T00:00:00Z",
-        # Open, not done: the static half renders only what the chips show on
-        # first paint, so a closed node would exercise the payload alone and
-        # leave the no-JS anchor guard untested.
-        "status": "in_review",
-    }
-    out = tmp_path / "graph.html"
-    render_graph_html([entry], out)
-    html_out = out.read_text()
-    assert "github.com/x/y/pull/542" in html_out, (
-        "non-http url silently dropped"
-    )
-    assert 'href="github.com/x/y/pull/542"' not in html_out
-    assert "PR #542" in html_out
 
 
 def test_render_md_includes_additional_prs_on_done_nodes(tmp_graph):
@@ -2189,16 +2158,3 @@ def test_provenance_external_reads_sidecar_edges(
     assert doc["sessions"] == [{"phase": "do", "session_id": "ext-sess"}]
     assert doc["source_node_id"] == "EXT-done"
     assert doc["source_node_title"] == "Closed blocker"
-
-
-def test_local_store_displays_refuse_cleanly_under_external(tmp_path, monkeypatch):
-    """Display renders of the LOCAL store's full records (view) refuse with
-    the backend named under an external selection - never a stale render."""
-    absent = tmp_path / "absent.json"
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: absent)
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "view")
-    assert r.exit_code == 2, r.output
-    assert "external" in r.output

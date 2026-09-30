@@ -379,6 +379,33 @@ mod tests {
             if harness == "codex" {
                 continue;
             }
+            // A harness whose interactive_resume is `unsupported` holds no
+            // Resume gesture, and the contract is the REFUSAL: resume_form
+            // reads false and the argv path errs naming the harness (zcode
+            // is the precedent - its TUI is unbuildable on the measured
+            // install, so an interactive restore must never render).
+            let kind = caps
+                .get("harness")
+                .and_then(|h| h.get(harness))
+                .and_then(|h| h.get("resume_strategy"))
+                .and_then(|r| r.get("forms"))
+                .and_then(|f| f.get("interactive_resume"))
+                .and_then(|f| f.get("kind"))
+                .and_then(|k| k.as_str())
+                .unwrap_or("");
+            if kind == "unsupported" {
+                assert!(
+                    !super::super::Core::resume_form(harness),
+                    "{harness} declares unsupported interactive_resume but resume_form seats it"
+                );
+                let sid = format!("{harness}-0a1b2c3d");
+                let err = resume_argv_for(harness, &sid).unwrap_err();
+                assert!(
+                    err.contains(harness.as_str()),
+                    "{harness} refusal names it: {err}"
+                );
+                continue;
+            }
             let form = token(&format!(
                 "{harness}/resume_strategy/forms/interactive_resume"
             ));

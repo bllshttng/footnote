@@ -132,7 +132,6 @@ pub(crate) fn build_codex_thread_entry(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: Some(session_id.clone()),
         delivery_policy: None,
         // v19: the posture the spawn REQUESTED, which is what `thread/resume`
         // re-applies across a daemon restart. Read off the typed posture the

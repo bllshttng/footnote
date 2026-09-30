@@ -355,19 +355,20 @@ fn where_chip_opens_the_local_and_placement_picker() {
 
 #[test]
 fn composer_keybar_names_the_keys() {
-    // AC8-HP: the keybar names the chip-row grammar: Enter opens a picker
-    // or launches, Tab moves, ^j is a newline, esc closes.
+    // AC8-HP: the keybar names the chip-row grammar: Enter launches from
+    // the prompt line (or names the chip it opens), Tab moves, ^j is a
+    // newline in the input, esc closes.
     let scratch = Scratch::new("composer-hint");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
-    let screen = h.wait_screen(10, |s| s.contains("open/launch"));
+    let screen = h.wait_screen(10, |s| s.contains("tab next"));
     assert!(
-        screen.contains("open/launch"),
-        "enter's action is named: {screen}"
+        screen.contains("\u{21b5} launch"),
+        "enter names the launch from the prompt line: {screen}"
     );
     assert!(screen.contains("tab next"), "tab is named: {screen}");
-    assert!(screen.contains("esc"), "esc is named: {screen}");
+    assert!(screen.contains("esc close"), "esc is named: {screen}");
 }
 
 #[test]

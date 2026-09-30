@@ -564,7 +564,10 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert predecessor.crown_scope == "scope-a"
     assert predecessor.crown_grantor == "human"
     assert branch.name == "target-x-f0c2-branch-08054b1d"
-    assert branch.fno_id == REMINT
+    # The branch mints its own id at the write; it is neither session id.
+    assert branch.fno_id
+    assert branch.fno_id != REMINT
+    assert branch.fno_id != BIRTH
     assert branch.forked_from_session_id == BIRTH
     assert branch.crown_level is None
     assert branch.crown_scope is None
