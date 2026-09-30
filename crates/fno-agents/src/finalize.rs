@@ -2221,6 +2221,8 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
             supplied_dispatch_hold: None,
+            supplied_review_hold: None,
+            supplied_facts: None,
         },
     );
     match outcome {
@@ -2980,35 +2982,12 @@ fn last_assistant_text(transcript: &Path) -> Option<String> {
         if role != "assistant" {
             continue;
         }
-        let text = assistant_text_blocks(&val);
+        let text = crate::loopcheck::extract_assistant_text(&val);
         if !text.trim().is_empty() {
             return Some(text.chars().take(4000).collect());
         }
     }
     None
-}
-
-/// Join the text blocks of a transcript assistant entry: string content, or an
-/// array of content blocks (tool_use/tool_result blocks skipped).
-fn assistant_text_blocks(val: &Value) -> String {
-    if let Some(s) = val.pointer("/message/content").and_then(|v| v.as_str()) {
-        return s.to_string();
-    }
-    if let Some(arr) = val.pointer("/message/content").and_then(|v| v.as_array()) {
-        return arr
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
-            .collect::<Vec<_>>()
-            .join(" ");
-    }
-    // Top-level `{"role":"assistant","content":"..."}` shape (matches
-    // loopcheck::extract_assistant_text and the hook tests; codex P2). Without
-    // this, last_assistant_text accepts the role but records no message.
-    if let Some(s) = val.get("content").and_then(|v| v.as_str()) {
-        return s.to_string();
-    }
-    String::new()
 }
 
 /// Best-effort: append a pointer line to `~/.fno/logs/corrections.log` so the
@@ -4502,22 +4481,6 @@ mod tests {
             home.join(".fno/postmortems")
         );
         let _ = fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn assistant_text_blocks_handles_string_and_array() {
-        let s = serde_json::json!({"message": {"content": "hi"}});
-        assert_eq!(assistant_text_blocks(&s), "hi");
-        let arr = serde_json::json!({"message": {"content": [
-            {"type": "text", "text": "a"},
-            {"type": "tool_use", "name": "x"},
-            {"type": "text", "text": "b"}
-        ]}});
-        assert_eq!(assistant_text_blocks(&arr), "a b");
-        // Top-level {"content": "..."} shape (codex P2 fallback).
-        let top = serde_json::json!({"role": "assistant", "content": "top-level"});
-        assert_eq!(assistant_text_blocks(&top), "top-level");
-        assert_eq!(assistant_text_blocks(&serde_json::json!({})), "");
     }
 
     #[test]

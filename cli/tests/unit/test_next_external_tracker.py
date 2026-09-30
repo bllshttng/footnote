@@ -281,9 +281,13 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
-    r = runner.invoke(app, ["backlog", "next", "-A"], catch_exceptions=False)
-    assert r.exit_code == 0, r.output
-    graph_winner = json.loads(r.output)["id"]
+    # The graph half answers through the native door (the wheel spelling
+    # tombstones there); the external half below stays on the wheel.
+    from tests.goldens._door import door_graph
+
+    code, out, err = door_graph(g, "next", "-A")
+    assert code == 0, err
+    graph_winner = json.loads(out)["id"]
 
     rows = [
         {"id": "ab-aaa00001", "title": "Leaf under epic", "priority": "p2",

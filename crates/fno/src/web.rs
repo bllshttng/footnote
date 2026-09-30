@@ -125,12 +125,12 @@ struct AppState {
     tx: broadcast::Sender<String>,
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
-    reign_html: PathBuf,
-    /// False when the reign root came from a config form this mirror cannot
+    rundown_html: PathBuf,
+    /// False when the state root came from a config form this mirror cannot
     /// expand (a template, a `~user` or relative anchor, an unset `$VAR`):
-    /// /crown then never republishes through the fallback path, so a
+    /// /rundown then never republishes through the fallback path, so a
     /// project-isolated bridge cannot overwrite the global page.
-    reign_republish: bool,
+    rundown_republish: bool,
     fleet_html: PathBuf,
     /// The mux session this bridge attaches to; a backlog launch names it to
     /// the spawn door.
@@ -154,14 +154,14 @@ struct CachedModel {
     inputs: Arc<backlog_model::Inputs>,
 }
 
-/// The reign page path plus whether its root resolved FAITHFULLY (see
+/// The rundown page path plus whether its root resolved FAITHFULLY (see
 /// [`crate::reign_root::reign_state_root`]): an unfaithful root is served as a
 /// miss but never written through.
-fn reign_html_path() -> (PathBuf, bool) {
+fn rundown_html_path() -> (PathBuf, bool) {
     #[cfg(not(test))]
     {
         let (root, faithful) = crate::reign_root::reign_state_root();
-        (crate::state_layout::place(&root, "reign.html"), faithful)
+        (crate::state_layout::place(&root, "rundown.html"), faithful)
     }
     #[cfg(test)]
     {
@@ -170,7 +170,7 @@ fn reign_html_path() -> (PathBuf, bool) {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        (crate::state_layout::place(&root, "reign.html"), true)
+        (crate::state_layout::place(&root, "rundown.html"), true)
     }
 }
 
@@ -737,13 +737,13 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
     let _state_guard = WebStateFile::write(&socket, &args.bind, args.port, &token);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let (reign_html, reign_republish) = reign_html_path();
+    let (rundown_html, rundown_republish) = rundown_html_path();
     let state = AppState {
         tx,
         snap,
         token,
-        reign_html,
-        reign_republish,
+        rundown_html,
+        rundown_republish,
         fleet_html: fleet_html_path(),
         session: args.session.into(),
         writable,
@@ -788,6 +788,7 @@ fn router(state: AppState) -> Router {
         .route("/backlog/model.json", get(backlog_model))
         .route("/backlog/node.json", get(backlog_node))
         .route("/backlog/act", post(backlog_act))
+        .route("/rundown", get(crown))
         .route("/crown", get(crown))
         .route("/fleet", get(fleet))
         .route("/ws", get(ws_handler))
@@ -1017,22 +1018,22 @@ async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Respon
 
 async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
     let authorized = token_ok(q.t.as_deref(), &st.token);
-    let modified = std::fs::metadata(&st.reign_html)
+    let modified = std::fs::metadata(&st.rundown_html)
         .and_then(|m| m.modified())
         .ok();
     // An unfaithful root is never written through: the republish would pass
     // the fallback as `--out` and overwrite the global page with this
     // project's court data.
-    if st.reign_republish && crown_needs_republish(authorized, modified, SystemTime::now()) {
-        start_crown_republish(&st.reign_html);
+    if st.rundown_republish && crown_needs_republish(authorized, modified, SystemTime::now()) {
+        start_crown_republish(&st.rundown_html);
     }
-    let notice = if st.reign_republish {
-        "fno agents king ledger (a render has started; reload in about a minute)"
+    let notice = if st.rundown_republish {
+        "fno agents org rundown (a render has started; reload in about a minute)"
     } else {
-        "reign.html is not resolvable from this config (a template, ~user, relative or unset $VAR state_dir); fix state_dir or run fno agents king ledger"
+        "rundown.html is not resolvable from this config (a template, ~user, relative or unset $VAR state_dir); fix state_dir or run fno agents org rundown"
     };
     private_page_response(
-        &st.reign_html,
+        &st.rundown_html,
         q.t.as_deref(),
         &st.token,
         notice,
@@ -1439,7 +1440,7 @@ fn start_crown_republish(out: &Path) {
     tokio::spawn(async move {
         let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
         let mut cmd = crate::process_admission::tokio_command(&fno);
-        cmd.args(["agents", "king", "ledger", "--out"]).arg(&out);
+        cmd.args(["agents", "org", "rundown", "--out"]).arg(&out);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
@@ -1482,7 +1483,7 @@ fn start_crown_republish(out: &Path) {
             }
         };
         if let Err(e) = result {
-            eprintln!("fno mux web: `fno agents king ledger --out <reign.html>` failed: {e}");
+            eprintln!("fno mux web: `fno agents org rundown --out <rundown.html>` failed: {e}");
         }
         CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
     });
@@ -1495,7 +1496,7 @@ fn nav_fragment(current: NavPage) -> String {
     let name = |p: NavPage| match p {
         NavPage::Live => "live",
         NavPage::Backlog => "backlog",
-        NavPage::Crown => "crown",
+        NavPage::Crown => "rundown",
         NavPage::Fleet => "fleet",
     };
     let link = |p: NavPage| {
@@ -1788,8 +1789,8 @@ mod tests {
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: true,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2200,8 +2201,8 @@ console.log("evictedRowCount: 18 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: true,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2342,7 +2343,7 @@ console.log("backlog page helpers: 12 cases ok");
         for (page, name) in [
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
-            (NavPage::Crown, "crown"),
+            (NavPage::Crown, "rundown"),
             (NavPage::Fleet, "fleet"),
         ] {
             let frag = nav_fragment(page);
@@ -2383,7 +2384,7 @@ console.log("backlog page helpers: 12 cases ok");
             &path,
             Some("right"),
             "right",
-            "fno agents king ledger",
+            "fno agents org rundown",
             NavPage::Crown,
         )
         .await;
@@ -2398,12 +2399,12 @@ console.log("backlog page helpers: 12 cases ok");
         assert!(String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
         // The served crown page carries the shared nav (inserted after <body>).
         let text = String::from_utf8_lossy(&body).to_string();
-        assert!(text.contains("nav class=\"fno-nav\" data-current=\"crown\""));
+        assert!(text.contains("nav class=\"fno-nav\" data-current=\"rundown\""));
         let denied = private_page_response(
             &path,
             Some("wrong"),
             "right",
-            "fno agents king ledger",
+            "fno agents org rundown",
             NavPage::Crown,
         )
         .await;
@@ -2425,7 +2426,7 @@ console.log("backlog page helpers: 12 cases ok");
             &dir.join("reign.html"),
             Some("right"),
             "right",
-            "fno agents king ledger (a render has started; reload in about a minute)",
+            "fno agents org rundown (a render has started; reload in about a minute)",
             NavPage::Crown,
         )
         .await;
@@ -2433,7 +2434,7 @@ console.log("backlog page helpers: 12 cases ok");
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("fno agents king ledger"));
+        assert!(String::from_utf8_lossy(&body).contains("fno agents org rundown"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2484,8 +2485,8 @@ console.log("backlog page helpers: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: false,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: false,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2566,8 +2567,8 @@ console.log("backlog page helpers: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: true,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: true,
             fleet_html: fleet_path,
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2948,8 +2949,8 @@ console.log("backlog page helpers: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: true,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -3041,8 +3042,8 @@ console.log("backlog page helpers: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            reign_html: dir.join("reign.html"),
-            reign_republish: true,
+            rundown_html: dir.join("reign.html"),
+            rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,

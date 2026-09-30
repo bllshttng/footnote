@@ -1,4 +1,4 @@
-<!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
+<!-- style-exception: canonical court prose predates the style rules; bundled into skills/lead verbatim -->
 # CLI commands: what the crown reaches for
 
 Curated for the crown: the verbs an adjudicator actually uses, each with the one gotcha that makes it non-obvious.
@@ -38,11 +38,11 @@ Verbs that exist only for a crowned session. One reign ran a whole territory wit
 
 | You are trying to | Verb | The gotcha |
 |---|---|---|
-| Run one check-in beat | `fno agents king checkin` | Runs the whole check-in body and emits the `reign_checkin` journal row itself. The row carries the numbers it just printed. A failed reader gets its own `READER FAILED` line and the beat continues. `--change "<sentence>"` records your finding on the same row. `--no-emit` prints and diffs without appending. |
-| Join nodes to PRs, sessions and workers | `fno agents court -n` | Returns the node, PR, session and worker join in one call. Replaces a hand-built join over `fno do pr list`, `fno agents registry-json` and a raw graph read. Implies JSON output. |
-| Count what is left to deliver | `fno agents king drain <scope>` | Answers delivery, not assignment: undelivered as one number. An unreadable graph exits non-zero on purpose, so the count can never read as drained. |
-| Leave an answer for the next king | `fno agents king faq add` | The only crown verb aimed at a successor. Refuses without `--exit`, the change that retires the entry. |
-| Read the reign back | `fno agents king history` | This crown's recorded check-ins, newest first, verbatim. Legacy alias rows count as rejected evidence and are never silently accepted. It never generates a summary. |
+| Run one check-in beat | `fno agents org checkin` | Runs the whole check-in body and emits the `reign_checkin` journal row itself. The row carries the numbers it just printed. A failed reader gets its own `READER FAILED` line and the beat continues. `--change "<sentence>"` records your finding on the same row. `--no-emit` prints and diffs without appending. |
+| Join nodes to PRs, sessions and workers | `fno agents org -n` | Returns the node, PR, session and worker join in one call. Replaces a hand-built join over `fno do pr list`, `fno agents registry-json` and a raw graph read. Implies JSON output. |
+| Count what is left to deliver | `fno agents org drain <scope>` | Answers delivery, not assignment: undelivered as one number. An unreadable graph exits non-zero on purpose, so the count can never read as drained. |
+| Leave an answer for the next king | `fno agents org faq add` | The only crown verb aimed at a successor. Refuses without `--exit`, the change that retires the entry. |
+| Read the reign back | `fno agents org history` | This crown's recorded check-ins, newest first, verbatim. Legacy alias rows count as rejected evidence and are never silently accepted. It never generates a summary. |
 
 ## Observation and pointing
 

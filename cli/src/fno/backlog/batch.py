@@ -629,7 +629,14 @@ def _peek_next(
     (MegawalkQueue::with_mission): without it, a same-domain ready node OUTSIDE
     the mission would keep a mission batch open forever (codex P2).
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "next"]
+    # The selection answers natively: the wheel spelling tombstones on the
+    # graph backend, so the peek drives the binary's door, never `fno-py`.
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise PeekError("fno backlog next failed: no fno-agents binary")
+    cmd = [str(binary), "backlog", "next"]
     if project:
         cmd += ["--project", project]
     if mission:

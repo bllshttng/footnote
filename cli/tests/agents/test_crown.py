@@ -394,20 +394,42 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
     assert vacated == []
 
     caller = _crown_row("caller")
-    succeeded_plan = plan_for([caller], succession=True)
-    rows, outcome, vacated = settle_spawn_crown([caller], scope="epic-x", plan=succeeded_plan)
+    # The predecessor's live court: one child whose current owner names the
+    # caller's session. Succession re-homes it in the same write that moves
+    # the crown; the birth edge stays history.
+    child = replace(
+        _crown_row("w5", scope=None),
+        spawned_by_session="caller-sess",
+        spawn_provenance={
+            "origin": {"kind": "session", "parent": {"harness": "claude", "session_id": "caller-sess", "cwd": "/w"}, "invocation": None},
+            "owner": {"kind": "session", "harness": "claude", "session_id": "caller-sess", "cwd": "/w"},
+        },
+    )
+    succeeded_plan = plan_for([caller, child], succession=True)
+    rows, outcome, vacated = settle_spawn_crown(
+        [caller, child], scope="epic-x", plan=succeeded_plan,
+        heir="heir",
+        heir_owner={"kind": "session", "harness": "codex", "session_id": "heir-sess", "cwd": "/w"},
+    )
     assert outcome == "succeeded"
-    assert [r.crown_scope for r in rows] == [None]
-    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
+    assert [r.crown_scope for r in rows] == [None, None]
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession"), ("w5", "reowned")]
+    assert rows[1].spawn_provenance["owner"]["session_id"] == "heir-sess"
+    assert rows[1].spawned_by_session == "caller-sess", "the birth edge stays history"
 
     # The race backstop: the plan was computed against "caller" holding the
     # scope, but the write sees "stranger" instead - declines rather than
     # applying a plan for a holder that is no longer there.
     stranger = _crown_row("stranger")
-    race_plan = plan_for([caller], succession=True)
-    rows, outcome, vacated = settle_spawn_crown([stranger], scope="epic-x", plan=race_plan)
+    race_plan = plan_for([caller, child], succession=True)
+    rows, outcome, vacated = settle_spawn_crown(
+        [stranger, child], scope="epic-x", plan=race_plan,
+    )
     assert outcome == "declined"
     assert rows[0].crown_scope == "epic-x", "a declined spawn leaves the holder alone"
+    assert rows[1].spawn_provenance["owner"]["session_id"] == "caller-sess", (
+        "a declined succession re-homes nobody"
+    )
     assert vacated == []
 
     dead = _crown_row("dead", status="exited")
@@ -417,9 +439,11 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
     assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
     assert rows[0].crown_scope is None
 
-    rebound_plan = plan_for([caller], succession=True)
+    rebound_plan = plan_for([caller, child], succession=True)
     rebound = replace(caller, harness_session_id="caller-sess-2")
-    rows, outcome, vacated = settle_spawn_crown([rebound], scope="epic-x", plan=rebound_plan)
+    rows, outcome, vacated = settle_spawn_crown(
+        [rebound, child], scope="epic-x", plan=rebound_plan,
+    )
     assert outcome == "declined"
     assert rows[0].crown_scope == "epic-x"
     assert vacated == []
@@ -1253,7 +1277,7 @@ def test_rescope_refusal_names_the_ways_out_and_never_force(
 
     assert result.exit_code == 2
     assert "incumbent" in result.output
-    assert "fno agents crown incumbent --scope" in result.output
+    assert "fno agents org promote incumbent --scope" in result.output
     assert "reconcile" in result.output
     assert "stop" in result.output
     assert "--force" not in result.output
@@ -2422,7 +2446,7 @@ def test_in_place_crown_mails_the_reign_verb_and_names_the_delivery(
     assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
     # AC28: the holder receives the plugin-qualified verb by raw mail,
     # addressed by the full session id (the ADDRESS, never the spawn label).
-    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:reign alpha")]
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:lead alpha")]
 
 
 def test_in_place_crown_renders_the_reign_verb_for_codex(
@@ -2446,7 +2470,7 @@ def test_in_place_crown_renders_the_reign_verb_for_codex(
     receipt = promote_existing_session("worker", ["alpha"])
 
     assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
-    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "$fno:reign alpha")]
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "$fno:lead alpha")]
 
 
 def test_reign_verb_send_failure_is_named_not_silent(

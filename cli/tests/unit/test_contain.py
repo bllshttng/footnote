@@ -22,6 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.goldens._door import door_graph
 from fno.graph.store import commit_rows_via_store, read_graph_strict
 from tests.conftest import run_native_create
 
@@ -349,11 +350,11 @@ def test_next_returns_the_owner_when_its_only_children_are_contained(tmp_graph):
 
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     assert _native_contain(tmp_graph, owner, *kids)[0] == 0
-    r = _invoke("backlog", "next", "--ideas")
-    assert r.exit_code == 0, r.output
-    assert owner in r.output
+    code, out, err = door_graph(tmp_graph, "next", "--ideas")
+    assert code == 0, err
+    assert owner in out
     for kid in kids:
-        assert kid not in r.output
+        assert kid not in out
         now = datetime.now(timezone.utc)
         assert selection_guards(
             _by_id(tmp_graph)[kid], _by_id(tmp_graph), now

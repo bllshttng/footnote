@@ -966,6 +966,7 @@ mod tests {
 
     #[test]
     fn the_inheritor_names_the_presiding_l1_or_operator() {
+        let _env_lock = crate::claims::test_env_lock();
         let dir = tmp("inheritor");
         // One epic list mapping to one project, so the presiding level-1
         // crown resolves through the seeded FNO_HOME store. set_var is

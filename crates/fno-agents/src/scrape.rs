@@ -190,10 +190,27 @@ pub(crate) fn declared_fno<T: From<&'static str>>(declared: Option<T>) -> T {
 
 /// The `fno` front-door binary (the Rust mux owner), same resolution as the
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
-/// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
-/// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
+/// overrides for tests and non-PATH installs, then the sibling of this
+/// binary (every complete install - uv tool venv, pip/uv venv, wheel scripts
+/// dir, Homebrew keg - ships `fno` and `fno-agents` in one bin dir, the same
+/// sibling resolution `fno_py` performs for the python half), then bare
+/// `fno`. `var_os` (not `var`) so a path with non-UTF-8 bytes passes through
+/// to `Command` unmangled (gemini MEDIUM).
 pub fn fno_bin() -> std::ffi::OsString {
-    declared_fno(std::env::var_os("FNO_BIN"))
+    if let Some(declared) = std::env::var_os("FNO_BIN") {
+        return declared;
+    }
+    if !cfg!(test) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let sibling = dir.join("fno");
+                if sibling.is_file() {
+                    return sibling.into_os_string();
+                }
+            }
+        }
+    }
+    declared_fno(None)
 }
 
 /// The undeclared-`fno-py` twin of [`UNDECLARED_FNO`]: the same refusal for

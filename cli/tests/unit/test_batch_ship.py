@@ -339,7 +339,7 @@ class CloseableRunner:
 
     def __call__(self, cmd, *, cwd=None):
         self.calls.append(cmd)
-        if cmd[:3] == ["fno-py", "backlog", "next"]:
+        if cmd[1:3] == ["backlog", "next"]:
             return _cp(0, json.dumps(self.next_node) if self.next_node else "null")
         if cmd[:3] == ["gh", "pr", "list"]:
             return _cp(0, "[]")
@@ -385,7 +385,7 @@ class PeekFailRunner:
     """Runner whose `fno backlog next` fails (rc!=0) - a transient peek error."""
 
     def __call__(self, cmd, *, cwd=None):
-        if cmd[:3] == ["fno-py", "backlog", "next"]:
+        if cmd[1:3] == ["backlog", "next"]:
             return _cp(1, "", "graph locked")
         if cmd[:3] == ["gh", "pr", "create"]:
             raise AssertionError("must not ship on a peek error")
@@ -433,7 +433,7 @@ def test_ship_closeable_scopes_peek_to_mission(tmp_path, graph, batching_on):
     B.join_batch(domain="code", node_id="x-1", root=tmp_path)
     r = CloseableRunner(next_node=None)
     B.ship_closeable(project="fno", root=tmp_path, run=r, mission="m-42")
-    next_calls = [c for c in r.calls if c[:3] == ["fno-py", "backlog", "next"]]
+    next_calls = [c for c in r.calls if c[1:3] == ["backlog", "next"]]
     assert next_calls, "expected a next peek"
     assert "--mission" in next_calls[0] and "m-42" in next_calls[0]
 

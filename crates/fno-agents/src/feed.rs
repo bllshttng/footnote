@@ -35,6 +35,10 @@ pub struct FeedRow {
     /// `crown_vacated` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
+    /// The node's project directory. Present on `node_created` rows so a
+    /// launch opened from the fleet feed starts in the node's repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub session_id: Option<String>,
     pub harness: Option<String>,
     pub title: String,
@@ -314,6 +318,7 @@ pub fn project(
                 ts: created,
                 kind: "node_created".into(),
                 node: Some(node_id.to_string()),
+                cwd: s_field(entry, "cwd"),
                 session_id: s_field(entry, "source_session_id").filter(|s| is_session_handle(s)),
                 harness: s_field(entry, "source_harness"),
                 title: node_title.clone(),
@@ -506,6 +511,17 @@ pub fn project(
     // assignment below.
     let mut crown_events = parse_crown_events(crown_raw);
     crown_events.sort_by_key(|c| ts_key(&c.ts));
+    // The themes render once per fold, not once per row: one tolerant store
+    // read feeds every crown row's title below.
+    let themes = crate::paths::AgentsHome::from_env_opt()
+        .map(|home| crate::crown_names::theme_map(&home.crown_names_json()))
+        .unwrap_or_default();
+    let rank = |level: i64, scope: &str| -> String {
+        let theme = themes
+            .get(crate::territory::canonical_scope(scope).as_str())
+            .cloned();
+        crate::crown_names::title(level as u32, scope, theme.as_deref())
+    };
     let mut seen_crowns: std::collections::HashSet<(String, String, String, String)> =
         std::collections::HashSet::new();
     for c in &crown_events {
@@ -527,7 +543,7 @@ pub fn project(
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
                     kind: "crown_granted".into(),
-                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    crown: Some(rank(c.level, &c.scope)),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -547,7 +563,7 @@ pub fn project(
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
                     kind: "crown_vacated".into(),
-                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    crown: Some(rank(c.level, &c.scope)),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -727,7 +743,18 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
                 || parent.as_deref().is_some_and(|p| scope_holds(scope, p))
         });
         if let Some((_, holder, level)) = king {
-            r.owner = Some(format!("king {holder} L{level}"));
+            let scope = held
+                .iter()
+                .find(|(s, _, _)| {
+                    r.node.as_deref().is_some_and(|n| scope_holds(s, n))
+                        || parent.as_deref().is_some_and(|p| scope_holds(s, p))
+                })
+                .map(|(s, _, _)| s.clone())
+                .unwrap_or_default();
+            let theme = crate::paths::AgentsHome::from_env_opt()
+                .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), &scope));
+            let rank = crate::crown_names::title(*level as u32, &scope, theme.as_deref());
+            r.owner = Some(format!("{rank} ({holder})"));
         } else if let Some(p) = parent {
             let title = title_of(&p).unwrap_or_default();
             r.owner = Some(if title.is_empty() {
@@ -1002,6 +1029,7 @@ mod tests {
             "pr_number": 1395,
             "pr_url": "https://github.com/bllshttng/footnote/pull/1395",
             "created_at": "2026-09-01T08:00:00Z",
+            "cwd": "/workspace/node-project",
             "completed_at": "2026-09-05T16:41:25Z",
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
@@ -1332,6 +1360,21 @@ mod tests {
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
         assert_eq!(created.node.as_deref(), Some("x-aaaa"));
+        let wire = serde_json::to_value(created).unwrap();
+        assert_eq!(
+            wire.get("cwd").and_then(Value::as_str),
+            Some("/workspace/node-project")
+        );
+        let mut cwdless_entry = graph_fixture().remove(0);
+        cwdless_entry.as_object_mut().unwrap().remove("cwd");
+        let cwdless = project("", &[cwdless_entry], &[], "", "");
+        let cwdless_created = cwdless
+            .rows
+            .iter()
+            .find(|r| r.kind == "node_created")
+            .expect("cwd-less graph row still projects");
+        let cwdless_wire = serde_json::to_value(cwdless_created).unwrap();
+        assert!(cwdless_wire.get("cwd").is_none());
         let started = p.rows.iter().find(|r| r.kind == "node_started").unwrap();
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
@@ -1404,6 +1447,9 @@ mod tests {
             row.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
+        // The receipt row's crown copies verbatim: the receipt is the
+        // surviving record, and the crown-event rows above are what render
+        // the title.
         assert_eq!(row.crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(row.detail, None);
     }
@@ -1463,7 +1509,7 @@ mod tests {
             .collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
         assert_eq!(granted[0].title, "jolly-finch crowned L2 x-eeee");
-        assert_eq!(granted[0].crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(granted[0].crown.as_deref(), Some("Lead of x-eeee"));
         assert_eq!(vacated.len(), 1, "vacated dedupes");
         assert_eq!(
             vacated[0].title,
@@ -1492,7 +1538,7 @@ mod tests {
             .iter()
             .find(|r| r.node == Some("x-child".into()))
             .unwrap();
-        assert_eq!(child.owner.as_deref(), Some("king heir L2"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // The crown row itself renders in the crowns band: no owner on it.
         let granted = p
             .rows
@@ -1505,7 +1551,7 @@ mod tests {
             .iter()
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
-        assert_eq!(epic.owner.as_deref(), Some("king heir L2"));
+        assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // Without a crown the child rolls up to its epic by the graph parent.
         let p = project("", &entries, &[], "", "");
         let child = p

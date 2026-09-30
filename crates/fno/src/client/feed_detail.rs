@@ -219,18 +219,18 @@ pub(crate) fn detail_fields(
             },
         ),
         (
-            "king",
+            "lead",
             match row.and_then(|a| a.crown_scope.as_deref()) {
-                Some(scope) => match row.and_then(|a| a.crown_level) {
-                    Some(level) => match row.and_then(|a| a.crown_name.as_deref()) {
-                        Some(name) => format!("L{level} {scope} ({name})"),
-                        None => format!("L{level} {scope}"),
+                Some(scope) => match row.and_then(|a| a.crown_title.as_deref()) {
+                    Some(title) => title.to_string(),
+                    None => match row.and_then(|a| a.crown_level) {
+                        Some(level) => format!("L{level} {scope}"),
+                        None => scope.to_string(),
                     },
-                    None => scope.to_string(),
                 },
-                // A worker row rolling up to a named crown carries the name.
+                // A worker row rolling up to a titled lead carries the title.
                 None => row
-                    .and_then(|a| a.crown_name.as_deref())
+                    .and_then(|a| a.crown_title.as_deref())
                     .unwrap_or(NOT_RECORDED)
                     .to_string(),
             },
@@ -308,8 +308,20 @@ fn push_wrapped(lines: &mut Vec<String>, label: &str, value: &str, width: usize)
 
 /// The one-line footer: what pressing Enter does, named before it is pressed.
 /// Reads the SAME [`Destination`] the action does, so the two cannot disagree.
-pub(crate) fn detail_footer(dest: &Destination<'_>) -> String {
-    match dest {
+pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
+    if item.kind != "node_created" {
+        return None;
+    }
+    item.node
+        .as_deref()
+        .map(str::trim)
+        .filter(|node| !node.is_empty())
+}
+
+/// The one-line footer names the existing Enter action and, for a created
+/// node with an id, the composer's node-bound blueprint action.
+pub(crate) fn detail_footer(item: &FeedItem, dest: &Destination<'_>) -> String {
+    let enter = match dest {
         Destination::Recovery(_) => "enter: show the resume line · esc close",
         Destination::Exact(a) | Destination::NameOnly(a) if a.pane_id.is_some() => {
             "enter: focus its pane · esc close"
@@ -319,8 +331,12 @@ pub(crate) fn detail_footer(dest: &Destination<'_>) -> String {
         }
         Destination::SessionOnly(_) => "enter: attach on portal 0 · esc close",
         Destination::None => "esc close",
+    };
+    if plan_node(item).is_some() {
+        format!("b: blueprint · {enter}")
+    } else {
+        enter.to_string()
     }
-    .to_string()
 }
 
 /// The action Enter sends, from that same resolution.
@@ -356,7 +372,7 @@ pub(crate) fn draw(
     let inner_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS + 2);
     let lines = detail_lines(item, &dest, inner_w);
     let chrome =
-        chrome::Chrome::new("event provenance", Anchor::Center).footer(detail_footer(&dest));
+        chrome::Chrome::new("event provenance", Anchor::Center).footer(detail_footer(item, &dest));
     draw_lines_overlay(
         cells,
         rows,
@@ -379,6 +395,7 @@ mod tests {
             ts: "2026-09-28T16:48:49Z".into(),
             kind: "session_reaped".into(),
             node: None,
+            cwd: None,
             session_id: None,
             harness: Some("codex".into()),
             title: "jolly-finch removed".into(),

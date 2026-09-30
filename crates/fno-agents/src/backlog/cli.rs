@@ -203,6 +203,12 @@ pub fn run(args: &[String]) -> i32 {
         // (statuses.live_worked_node_ids over graph/worked.py) keeps its
         // callers (the next/undispatched occupancy legs) until their doors
         // go native.
+        // The observer is native on the graph backend; the external joined
+        // candidates still ride the python wheel from inside the arm.
+        "undispatched" => super::undispatched::run(resolved.tail),
+        // The selection door: native on the graph backend; the external
+        // joined candidates still ride the python wheel from inside the arm.
+        "next" => super::next::run(resolved.tail),
         "worked" => super::worked::run(resolved.tail),
         _ => forward_python(&resolved),
     }

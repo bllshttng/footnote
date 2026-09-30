@@ -62,7 +62,7 @@ The finish line is a PR with CI green and review done under your configured poli
 - [Think and plan](docs/guides/think-and-plan.md): design exploration and planning
 - [PR lifecycle](docs/guides/pr-lifecycle.md): review, create, check, merged
 - [Agents quickstart](docs/guides/agents-quickstart.md): spawn and message peer agents
-- [Vocabulary](docs/architecture/vocabulary-user-and-operator.md): citizen, king, crown, and the rest of the mesh's words
+- [Vocabulary](docs/architecture/vocabulary-user-and-operator.md): citizen, crown, and the rest of the mesh's words
 - [Troubleshooting](docs/troubleshooting.md) and [best practices](docs/best-practices.md)
 - [Security posture](docs/security-posture.md)
 

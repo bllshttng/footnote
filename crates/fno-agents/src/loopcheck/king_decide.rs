@@ -133,7 +133,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                     king_output(
                         "allow",
                         None,
-                        &format!("reign already terminal ({reason} at {ts}); re-arm with fno agents king init"),
+                        &format!("reign already terminal ({reason} at {ts}); re-arm with fno agents org init"),
                         0,
                         history.total,
                     ),

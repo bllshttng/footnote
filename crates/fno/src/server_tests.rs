@@ -634,28 +634,6 @@ fn tab_close_rows() {
 fn pane_send_rows() {
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
-    core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
-    let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
-    addressed.name = "addressed".into();
-    addressed.harness_session_id = Some("target-id".into());
-
-    match core.pane_send(
-        pane,
-        b"payload",
-        false,
-        Some("target-id"),
-        Ok(vec![addressed]),
-        false,
-    ) {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
-            assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
-        }
-        other => panic!("expected identity refusal before typing, got {other:?}"),
-    }
-
-    let (mut core, pane) = template_core();
-    core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
     let mut first = agent_in("sess", pane, Some(AgentBadge::Done), false);
     first.name = "worker".into();

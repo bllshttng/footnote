@@ -81,6 +81,33 @@ def warm(root: Path, probe: str) -> None:
     door(root, ["get", probe])
 
 
+def roster_stub(root: Path, rows: list | None = None) -> str:
+    """A PATH dir whose `claude` answers one roster listing (empty when no
+    rows are given), so the worked fold stays hermetic. Pass e.g. [42] for a
+    malformed listing, which the strict fold treats as a refusal."""
+    stub = root / "stubbin"
+    stub.mkdir(exist_ok=True)
+    body = json.dumps({"agents": rows or []})
+    script = "#!/bin/sh\nprintf '%s' '" + body.replace("'", "'\\''") + "'\nexit 0\n"
+    (stub / "claude").write_text(script)
+    (stub / "claude").chmod(0o755)
+    return str(stub)
+
+
+def door_graph(graph: Path, *args: str) -> tuple[int, str, str]:
+    """Run a selection verb (next/undispatched) through the binary against a
+    fixture-seeded store at graph.parent. Writes config.toml when the fixture
+    has none, isolates claims under the state root, and stubs the roster
+    listing empty so the worked fold never leaves the sandbox. The door
+    splits the streams: selection JSON rides stdout, starvation receipts
+    answer on stderr."""
+    root = graph.parent
+    config = root / "config.toml"
+    if not config.exists():
+        config.write_text(f'state_dir = "{root}"\n')
+    return door(root, list(args), path_prepend=roster_stub(root, []))
+
+
 def write_gh_stub(tmp_path: Path, body: str = "[]\n") -> str:
     """A PATH dir whose `gh` answers one JSON line to every call, so the
     GitHub-reading verbs stay hermetic."""

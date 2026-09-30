@@ -204,7 +204,7 @@ def test_law_supersession_rule_matches_the_cli_guard():
 
 
 def test_reign_branches_on_harness_capability_before_arming():
-    text = _skill("skills/reign/SKILL.md")
+    text = _skill("skills/lead/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
     assert "king_settle" in arm  # the daemon settle mail pushes on every harness
@@ -221,7 +221,7 @@ def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
     # following the skill reported both lines as unmeasurable while live workers
     # ran. The contract is the top view's served payload, and an unreadable
     # instrument prints a refusal, never a default that reads healthy.
-    text = _skill("skills/reign/SKILL.md")
+    text = _skill("skills/lead/SKILL.md")
     checkin = text[text.index("## The check-in body") :]
     checkin = checkin[: checkin.index("## Recording a ruling")]
     assert "fno agents top --json" in checkin
@@ -238,7 +238,7 @@ def test_reign_checkin_names_the_merge_finish_line():
     # merger, so the skill must carry the verb, the gate, and the merge rule
     # together: a lever the file cannot name is a law rediscovered by
     # exhaustion.
-    text = _skill("skills/reign/SKILL.md")
+    text = _skill("skills/lead/SKILL.md")
     checkin = text[text.index("## The check-in body") :]
     checkin = checkin[: checkin.index("## Recording a ruling")]
     assert "fno do pr status" in checkin
@@ -250,13 +250,13 @@ def test_reign_finding_starts_a_new_epic():
     # Law d-08ef1f90: new findings go into a new small epic, not a running
     # one. The old lever told a king to parent a finding into an active
     # mission scope, which grew running epics without bound.
-    text = _skill("skills/reign/SKILL.md")
+    text = _skill("skills/lead/SKILL.md")
     assert "### A finding starts a new epic" in text
     assert "--type epic" in text
     assert "--parent null" in text
-    assert "fno agents crown <handle> --scope" in text
+    assert "fno agents org promote <handle> --scope" in text
     assert "inside an active mission scope" not in text
-    once = _skill("skills/reign/references/once.md")
+    once = _skill("skills/lead/references/once.md")
     assert "../SKILL.md#a-finding-starts-a-new-epic" in once
 
 
@@ -294,20 +294,20 @@ def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
 
 
 def test_king_rule_and_exit_name_the_king_channel_not_decide():
-    text = _skill("skills/reign/SKILL.md")
+    text = _skill("skills/lead/SKILL.md")
     rule = text[text.index("## Recording a ruling") :]
     assert "fno backlog note <node> <text>" in rule
     assert "--authority crown" in rule
     assert "escalations directory" in rule
     assert "fno inbox decisions <subject> --lane law" in rule
-    once = _skill("skills/reign/references/once.md")
+    once = _skill("skills/lead/references/once.md")
     exit_section = once[once.index("Before you abdicate") :]
     assert "../SKILL.md#recording-a-ruling" in exit_section
-    assert "fno agents king done" in exit_section
+    assert "fno agents org done" in exit_section
 
 
 def test_king_mailbox_addresses_full_session_ids():
-    text = _skill("skills/reign/references/once.md")
+    text = _skill("skills/lead/references/once.md")
     assert "the bare 8-hex session prefix, the same id" not in text
     assert "FULL session id" in text
     assert "refuses an ambiguous short form" in text
@@ -347,7 +347,7 @@ def test_pr_create_and_using_fno_run_inline():
 def test_agent_and_king_roots_route_to_workflow_routes_references():
     for skill, trigger in (
         ("skills/agent/SKILL.md", "workflow-routes.md"),
-        ("skills/reign/SKILL.md", "workflow-routes.md"),
+        ("skills/lead/SKILL.md", "workflow-routes.md"),
     ):
         text = _skill(skill)
         assert trigger in text

@@ -88,7 +88,8 @@ mod tests {
     /// Serializes tests that touch the process env (key precedence reads the
     /// real env vars) and hands each test a fresh temp dir.
     fn env_guard() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(crate::claims::test_env_lock);
         let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "fno-provider-key-test-{}-{}",

@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from tests.conftest import run_native_create
+from tests.goldens._door import door_graph
 
 runner = CliRunner()
 
@@ -358,9 +359,9 @@ def test_deferred_excluded_from_next_default(tmp_graph, tmp_path):
     a_id = next(e["id"] for e in entries if e.get("plan_path") == str(plan_a))
     _invoke("backlog", "defer", a_id, "--reason", "stale p1")
 
-    r = _invoke("backlog", "next", "--all")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.stdout)
+    code, out, err = door_graph(tmp_graph, "next", "--all")
+    assert code == 0, err
+    payload = json.loads(out)
     assert payload is not None
     assert payload["id"] != a_id, "deferred p1 should not be picked over ready p2"
 

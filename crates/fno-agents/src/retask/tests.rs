@@ -159,93 +159,69 @@ fn test_default_target_vendor_preserves_the_registry_vendor_axis() {
 }
 
 #[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_harness() {
-    let target = RetaskTarget {
-        harness: "claude".to_string(),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, None),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("harness".into())
-        }
-    );
-}
-
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_provider() {
-    let target = RetaskTarget {
-        provider: Some("zai".to_string()),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, None),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("provider".into())
-        }
-    );
-}
-
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_substrate() {
-    let target = RetaskTarget {
-        substrate: Some("bg".to_string()),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, None),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("substrate".into())
-        }
-    );
-}
-
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_permission_mode() {
-    let target = RetaskTarget {
-        permission_mode: Some("yolo".to_string()),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, Some("bypassPermissions")),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("permission_mode".into())
-        }
-    );
-}
-
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_permission_mode_unobserved() {
-    let target = RetaskTarget {
-        permission_mode: Some("bypassPermissions".to_string()),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, None),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("permission_mode_unobserved".into())
-        }
-    );
-}
-
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_account() {
-    let target = RetaskTarget {
-        account: Some("work".to_string()),
-        ..codex_target()
-    };
-    assert_eq!(
-        detect_retask(&row(), &target, None),
-        DetectOutcome {
-            outcome: "spawn_required",
-            reason: Some("account".into())
-        }
-    );
+fn test_incompatible_axis_requires_spawn_before_any_payload_per_axis() {
+    // One table test per the audit Keep rule: one row per axis value, not
+    // one declaration per value.
+    let cases: &[(&str, RetaskTarget, Option<&str>)] = &[
+        (
+            "harness",
+            RetaskTarget {
+                harness: "claude".to_string(),
+                ..codex_target()
+            },
+            None,
+        ),
+        (
+            "provider",
+            RetaskTarget {
+                provider: Some("zai".to_string()),
+                ..codex_target()
+            },
+            None,
+        ),
+        (
+            "substrate",
+            RetaskTarget {
+                substrate: Some("bg".to_string()),
+                ..codex_target()
+            },
+            None,
+        ),
+        (
+            "permission_mode",
+            RetaskTarget {
+                permission_mode: Some("yolo".to_string()),
+                ..codex_target()
+            },
+            Some("bypassPermissions"),
+        ),
+        (
+            "permission_mode_unobserved",
+            RetaskTarget {
+                permission_mode: Some("bypassPermissions".to_string()),
+                ..codex_target()
+            },
+            None,
+        ),
+        (
+            "account",
+            RetaskTarget {
+                account: Some("work".to_string()),
+                ..codex_target()
+            },
+            None,
+        ),
+    ];
+    for (axis, target, observed) in cases {
+        assert_eq!(
+            detect_retask(&row(), target, *observed),
+            DetectOutcome {
+                outcome: "spawn_required",
+                reason: Some((*axis).to_string()),
+            },
+            "axis {axis}"
+        );
+    }
 }
 
 #[test]
