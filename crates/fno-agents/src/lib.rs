@@ -322,6 +322,7 @@ pub mod reign_goal;
 pub mod reign_hygiene;
 pub mod removals;
 pub mod rename;
+pub mod repeated_asks;
 pub mod restart_run;
 pub mod resume_args;
 pub mod resume_gate;
