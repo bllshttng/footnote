@@ -1157,6 +1157,7 @@ fn assert_bash_pretooluse_dispatch_order() {
     let mut expected: Vec<String> = [
         "bg-process-guard",
         "bin-install-guard",
+        "effect-guard",
         "git-protection",
         "pipe-guard",
         "recursive-grep-guard",
