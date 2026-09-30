@@ -30,7 +30,6 @@ pub mod dispatch_launch;
 pub mod event_cli;
 pub mod event_store;
 pub mod feed_overlay;
-#[cfg(test)]
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;

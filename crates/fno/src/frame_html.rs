@@ -9,7 +9,9 @@
 //! that swap (the default in iTerm2, Terminal.app and GNOME Terminal), `DIM`
 //! drops it toward the background.
 //!
-//! Test-only: a lens on the render path, never shipped chrome.
+//! Tests use it as a lens on the render path. `fno mux serve --snapshot` uses
+//! [`screen_html`] and [`frame_svg`] to publish one frame in one theme. Neither
+//! draws a cursor.
 
 use crate::proto::{cell_flags, Cell, Color, Frame};
 
@@ -347,6 +349,115 @@ fn frame_body(frame: &Frame, theme: Theme) -> String {
     body
 }
 
+/// The theme a snapshot names: `dark`, `light` or `macchiato`.
+pub fn theme_by_name(name: &str) -> Option<Theme> {
+    match name {
+        "dark" => Some(DARK),
+        "light" => Some(LIGHT),
+        "macchiato" => Some(MACCHIATO),
+        _ => None,
+    }
+}
+
+/// One screen in one theme, as a bare page whose background is the theme's.
+/// This is the publishable form; [`frame_html`] is the side-by-side lens.
+pub fn screen_html(frame: &Frame, theme: Theme) -> String {
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>fno mux</title>\
+<style>\
+html,body{{margin:0;background:{bg}}}\
+.screen{{display:inline-block;padding:8px;font:14px/1.15 'SF Mono',Menlo,'DejaVu Sans Mono',monospace}}\
+.row{{white-space:pre;height:1.15em}}\
+span{{white-space:pre}}\
+</style><div class=\"screen\">{body}</div>",
+        bg = hex(theme.bg),
+        body = frame_body(frame, theme)
+    )
+}
+
+/// Cell size of [`frame_svg`] in px. Every text run is stretched to its cell
+/// count with `textLength`, so the grid holds whatever monospace font the
+/// viewer has.
+pub const SVG_CELL_W: f64 = 8.4;
+pub const SVG_CELL_H: f64 = 17.0;
+
+/// One screen in one theme as SVG: crisp at any width, and the theme's
+/// background fills the whole image.
+pub fn frame_svg(frame: &Frame, theme: Theme) -> String {
+    let cols = frame.cols as usize;
+    let (w, h) = (cols as f64 * SVG_CELL_W, frame.rows as f64 * SVG_CELL_H);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" xml:space=\"preserve\" \
+font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
+<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
+        hex(theme.bg)
+    );
+    for r in 0..frame.rows as usize {
+        let y = r as f64 * SVG_CELL_H;
+        let mut c = 0usize;
+        while c < cols {
+            let start = c;
+            let cell = &frame.cells[r * cols + c];
+            let (fg, bg) = cell_colors(cell, theme);
+            let flags =
+                cell.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
+            let mut text = String::new();
+            while c < cols {
+                let n = &frame.cells[r * cols + c];
+                if n.flags & cell_flags::WIDE_SPACER == 0 {
+                    let nflags =
+                        n.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
+                    if cell_colors(n, theme) != (fg, bg) || nflags != flags {
+                        break;
+                    }
+                    text.push(n.c);
+                }
+                c += 1;
+            }
+            let x = start as f64 * SVG_CELL_W;
+            let run_w = (c - start) as f64 * SVG_CELL_W;
+            if bg != theme.bg {
+                out.push_str(&format!(
+                    "<rect x=\"{x}\" y=\"{y}\" width=\"{run_w}\" height=\"{SVG_CELL_H}\" fill=\"{}\"/>",
+                    hex(bg)
+                ));
+            }
+            let trimmed = text.trim_end_matches([' ', '\0']);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lead = trimmed
+                .chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\0')
+                .count();
+            let body: String = trimmed.chars().skip(lead).map(xml_escape).collect();
+            let cells = trimmed.chars().count() - lead;
+            out.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\" fill=\"{}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\"{}{}{}>{body}</text>",
+                x + lead as f64 * SVG_CELL_W,
+                y + SVG_CELL_H * 0.78,
+                hex(fg),
+                cells as f64 * SVG_CELL_W,
+                if flags & cell_flags::BOLD != 0 { " font-weight=\"700\"" } else { "" },
+                if flags & cell_flags::ITALIC != 0 { " font-style=\"italic\"" } else { "" },
+                if flags & cell_flags::UNDERLINE != 0 { " text-decoration=\"underline\"" } else { "" },
+            ));
+        }
+    }
+    out.push_str("</svg>");
+    out
+}
+
+fn xml_escape(c: char) -> String {
+    match c {
+        '&' => "&amp;".into(),
+        '<' => "&lt;".into(),
+        '>' => "&gt;".into(),
+        '\0' => " ".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Write `frame` to `<dir>/<name>.html`; `dir` is `$FNO_UX_SHOTS`, else this
 /// crate's `target/ux-shots` so `cargo test ux_shot` leaves the pictures on disk
 /// with no variable to know about, gitignored by construction.
@@ -372,6 +483,46 @@ pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_frame(text: &str) -> Frame {
+        let cells: Vec<Cell> = text
+            .chars()
+            .map(|c| Cell {
+                c,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            })
+            .collect();
+        Frame {
+            rows: 1,
+            cols: cells.len() as u16,
+            cells,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            scroll_offset: 0,
+        }
+    }
+
+    /// A published shot fills with the chosen theme's own background, keeps
+    /// inner spaces on the grid, and escapes markup in pane text.
+    #[test]
+    fn svg_paints_the_named_theme_and_escapes_text() {
+        let frame = line_frame("a <b>  c");
+        for (name, theme) in [("dark", DARK), ("light", LIGHT)] {
+            assert_eq!(theme_by_name(name), Some(theme));
+            let svg = frame_svg(&frame, theme);
+            assert!(
+                svg.contains(&format!("fill=\"{}\"", hex(theme.bg))),
+                "{svg}"
+            );
+            assert!(svg.contains("xml:space=\"preserve\""));
+            assert!(svg.contains("a &lt;b&gt;  c"), "{svg}");
+            assert!(screen_html(&frame, theme).contains(&format!("background:{}", hex(theme.bg))));
+        }
+        assert_eq!(theme_by_name("solarized"), None);
+    }
 
     fn cell(flags: u8) -> Cell {
         Cell {
