@@ -14,6 +14,7 @@ mod tests {
             cap: 2000,
             provenance: json!({"decided_by": "test-agent", "authority_source": "operator"}),
             closed_by: Some("test-agent".to_string()),
+            caller: Some(ClearCaller::default()),
             journal_path: tmp.path().join("project/events.jsonl"),
             index_path: tmp.path().join("fno/questions.jsonl"),
             decisions_path: tmp.path().join("fno/decisions.jsonl"),
@@ -35,6 +36,15 @@ mod tests {
             "type": "operator_question",
             "source": "agent",
             "data": data,
+        })
+    }
+
+    fn ask_from(qid: &str, asker: &str, question: &str) -> Value {
+        json!({
+            "ts": "2026-09-23T00:00:00Z",
+            "type": "operator_question",
+            "source": "agent",
+            "data": {"question_id": qid, "question": question, "asker": asker},
         })
     }
 
@@ -163,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn a_different_answer_refuses_without_writing_or_closing() {
+    fn a_different_answer_refuses_unless_it_overrides_a_coordination_row() {
         let tmp = tempfile::tempdir().unwrap();
         let req = request(&tmp, "q-different", Some("no"));
         seed_question(&req, &ask("q-different", "which lane?", None, None));
@@ -186,6 +196,28 @@ mod tests {
         )
         .is_empty());
         assert!(rows(&req.index_path, &["operator_question_closed"]).is_empty());
+
+        // The user's own answer overrides a coordination row an agent wrote:
+        // the board answer mints and the live read returns it.
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-coord", Some("no"));
+        seed_question(&req, &ask("q-coord", "which lane?", None, None));
+        let mut coord = decision("q-coord", "d-coord1", "yes");
+        coord["data"]["authority_source"] = json!("agent");
+        coord["data"]["decided_by"] = json!("agent-9");
+        crate::backlog::api::decision_record(&crate::backlog::api::Store::new(&req.graph), coord)
+            .unwrap();
+
+        let result = run_clear(&req);
+
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let connection = crate::backlog::open(&req.graph).unwrap();
+        let live = crate::backlog::decisions::live_answer(&connection, "q-coord")
+            .unwrap()
+            .unwrap();
+        let data: Value = serde_json::from_str(&live.2).unwrap();
+        assert_eq!(data["decision"], "no");
+        assert_eq!(data["authority_source"], "operator");
     }
 
     #[test]
@@ -373,26 +405,149 @@ mod tests {
             crate::merge_grant::HeadGrant::Conflict
         );
 
-        // An agent session's clear mints no grant: the row keeps today's
-        // node-subject shape and the operator stamp never lands.
+        // An agent session's clear is refused outright: the gate refuses the
+        // answer before any row lands, so no grant row at the subject and no
+        // coordination row at the node either.
         let tmp = tempfile::tempdir().unwrap();
         let mut req = request(&tmp, "q-agent", Some("Merge it now."));
         req.provenance = json!({"decided_by": "agent-1", "authority_source": "agent"});
+        req.caller.as_mut().unwrap().ancestry_handle = Some("agent-1".to_string());
         ask_grant(&req, "q-agent");
         let result = run_clear(&req);
-        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
         let decisions = graph_decisions(&req);
         assert!(
             decisions.iter().all(|r| r["subject"] != subject.as_str()),
             "no row may land at the merge-grant subject from an agent clear"
         );
+        assert!(
+            decisions.iter().all(|r| r["subject"] != "x-0000"),
+            "no row may land at the node from an agent clear"
+        );
+    }
+
+    #[test]
+    fn only_the_user_or_the_asking_crown_closes_a_question_asked_of_the_user() {
+        // (a) An agent answers the user's question: refused, nothing written.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-gate", Some("C: set 400 here"));
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "agent"});
+        seed_question(&req, &ask_from("q-gate", "49a80492", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
+        assert!(
+            result.lines[0].contains("question board"),
+            "{:?}",
+            result.lines
+        );
+        assert!(result.lines[0].contains("--answer"), "{:?}", result.lines);
+        assert!(rows(
+            &req.journal_path,
+            &["operator_decision", "operator_question_closed"]
+        )
+        .is_empty());
+        assert!(rows(&req.decisions_path, &["operator_decision"]).is_empty());
+        assert!(rows(&req.index_path, &["operator_question_closed"]).is_empty());
+        assert!(graph_decisions(&req).is_empty());
+
+        // (b) The same agent withdraws (no --answer): refused, still open.
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-gate-w", None);
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "agent"});
+        seed_question(&req, &ask_from("q-gate-w", "49a80492", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
+        assert!(
+            result.lines[0].contains("was asked by 49a80492"),
+            "{:?}",
+            result.lines
+        );
+        assert!(
+            result.lines[0].contains("Only the asker withdraws"),
+            "{:?}",
+            result.lines
+        );
+        let (asked, closed) = crate::question_intake::question_rows(&req.index_path);
+        assert!(asked.contains_key("q-gate-w"));
+        assert!(!closed.contains("q-gate-w"));
+
+        // (c) An agent withdraws its own ask: allowed, closed, no decision.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-own", None);
+        req.caller.as_mut().unwrap().ancestry_handle = Some("01a0cbdd".to_string());
+        seed_question(&req, &ask_from("q-own", "01a0cbdd", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert!(result.lines[0].contains("(no answer, withdrawn)"));
+        assert!(rows(&req.journal_path, &["operator_decision"]).is_empty());
         assert_eq!(
-            decisions
-                .iter()
-                .filter(|r| r["subject"] == "x-0000")
-                .count(),
+            rows(&req.journal_path, &["operator_question_closed"]).len(),
             1
         );
+
+        // (d) A crowned session answers its own ask with --authority crown.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-crown", Some("C: do as asked"));
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
+        req.caller.as_mut().unwrap().crowned = true;
+        seed_question(&req, &ask_from("q-crown", "01a0cbdd", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let decisions = graph_decisions(&req);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0]["authority_source"], "crown");
+
+        // (e) The same answer without a live crown: refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-uncrowned", Some("C: do as asked"));
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
+        seed_question(&req, &ask_from("q-uncrowned", "01a0cbdd", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
+        assert!(
+            result.lines[0].contains("question board"),
+            "{:?}",
+            result.lines
+        );
+
+        // (f) A crowned crown answering another session's ask: refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-other", Some("C: do as asked"));
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
+        req.caller.as_mut().unwrap().crowned = true;
+        seed_question(&req, &ask_from("q-other", "49a80492", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
+        assert!(
+            result.lines[0].contains("asks the user"),
+            "{:?}",
+            result.lines
+        );
+
+        // (g) The forged transport: empty provenance, but the ancestry prover
+        // names the agent, so the gate still refuses.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = request(&tmp, "q-forge", Some("C: do it"));
+        req.provenance = json!({});
+        req.caller.as_mut().unwrap().ancestry_handle = Some("01a0cbdd".to_string());
+        seed_question(&req, &ask_from("q-forge", "49a80492", "which lane?"));
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 3, "{:?}", result.lines);
+        assert!(
+            result.lines[0].contains("asks the user"),
+            "{:?}",
+            result.lines
+        );
+
+        // (h) holds_crown reads the holder session's canonical handle.
+        let crown = crate::territory::Crown {
+            scope: "scope".to_string(),
+            level: 1,
+            holder: "king".to_string(),
+            holder_session: Some("01a0cbdd-baed-4482-9135-37ba1cb0f0d2".to_string()),
+        };
+        assert!(holds_crown(&[crown.clone()], "01a0cbdd"));
+        assert!(!holds_crown(&[crown], "49a80492"));
     }
 }
 use crate::backlog::api::{self, Store};
@@ -402,6 +557,17 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Who is at the clear door, resolved once per request. The gate reads the
+/// handle; the crown check is precomputed so a test can drive it without a
+/// registry on disk.
+#[derive(Clone, Debug, Default)]
+pub struct ClearCaller {
+    /// The agent handle the Rust ancestry prover resolved in this process.
+    pub ancestry_handle: Option<String>,
+    /// Whether the caller's handle holds a live crown.
+    pub crowned: bool,
+}
 
 #[derive(Deserialize)]
 pub struct ClearRequest {
@@ -414,11 +580,99 @@ pub struct ClearRequest {
     pub provenance: Value,
     #[serde(default)]
     pub closed_by: Option<String>,
+    /// Caller facts resolved in-process. The binary transport never sets it;
+    /// `None` means run_clear resolves from the process itself.
+    #[serde(skip)]
+    pub caller: Option<ClearCaller>,
     pub journal_path: PathBuf,
     pub index_path: PathBuf,
     pub decisions_path: PathBuf,
     pub graph: PathBuf,
     pub repo_root: PathBuf,
+}
+
+/// The agent handle at the door: the provenance resolver's stamp when it
+/// names an agent authority, else the process's own ambient resolution. The
+/// Python front resolves provenance only when `--answer` is set, so a
+/// withdrawal leans on the ancestry prover here.
+fn agent_handle(req: &ClearRequest, caller: &ClearCaller) -> Option<String> {
+    let authority = req
+        .provenance
+        .get("authority_source")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if matches!(authority, "agent" | "crown" | "beastmode") {
+        if let Some(decided_by) = req
+            .provenance
+            .get("decided_by")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(decided_by.to_string());
+        }
+    }
+    caller.ancestry_handle.clone()
+}
+
+/// The user's own answer outranks a coordination row an agent wrote (agent,
+/// crown or beastmode authority): without this, an agent's
+/// `decide --question-id` row makes the user's board answer refuse as "a
+/// different answer". A live operator or chat_attested row keeps today's
+/// refusal, and an agent caller never overrides.
+fn override_coordination(
+    req: &ClearRequest,
+    caller: &ClearCaller,
+    row: &Value,
+    text: &str,
+) -> bool {
+    if agent_handle(req, caller).is_some() {
+        return false;
+    }
+    if row.get("decision").and_then(Value::as_str) == Some(text) {
+        return false;
+    }
+    matches!(
+        row.get("authority_source").and_then(Value::as_str),
+        Some("agent") | Some("crown") | Some("beastmode")
+    )
+}
+
+/// Production caller resolution: the ambient prover for the handle, the
+/// registry for the crown. A registry read error reads as not crowned
+/// (fail closed).
+fn resolve_clear_caller(req: &ClearRequest) -> ClearCaller {
+    let ancestry_handle = crate::identity::ambient_agent_handle();
+    let handle = agent_handle(
+        req,
+        &ClearCaller {
+            ancestry_handle: ancestry_handle.clone(),
+            crowned: false,
+        },
+    );
+    let crowned = handle
+        .as_deref()
+        .map(|handle| {
+            crate::territory::live_crowns(&crate::paths::AgentsHome::from_env().registry_json())
+                .map(|crowns| holds_crown(&crowns, handle))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    ClearCaller {
+        ancestry_handle,
+        crowned,
+    }
+}
+
+/// Whether `handle` holds a live crown: the crown-name store binds by session
+/// id (law d-e952ed19), so the holder's canonical handle is what compares.
+/// Pure, so tests drive it without a registry.
+fn holds_crown(crowns: &[crate::territory::Crown], handle: &str) -> bool {
+    crowns.iter().any(|crown| {
+        crown
+            .holder_session
+            .as_deref()
+            .is_some_and(|session| crate::identity::canonical_handle(session) == handle)
+    })
 }
 
 fn default_cap() -> usize {
@@ -492,6 +746,10 @@ pub fn run_question_clear() -> i32 {
 }
 
 pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
+    let caller = req
+        .caller
+        .clone()
+        .unwrap_or_else(|| resolve_clear_caller(req));
     let (asked, mut closed_ids) = crate::question_intake::question_rows(&req.index_path);
     let mut answer = ClearAnswer::new();
     let mut newly_closed = 0usize;
@@ -515,6 +773,45 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             ));
             continue;
         };
+        // The clear door is the user's answer lane: an agent session never
+        // answers or withdraws a question asked of the user, and a crown
+        // answers (with --authority crown) only a question it asked itself.
+        // This gate runs before make_decision, so the only agent session that
+        // reaches operator_can_grant below is a crown on its own ask, whose
+        // authority crown already fails there.
+        let asker = question_event
+            .get("data")
+            .and_then(|data| data.get("asker"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(agent) = agent_handle(req, &caller) {
+            let own_ask = asker == agent;
+            let allowed = if req.answer.is_some() {
+                own_ask
+                    && req
+                        .provenance
+                        .get("authority_source")
+                        .and_then(Value::as_str)
+                        == Some("crown")
+                    && caller.crowned
+            } else {
+                own_ask
+            };
+            if !allowed {
+                refused += 1;
+                answer.lines.push(if req.answer.is_some() {
+                    format!(
+                        "outstanding: refused: {qid} asks the user, and this session is agent {agent}. Nothing was closed; the question stays open. The user answers it on the question board (fno-agents state path questions) or at their own terminal: fno inbox outstanding clear {qid} --answer \"<answer>\". A crown answers only a question it asked, with --authority crown."
+                    )
+                } else {
+                    let shown = if asker.is_empty() { "the user" } else { asker };
+                    format!(
+                        "outstanding: refused: {qid} was asked by {shown}, and this session is agent {agent}. Only the asker withdraws a question. Nothing was closed; the user answers it on the question board (fno-agents state path questions)."
+                    )
+                });
+                continue;
+            }
+        }
         if let Some(text) = req.answer.as_deref() {
             let text = cut(text, req.cap);
             let current = match live_decision(req, qid) {
@@ -528,7 +825,7 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
                 }
             };
             let (event, line, decision_id, was_resumed) = match current {
-                Some((row, event, line)) => {
+                Some((row, event, line)) if !override_coordination(req, &caller, &row, &text) => {
                     let id = row
                         .get("decision_id")
                         .and_then(Value::as_str)
@@ -543,7 +840,7 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
                     }
                     (event, line, id, true)
                 }
-                None => {
+                _ => {
                     let authority = req
                         .provenance
                         .get("authority_source")
