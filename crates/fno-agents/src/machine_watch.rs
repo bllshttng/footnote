@@ -411,7 +411,7 @@ pub(crate) fn brake_path() -> PathBuf {
 
 /// The runaway brake: a self-expiring file the spawn admission honors.
 /// Best-effort - a failed write costs the refusal leg, never the notice.
-fn write_brake_file(sample: &MachineSample, reason: &str) {
+fn write_brake_file(sample: &MachineSample, reason: &str) -> Result<(), String> {
     let until = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() + MACHINE_BRAKE_HOLD_SECS)
@@ -430,10 +430,9 @@ fn write_brake_file(sample: &MachineSample, reason: &str) {
         "processes": sample.processes,
         "swap_used_gb": sample.swap_used_gb,
     });
-    let _ = std::fs::write(
-        brake_path(),
-        serde_json::to_string(&payload).unwrap_or_default(),
-    );
+    let path = brake_path();
+    std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default())
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn notice_body(reason: &str, sample: &MachineSample) -> String {
@@ -651,11 +650,15 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             .clamp(0, 10080) as u64;
             let stop_home = home.clone();
             let runtime = tokio::runtime::Handle::current();
+            let brake_error = std::cell::RefCell::new(None);
             tick_machine_watch_with_thresholds(
                 &mut guard,
                 Ok(&sample),
                 |title, body| {
                     let mut body = body.to_string();
+                    if let Some(error) = brake_error.borrow_mut().take() {
+                        body.push_str(&format!("; spawn brake write failed: {error}"));
+                    }
                     if title.ends_with("box runaway") {
                         let stop_result = top_session_id(&sample).and_then(|session| {
                             runtime.block_on(crate::daemon::stop_session_for_home(
@@ -672,7 +675,12 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     crate::operator_notice::notify_operator(title, &body, None)
                 },
                 Instant::now(),
-                |sample, reason| write_brake_file(sample, reason),
+                |sample, reason| {
+                    if let Err(error) = write_brake_file(sample, reason) {
+                        tracing::error!(%error, "machine runaway brake write failed");
+                        *brake_error.borrow_mut() = Some(error);
+                    }
+                },
                 thresholds,
             )
         };
@@ -865,7 +873,7 @@ mod tests {
             |s, r| {
                 brake_calls += 1;
                 actions.borrow_mut().push("brake");
-                write_brake_file(s, r);
+                write_brake_file(s, r).unwrap();
             },
         );
         assert_eq!(outcome.acted, 1, "no debounce on a runaway");
