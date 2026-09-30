@@ -1014,6 +1014,11 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The attached server's wire version, announced on every Layout (v97).
+    /// `None` until the first layout arrives and forever on an older server;
+    /// commands the announcement predates are refused client-side rather
+    /// than sent into an unknown-variant read failure.
+    server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     sideline_view: crate::view_store::SidelineView,
@@ -2053,6 +2058,7 @@ impl View {
             user_themes: Vec::new(),
             pending_ground: None,
             backlog: Vec::new(),
+            server_proto: None,
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
@@ -8638,9 +8644,10 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, .. }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, proto, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
                     view.backlog = backlog;
+                    view.server_proto = proto;
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -9637,6 +9644,12 @@ async fn dispatch_event(
             view.reveal_pane_ids_at(Instant::now());
         }
         Event::Cmd(cmd) => {
+            if let Command::SplitDir(_) = cmd {
+                if !server_has_splitdir(view.server_proto) {
+                    view.set_notice(split_skew_notice());
+                    return Ok(DispatchFlow::Continue);
+                }
+            }
             view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
                 .await
@@ -10168,6 +10181,20 @@ async fn confirm_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// True when the attached server parses `Command::SplitDir` (v96). A server
+/// that never announced (pre-v97 layout) counts as unable: announcing began
+/// one generation after the command, and the unannounced builds include the
+/// one that ends the client's session on the unknown variant.
+fn server_has_splitdir(server_proto: Option<u32>) -> bool {
+    server_proto.is_some_and(|proto| proto >= 96)
+}
+
+/// The one refusal line both SplitDir entry points (the `%` family and the
+/// tab menu) show against a server that cannot parse the command.
+fn split_skew_notice() -> String {
+    "this mux server is older than directional splits; restart the mux server to use them".into()
+}
+
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
 /// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
 /// P1), never a misrouted action; every action maps to an existing Command /
@@ -10321,6 +10348,10 @@ async fn execute_row_menu_action(
             // here is a stale menu; name it rather than guess.
             if view.active_squad_active_tab_id() != Some(tid) {
                 view.set_notice("split acts on the viewed tab".into());
+                return Ok(());
+            }
+            if !server_has_splitdir(view.server_proto) {
+                view.set_notice(split_skew_notice());
                 return Ok(());
             }
             write_msg(sock_w, &ClientMsg::Command(Command::SplitDir(dir)))

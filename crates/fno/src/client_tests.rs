@@ -6610,6 +6610,63 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
             .is_some_and(|(s, _)| s.contains("split acts on the viewed tab")),
         "the refusal is named"
     );
+
+    // Unannounced server (pre-v97 layout; the v95 build among them cannot
+    // parse SplitDir and the unknown variant ended the client's session):
+    // the cell refuses by notice and sends nothing.
+    v.server_proto = None;
+    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+    let sel = v
+        .row_menu
+        .as_ref()
+        .unwrap()
+        .actions
+        .iter()
+        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
+        .expect("the menu offers the split cell");
+    v.row_menu.as_mut().unwrap().popup.sel = sel;
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+    assert!(
+        buf.is_empty(),
+        "a split against an unannounced server sends nothing"
+    );
+    assert!(
+        v.notice
+            .as_ref()
+            .is_some_and(|(s, _)| s.contains("restart the mux server")),
+        "the refusal names the fix"
+    );
+
+    // An announced current server splits normally; the guard passes through.
+    v.server_proto = Some(97);
+    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+    let sel = v
+        .row_menu
+        .as_ref()
+        .unwrap()
+        .actions
+        .iter()
+        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
+        .expect("the menu offers the split cell");
+    v.row_menu.as_mut().unwrap().popup.sel = sel;
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut std::io::Cursor::new(buf)).unwrap() {
+        ClientMsg::Command(Command::SplitDir(Dir::Left)) => {}
+        other => panic!("an announced server got the split, got {other:?}"),
+    }
+}
+
+#[test]
+fn server_has_splitdir_edges() {
+    // The guard's contract: only an announced v96+ server admits the
+    // command; an unannounced (pre-v97) server counts as unable, since the
+    // announcement began one generation after the command.
+    assert!(!server_has_splitdir(None));
+    assert!(!server_has_splitdir(Some(95)));
+    assert!(server_has_splitdir(Some(96)));
+    assert!(server_has_splitdir(Some(97)));
 }
 
 /// One squad's `TabMeta` list, cloned out of the layout borrow.
