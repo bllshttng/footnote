@@ -3123,7 +3123,8 @@ mod tests {
     }
 
     /// A workflow whose newest run is still in flight reads pending even when
-    /// its newest completed run passed.
+    /// its newest completed run passed, and empty history reads pending too -
+    /// never green.
     #[test]
     fn main_ci_reads_pending_when_a_workflows_newest_run_is_in_flight() {
         let runs = vec![
@@ -3138,6 +3139,10 @@ mod tests {
         ];
         assert_eq!(
             main_ci_token_from_pages(&runs, &[]),
+            Value::String("pending".into())
+        );
+        assert_eq!(
+            main_ci_token_from_pages(&[], &[]),
             Value::String("pending".into())
         );
     }
@@ -3159,14 +3164,6 @@ mod tests {
         assert_eq!(
             main_ci_token_from_pages(&runs, &[]),
             serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
-        );
-    }
-
-    #[test]
-    fn main_ci_reads_pending_on_no_runs() {
-        assert_eq!(
-            main_ci_token_from_pages(&[], &[]),
-            Value::String("pending".into())
         );
     }
 
