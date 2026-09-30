@@ -1308,7 +1308,7 @@ mod tests {
     /// An unparsable journal line never qualifies a row; the parseable one
     /// after it still does.
     #[test]
-    fn awaiting_operator_ignores_an_unparsable_line() {
+    fn awaiting_rows() {
         let a = "aaaaaaaa-0000-0000-0000-00000000000a";
         let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
         let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
@@ -1317,13 +1317,7 @@ mod tests {
         );
         let waiting = awaiting_operator(&row_refs, &questions, |sid| (sid == a).then_some(3600));
         assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
-    }
 
-    /// AC1-HP at the helper: an open question plus a quiet transcript maps the
-    /// row to its question id; a row with no question stays out even when its
-    /// transcript is just as quiet.
-    #[test]
-    fn awaiting_operator_maps_an_open_quiet_question_to_its_row() {
         let a = "aaaaaaaa-0000-0000-0000-00000000000a";
         let b = "bbbbbbbb-0000-0000-0000-00000000000b";
         let rows: Vec<RegistryEntry> = [claude_row_json("a", a), claude_row_json("b", b)]
@@ -1338,11 +1332,7 @@ mod tests {
         let waiting = awaiting_operator(&row_refs, &questions, |_| Some(3600));
         assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
         assert_eq!(waiting.get("b"), None, "no open question, no park");
-    }
 
-    /// AC1-ACTIVE: a transcript quiet only 60 s never parks a row.
-    #[test]
-    fn awaiting_operator_needs_the_quiet_grace() {
         let a = "aaaaaaaa-0000-0000-0000-00000000000a";
         let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
         let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
@@ -1351,11 +1341,7 @@ mod tests {
         );
         let waiting = awaiting_operator(&row_refs, &questions, |_| Some(60));
         assert!(waiting.is_empty());
-    }
 
-    /// AC1-CLOSED: a closed question does not park its row.
-    #[test]
-    fn awaiting_operator_skips_a_closed_question() {
         let a = "aaaaaaaa-0000-0000-0000-00000000000a";
         let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
         let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
@@ -1364,12 +1350,7 @@ mod tests {
         );
         let waiting = awaiting_operator(&row_refs, &questions, |_| Some(3600));
         assert!(waiting.is_empty());
-    }
 
-    /// The asker arm: a question carrying only the 8-character asker short id
-    /// still binds to its row.
-    #[test]
-    fn awaiting_operator_matches_a_bare_asker_short_id() {
         let a = "aaaaaaaa-0000-0000-0000-00000000000a";
         let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
         let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
@@ -1378,6 +1359,17 @@ mod tests {
         let waiting = awaiting_operator(&row_refs, questions, |_| Some(3600));
         assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
     }
+
+    /// AC1-HP at the helper: an open question plus a quiet transcript maps the
+    /// row to its question id; a row with no question stays out even when its
+    /// transcript is just as quiet.
+
+    /// AC1-ACTIVE: a transcript quiet only 60 s never parks a row.
+
+    /// AC1-CLOSED: a closed question does not park its row.
+
+    /// The asker arm: a question carrying only the 8-character asker short id
+    /// still binds to its row.
 
     /// AC1-ERR: an unreadable questions path (a directory) pushes exactly one
     /// warning and reads as no questions; waiting workers stay counted.
@@ -1982,7 +1974,7 @@ mod tests {
     /// exit 78 provider_quota_lock naming the lane; another provider, a
     /// passed reset, and a missing snapshot all read unlocked.
     #[test]
-    fn lane_quota_lock_refuses_the_walled_provider_route() {
+    fn quota_rows() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-lanequota-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
         let now = std::time::SystemTime::now()
@@ -2027,10 +2019,7 @@ mod tests {
         warnings.clear();
         assert!(check_lane_quota_lock(&dir.join("absent"), "zai", &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn lane_quota_lock_warns_when_provider_lane_is_unmeasured() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-unmeasured-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
         std::fs::write(
@@ -2060,10 +2049,7 @@ mod tests {
         assert!(warnings[0].contains("provider lane openai quota unmeasured"));
         assert!(warnings[0].contains("no member measured"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn lane_quota_lock_holds_recent_unknown_reset_but_not_old_or_returning_lane() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-unknown-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
         let now = std::time::SystemTime::now()
@@ -2132,7 +2118,30 @@ mod tests {
         warnings.clear();
         assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+
+        let caps = std::collections::BTreeMap::from([
+            ("zai".to_string(), Some(2)),
+            ("openai".to_string(), None),
+            ("anthropic".to_string(), Some(3)),
+        ]);
+        let readings = vendor_lane_readings_from_caps(&caps, |provider| match provider {
+            "zai" => Ok(2),
+            "anthropic" => Err("registry unreadable".to_string()),
+            _ => unreachable!("uncapped provider must not be counted"),
+        });
+
+        assert_eq!(
+            readings["vendor_caps"],
+            serde_json::json!({"zai": 2, "anthropic": 3})
+        );
+        assert_eq!(readings["vendor_counts"], serde_json::json!({"zai": 2}));
+        assert_eq!(
+            readings["vendor_count_errors"],
+            serde_json::json!({"anthropic": "registry unreadable"})
+        );
     }
+
+
 
     /// The lanes cap reader: the configured table wins, the built-in fallback
     /// caps only zai, and a non-positive or missing lanes is uncapped.
@@ -2250,29 +2259,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn vendor_lane_readings_include_only_capped_lanes_and_keep_count_errors() {
-        let caps = std::collections::BTreeMap::from([
-            ("zai".to_string(), Some(2)),
-            ("openai".to_string(), None),
-            ("anthropic".to_string(), Some(3)),
-        ]);
-        let readings = vendor_lane_readings_from_caps(&caps, |provider| match provider {
-            "zai" => Ok(2),
-            "anthropic" => Err("registry unreadable".to_string()),
-            _ => unreachable!("uncapped provider must not be counted"),
-        });
-
-        assert_eq!(
-            readings["vendor_caps"],
-            serde_json::json!({"zai": 2, "anthropic": 3})
-        );
-        assert_eq!(readings["vendor_counts"], serde_json::json!({"zai": 2}));
-        assert_eq!(
-            readings["vendor_count_errors"],
-            serde_json::json!({"anthropic": "registry unreadable"})
-        );
-    }
 
     /// The subagents ceiling reader: the configured table wins, the built-in
     /// fallback caps only zai, and a non-positive or missing subagents is
@@ -2356,7 +2342,7 @@ mod tests {
 
     /// Rule 1: no account or `default` admits and calls nothing.
     #[test]
-    fn login_lane_skips_empty_and_default_accounts() {
+    fn login_lane_rows() {
         for account in ["", "default"] {
             let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
             let mut warnings = Vec::new();
@@ -2364,12 +2350,7 @@ mod tests {
             assert_eq!(calls.get(), 0, "account {account:?} must call nothing");
             assert!(warnings.is_empty());
         }
-    }
 
-    /// Rule 2: a route to any non-anthropic provider admits and calls
-    /// nothing - a routed worker authenticates with the route's key.
-    #[test]
-    fn login_lane_skips_a_routed_non_anthropic_spawn() {
         let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
         let mut warnings = Vec::new();
         assert!(
@@ -2377,35 +2358,20 @@ mod tests {
         );
         assert_eq!(calls.get(), 0);
         assert!(warnings.is_empty());
-    }
 
-    /// Rule 3: an unreadable binding admits; the Python resolver owns that
-    /// refusal, and the probe must not run.
-    #[test]
-    fn login_lane_admits_an_unreadable_binding_without_probing() {
         let (binding, probe, calls) =
             login_lane_fakes(Err("no such account".to_string()), Login::LoggedIn);
         let mut warnings = Vec::new();
         assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
         assert_eq!(calls.get(), 1, "binding once, probe never");
         assert!(warnings.is_empty());
-    }
 
-    /// Rule 4: a binding with no config dir (an api-key lane) admits without
-    /// probing.
-    #[test]
-    fn login_lane_admits_an_api_key_lane_without_probing() {
         let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
         let mut warnings = Vec::new();
         assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
         assert_eq!(calls.get(), 1, "binding once, probe never");
         assert!(warnings.is_empty());
-    }
 
-    /// Rule 5, logged-out: exit 78, the full receipt, and the warning that
-    /// names the remedy and says no worker launched.
-    #[test]
-    fn login_lane_refuses_a_logged_out_account_with_receipt() {
         let (binding, probe, _calls) = login_lane_fakes(
             Ok(Some("/tmp/acct".to_string())),
             Login::LoggedOut("Login expired".to_string()),
@@ -2429,11 +2395,7 @@ mod tests {
                 .any(|w| w.contains("no worker launched") && w.contains("claude /login")),
             "{warnings:?}"
         );
-    }
 
-    /// Rule 5, inconclusive: admit, but push the one honesty note.
-    #[test]
-    fn login_lane_admits_an_inconclusive_probe_with_a_note() {
         let (binding, probe, _calls) = login_lane_fakes(
             Ok(Some("/tmp/acct".to_string())),
             Login::Unknown("probe timed out after 20s".to_string()),
@@ -2446,17 +2408,29 @@ mod tests {
             "exactly the inconclusive note: {warnings:?}"
         );
         assert!(warnings[0].contains("inconclusive"), "{warnings:?}");
-    }
 
-    /// Rule 5, logged-in: admit with no note.
-    #[test]
-    fn login_lane_admits_a_logged_in_account_silently() {
         let (binding, probe, _calls) =
             login_lane_fakes(Ok(Some("/tmp/acct".to_string())), Login::LoggedIn);
         let mut warnings = Vec::new();
         assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
         assert!(warnings.is_empty());
     }
+
+    /// Rule 2: a route to any non-anthropic provider admits and calls
+    /// nothing - a routed worker authenticates with the route's key.
+
+    /// Rule 3: an unreadable binding admits; the Python resolver owns that
+    /// refusal, and the probe must not run.
+
+    /// Rule 4: a binding with no config dir (an api-key lane) admits without
+    /// probing.
+
+    /// Rule 5, logged-out: exit 78, the full receipt, and the warning that
+    /// names the remedy and says no worker launched.
+
+    /// Rule 5, inconclusive: admit, but push the one honesty note.
+
+    /// Rule 5, logged-in: admit with no note.
 
     #[test]
     fn questions_journal_read_reaches_the_store() {
