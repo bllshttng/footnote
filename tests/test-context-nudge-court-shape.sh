@@ -76,6 +76,7 @@ touch "$SBX/.fno/.path-migration-done"
 printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
+export FNO_AGENTS_HOME="$SBX/.fno/agents"
 export FNO_REPO_ROOT="$SBX"
 unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
 export CLAUDE_CODE_SESSION_ID="$KING_SID"
@@ -119,7 +120,13 @@ if [[ -z "$ROWS_BIN" ]]; then
 fi
 [[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
 events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
-reset_events() { rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db"; }
+reset_events() {
+  local store root
+  store=$("$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" --store-path-only | jq -er '.store') || return 1
+  root=$(cd "$SBX" && pwd -P)
+  [[ "$store" == "$root/"* ]] || { bad "event reset escaped its sandbox"; return 1; }
+  rm -f "$SBX/.fno/events.jsonl" "$store" "$store-wal" "$store-shm"
+}
 
 # The hook reads the manifest from the crown row's cwd space: the resolver
 # keys the row, so the fixture computes the same root the resolver makes,

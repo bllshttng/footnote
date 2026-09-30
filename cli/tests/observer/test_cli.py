@@ -581,7 +581,12 @@ def test_replay_isolation_violation_hard_fails(monkeypatch, tmp_path):
     class _P:
         returncode, stdout, stderr = 0, "", ""
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
+    real_run = cli.subprocess.run
+
+    def run(argv, *args, **kwargs):
+        return _P() if argv[0] == "git" else real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
     from fno.observer import isolation
     monkeypatch.setattr(isolation, "collect_eval_session_ids", lambda wd, **k: ({"leak"}, None))
     monkeypatch.setattr(
