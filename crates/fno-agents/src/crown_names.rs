@@ -746,7 +746,12 @@ pub(crate) fn stamp_reign(
 /// Best-effort: any failure prints one warning and never fails the beat.
 pub(crate) fn stamp_beat_reign(store_path: &Path, cwd: &Path, scope: &str) -> Option<String> {
     let stamped = (|| -> Result<String, String> {
-        let path = crate::loop_reign::manifest_path(&crate::paths::space_dir(cwd), scope)?;
+        // The manifest lives under the canonical scope; a caller passing an
+        // unsorted member list still reads its own armed manifest.
+        let path = crate::loop_reign::manifest_path(
+            &crate::paths::space_dir(cwd),
+            &crate::territory::canonical_scope(scope),
+        )?;
         let content =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let manifest = crate::loopcheck::parse_king_manifest(&content)
