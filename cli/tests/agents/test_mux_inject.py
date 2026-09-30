@@ -420,7 +420,9 @@ def test_codex_mail_resends_the_submit_key_after_a_slow_paste(monkeypatch) -> No
         for call in fake.calls
         if "--text" in call[0]
     ]
-    assert controls.count("\r") == 2
+    # The initial CR, one late key after the burst, and the no-affordance
+    # hedge: three, all bounded.
+    assert controls.count("\r") == 3
 
 
 def test_codex_mail_ends_unconfirmed_when_the_payload_never_renders(monkeypatch) -> None:

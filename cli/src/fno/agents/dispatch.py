@@ -6051,6 +6051,7 @@ def _mux_pane_send(
         resends = 0
         polls = 0
         seen_payload = False
+        hedged = False
         while True:
             time.sleep(enter_delay_s)
             screen = _read_screen()
@@ -6061,11 +6062,19 @@ def _mux_pane_send(
                 seen_payload = True
                 if any(_marker_near_payload(screen, m) for m in _CODEX_QUEUED_MARKERS):
                     return "queued"
-                if not _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
-                    # Visible with no composer affordance beside it: the
-                    # submit fired and this is the transcript row.
+                if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
+                    key = "\t"
+                elif not hedged:
+                    # Visible with no affordance: landed transcript row or a
+                    # resident envelope the footer does not name. One extra
+                    # submit key decides -- no-op on a landed frame's empty
+                    # composer, the submit on a resident one.
+                    hedged = True
+                    key = submit_text[0]
+                else:
+                    # The hedge moved nothing and the affordance never showed:
+                    # this is the transcript row.
                     return True
-                key = "\t"
             elif seen_payload:
                 # Resident, then gone: the extra key moved it out.
                 return True
