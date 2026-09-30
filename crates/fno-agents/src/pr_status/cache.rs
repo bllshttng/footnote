@@ -226,6 +226,21 @@ pub(crate) fn cached_status(
     };
     let _ = std::fs::create_dir_all(&dir);
     let now = now_secs();
+    // The pre-network serve: any row for (slug, pr) younger than the TTL
+    // answers with ZERO gh calls, the key-minting head read included. The
+    // per-tick head check it replaces was the read that kept a cache "hit"
+    // at ~6 calls; a head that moves mid-window is noticed one TTL late,
+    // which is the freshness contract the TTL already sells. `refresh` is
+    // the escape hatch.
+    if !refresh {
+        if let Some(row) = newest_row(&dir, &slug_key, &pr.to_string()) {
+            if now - num(&row, "ts") < ttl() as f64 {
+                if let Some(answer) = serve(&row, false) {
+                    return into_answer(answer, 0);
+                }
+            }
+        }
+    }
     // Backoff pre-check, zero network: inside a live refusal every waiter's
     // tick short-circuits to the newest cached row instead of re-attempting.
     if !refresh
@@ -268,10 +283,18 @@ pub(crate) fn cached_status(
             return live_through(cwd, pr, None, &slug, &dir, "", None, None);
         }
     };
-    // ONE hold probe per read: its verdict feeds both the cache-key material
-    // and the payload, instead of `hold-check` spawning twice.
+    // ONE hold probe per TTL: the verdict feeds the cache-key material and
+    // the payload, and a fresh hold row serves it without re-shelling
+    // `hold-check` (which itself spends 2 gh calls per fire).
     let hold_state = if pr_state == "OPEN" {
-        Some(super::seams::hold_verdict(cwd, pr))
+        match cached_hold_verdict(&dir, &slug_key, pr, now) {
+            Some(verdict) => Some(verdict),
+            None => {
+                let verdict = super::seams::hold_verdict(cwd, pr);
+                write_hold_verdict(&dir, &slug_key, pr, &verdict);
+                Some(verdict)
+            }
+        }
     } else {
         None
     };
@@ -430,6 +453,51 @@ fn hold_word(verdict: &super::seams::HoldVerdict) -> String {
         super::seams::HoldVerdict::Held(reason) => format!("held:{reason}"),
         super::seams::HoldVerdict::Unreadable => "unreadable".to_string(),
     }
+}
+
+/// The hold-verdict row lives in a `hold/` subdir: `rows_newest_first` and
+/// `prune_rows` prefix-match `{slug}-{pr}-` over the top-level dir only, so
+/// a sibling file there would be read back as a status row.
+fn hold_row(dir: &Path, slug_key: &str, pr: u64) -> PathBuf {
+    dir.join("hold").join(format!("{slug_key}-{pr}-hold.json"))
+}
+
+/// The cached hold verdict for (slug, pr), or None when missing, stale, or
+/// from an unreadable probe (those are never written - a crashed probe must
+/// not freeze the key material for a TTL).
+fn cached_hold_verdict(
+    dir: &Path,
+    slug_key: &str,
+    pr: u64,
+    now: f64,
+) -> Option<super::seams::HoldVerdict> {
+    let row = std::fs::read_to_string(hold_row(dir, slug_key, pr)).ok()?;
+    let parsed: Value = serde_json::from_str(&row).ok()?;
+    if now - num(&parsed, "ts") >= ttl() as f64 {
+        return None;
+    }
+    match parsed.get("word").and_then(Value::as_str)? {
+        "clear" => Some(super::seams::HoldVerdict::Clear),
+        w => w
+            .strip_prefix("held:")
+            .map(|reason| super::seams::HoldVerdict::Held(reason.to_string())),
+    }
+}
+
+fn write_hold_verdict(dir: &Path, slug_key: &str, pr: u64, verdict: &super::seams::HoldVerdict) {
+    let word = hold_word(verdict);
+    if word == "unreadable" {
+        return;
+    }
+    let path = hold_row(dir, slug_key, pr);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    write_row(
+        &dir.join("hold"),
+        &format!("{slug_key}-{pr}-hold"),
+        &json!({"ts": now_secs(), "word": word}),
+    );
 }
 
 fn mint_key(
