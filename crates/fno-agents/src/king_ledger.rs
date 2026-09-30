@@ -1230,16 +1230,15 @@ mod tests {
         assert_eq!(page.matches("<article class=\"crown").count(), 2);
         assert!(page.contains("e-1") && page.contains("king"));
         let rows = vec![
-            json!({"name":"t-x-1-glm", "node":"x-1", "harness":"claude", "harness_session_id":"current", "model":"opus", "model_basis":"observed", "status":"writing", "status_basis":"transcript", "context_used_pct":26, "context_used_tokens":258687, "context_window_tokens":1000000, "context_measured_at":"2026-09-12T00:00:00Z", "progress":"awaiting-operator", "progress_basis":"report", "last_message":"RESULT: BLOCKED need a ruling <script>"}),
-            json!({"name":"proof-x-39dc-h3", "harness":"codex", "status":"quiet"}),
-            json!({"name":"lead-hidden", "node":"x-1", "crown":{"scope":"e-1"}, "status":"writing"}),
+            json!({"name":"t-x-aaaa-glm", "node":"x-aaaa", "harness":"claude", "harness_session_id":"current", "model":"opus", "model_basis":"observed", "status":"writing", "status_basis":"transcript", "context_used_pct":26, "context_used_tokens":258687, "context_window_tokens":1000000, "context_measured_at":"2026-09-12T00:00:00Z", "progress":"awaiting-operator", "progress_basis":"report", "last_message":"RESULT: BLOCKED need a ruling <script>"}),
+            json!({"name":"proof-x-bbbb-h3", "harness":"codex", "status":"quiet"}),
+            json!({"name":"lead-hidden", "node":"x-aaaa", "crown":{"scope":"e-1"}, "status":"writing"}),
         ];
         let workers = Ok(crate::ledger_workers::by_node(&rows));
         let mut crown = base_crown();
-        crown["scope_nodes"]["nodes"] =
-            json!([{"id":"x-1", "status":"in_progress"}, {"id":"x-39dc", "status":"in_progress"}]);
+        crown["scope_nodes"]["nodes"] = json!([{"id":"x-aaaa", "status":"in_progress"}, {"id":"x-bbbb", "status":"in_progress"}]);
         let entries = vec![
-            json!({"id":"x-1", "sessions":[{"session_id":"current", "harness":"claude"}, {"session_id":"former", "harness":"claude", "phase":"execute", "observed_model":"sonnet", "ended_at":"yesterday"}]}),
+            json!({"id":"x-aaaa", "sessions":[{"session_id":"current", "harness":"claude"}, {"session_id":"former", "harness":"claude", "phase":"execute", "observed_model":"sonnet", "ended_at":"yesterday"}]}),
         ];
         let html = render(
             &base_court(json!([crown.clone()])),
@@ -1252,12 +1251,12 @@ mod tests {
         );
         assert_eq!(html.matches("<details class=\"worker\"").count(), 2);
         assert!(
-            html.contains("t-x-1-glm")
+            html.contains("t-x-aaaa-glm")
                 && html.contains("claude")
                 && html.contains("opus (observed)")
                 && html.contains("writing (transcript)")
         );
-        assert!(html.contains("proof-x-39dc-h3") && !html.contains("lead-hidden"));
+        assert!(html.contains("proof-x-bbbb-h3") && !html.contains("lead-hidden"));
         assert!(html.contains("26% used") && html.contains("258,687 of 1,000,000"));
         assert!(html.contains("Needs-you: RESULT: BLOCKED need a ruling &lt;script&gt;"));
         assert!(

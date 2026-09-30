@@ -664,9 +664,7 @@ fn apply_worker_readings(registry: &mut state::Registry, readings: &[WorkerReadi
             row.context_window_tokens = context["window_tokens"].as_u64();
             row.context_measured_at = Some(now.to_string());
         }
-        if let Some(unread) = reading.unread {
-            row.mail_unread = Some(unread);
-        }
+        row.mail_unread = reading.unread;
     }
 }
 
@@ -950,6 +948,9 @@ mod tests {
         assert_eq!(row.status, AgentStatus::Exited);
         assert_eq!(row.pid, None, "Exited clears the pid (Locked Decision #7)");
         assert_eq!(row.exited_at.as_deref(), Some("2026-09-10T12:00:00Z"));
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("usage.jsonl");
         fs::write(&transcript, r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":258687}}}"#).unwrap();
@@ -959,19 +960,30 @@ mod tests {
         entry.cwd = dir.path().to_string_lossy().into_owned();
         entry.context_used_pct = Some(40);
         entry.context_measured_at = Some("T0".into());
+        entry.mail_unread = Some(5);
         let mut registry = state::Registry::default();
         registry.entries.push(entry.clone());
         let missing = dir.path().join("missing.jsonl");
         let reading = measure_worker(&entry, Some(&missing), dir.path(), None);
         apply_worker_readings(&mut registry, &[reading], "T1");
         assert_eq!(registry.entries[0].context_used_pct, Some(40));
+        assert_eq!(registry.entries[0].mail_unread, None);
         assert_eq!(
             registry.entries[0].context_measured_at.as_deref(),
             Some("T0")
         );
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "[[routing.models]]\nmodel = \"claude-opus-5\"\ncontext = 1000000\ncontext_measured_at = 2026-09-01\n").unwrap();
+        let previous = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", &config);
         let reading = measure_worker(&entry, Some(&transcript), dir.path(), Some(&[]));
+        match previous {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
         apply_worker_readings(&mut registry, &[reading], "T1");
         assert_eq!(registry.entries[0].context_used_pct, Some(26));
+        assert_eq!(registry.entries[0].context_window_tokens, Some(1_000_000));
         assert_eq!(
             registry.entries[0].context_measured_at.as_deref(),
             Some("T1")
@@ -985,7 +997,7 @@ mod tests {
             registry.entries[0].context_measured_at.as_deref(),
             Some("T1")
         );
-        assert_eq!(registry.entries[0].mail_unread, Some(0));
+        assert_eq!(registry.entries[0].mail_unread, None);
         let reading = measure_worker(&entry, Some(&transcript), dir.path(), Some(&[]));
         registry.entries[0].harness_session_id = Some("successor".into());
         registry.entries[0].mail_unread = Some(7);

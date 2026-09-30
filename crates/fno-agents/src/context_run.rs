@@ -1283,18 +1283,14 @@ mod tests {
 
     #[test]
     fn transcript_reading_preserves_probe_usage_and_unreadable_exit() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":200000,\"cache_creation_input_tokens\":58687}}}\n").unwrap();
-        let cwd = std::env::current_dir().unwrap();
-        let reading = transcript_reading(&path, "fixture", &cwd).unwrap();
-        assert_eq!(reading["used_tokens"], 258687);
-        assert_eq!(reading["model"], "claude-opus-5");
-        assert_eq!(
-            reading["used_pct"],
-            crate::context_window::used_percent(258687, reading["window_tokens"].as_u64().unwrap())
-                .unwrap()
-        );
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[[routing.models]]\nmodel = \"claude-opus-5\"\ncontext = 1000000\ncontext_measured_at = 2026-09-01\n").unwrap();
         let args = vec![
             "--transcript".into(),
             path.to_string_lossy().into_owned(),
@@ -1302,12 +1298,26 @@ mod tests {
             "fixture".into(),
             "--json".into(),
         ];
-        assert_eq!(run_context_probe(&args), 0);
+        let previous = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", &config);
+        let reading = transcript_reading(&path, "fixture", dir.path());
+        let exit = run_context_probe(&args);
+        match previous {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let reading = reading.unwrap();
+        assert_eq!(reading["used_tokens"], 258687);
+        assert_eq!(reading["model"], "claude-opus-5");
+        assert_eq!(reading["window_tokens"], 1_000_000);
+        assert_eq!(reading["used_pct"], 26);
+        assert_eq!(reading["window_source"], "measured");
+        assert_eq!(exit, 0);
         std::fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
-        assert!(transcript_reading(&path, "fixture", &cwd).is_err());
+        assert!(transcript_reading(&path, "fixture", dir.path()).is_err());
         assert_eq!(run_context_probe(&args), 3);
         std::fs::remove_file(&path).unwrap();
-        assert!(transcript_reading(&path, "fixture", &cwd).is_err());
+        assert!(transcript_reading(&path, "fixture", dir.path()).is_err());
         assert_eq!(run_context_probe(&args), 3);
         assert!(session_transcript("fixture", "unsupported").is_none());
     }
