@@ -18,9 +18,6 @@ use crate::feed_overlay::FeedItem;
 use crate::popup::{Anchor, Popup, PopupRow};
 use crate::proto::AgentRow;
 
-pub(crate) const NOT_RECORDED: &str = "NOT RECORDED";
-pub(crate) const NOT_APPLICABLE: &str = "NOT APPLICABLE";
-
 /// How this event's session can be reached right now, worst evidence last.
 pub(crate) enum Destination<'a> {
     /// The receipt says how to bring a removed session back. A removal is a
@@ -127,7 +124,6 @@ pub(crate) enum FeedAction {
 /// target `i` (flat index) - only Entry rows contribute targets, and exactly
 /// those rows push here, so the alignment holds by construction.
 pub(crate) struct FeedDetailModal {
-    pub(crate) item: FeedItem,
     pub(crate) popup: Popup,
     pub(crate) actions: Vec<FeedAction>,
     pub(crate) values: Vec<String>,
@@ -140,7 +136,6 @@ pub(crate) struct FeedDetailModal {
 pub(crate) fn modal(view: &View, item: FeedItem) -> FeedDetailModal {
     let (popup, actions, values) = build(&view.layout.agents, view.layout.active_squad, &item);
     FeedDetailModal {
-        item,
         popup,
         actions,
         values,
@@ -170,7 +165,7 @@ pub(crate) fn build(
 
     // One inert field row. Absent prints nothing - the ruling that retired
     // NOT RECORDED - so the modal's height says what the source holds.
-    let mut info = |label: &str, value: Option<String>, rows: &mut Vec<PopupRow>| {
+    let info = |label: &str, value: Option<String>, rows: &mut Vec<PopupRow>| {
         if let Some(v) = value.filter(|v| !v.is_empty()) {
             rows.push(PopupRow::Info {
                 label: label.to_string(),
@@ -365,7 +360,7 @@ pub(crate) async fn execute_selected(
                 ));
                 return Ok(());
             }
-            view.open();
+            View::open(view);
             if let Some(b) = view.backlog_board.as_mut() {
                 b.detail = Some(node_detail::NodeDetailOverlay {
                     node_id: id,
@@ -380,7 +375,8 @@ pub(crate) async fn execute_selected(
             let url = url.clone();
             // Off-loop for the same reason ServerMsg::OpenLink is: a cold
             // browser launch must not stall the render loop.
-            let outcome = tokio::task::spawn_blocking(move || crate::link::open_url(&url))
+            let launched = url.clone();
+            let outcome = tokio::task::spawn_blocking(move || crate::link::open_url(&launched))
                 .await
                 .unwrap_or_else(|_| Err("opener task failed".to_string()));
             match outcome {

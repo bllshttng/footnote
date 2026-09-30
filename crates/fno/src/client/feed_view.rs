@@ -742,17 +742,22 @@ impl View {
     /// the list. A later fold replaces `items` wholesale, so holding an index
     /// would re-point the open view at a different event mid-read.
     pub(super) fn open_feed_detail(&mut self) {
-        let Some(f) = &self.feed else {
-            return;
-        };
         // `sel` is a SLOT index (headers included); a header has no detail.
-        let Some(item) = display_slots(&f.items, f.order)
-            .get(f.sel)
-            .and_then(|s| match s {
-                Slot::Item(i) => f.items.get(*i),
-                Slot::Header(_) => None,
-            })
-        else {
+        // The clone ends the feed borrow, so the question route below can
+        // open the questions detail on the same view.
+        let item = {
+            let Some(f) = &self.feed else {
+                return;
+            };
+            display_slots(&f.items, f.order)
+                .get(f.sel)
+                .and_then(|s| match s {
+                    Slot::Item(i) => f.items.get(*i),
+                    Slot::Header(_) => None,
+                })
+                .cloned()
+        };
+        let Some(item) = item else {
             return;
         };
         // A question row answers from the feed, the same question view the
@@ -763,7 +768,7 @@ impl View {
                 return;
             }
         }
-        self.feed_detail = Some(feed_detail::modal(self, item.clone()));
+        self.feed_detail = Some(feed_detail::modal(self, item));
     }
 
     /// The hover marker follows the pointer inside the panel; anything else

@@ -383,7 +383,7 @@ pub fn project(
                         model: model.clone(),
                         effort: effort.clone(),
                         phase: Some(phase.to_string()),
-                        url: Some(url),
+                        url: Some(url.to_string()),
                         ..FeedRow::default()
                     });
                 }

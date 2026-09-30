@@ -6868,6 +6868,7 @@ enum TabHit {
 
 /// What a left-click on chrome resolves to: server commands to send, or a
 /// local one-line hint for a row that isn't directly actionable.
+#[derive(Debug, Clone)]
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
