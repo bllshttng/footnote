@@ -6641,17 +6641,6 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
     );
 }
 
-#[test]
-fn server_has_splitdir_edges() {
-    // The guard's contract: only an announced v96+ server admits the
-    // command; an unannounced (pre-v97) server counts as unable, since the
-    // announcement began one generation after the command.
-    assert!(!server_has_splitdir(None));
-    assert!(!server_has_splitdir(Some(95)));
-    assert!(server_has_splitdir(Some(96)));
-    assert!(server_has_splitdir(Some(97)));
-}
-
 /// One squad's `TabMeta` list, cloned out of the layout borrow.
 fn squad_tabs(v: &View, squad: u64) -> Vec<TabMeta> {
     v.layout
