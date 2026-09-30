@@ -2815,29 +2815,14 @@ mod tests {
     }
 
     #[test]
-    fn ac3_tokens_drops_hex_ids_and_stop_words() {
+    fn token_rows() {
         let got = tokens("x-1111 pr-1847 cf6a file-budget added");
         let want: BTreeSet<String> = ["added", "budget", "file"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         assert_eq!(got, want);
-    }
 
-    fn ask_req(question: &str, subject: Option<&str>, node: Option<&str>) -> AskRequest {
-        AskRequest {
-            question: question.to_owned(),
-            subject: subject.map(str::to_owned),
-            node: node.map(str::to_owned),
-            laws: fixture_laws(),
-        }
-    }
-
-    const Q470: &str =
-        "PR 1847 shrank +207 to +142. Requesting the operator-applied budget-exception label.";
-
-    #[test]
-    fn ac1_nearby_finds_the_five_file_budget_laws() {
         let req = ask_req(Q470, Some("pr-1847-budget-exception"), Some("x-cccc"));
         let ans = ask_answer(&req);
         assert!(ans.exact.is_empty());
@@ -2851,10 +2836,7 @@ mod tests {
         for id in &ids {
             assert!(refusal.contains(id));
         }
-    }
 
-    #[test]
-    fn ac2_cited_ids_pass_the_nearby_gate() {
         let mut question = String::from(Q470);
         for id in [
             "d-4b39ad4c",
@@ -2869,10 +2851,7 @@ mod tests {
         let ans = ask_answer(&req);
         assert!(ans.uncited.is_empty());
         assert!(ans.nearby_refusal.is_none());
-    }
 
-    #[test]
-    fn ac4_exact_tier_review_coverage_hits_by_text() {
         let mut req = ask_req(
             "PR 1717 is stuck at the review cap: coverage reads uncovered and the \
              attestation is stale. Approve, or set the override label?",
@@ -2895,6 +2874,18 @@ mod tests {
         );
     }
 
+    fn ask_req(question: &str, subject: Option<&str>, node: Option<&str>) -> AskRequest {
+        AskRequest {
+            question: question.to_owned(),
+            subject: subject.map(str::to_owned),
+            node: node.map(str::to_owned),
+            laws: fixture_laws(),
+        }
+    }
+
+    const Q470: &str =
+        "PR 1847 shrank +207 to +142. Requesting the operator-applied budget-exception label.";
+
     fn open_q(
         id: &str,
         ts: &str,
@@ -2915,7 +2906,7 @@ mod tests {
     }
 
     #[test]
-    fn ac5_law_mode_finds_the_subject_candidate() {
+    fn law_mode_rows() {
         let law_row = law("d-4b39ad4c", "file-budget", "A size-budget refusal is never answered by raising the allowance and never by splitting the PR.", "2026-09-04T16:59:33Z");
         let req = LawRequest {
             law: law_row,
@@ -2948,10 +2939,7 @@ mod tests {
         let line = &ans.lines[0];
         assert!(line.contains("fno agents mail send sess-9f2c"), "{line}");
         assert!(line.contains("q-470f40d2"), "{line}");
-    }
 
-    #[test]
-    fn ac6_more_than_ten_candidates_leaves_a_count_line() {
         let law_row = law(
             "d-4b39ad4c",
             "file-budget",
@@ -2981,17 +2969,14 @@ mod tests {
     }
 
     #[test]
-    fn verb_contract_help_args_and_bad_json() {
+    fn verb_rows() {
         let h: Vec<String> = vec!["-h".into()];
         assert_eq!(run_law_match(&h), 0);
         let extra: Vec<String> = vec!["--nope".into()];
         assert_eq!(run_law_match(&extra), 2);
         let bad: Vec<String> = vec![];
         assert_eq!(run_law_match(&bad), 2, "unparsable stdin must exit 2");
-    }
 
-    #[test]
-    fn ac2_hp_skill_payload_surfaces_the_review_laws() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         let mut rows: Vec<String> = Vec::new();
@@ -3054,7 +3039,7 @@ mod tests {
     }
 
     #[test]
-    fn ac2_prompt_first_token_classifies_the_stage() {
+    fn stage_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         std::fs::write(
@@ -3089,10 +3074,7 @@ mod tests {
             .as_str()
             .expect("context present");
         assert!(ctx.contains("d-0fa92eb9"), "{ctx}");
-    }
 
-    #[test]
-    fn ac2_err_unreadable_index_is_a_report_not_silence() {
         let hook = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
@@ -3114,10 +3096,7 @@ mod tests {
             ctx.contains("fno backlog decisions --lane law --state live"),
             "{ctx}"
         );
-    }
 
-    #[test]
-    fn ac2_edge_non_review_actions_stay_silent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.png");
         std::fs::write(&path, "").expect("writes");
@@ -3148,10 +3127,7 @@ mod tests {
             assert_eq!(answer["stage"], Value::Null, "{hook}");
             assert_eq!(answer["hook_output"], Value::Null, "{hook}");
         }
-    }
 
-    #[test]
-    fn ac2_edge_review_with_no_matching_law_renders_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         std::fs::write(&path, "").expect("writes");
@@ -3170,10 +3146,7 @@ mod tests {
         );
         assert_eq!(answer["stage"], "review");
         assert_eq!(answer["hook_output"], Value::Null);
-    }
 
-    #[test]
-    fn ac3_hp_cap_overflow_still_lists_every_law_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         let mut rows: Vec<String> = Vec::new();
@@ -3228,10 +3201,7 @@ mod tests {
             answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
             "UserPromptSubmit"
         );
-    }
 
-    #[test]
-    fn ac4_hp_verb_law_matches_blueprint_stage() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_index(
             dir.path(),
@@ -3282,7 +3252,7 @@ mod tests {
     }
 
     #[test]
-    fn ac4_hp_node_id_and_pr_subjects_are_refused() {
+    fn validate_rows() {
         for subject in ["x-aaaa", "pr-1157"] {
             let req = validate_req(subject, "Two rounds.", Some("r"), None);
             let answer = validate_answer(&req);
@@ -3293,10 +3263,7 @@ mod tests {
             );
             assert!(refusal.contains(subject), "{subject}: {refusal}");
         }
-    }
 
-    #[test]
-    fn a_placeholder_statement_is_refused() {
         // The 2026-08-29 junk law was exactly this shape: a smoke call with
         // x/y/z landed a live law only the operator could clear.
         let req = validate_req("x", "y", Some("z"), None);
@@ -3310,17 +3277,14 @@ mod tests {
         let req = validate_req("mx", "my", Some("why"), None);
         let answer = validate_answer(&req);
         assert_eq!(answer["refusal"], Value::Null);
-    }
 
-    #[test]
-    fn ac4_topic_a_topic_subject_with_a_cited_node_id_passes() {
         let req = validate_req("review-rounds-cap", "Cite x-aaaa in text.", Some("r"), None);
         let answer = validate_answer(&req);
         assert_eq!(answer["refusal"], Value::Null);
     }
 
     #[test]
-    fn ac4_port_rules_match_the_python_word_for_word() {
+    fn port_rows() {
         let cases: Vec<(ValidateRequest, &str)> = vec![
             (
                 validate_req("", "Decision.", Some("r"), None),
@@ -3367,10 +3331,7 @@ mod tests {
             Some("d-0ad0ad0a"),
         ));
         assert_eq!(ok["refusal"], Value::Null);
-    }
 
-    #[test]
-    fn ac4_near_law_lines_name_the_prior_ruling_and_both_remedies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         std::fs::write(
@@ -3457,7 +3418,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_edit_payload_prints_the_path_law() {
+    fn edit_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = tempfile::tempdir().expect("tempdir");
         let path = write_index(dir.path(), &[edit_row("d-editlaw01", "[\"crates/**\"]")]);
@@ -3469,10 +3430,7 @@ mod tests {
             .expect("context present");
         assert!(ctx.contains("Law governing edit"), "{ctx}");
         assert!(ctx.contains("d-editlaw01"), "{ctx}");
-    }
 
-    #[test]
-    fn ac2_the_same_session_prints_the_law_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = tempfile::tempdir().expect("tempdir");
         let path = write_index(dir.path(), &[edit_row("d-editlaw01", "[\"crates/**\"]")]);
@@ -3488,10 +3446,7 @@ mod tests {
             Some(state.path()),
         );
         assert!(second["hook_output"].is_null(), "{second}");
-    }
 
-    #[test]
-    fn ac3_a_row_without_paths_never_prints_at_an_edit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = tempfile::tempdir().expect("tempdir");
         // The row's TEXT contains the word crates; the edit read matches
@@ -3508,10 +3463,7 @@ mod tests {
             Some(state.path()),
         );
         assert!(answer["hook_output"].is_null(), "{answer}");
-    }
 
-    #[test]
-    fn ac3_a_request_without_paths_answers_the_verb_stage() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_index(
             dir.path(),
@@ -3536,10 +3488,7 @@ mod tests {
             Some(&graph),
         );
         assert_eq!(answer["stage"], "blueprint");
-    }
 
-    #[test]
-    fn ac4_an_unreadable_index_reports_never_silence() {
         let missing = std::path::Path::new("/nonexistent/fno-edit-read/decisions.jsonl");
         let state = tempfile::tempdir().expect("tempdir");
         let answer = edit_answer(
@@ -3551,10 +3500,7 @@ mod tests {
             .as_str()
             .expect("context present");
         assert!(ctx.contains("could not be read"), "{ctx}");
-    }
 
-    #[test]
-    fn an_edit_with_no_session_prints_every_time() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = tempfile::tempdir().expect("tempdir");
         let path = write_index(dir.path(), &[edit_row("d-editlaw02", "[\"crates/**\"]")]);
@@ -3569,7 +3515,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_blueprint_payload_surfaces_the_language_law() {
+    fn blueprint_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_index(
             dir.path(),
@@ -3602,10 +3548,7 @@ mod tests {
             .expect("context present");
         assert!(ctx.contains("Law governing blueprint"), "{ctx}");
         assert!(ctx.contains("d-b6cc1a2a"), "{ctx}");
-    }
 
-    #[test]
-    fn ac2_epic_named_law_lists_node_subject_law_dropped() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_index(
             dir.path(),
@@ -3664,7 +3607,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_target_and_execute_verbs_classify_target() {
+    fn target_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_index(
             dir.path(),
@@ -3699,10 +3642,7 @@ mod tests {
                 .expect("context present");
             assert!(ctx.contains("Law governing target"), "{ctx}");
         }
-    }
 
-    #[test]
-    fn payload_node_id_extracts_from_skill_args_or_prompt() {
         let skill = serde_json::json!({
             "tool_name": "Skill",
             "tool_input": { "skill": "fno:blueprint", "args": "x-aaaa" }
@@ -3718,10 +3658,7 @@ mod tests {
             "prompt": "/fno:target auto-merge \"a feature\""
         });
         assert_eq!(payload_node_id(&no_node), None);
-    }
 
-    #[test]
-    fn node_subject_idents_resolves_parent_and_project() {
         let dir = tempfile::tempdir().expect("tempdir");
         let graph = dir.path().join("graph.json");
         crate::graph_store::seed_rows(
@@ -3741,7 +3678,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_readable_graph_has_no_unread_receipt() {
+    fn graph_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let index = write_index(
             dir.path(),
@@ -3776,10 +3713,7 @@ mod tests {
                 .expect("context")
                 .contains("d-epic0001")
         );
-    }
 
-    #[test]
-    fn ac1_unreadable_graph_names_scope_and_keeps_node_id_matching() {
         let dir = tempfile::tempdir().expect("tempdir");
         let index = write_index(
             dir.path(),
@@ -3812,10 +3746,7 @@ mod tests {
         );
         assert!(ctx.contains("d-node0001"), "{ctx}");
         assert_eq!(answer["unread"].as_array().expect("unread").len(), 1);
-    }
 
-    #[test]
-    fn ac2_unreadable_graph_and_index_keep_both_reasons() {
         let dir = tempfile::tempdir().expect("tempdir");
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, "not json").expect("writes");
@@ -3842,10 +3773,7 @@ mod tests {
         assert!(ctx.contains("Unread: the decision index ("), "{ctx}");
         assert!(!ctx.contains("These live operator rulings govern"), "{ctx}");
         assert_eq!(answer["unread"].as_array().expect("unread").len(), 2);
-    }
 
-    #[test]
-    fn ac2_empty_match_with_unread_graph_has_no_empty_law_block() {
         let dir = tempfile::tempdir().expect("tempdir");
         let index = write_index(
             dir.path(),
