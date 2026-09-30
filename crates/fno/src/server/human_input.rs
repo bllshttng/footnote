@@ -304,6 +304,8 @@ impl Core {
     /// Enter on `pane` (C11 feed): the same binding and journal append as
     /// [`Self::witness_submit`], throttled to the touch burst window by the
     /// caller. The human_touch kill switch does not suppress this witness.
+    /// The touch map already holds this pane's keystroke instant; the 60s
+    /// auto-close guard reads it from there.
     pub(super) fn witness_typing(&self, pane: u64) {
         let event = self.witness_row(pane, "operator_typing");
         if crate::pane_send_audit::append_agents_event(
@@ -315,6 +317,17 @@ impl Core {
             let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
             eprintln!("fno mux: operator_typing emit failed ({n} this session)");
         }
+    }
+
+    /// True when `pane` received operator keystrokes within the last 60
+    /// seconds: the auto-close guard's question. The touch map is the
+    /// signal (one entry per keystroke burst, purged with the pane), so no
+    /// record answers false and a pane the operator never typed into
+    /// retires exactly as before.
+    pub(super) fn typed_recently(&self, pane: u64) -> bool {
+        self.touch_last_emit
+            .get(&pane)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60))
     }
 
     /// The witness envelope for `pane` (`operator_submit` or

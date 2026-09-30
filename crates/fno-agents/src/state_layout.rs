@@ -956,7 +956,7 @@ mod tests {
         let mut c = rusqlite::Connection::open(&published).unwrap();
         crate::event_store::ensure_schema(&mut c, &published).unwrap();
         c.execute(
-            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}')",
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'e-1', x'01', 0, 'x', 't', '{}'), (2, 'destination-only', x'03', 0, 'x', 't', '{}')",
             [],
         )
         .unwrap();
@@ -981,8 +981,37 @@ mod tests {
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 2, "both rows exist once");
+        assert_eq!(
+            n, 3,
+            "distinct event identities survive sequence collisions"
+        );
+        let source_rows: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_id = 'e-2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_rows, 1, "the colliding source event survives once");
         assert!(!straggler.exists(), "the straggler parked");
+        let mut source = rusqlite::Connection::open(&straggler).unwrap();
+        crate::event_store::ensure_schema(&mut source, &straggler).unwrap();
+        source.execute_batch(
+            "INSERT INTO events (seq, event_id, row_hash, ts_ms, type, source, line) VALUES (1, 'distinct-conflict', x'03', 0, 'x', 't', '{}');",
+        ).unwrap();
+        drop(source);
+        let refused = migrate(&root, true);
+        assert!(
+            refused
+                .entries
+                .iter()
+                .any(|e| e.legacy.contains("straggler") && matches!(e.status, Status::Refused(_))),
+            "{refused:?}"
+        );
+        assert!(
+            straggler.exists(),
+            "a distinct event is retained on an integrity conflict"
+        );
         clean(&root);
     }
 

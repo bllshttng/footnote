@@ -156,12 +156,14 @@ fn proto_v4_control_replies_roundtrip() {
             panes_closed: 1,
             closed_panes: vec!["t-r-one".into()],
             tabs_removed: vec!["targets/lanes".into()],
+            skipped_typing: 3,
         },
         ServerMsg::SessionRetired {
             retired: 0,
             panes_closed: 0,
             closed_panes: Vec::new(),
             tabs_removed: Vec::new(),
+            skipped_typing: 0,
         },
     ] {
         let bytes = encode(&msg).unwrap();

@@ -127,16 +127,16 @@ When your only outstanding work is a wait, do NOT keep waking every stop tick to
 
    The verb is the heartbeat. It ends on its own after the bound (default 30m), so a wedged read still wakes the session. Its exit code is the status verb's own alphabet: 0 green, 1 red, 2 still-unsettled at the bound. Every tick rides the coalescing cache: N waiters on one PR cost one network read per TTL. A rate-limit backoff window is ridden out, not hammered. The gh-call count prints at exit. The verb exits on the POSITIVE settled marker internally, never an absence test. An absence test reads a rate-limited read as settled. The verb does not. Spell the bound in `--timeout`, never `timeout(1)`. That is GNU coreutils, and a stock macOS ships neither it nor `gtimeout`. A command naming it dies with `command not found` before the read runs, so the watcher no-ops. Detaching the task itself (`nohup`, `disown`, a trailing `&`) is FORBIDDEN - it exits without re-invoking anyone, so the session idles forever. The CI read inside is REST, so this spends none of the per-user GraphQL quota every session on the machine shares. Do NOT reach for `gh pr checks --watch` or a `gh pr view` poll: `hooks/git-protection.py` DENIES both, so that recipe cannot run at all. Never hand-roll a `while/sleep/grep` replacement: every such loop is an uncoordinated poll against the shared quota, the exact fleet condition the verb exists to prevent.
 
-   For a local run, the run itself is the watcher: start it as a background Bash task with its own bound.
+   For a local Bash run, make the run itself the watcher. Start it as a background task with a command-level bound. For example, `bash -c 'source scripts/lib/with-timeout.sh; with_timeout 1800 command ...'`. Native verbs with their own `--timeout` are already bounded. Codex must use a bounded foreground command or a goal-backed wait with `clock.sleep`. The `exec_command.yield_time_ms` value controls only how long the tool call waits. It does not stop the command.
 
 2. **End your turn with the tag, and nothing else.** After arming the watcher, close the turn with:
 
    ```
    <watching reason="ci" pr="<PR>" timeout="30m">
-   <watching reason="local" timeout="30m">
+   <watching reason="local" task_id="<task-id>" timeout="30m">
    ```
 
-   `reason` is `ci`, `review`, `merge_slot`, or `local` (a run on this machine: a test suite, a build, a review fork). `pr` is a real PR number. Leave it out for a local run, never `pr="0"`. The attributes feed the idle event and the claim-lease math. On a claude session whose claim lease renews, loop-check idles without reading PR state, so the tag is only as true as you write it. Where the lease cannot renew or the harness cannot self-wake, the tag is ignored and you are told the real blocker.
+   `reason` is `ci`, `review`, `merge_slot`, or `local` (a run on this machine: a test suite, a build, a review fork). `pr` is a real PR number. Leave it out for a local run, never `pr="0"`. For local runs include the harness `task_id` so expiry mail identifies the task to inspect. The attributes feed the idle event and the claim-lease math. If the daemon wake route is unavailable or the claim lease cannot renew, loop-check ignores the tag and reports the blocker.
 
 3. **On wake, re-check and either proceed or re-arm.** The harness re-invokes you when the watcher exits (settle, timeout, or kill). If the state settled, proceed. If the timeout fired and it is still pending, re-arm the watcher and re-emit `<watching>` - one cheap turn per ~30 min instead of one per ~90 s.
 

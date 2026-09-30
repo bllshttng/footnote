@@ -358,6 +358,16 @@ pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
     Ok(payload)
 }
 
+pub(crate) fn overdue_watches_reading() -> Result<Value, String> {
+    let rows = crate::watch_expiry::overdue(&crate::paths::AgentsHome::from_env())?;
+    Ok(json!({
+        "rows": rows.into_iter().map(|watch| json!({
+            "session_id": watch.session_id,
+            "overdue_ms": watch.overdue_ms,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// The finished background subagents this session still holds, read from
 /// its own claude transcript; claude-only, the same posture as the refusal
 /// and wake readers, and it fails as a reader on every other harness.
@@ -519,7 +529,7 @@ pub(crate) fn held_lines(readings: &[crate::king_checkin::Reading]) -> Vec<Strin
                 "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
             )),
             None => lines.push(format!(
-                "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
+                "  question {qid}: the user answers it on the question board; if this crown asked it: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
             )),
         }
     }
