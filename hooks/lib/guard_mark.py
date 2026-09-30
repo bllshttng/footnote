@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 
@@ -30,18 +31,27 @@ def _resolve_bin():
 
 
 def _resolve_events_path():
-    """FNO_EVENTS_PATH, then the journal the store reads, then the
-    rev-parse degrade. A cwd guess is how guard rows landed in the checkout
-    journal the store ignores."""
+    """FNO_EVENTS_PATH, then the journal the fno package resolves (the pin a
+    harness sets, or the space journal the store reads), then the rev-parse
+    degrade. A cwd guess is how guard rows landed in the checkout journal
+    the store ignores. The package import is best-effort: an installed
+    plugin carries no cli/src, and a hook degrades rather than blocks."""
     pin = os.environ.get("FNO_EVENTS_PATH")
     if pin:
         return pin
-    probe = subprocess.run(
-        ["fno-agents", "state", "path", "events"],
-        capture_output=True, text=True, timeout=5,
-    )
-    if probe.returncode == 0 and probe.stdout.strip():
-        return probe.stdout.strip()
+    try:
+        cli_src = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "cli", "src",
+        )
+        if os.path.isdir(cli_src):
+            if cli_src not in sys.path:
+                sys.path.insert(0, cli_src)
+            from fno.paths import project_events_json
+
+            return str(project_events_json())
+    except Exception:
+        pass
     root = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True, text=True, timeout=5,
