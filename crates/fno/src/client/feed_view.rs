@@ -707,7 +707,13 @@ impl View {
             // on the same path the questions view uses, never a provenance
             // detour (ruling 2026-09-29).
             if item.kind == "question_asked" {
-                return item.r#ref.clone().map(ChromeHit::OpenQuestionDetail);
+                // A row whose question id never landed still inspects: the
+                // click falls back to the provenance modal rather than
+                // resolving to nothing (which would forward to a pane).
+                return Some(match item.r#ref.clone() {
+                    Some(qid) => ChromeHit::OpenQuestionDetail(qid),
+                    None => ChromeHit::OpenFeedDetail(item.clone()),
+                });
             }
             Some(ChromeHit::OpenFeedDetail(item.clone()))
         })
