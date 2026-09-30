@@ -664,7 +664,9 @@ mod tests {
         let mut captured = 0;
         let snapshot = maybe_capture_process_snapshot(&home, pressure_procs.len(), None, || {
             captured += 1;
-            Ok(vec![b'x'; MAX_MACHINE_SNAPSHOT_BYTES * 2])
+            let mut ps_output = b"PID PPID RSS ELAPSED COMMAND\n".to_vec();
+            ps_output.extend(vec![b'x'; MAX_MACHINE_SNAPSHOT_BYTES * 2]);
+            Ok(ps_output)
         })
         .unwrap();
         assert!(snapshot);
@@ -678,13 +680,20 @@ mod tests {
         );
         assert_eq!(captured, 1, "one snapshot per pressure episode");
         let contents = std::fs::read(dir.path().join(MACHINE_SNAPSHOT_NAME)).unwrap();
+        assert!(contents.starts_with(b"captured_at: "));
+        let ps_header = b"PID PPID RSS ELAPSED COMMAND";
+        assert!(contents
+            .windows(ps_header.len())
+            .any(|window| window == ps_header));
         assert!(contents.len() <= MAX_MACHINE_SNAPSHOT_BYTES);
+        assert!(dir.path().join(MACHINE_SNAPSHOT_ACTIVE_NAME).exists());
         assert!(!maybe_capture_process_snapshot(&home, 199, Some(100), || {
             captured += 1;
             Ok(Vec::new())
         })
         .unwrap());
         assert!(dir.path().join(MACHINE_SNAPSHOT_NAME).exists());
+        assert!(!dir.path().join(MACHINE_SNAPSHOT_ACTIVE_NAME).exists());
         assert!(maybe_capture_process_snapshot(&home, 201, Some(100), || {
             captured += 1;
             Ok(b"baseline threshold crossed\n".to_vec())
