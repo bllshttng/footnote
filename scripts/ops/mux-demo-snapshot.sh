@@ -40,8 +40,12 @@ printf '{"sideline_view":"backlog","experimental_backlog_view":true}\n' >"$ROOT/
 cd "$ROOT/code/checkout"
 # Invented work. The board's lanes come from priority, and its scope from
 # the server's project, so these stay unscoped.
-file() { # file <priority> <title>
-  "$FNO" backlog idea "$2" -p "$1" --difficulty medium >/dev/null
+IDS=()
+file() { # file <priority> <title> : record the id, show the demo's home path
+  local id
+  id="$("$FNO" backlog idea "$2" -p "$1" --difficulty medium | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  "$FNO" backlog update "$id" --set cwd='~/code/checkout' >/dev/null
+  IDS+=("$id")
 }
 file p1 "Rate limit the checkout api per key"
 file p1 "Retry webhooks with backoff and a dead-letter queue"
@@ -53,6 +57,21 @@ file p2 "Split the payments module out of the monolith"
 file p2 "Remove the legacy coupon service"
 file p3 "Move image resizing to a queue worker"
 file p3 "Support Apple Pay on the checkout page"
+
+# The three panes work the first three nodes: a claim moves each node to In
+# Progress, and a session row names the harness session its pane runs.
+SIDS=(7d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6 0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b ses_3f9a1c2b7e4dA1b2C3d4E5f6g7)
+HARNESSES=(claude codex opencode)
+for i in 0 1 2; do
+  "$FNO" agents claim acquire "node:${IDS[$i]}" --holder "target-session:${SIDS[$i]}" --ttl 2h --pid-unavailable >/dev/null
+  "$FNO" backlog session add "${IDS[$i]}" --phase execute --harness "${HARNESSES[$i]}" --session-id "${SIDS[$i]}" >/dev/null
+done
+# The selected card carries a plan and a rank. --operator: this script is
+# the operator's own tool, writing a graph that dies with the shot.
+mkdir -p "$ROOT/code/checkout/plans"
+printf -- '---\nstatus: ready\n---\n# Rate limit the checkout api per key\n' >"$ROOT/code/checkout/plans/rate-limit.md"
+"$FNO" backlog update "${IDS[0]}" --plan-path '~/code/checkout/plans/rate-limit.md' >/dev/null
+"$FNO" backlog rank "${IDS[0]}" --top --operator >/dev/null
 
 # Pane text: an invented transcript per harness, shown by a process that
 # never prints a prompt. The cursor is hidden, so no block reads as a glyph.
@@ -130,13 +149,14 @@ run "${W[@]}" --worker scribe -- sh -c "$(show "$ROOT/text/docs.txt")"
 
 # The registry rows that name each pane's harness, model and state. The
 # server reads the registry on an interval, so wait a few seconds for it.
-python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${PANES[@]}" <<'PY'
+python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${SIDS[@]}" "${PANES[@]}" <<'PY'
 import json, sys, datetime
 path, server, cwd = sys.argv[1:4]
-ids = [int(p) for p in sys.argv[4:]]
+sids = sys.argv[4:7]
+ids = [int(p) for p in sys.argv[7:]]
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-def row(name, harness, model, pane, state):
-    return {
+def row(name, harness, model, pane, state, sid=None):
+    return {"harness_session_id": sid} | {
         "name": name, "cwd": cwd, "harness": harness, "model": model,
         "status": "live", "liveness": "alive", "liveness_measured_at": now,
         "created_at": now, "last_message_at": now, "substrate": "pane",
@@ -144,9 +164,9 @@ def row(name, harness, model, pane, state):
         "inside_leg": {"state": state, "seq": 1, "received_at": now},
     }
 json.dump({"schema_version": 1, "agents": [
-    row("archer", "codex", "gpt-6-sol", ids[0], "working"),
-    row("scout", "claude", "opus", ids[1], "done"),
-    row("reviewer", "opencode", "zen", ids[2], "blocked"),
+    row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
+    row("scout", "claude", "opus", ids[1], "done", sids[0]),
+    row("reviewer", "opencode", "zen", ids[2], "blocked", sids[2]),
     row("pager", "pi", "glm-5", ids[3], "working"),
     row("scribe", "claude", "sonnet", ids[4], "done"),
 ]}, open(path, "w"))
