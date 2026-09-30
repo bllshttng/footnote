@@ -122,6 +122,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
 | `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`), every reader resolving through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |
 | `backups/state-root-migration/<stamp>/` | `crates/fno-agents/src/state_layout.rs::migrate` | parked legacy copies from the state-root migration, one stamp folder per apply run; the layout table's park rows and every conflict-parked legacy file land here. Never swept; deletion requires a recovery receipt with zero missing event identities and the operator's yes |
+| `backups/state-recovery/<digest>/` | `crates/fno/src/state_recovery.rs::apply` | verified SQLite snapshots, consumer sidecar snapshots and the immutable recovery batch manifest. Retain until the operator approves a separate rollback or removal. |
 | `inbox/` | `paths.inbox_agents_root()` (`cli/src/fno/paths.py`), the mail bus's fallback root: one mailbox per agent handle under `agents/` | mail drains per handle; a drained envelope is acked away |
 | `.interrupted-writes/` | `crates/fno-agents/src/daemon.rs` (quarantine) | writes caught mid-flight; released after the write settles |
 | `logs/` | `cli/src/fno/agents/mux_spawn.py` (spawn logs), `pr_watch/_install.py` and `backlog/groom.py` (the launchd plist `StandardOutPath`/`StandardErrorPath`), `hooks/git-protection.py` (`logs/merge-gate-overrides.log`), the corrections hook family (`logs/corrections.log`, resolved through `scripts/lib/corrections-lock.sh` and `crates/fno-agents/src/finalize.rs::corrections_log_path`) | unrotated spawn logs plus the moved writers |
@@ -294,3 +295,21 @@ A worker whose sandbox denies the fno state root has lost the claim store, the m
 The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. Moving it into the space puts it behind the very grant that was denied. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
 
 It carries the denied absolute root, the harness session id, and a UTC timestamp. A successful claim write clears it, because a stale breadcrumb reads as a live problem forever.
+
+## Recover parked history
+
+Run `fno doctor event recover --root ~/.fno` for a read-only audit. The command reports each parked store, missing identities, conflicts and a packet digest. Unsupported schemas or changing sources refuse recovery. It never removes a backup.
+
+Event families use `event_id` rather than the source sequence. Recovery preserves every non-sequence value and assigns destination sequences. A `recovery_history` ledger commits with each imported family. Historical reads remain visible. Activity readers suppress recovered rows without advancing across genuine concurrent controls.
+
+For copied stores, use `--apply --copy-proof --packet-digest <digest>`. The physical root must be under an OS temporary directory. Each destination must have a different inode from its live counterpart. Pass copied consumer files with repeatable `--sidecar <path>` arguments. Sidecar bytes are captured before the audit, so a later genuine edit differs from its recovery baseline.
+
+Live apply requires `--apply --packet-digest <digest> --packet <file> --approval <decision-id>`. The packet names the absolute root, audit digest, zero historical effects, genuine controls handled once, consumer inventory, verified artifacts and consumer sidecars. An active operator law must state `approve state recovery <absolute-root> <audit-digest> <packet-file-sha256>`. Agent or crown coordination cannot grant apply. A worktree binary cannot apply to operator stores.
+
+Before any family writes, recovery snapshots all five stores through SQLite's backup API and checks integrity. Snapshot receipts include hashes, inode identities, schema versions, row counts and sequence high-water marks. Required sidecar failures abort. Resuming the same packet verifies its original sources and snapshots, then imports only its remaining approved identities. Conflicting live identities refuse instead of overwriting concurrent writes.
+
+Include existing question pages in the sidecar inventory. Recovery does not deliver a new page for an old ask. An unchanged historical page cannot record an answer. A later page edit remains actionable. A missing or altered baseline holds that page rather than replaying its old tick.
+
+Approvals and archive stores are audited by owning primary keys. Derived archive FTS tables are excluded from identity counts. Missing owning rows in either family hold apply until their replay-safe recovery exists. `zero_missing` requires every audited family to be complete and readable.
+
+Keep migration backups, recovery snapshots and the ledger. Pruning needs a fresh zero-missing audit and separate operator approval. Never restore a snapshot over live stores automatically. Such a restore can discard intervening writes. Rollback requires an approved identity-based plan that accounts for those writes.

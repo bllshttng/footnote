@@ -10,7 +10,8 @@ use crate::attention_file::{
     DoneEntry, FileAnswer, IndexEntry, PageFront,
 };
 use crate::attention_route::{Router, Routing};
-use serde_json::json;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -199,6 +200,9 @@ pub fn tick_pages(
     let mut routing_err: Option<String> = None;
     let mut fresh: Vec<(String, &AttentionItem, Routing)> = Vec::new();
     for item in &routed {
+        if item.recovery_batch.is_some() {
+            continue;
+        }
         if pages.iter().any(|p| p.front.question_id == item.id) || done_ids.contains(&item.id) {
             continue;
         }
@@ -253,6 +257,47 @@ pub fn tick_pages(
         let Some(item) = open_by_id.get(id.as_str()) else {
             continue;
         };
+        if let Some(batch) = &item.recovery_batch {
+            if batch.len() != 64 || !batch.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            let questions =
+                crate::provider_cap::questions_path(&crate::paths::AgentsHome::from_env());
+            let store = crate::event_store::store_path(&questions);
+            let Some(root) = store.parent().and_then(Path::parent) else {
+                continue;
+            };
+            let manifest = root
+                .join("backups/state-recovery")
+                .join(batch)
+                .join("snapshots.json");
+            let baseline = io
+                .read(&manifest)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
+                .and_then(|rows| {
+                    rows.into_iter().find(|r| {
+                        r["source"].as_str().is_some_and(|source| {
+                            std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source))
+                                == std::fs::canonicalize(&page.path)
+                                    .unwrap_or_else(|_| page.path.clone())
+                        })
+                    })
+                });
+            let Some(baseline) = baseline else { continue };
+            let Some(snapshot) = baseline["snapshot"].as_str() else {
+                continue;
+            };
+            let Ok(text) = io.read(Path::new(snapshot)) else {
+                continue;
+            };
+            if baseline["sha256"] != format!("{:x}", Sha256::digest(text.as_bytes())) {
+                continue;
+            }
+            if settle_key(&text) == settle_key(&page.text) {
+                continue;
+            }
+        }
         settle_page(page, item, dir, state, now, settle_secs, io, &mut tick);
     }
 
@@ -791,6 +836,9 @@ fn bounce_not_ready_with(
     let mut dirty = false;
     let mut deferred = 0u64;
     for item in items {
+        if item.recovery_batch.is_some() {
+            continue;
+        }
         if item.ready || !matches!(item.kind.as_str(), "question" | "pin") {
             continue;
         }
@@ -1863,6 +1911,92 @@ mod tests {
         let index = io.files[&index_path].clone();
         assert!(index.contains("## Done"), "{index}");
         assert!(index.contains("[[q-a1|"), "{index}");
+        let _declared = crate::paths::DeclaredRoot::declare("recovery_page_baseline");
+        let mut io = MemIo::default();
+        let mut items = vec![ready_item("q-history", "question")];
+        let mut state = HashMap::new();
+        tick_pages(
+            &items,
+            &HashMap::new(),
+            dir.path(),
+            &mut state,
+            1000,
+            0,
+            &mut io,
+        );
+        let page = io.path_of("q-history").unwrap();
+        let baseline = io.files[&page].replace("- [ ] 2.", "- [x] 2.");
+        io.files.insert(page.clone(), baseline.clone());
+        let batch = "a".repeat(64);
+        items[0].recovery_batch = Some(batch.clone());
+        let store = crate::event_store::store_path(&crate::provider_cap::questions_path(
+            &crate::paths::AgentsHome::from_env(),
+        ));
+        let recovery_dir = store
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("backups/state-recovery")
+            .join(&batch);
+        let snapshot = recovery_dir.join("sidecar-0");
+        io.files.insert(snapshot.clone(), baseline.clone());
+        io.files.insert(recovery_dir.join("snapshots.json"),json!([{"source":page,"snapshot":snapshot,"sha256":format!("{:x}",Sha256::digest(baseline.as_bytes()))}]).to_string());
+        state.clear();
+        for now in [1100, 1300] {
+            let tick = tick_pages(
+                &items,
+                &HashMap::new(),
+                dir.path(),
+                &mut state,
+                now,
+                0,
+                &mut io,
+            );
+            assert_eq!(
+                tick.acted(),
+                0,
+                "a restored page's historical tick records and delivers nothing"
+            );
+        }
+        io.files.insert(
+            page.clone(),
+            baseline
+                .replace("- [x] 2.", "- [ ] 2.")
+                .replace("- [ ] 1.", "- [x] 1."),
+        );
+        tick_pages(
+            &items,
+            &HashMap::new(),
+            dir.path(),
+            &mut state,
+            1400,
+            0,
+            &mut io,
+        );
+        let tick = tick_pages(
+            &items,
+            &HashMap::new(),
+            dir.path(),
+            &mut state,
+            1500,
+            0,
+            &mut io,
+        );
+        assert_eq!(
+            tick.recorded, 1,
+            "a genuine new page answer remains actionable"
+        );
+        let repeated = tick_pages(
+            &items,
+            &HashMap::new(),
+            dir.path(),
+            &mut state,
+            1600,
+            0,
+            &mut io,
+        );
+        assert_eq!(repeated.recorded, 0, "the new answer records once");
     }
 
     #[test]

@@ -70,7 +70,7 @@ clap_complete = "4"
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 thiserror = "2"
 tokio = { version = "1", features = [
