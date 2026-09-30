@@ -106,7 +106,12 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_member_on_the_same_rung_is_one_pair() {
+    fn the_rivalry_table_answers_per_pair() {
+        // One scan pins the rule's table: a portfolio over two project kings
+        // rivals EACH (one entry per pair, never a group); disjoint
+        // territories rival nothing; a portfolio and a non-member court stay
+        // legitimate; blank scopes claim nothing; a missing rows array is an
+        // error, never an empty answer.
         let projects = HashMap::from([
             ("alpha".to_string(), "alpha".to_string()),
             ("beta".to_string(), "beta".to_string()),
@@ -134,14 +139,11 @@ mod tests {
             .collect();
         assert!(holders.contains(&vec!["portfolio", "king-a"]));
         assert!(holders.contains(&vec!["portfolio", "king-b"]));
-    }
-
-    #[test]
-    fn disjoint_territories_rival_nothing() {
-        let projects = HashMap::from([
-            ("alpha".to_string(), "alpha".to_string()),
-            ("beta".to_string(), "beta".to_string()),
-        ]);
+        assert_eq!(
+            pairs[0]["scope"].as_str().unwrap(),
+            "alpha",
+            "the pair names the territory it actually shares"
+        );
         let out = scan(
             json!([
                 {"name": "king-a", "crown_scope": "alpha", "crown_level": 0},
@@ -150,14 +152,6 @@ mod tests {
             &projects,
         );
         assert_eq!(out["pairs"], json!([]));
-    }
-
-    #[test]
-    fn a_court_is_legitimate_portfolio_over_its_projects() {
-        let projects = HashMap::from([
-            ("alpha".to_string(), "alpha".to_string()),
-            ("beta".to_string(), "beta".to_string()),
-        ]);
         let out = scan(
             json!([
                 {"name": "portfolio", "crown_scope": "alpha,beta", "crown_level": 2},
@@ -165,22 +159,17 @@ mod tests {
             ]),
             &projects,
         );
-        // e-court resolves to no configured project; the empty-map sibling of
-        // its members rivals nothing the portfolio holds.
+        // e-court resolves to no configured project; its members rival
+        // nothing the portfolio holds.
         assert_eq!(out["pairs"], json!([]));
-    }
-
-    #[test]
-    fn blank_scopes_claim_nothing_and_a_missing_array_is_an_error() {
-        let projects = HashMap::new();
         let out = scan(
             json!([
                 {"name": "blank", "crown_scope": "  ", "crown_level": 2},
                 {"name": "none"}
             ]),
-            &projects,
+            &HashMap::new(),
         );
         assert_eq!(out["pairs"], json!([]));
-        assert!(resolve_with_projects(&json!({"kind": "court-rivals"}), &projects).is_err());
+        assert!(resolve_with_projects(&json!({"kind": "court-rivals"}), &HashMap::new()).is_err());
     }
 }
