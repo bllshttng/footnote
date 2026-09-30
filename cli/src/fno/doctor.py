@@ -1962,10 +1962,8 @@ def _review_invocation_report(
     try:
         from contextlib import nullcontext
         from fno.events.store_client import query_rows
-
-        # In-process SQL read, not the native verb: doctor flows must not
-        # subprocess (the raw-cargo tripwire), and _drained_msg_ids reads
-        # the same way. A torn or unreadable store reads as empty.
+        # In-process SQL read: doctor flows must not subprocess (the
+        # raw-cargo tripwire). A torn or unreadable store reads as empty.
         try:
             rows = query_rows(
                 events_path, types=["review_invocation", "review_attestation"]
@@ -1973,7 +1971,6 @@ def _review_invocation_report(
         except Exception:
             rows = []
         if not rows:
-            # A journal can still carry raw pre-cutover bytes and no store.
             try:
                 with open(events_path, encoding="utf-8") as fh:
                     rows = [
