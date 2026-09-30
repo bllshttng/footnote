@@ -344,6 +344,217 @@ fn sideline_toggle_rows() {
         v.input_owner(),
         crate::client::region_focus::RegionOwner::Board
     );
+    let selected_session = |agent: Option<crate::proto::AgentRow>| {
+        crate::client::org_board::Selected::Session(crate::org_model::OrgSession {
+            view: backlog_model::SessionView {
+                phase: Some("execute".into()),
+                harness: Some("claude".into()),
+                session_id: Some("session-live-full".into()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                agent: Some("worker".into()),
+                action: "attach".into(),
+                reason: None,
+            },
+            agent,
+        })
+    };
+    let agent = crate::proto::AgentRow {
+        name: "worker".into(),
+        harness: Some("claude".into()),
+        harness_session_id: Some("session-live-full".into()),
+        pane_id: Some(44),
+        context_used_pct: Some(26),
+        context_tokens: Some((258687, 1000000)),
+        node: Some("x-1".into()),
+        model: Some("requested-model".into()),
+        started_at: Some(crate::digest_overlay::now_secs() - 10800),
+        ..Default::default()
+    };
+    v.layout.agents = vec![agent.clone()];
+    sock.clear();
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            selected_session(Some(agent.clone())),
+            b'\r',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    let mut expected = Vec::new();
+    rt.block_on(async {
+        crate::proto::write_msg(
+            &mut expected,
+            &crate::proto::ClientMsg::Command(crate::proto::Command::FocusPane(44)),
+        )
+        .await
+        .unwrap();
+    });
+    assert_eq!(sock, expected, "Org Enter uses the existing focus command");
+    assert!(v.org_board.is_none());
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane
+    );
+    crate::client::org_board::open(&mut v);
+    v.layout.agents[0].harness_session_id = Some("successor-full-session".into());
+    sock.clear();
+    rt.block_on(async {
+        crate::client::org_board::dispatch(&mut v, selected_session(None), b'\r', &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(
+        sock.is_empty(),
+        "former identity never selects a same-name successor"
+    );
+    assert_eq!(
+        v.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("no registry row")
+    );
+    v.layout.agents = vec![agent.clone()];
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            selected_session(Some(agent.clone())),
+            b'd',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    let detail = v.org_board.as_ref().unwrap().detail.as_ref().unwrap();
+    let request = detail.request;
+    let identity = detail.identity.clone();
+    let gen = v.org_generation;
+    let message = format!("{} END-FULL-ROSTER-MESSAGE", "full text ".repeat(35));
+    let roster = serde_json::to_vec(&json!({"agents":[{
+        "name":"worker", "harness":"claude", "harness_session_id":"session-live-full",
+        "observed_model":{"model":"actual-model", "kind":"transcript"},
+        "model":"requested-model", "model_basis":"spawn", "effort":"high", "effort_basis":"spawn",
+        "status":"working", "status_basis":"transcript", "progress":"awaiting-operator", "progress_basis":"assistant",
+        "last_message":message,
+    }]})).unwrap();
+    let payload = crate::client::org_detail::select_roster(&roster, &agent).unwrap();
+    let changed = |request, identity, result| crate::client::org_detail::OrgMsg::Detail {
+        request,
+        identity,
+        result,
+    };
+    crate::client::org_detail::apply(
+        &mut v,
+        gen.wrapping_sub(1),
+        changed(request, identity.clone(), Ok(payload.clone())),
+    );
+    let rendered = |v: &View| {
+        v.org_board
+            .as_ref()
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .lines(200)
+            .into_iter()
+            .map(|l| l.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "stale view generation ignored"
+    );
+    crate::client::org_detail::apply(
+        &mut v,
+        gen,
+        changed(request, "other identity".into(), Ok(payload.clone())),
+    );
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "changed selection ignored"
+    );
+    crate::client::org_detail::apply(
+        &mut v,
+        gen,
+        changed(request + 1, identity.clone(), Ok(payload.clone())),
+    );
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "different request ignored"
+    );
+    crate::client::org_detail::apply(&mut v, gen, changed(request, identity, Ok(payload)));
+    let text = rendered(&v);
+    for expected in [
+        "26% used",
+        "258,687 of 1,000,000",
+        "actual-model (transcript)",
+        "requested-model (spawn)",
+        "3h",
+        "x-1",
+        "END-FULL-ROSTER-MESSAGE",
+        "Needs-you:",
+    ] {
+        assert!(text.contains(expected), "detail omitted {expected}: {text}");
+    }
+    assert!(crate::client::org_detail::select_roster(b"{}", &agent).is_err());
+    let ambiguous = serde_json::to_vec(&json!([{"harness":"claude","session_id":"session-live-full"},{"harness":"claude","session_id":"session-live-full"}])).unwrap();
+    assert!(crate::client::org_detail::select_roster(&ambiguous, &agent)
+        .unwrap_err()
+        .contains("ambiguous"));
+    rt.block_on(async {
+        crate::client::org_board::keys(&mut v, &[27], &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(v.org_board.as_ref().unwrap().detail.is_none());
+    let mut short = agent.clone();
+    short.harness_session_id = Some("abcdef01-first".into());
+    v.layout.agents = vec![short.clone()];
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("abcdef01"),
+        Some("claude"),
+        None
+    )
+    .is_some());
+    short.harness_session_id = Some("abcdef01-second".into());
+    v.layout.agents.push(short);
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("abcdef01"),
+        Some("claude"),
+        None
+    )
+    .is_none());
+    assert!(crate::client::node_detail::resolve_session(&v, None, None, None).is_none());
+    let inputs = board_inputs();
+    let node = backlog_model::node(&inputs, "x-1").unwrap();
+    v.org_board.as_mut().unwrap().inputs = Some(inputs);
+    v.experimental_backlog = false;
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            crate::client::org_board::Selected::Node(node),
+            b'\r',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    assert!(v.org_board.is_none());
+    assert_eq!(
+        v.backlog_board
+            .as_ref()
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "x-1"
+    );
+    assert_eq!(v.sideline_view, crate::view_store::SidelineView::Backlog);
 
     let mut v = key_view(board_with(board_inputs()));
     let mut sock: Vec<u8> = Vec::new();

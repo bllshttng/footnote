@@ -1862,6 +1862,7 @@ mod config_set;
 mod lane_entry;
 mod node_detail;
 mod org_board;
+mod org_detail;
 mod org_graph;
 mod overlay_paint;
 mod release_check;
@@ -8138,8 +8139,7 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<theme_import_ui::ImportMsg>();
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
-    let (org_tx, mut org_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, crate::org_model::OrgInputs)>();
+    let (org_tx, mut org_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, org_detail::OrgMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -8934,8 +8934,8 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
-            Some((gen, inputs)) = org_rx.recv() => {
-                org_board::apply_fold(&mut view, gen, inputs);
+            Some((gen, msg)) = org_rx.recv() => {
+                org_detail::apply(&mut view, gen, msg);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }

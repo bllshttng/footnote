@@ -3,7 +3,7 @@ use crate::org_model::{OrgInputs, OrgSession, OrgSnapshot};
 use crate::view_store::{OrgMode, OrgSessions, SidelineView};
 use std::collections::HashSet;
 
-pub(crate) type OrgTx = tokio::sync::mpsc::UnboundedSender<(u64, OrgInputs)>;
+pub(crate) type OrgTx = tokio::sync::mpsc::UnboundedSender<(u64, super::org_detail::OrgMsg)>;
 #[derive(Clone)]
 pub(crate) enum Selected {
     Lead(AgentRow),
@@ -24,6 +24,9 @@ pub(crate) struct OrgBoard {
     pub(crate) filter: OrgSessions,
     pub(crate) query: String,
     pub(crate) gen: u64,
+    pub(crate) detail: Option<super::org_detail::WorkerDetail>,
+    pub(crate) detail_request: u64,
+    pub(crate) tx: Option<OrgTx>,
     inflight: bool,
     last_read: Option<Instant>,
     collapsed: HashSet<String>,
@@ -45,6 +48,9 @@ impl OrgBoard {
             filter,
             query: String::new(),
             gen,
+            detail: None,
+            detail_request: 0,
+            tx: None,
             inflight: false,
             last_read: None,
             collapsed: HashSet::new(),
@@ -300,6 +306,9 @@ impl OrgBoard {
     }
     pub(crate) fn lines(&self, width: usize, height: usize) -> Vec<super::backlog_style::BLine> {
         use super::backlog_style::BLine;
+        if let Some(detail) = &self.detail {
+            return detail.lines(width);
+        }
         if self.keys_help {
             return [
                 "Org keys",
@@ -494,6 +503,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &OrgTx) {
     let Some(b) = view.org_board.as_mut() else {
         return;
     };
+    b.tx = Some(tx.clone());
     if b.inflight
         || b.last_read
             .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
@@ -507,7 +517,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &OrgTx) {
     let tx = tx.clone();
     tokio::spawn(async move {
         let inputs = crate::org_model::gather(&crate::backlog_view::graph_path(), agents).await;
-        let _ = tx.send((gen, inputs));
+        let _ = tx.send((gen, super::org_detail::OrgMsg::Gather(inputs)));
     });
 }
 pub(crate) fn apply_fold(view: &mut View, gen: u64, inputs: OrgInputs) {
@@ -553,7 +563,11 @@ pub(crate) fn paint(
         width,
         height.saturating_sub(1),
         &lines,
-        Some(b.cursor + if b.mode == OrgMode::Table { 2 } else { 1 }),
+        if b.detail.is_some() {
+            None
+        } else {
+            Some(b.cursor + if b.mode == OrgMode::Table { 2 } else { 1 })
+        },
         &view.theme,
     );
     super::backlog_style::paint_panel(
@@ -628,6 +642,21 @@ pub(crate) async fn keys(
         let Some(b) = view.org_board.as_mut() else {
             break;
         };
+        if let Some(detail) = b.detail.as_mut() {
+            match token {
+                ModalKey::Esc | ModalKey::Byte(b'q') => {
+                    b.detail = None;
+                }
+                ModalKey::Up | ModalKey::Byte(b'k') => {
+                    detail.scroll = detail.scroll.saturating_sub(1)
+                }
+                ModalKey::Down | ModalKey::Byte(b'j') => {
+                    detail.scroll = detail.scroll.saturating_add(1)
+                }
+                _ => {}
+            }
+            continue;
+        }
         match token {
             ModalKey::Esc | ModalKey::Byte(b'q') => {
                 if b.keys_help {
@@ -700,24 +729,7 @@ pub(crate) async fn keys(
     }
     Ok(StdinFlow::Continue)
 }
-pub(crate) async fn dispatch(
-    view: &mut View,
-    selected: Selected,
-    _key: u8,
-    _sock: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    let notice = match selected {
-        Selected::Lead(a) => format!("Lead {}", a.name),
-        Selected::Node(n) => format!("{} {}", n.card.id, n.card.title),
-        Selected::Session(s) => s
-            .view
-            .reason
-            .clone()
-            .unwrap_or_else(|| session_line(&s, now())),
-    };
-    view.set_notice(notice);
-    Ok(())
-}
+pub(crate) use super::org_detail::dispatch;
 
 #[cfg(test)]
 pub(super) fn check_fixture(view: &mut View) {
@@ -848,6 +860,9 @@ pub(crate) async fn mouse(
     let Some(b) = view.org_board.as_mut() else {
         return Ok(());
     };
+    if b.detail.is_some() {
+        return Ok(());
+    }
     if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
         let rows = b.rows();
         if b.mode == OrgMode::Graph {
