@@ -8,7 +8,7 @@ use super::*;
 
 #[cfg(test)]
 thread_local! {
-    /// Test gate for the post-resume registry rebind (x-85c3): off in tests
+    /// Test gate for the post-resume registry rebind: off in tests
     /// unless a test opts in, so the existing restore tests never shell the
     /// real fno-agents binary from apply.
     static RESTORE_REBIND_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -120,7 +120,7 @@ impl super::Core {
     ) {
         use self::portal_reach::RESTORE_CLIENT;
         let candidates = self.restore_candidates(harness.as_deref());
-        // (x-85c3) One rebind job per resumed member whose registry row
+        // One rebind job per resumed member whose registry row
         // carried a native session id: the pane is running, and the row it
         // left behind names the DEAD pane, so mail, pane send, and
         // `fno agents resume` refuse it until this lands. The jobs run
@@ -219,7 +219,7 @@ impl super::Core {
                 )
                 .ok();
             }
-            // The native session id rides the rebind job (x-85c3); `member`
+            // The native session id rides the rebind job; `member`
             // moves into resume_one below.
             let rebind_session = (!dry_run && rebind_enabled())
                 .then(|| member.harness_session_id.clone())
@@ -282,7 +282,7 @@ impl super::Core {
                     notice: None,
                 },
             };
-            // (x-85c3) Collect the rebind job BEFORE the row consumes the
+            // Collect the rebind job BEFORE the row consumes the
             // member: a resumed member whose row carried a native session id
             // and a child pid rebinds off-loop; the dry run never does.
             if !dry_run && rebind_enabled() && row.outcome == "resumed" {
@@ -332,7 +332,7 @@ impl super::Core {
             let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
             return;
         }
-        // Off-loop rebind (x-85c3): each job shells `fno-agents pane-rebind`
+        // Off-loop rebind: each job shells `fno-agents pane-rebind`
         // bounded, and the reply waits for every receipt so the verb's own
         // report carries it. The pane is running either way, so a failed
         // rebind degrades to its named notice on the row, never a refusal.

@@ -2219,7 +2219,7 @@ fn focusing_a_held_claude_pane_runs_the_revive_plan_even_when_the_session_is_liv
 
 #[tokio::test]
 async fn workspace_restore_rebinds_the_resumed_members_registry_row() {
-    // (x-85c3) A resumed member whose registry row carried a native session
+    // A resumed member whose registry row carried a native session
     // id rebinds off-loop: the row names the new pane, carries the child
     // pid, and the receipt row's notice says so. The rebind runs against a
     // fake fno-agents binary; the gate keeps every other test inert.
@@ -2230,7 +2230,7 @@ async fn workspace_restore_rebinds_the_resumed_members_registry_row() {
     set_resume_program(&["/bin/cat"]);
     let _known = KnownWorkersGuard;
     set_known_workers(&["t-codex-one"]);
-    let tmp = std::env::temp_dir().join(format!("fno-x-85c3-rebind-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("fno-restore-rebind-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let argv_log = tmp.join("argv.log");

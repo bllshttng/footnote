@@ -534,7 +534,9 @@ impl super::Core {
 /// fail-closed-per-job shape as [`run_reentry_plan`]: the restore walk just
 /// spawned the row's pane, and this is what moves its registry row onto it
 /// (mux ref, pid, Live) instead of leaving it orphaned on the dead pane. The
-/// receipt line the verb prints is the notice the restore row carries.
+/// receipt line the verb prints is the notice the restore row carries. The
+/// bound sits under the client's 10s control timeout because the restore
+/// reply waits for every receipt.
 pub(super) async fn run_pane_rebind(
     harness: &str,
     session_id: &str,
@@ -542,7 +544,7 @@ pub(super) async fn run_pane_rebind(
     pane: u64,
     pid: u32,
 ) -> Result<String, String> {
-    const REBIND_TIMEOUT: Duration = Duration::from_secs(20);
+    const REBIND_TIMEOUT: Duration = Duration::from_secs(8);
     let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command.args([
         "pane-rebind",
