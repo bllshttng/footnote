@@ -526,12 +526,7 @@ mod tests {
     }
 
     fn journal_submits(dir: &Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(dir.join("events.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v["type"] == "operator_submit")
-            .collect()
+        journal_rows(dir, "operator_submit")
     }
 
     #[test]
@@ -780,12 +775,14 @@ mod tests {
     }
 
     fn journal_rows(dir: &Path, event_type: &str) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(dir.join("events.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v["type"] == event_type)
-            .collect()
+        crate::event_store::query_events(
+            &dir.join("events.jsonl"),
+            &crate::event_store::EventQuery::of_types(&[event_type]),
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| serde_json::from_str(&row.line).ok())
+        .collect()
     }
 
     fn typing_client_core() -> super::super::Core {

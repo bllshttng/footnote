@@ -1,7 +1,6 @@
 //! The pane-send audit row: the record `fno mux pane send` writes so
 //! "who told this worker to do that" is one grep, not a transcript sweep.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::mux_cli::{

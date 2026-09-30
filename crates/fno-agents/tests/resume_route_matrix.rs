@@ -81,7 +81,7 @@ impl Fixture {
     }
 
     fn events(&self) -> String {
-        fs::read_to_string(self.root.path().join("events.jsonl")).unwrap_or_default()
+        fno_agents::event_store::journal_text(&self.root.path().join("events.jsonl"), &[])
     }
 
     fn write_registry_entries(&self, entries: &[Value]) {

@@ -1961,14 +1961,29 @@ def _review_invocation_report(
         ]
     try:
         from contextlib import nullcontext
-        from fno.events.log import read_events
+        from fno.events.store_client import query_rows
 
+        # In-process SQL read, not the native verb: doctor flows must not
+        # subprocess (the raw-cargo tripwire), and _drained_msg_ids reads
+        # the same way. A torn or unreadable store reads as empty.
         try:
-            rows = read_events(events_path)
-        except ValueError:
-            # A corrupt raw-only parse degrades to an empty read; good rows
-            # are read back the moment the binary can answer again.
+            rows = query_rows(
+                events_path, types=["review_invocation", "review_attestation"]
+            )
+        except Exception:
             rows = []
+        if not rows:
+            # A journal can still carry raw pre-cutover bytes and no store.
+            try:
+                with open(events_path, encoding="utf-8") as fh:
+                    rows = [
+                        parsed
+                        for line in fh
+                        if line.strip()
+                        for parsed in (json.loads(line),)
+                    ]
+            except (OSError, json.JSONDecodeError):
+                rows = []
         with nullcontext(rows) as stream:
             for event in stream:
                 data = event.get("data")

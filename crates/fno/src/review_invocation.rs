@@ -3,7 +3,6 @@
 //! confirmed delivery. Pure move out of `mux_cli.rs` (file-budget shrink),
 //! no edits.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn review_invocation_command(bytes: &[u8]) -> Option<(String, String)> {
