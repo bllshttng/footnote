@@ -101,9 +101,9 @@ pub(crate) use name_fit::{fit_name, pad_to};
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Connect bound for the attach path. Longer than the scriptable verbs'
-/// probe (a human is willing to wait a beat) but never infinite: a wedged
-/// server must produce a clear line, not a hang.
+/// One connect attempt on the attach path. Longer than the scriptable verbs'
+/// probe. A script refuses when it expires; a human attach says it is still
+/// waiting and tries again.
 const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sideline width in columns at [`Density::Regular`], divider column included.
@@ -407,7 +407,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     }
     let path = proto::socket_path(session)?;
 
-    let stream = connect_or_spawn(&path)?;
+    let stream = connect_or_spawn(&path, true)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
@@ -431,34 +431,40 @@ fn client_log_append(path: &Path, msg: &str) {
 /// server's stale socket gets a one-line notice and a fresh server - never a
 /// hang on a dead socket (the spawned server's bind unlinks it). Shared with
 /// `mux_cli::pane run`, which must self-spawn a server for a script-only
-/// session (AC1-EDGE).
-pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+/// session (AC1-EDGE). `patient` is the human attach: a slow or starved
+/// server gets one "still waiting" line and more time, never a refusal.
+pub(crate) fn connect_or_spawn(
+    path: &Path,
+    patient: bool,
+) -> Result<std::os::unix::net::UnixStream, String> {
     // spawn_server opens a log file in the mux dir, so the dir must exist first.
     // pane run reaches here without going through run_inner's ensure (AC1-EDGE).
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
-    match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
-        Ok(s) => {
-            e2e_client_log(format_args!(
-                "connected to live server at {}",
-                path.display()
-            ));
-            return Ok(s);
-        }
-        // A connect timeout means something holds the socket but never
-        // accepted: a wedged server. Spawning over it would just lose the
-        // bind race, so report instead - never hang, never clobber.
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(format!(
-                "server at {} is not accepting connections (connect timed out); it is \
-                 wedged. Run `fno mux kill-server` for this session: it escalates to \
-                 SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
-                 then retry.",
-                path.display(),
+    let mut said = false;
+    let mut still_waiting = |what: &str| {
+        if !std::mem::replace(&mut said, true) {
+            eprintln!(
+                "fno: {what}, still waiting (Ctrl-C to stop; check {})",
                 log_path(path).display()
-            ));
+            );
         }
-        Err(e) => {
-            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+    };
+    loop {
+        match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
+            Ok(s) => {
+                e2e_client_log(format_args!(
+                    "connected to live server at {}",
+                    path.display()
+                ));
+                return Ok(s);
+            }
+            // Something holds the socket but is not accepting: a starved or
+            // wedged server. A human waits it out; spawning over it would
+            // only lose the bind race.
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut && patient => {
+                still_waiting("server is busy");
+            }
+            Err(e) => break connect_failed(path, e)?,
         }
     }
     if path.exists() {
@@ -469,6 +475,10 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
     loop {
         match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
             Ok(s) => return Ok(s),
+            Err(_) if Instant::now() >= deadline && patient => {
+                still_waiting("server is slow to start");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!(
                     "server did not come up at {} ({e}); check {}",
@@ -477,6 +487,25 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
                 ));
             }
             Err(_) => std::thread::sleep(Duration::from_millis(30)),
+        }
+    }
+}
+
+/// A first connect that failed: a timeout refuses (the non-patient caller
+/// never clobbers a wedged server), anything else means spawn a server.
+fn connect_failed(path: &Path, e: std::io::Error) -> Result<(), String> {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => Err(format!(
+            "server at {} is not accepting connections (connect timed out); it is \
+             wedged. Run `fno mux kill-server` for this session: it escalates to \
+             SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
+             then retry.",
+            path.display(),
+            log_path(path).display()
+        )),
+        _ => {
+            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+            Ok(())
         }
     }
 }
