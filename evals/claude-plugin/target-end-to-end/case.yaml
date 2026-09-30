@@ -1,4 +1,0 @@
-schema_version: "1.1"
-name: target-end-to-end
-context:
-  scaffold_script: fixture.sh

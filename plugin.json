@@ -1,5 +1,0 @@
-{
-  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
-  "name": "footnote",
-  "description": "Footnote delivery workflow: plan, execute, review, and ship work with the fno mesh."
-}

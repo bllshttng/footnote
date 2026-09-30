@@ -1,8 +1,0 @@
-{
- "captured_from": "3b58aad3b91bdc13ed1f1187dff0eda8046397f9",
- "seed": "SEED in capture_add_goldens.py and backlog_write_goldens.rs",
- "identity": "FNO_HARNESS_NAME claude + FNO_HARNESS_SESSION_ID golden-fixed-session-0001 on cases that set identity",
- "cases": 15,
- "masking": "<FIXTURE> fixture dir, <PATH> other abs /Users|/home path, <TS> timestamps, <MINTED> the case's minted node id",
- "runner": "python cli (fno.graph.cli _create_node_impl) - the leg PR four deletes"
-}

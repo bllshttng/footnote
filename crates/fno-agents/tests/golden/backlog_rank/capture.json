@@ -1,8 +1,0 @@
-{
- "captured_from": "042834775e6a4aedb8ad42316e580a93771e77e6",
- "seed": "SEED in capture_update_goldens.py and backlog_write_goldens.rs",
- "identity": "FNO_HARNESS_NAME claude + FNO_HARNESS_SESSION_ID golden-fixed-session-0001",
- "cases": 14,
- "masking": "<FIXTURE> fixture dir, <PATH> other abs /Users|/home path, <TS> timestamps",
- "runner": "native fno-agents (rank ported in PR two; originally characterized from Python at efda1dbdfb, goldens-rank/goldens.json)"
-}
