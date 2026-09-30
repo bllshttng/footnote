@@ -126,7 +126,7 @@ Worktrees symlink that path to the canonical checkout's journal, and a write fai
 
 An unobservable walk that continues spending compute is worse than stopping.
 
-**Global mirror (`~/.fno/events.jsonl`) is best-effort.** A write failure is logged to stderr and never propagated. The store beside each journal is the record (event-log-storage.md); a mirror row is convenience for cross-project tooling, never the record.
+**Global mirror (`~/.fno/events.jsonl`) is best-effort.** A write failure is logged to stderr and never propagated. The store beside each journal is the record (event-log-storage.md). A mirror row is convenience for cross-project tooling, never the record.
 
 The method is named `append` (not `emit` or `emit_fields`) deliberately - see "Two-tier event model" below.
 
