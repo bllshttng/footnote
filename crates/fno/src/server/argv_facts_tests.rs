@@ -68,3 +68,27 @@ fn account_from_argv_reads_the_fno_account_token() {
     assert_eq!(from(&["claude"]), None);
     assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
 }
+
+#[test]
+fn argv_runs_claude_matches_command_positions_only() {
+    let from = |a: &[&str]| argv_runs_claude(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    // Bare and env-wrapped claude.
+    assert!(from(&["claude"]));
+    assert!(from(&["env", "FNO_AGENT_SELF=w", "claude"]));
+    // A QoS wrapper re-anchors the command after its `--` terminator.
+    assert!(from(&[
+        "env",
+        "FNO_AGENT_SELF=w",
+        "/usr/sbin/taskpolicy",
+        "-c",
+        "utility",
+        "--",
+        "claude"
+    ]));
+    // An argument naming claude is never the command.
+    assert!(!from(&["man", "claude"]));
+    assert!(!from(&["bash", "-c", "claude --print"]));
+    assert!(!from(&["env", "A=b", "taskpolicy", "--", "codex"]));
+    // No command at all.
+    assert!(!from(&["env", "A=b"]));
+}

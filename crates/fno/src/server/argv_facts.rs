@@ -66,16 +66,25 @@ pub(super) fn agent_self_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_AGENT_SELF=")
 }
 
-/// Whether the spawned command is claude: any command-shaped token past the
-/// `env` wrapper whose basename is `claude` (a QoS wrapper around it does not
-/// hide it). ponytail: a claude NAMED IN AN ARGUMENT of some other command
-/// also matches - only the spawn-path theme flag consumes this, and that
-/// false positive costs a harmless extra flag.
+/// Whether the spawned command is claude: the first command-shaped token
+/// past the `env` assignment run, or the token a wrapper's `--` terminator
+/// re-anchors (taskpolicy -c utility -- claude). An argument can never name
+/// the command, so `man claude` and `bash -c '... claude ...'` do not match.
 pub(super) fn argv_runs_claude(argv: &[String]) -> bool {
     let start = env_assignments_start(argv).unwrap_or(0);
-    argv[start..]
-        .iter()
-        .any(|a| !a.contains('=') && a.rsplit('/').next() == Some("claude"))
+    let rest = &argv[start..];
+    let is_claude = |t: &str| t.rsplit('/').next() == Some("claude");
+    let body = match rest.iter().position(|a| !a.contains('=')) {
+        Some(i) => &rest[i..],
+        None => return false,
+    };
+    if is_claude(&body[0]) {
+        return true;
+    }
+    match body.iter().position(|a| a == "--") {
+        Some(i) => body.get(i + 1).is_some_and(|t| is_claude(t)),
+        None => false,
+    }
 }
 
 /// The argv index where the `env(1)` `NAME=VALUE` assignment run begins:
