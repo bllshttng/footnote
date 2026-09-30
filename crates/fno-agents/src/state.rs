@@ -226,6 +226,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // to 1..=34.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
+// v38 preserves sweep-owned context and unread measurements across writers.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;

@@ -209,6 +209,11 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
         short_id="abc123",
         harness_session_id=None,
         log_path="/tmp/my-agent.log",
+        context_used_pct=26,
+        context_used_tokens=258_687,
+        context_window_tokens=1_000_000,
+        context_measured_at="2026-09-30T12:00:00Z",
+        mail_unread=1,
     )
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -223,6 +228,11 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     assert e.short_id == "abc123"
     assert e.harness_session_id is None
     assert e.log_path == "/tmp/my-agent.log"
+    assert e.context_used_pct == 26
+    assert e.context_used_tokens == 258_687
+    assert e.context_window_tokens == 1_000_000
+    assert e.context_measured_at == "2026-09-30T12:00:00Z"
+    assert e.mail_unread == 1
     # AC1-HP: model provider is explicit and unset; removed session aliases die.
     raw_row = json.loads(registry_path.read_text())["agents"][0]
     assert raw_row["provider"] is None
