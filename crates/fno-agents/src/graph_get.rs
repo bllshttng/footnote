@@ -168,6 +168,13 @@ pub fn run_graph_get(args: &[String]) -> i32 {
                     println!("{}", crate::tracker::run_door(&payload));
                     return 0;
                 }
+                if payload
+                    .as_object()
+                    .is_some_and(|o| o.contains_key("pr_draft_ready"))
+                {
+                    println!("{}", crate::pr_draft_ready::run_door(&payload));
+                    return 0;
+                }
             }
         }
     }

@@ -288,6 +288,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_draft_ready;
 pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
@@ -1358,6 +1359,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The pr-watch sweep flipped an open fno-bound draft PR back to ready
+    // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
+    "pr_watch_draft_flip",
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
