@@ -234,12 +234,17 @@ fn watches(evidence: &[Evidence]) -> Vec<Watch> {
 pub(crate) fn overdue(home: &AgentsHome) -> Result<Vec<OverdueWatch>, String> {
     let now_ms = millis_now();
     let evidence = read_evidence(home, now_ms)?;
-    let mut overdue = Vec::new();
-    for watch in watches(&evidence)
+    let due = watches(&evidence)
         .into_iter()
         .filter(|watch| now_ms >= watch.expires_at_ms && is_current_watch(watch, &evidence))
-    {
-        let Some(node) = current_node_claim(home, &watch.session_id)? else {
+        .collect::<Vec<_>>();
+    if due.is_empty() {
+        return Ok(Vec::new());
+    }
+    let claims = current_node_claims(home)?;
+    let mut overdue = Vec::new();
+    for watch in due {
+        let Some(node) = claims.get(&watch.session_id).cloned().unwrap_or(Ok(None))? else {
             continue;
         };
         if !watch.node.is_empty() && node != watch.node {
@@ -253,57 +258,81 @@ pub(crate) fn overdue(home: &AgentsHome) -> Result<Vec<OverdueWatch>, String> {
     Ok(overdue)
 }
 
-pub(crate) fn current_node_claim(
+pub(crate) fn current_node_claims(
     home: &AgentsHome,
-    session_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<std::collections::HashMap<String, Result<Option<String>, String>>, String> {
     let registry = crate::state::load_registry(&home.registry_json())
         .map_err(|error| format!("registry read failed: {error}"))?;
-    let row = registry
-        .entries
-        .iter()
-        .find(|row| registry_session_id(row) == Some(session_id));
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    if matches!(
-        row.status,
-        crate::AgentStatus::Exited
-            | crate::AgentStatus::PermanentDead
-            | crate::AgentStatus::Failed
-            | crate::AgentStatus::Orphaned
-    ) {
-        return Ok(None);
+    let mut sessions = std::collections::HashMap::<String, bool>::new();
+    for row in &registry.entries {
+        let Some(session_id) = registry_session_id(row) else {
+            continue;
+        };
+        sessions.entry(session_id.to_string()).or_insert(!matches!(
+            row.status,
+            crate::AgentStatus::Exited
+                | crate::AgentStatus::PermanentDead
+                | crate::AgentStatus::Failed
+                | crate::AgentStatus::Orphaned
+        ));
+    }
+    let live_sessions: std::collections::HashSet<String> = sessions
+        .into_iter()
+        .filter_map(|(session_id, live)| live.then_some(session_id))
+        .collect();
+    if live_sessions.is_empty() {
+        return Ok(std::collections::HashMap::new());
     }
     let records = crate::claims::list_strict(Some("node:"), None, false)
         .map_err(|error| format!("node claim read failed: {error}"))?;
-    let mut owned = Vec::new();
-    for record in records
-        .iter()
-        .filter(|record| record.session_id.as_deref() == Some(session_id))
-    {
+    let mut owned = std::collections::HashMap::<String, Vec<String>>::new();
+    let mut errors = std::collections::HashMap::<String, String>::new();
+    for record in &records {
+        let Some(session_id) = record
+            .session_id
+            .as_deref()
+            .filter(|session_id| live_sessions.contains(*session_id))
+        else {
+            continue;
+        };
         match crate::claims::status(&record.key, None).0 {
             crate::claims::ClaimState::Live => {
                 if let Some(node) = record.key.strip_prefix("node:") {
-                    owned.push(node.to_string());
+                    owned
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .push(node.to_string());
                 }
             }
             crate::claims::ClaimState::Corrupted => {
-                return Err(format!("node claim {} is unreadable", record.key));
+                errors
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| format!("node claim {} is unreadable", record.key));
             }
             crate::claims::ClaimState::Free
             | crate::claims::ClaimState::Suspect
             | crate::claims::ClaimState::Stale => {}
         }
     }
-    match owned.as_slice() {
-        [node] => Ok(Some(node.clone())),
-        [] => Ok(None),
-        _ => Err(format!(
-            "session {session_id} owns multiple live node claims: {}",
-            owned.join(", ")
-        )),
+    let mut claims = std::collections::HashMap::new();
+    for session_id in live_sessions {
+        if let Some(error) = errors.remove(&session_id) {
+            claims.insert(session_id, Err(error));
+            continue;
+        }
+        let mut nodes = owned.remove(&session_id).unwrap_or_default();
+        nodes.sort();
+        let claim = match nodes.as_slice() {
+            [node] => Ok(Some(node.clone())),
+            [] => Ok(None),
+            _ => Err(format!(
+                "session {session_id} owns multiple live node claims: {}",
+                nodes.join(", ")
+            )),
+        };
+        claims.insert(session_id, claim);
     }
+    Ok(claims)
 }
 
 fn registry_session_id(entry: &crate::state::RegistryEntry) -> Option<&str> {
@@ -329,6 +358,14 @@ pub(crate) fn message(watch: &Watch) -> String {
 pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
     let now_ms = millis_now();
     let evidence = read_evidence(home, now_ms)?;
+    let due = watches(&evidence)
+        .into_iter()
+        .filter(|watch| should_wake(watch, now_ms, &evidence))
+        .collect::<Vec<_>>();
+    if due.is_empty() {
+        return Ok(());
+    }
+    let claims = current_node_claims(home)?;
     let emitter =
         crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon");
     let mut runner: crate::burn_watch::Runner = &mut crate::burn_watch::run_command;
@@ -336,11 +373,8 @@ pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
     let mut eligibility_failures = 0usize;
     let mut receipt_failures = 0usize;
     let mut first_error = None;
-    for watch in watches(&evidence) {
-        if !should_wake(&watch, now_ms, &evidence) {
-            continue;
-        }
-        let node = match current_node_claim(home, &watch.session_id) {
+    for watch in due {
+        let node = match claims.get(&watch.session_id).cloned().unwrap_or(Ok(None)) {
             Ok(Some(node)) => node,
             Ok(None) => continue,
             Err(error) => {

@@ -985,7 +985,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let legacy_owner = crate::watch_expiry::current_node_claim(&home, "s-legacy");
+        let legacy_claims = crate::watch_expiry::current_node_claims(&home).unwrap();
+        let legacy_owner = legacy_claims.get("s-legacy").cloned().unwrap();
 
         let global_events = crate::daemon::global_events_path(&home);
         std::fs::write(
