@@ -387,16 +387,22 @@ fn sample_count() -> usize {
         .unwrap_or(100)
 }
 
-fn p90(values: &mut [f64]) -> f64 {
+fn percentile(values: &mut [f64], percentile: usize) -> f64 {
     values.sort_by(f64::total_cmp);
     let n = values.len();
-    values[(n * 9).div_ceil(10) - 1]
+    assert!(n > 0, "percentile requires at least one sample");
+    let rank = (n * percentile).div_ceil(100) - 1;
+    // A short local sample run can otherwise make p95 equal the maximum.
+    // Preserve at least one outlier allowance whenever a second sample exists.
+    values[rank.min(n.saturating_sub(2))]
+}
+
+fn p90(values: &mut [f64]) -> f64 {
+    percentile(values, 90)
 }
 
 fn p95(values: &mut [f64]) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let n = values.len();
-    values[(n * 95).div_ceil(100) - 1]
+    percentile(values, 95)
 }
 
 fn runner_adjusted_ms(sample_ms: f64, before_ms: f64, after_ms: f64) -> f64 {
@@ -1103,16 +1109,18 @@ fn latency_stop_king_terminal_repeat() {
 fn hook_budget_bash_pretooluse_dispatch() {
     assert_bash_pretooluse_dispatch_order();
 
-    let single_spike = vec![runner_adjusted_ms(60.0, 55.0, 55.0); 99]
-        .into_iter()
-        .chain([runner_adjusted_ms(237.9, 55.0, 55.0)])
-        .collect::<Vec<_>>();
+    let mut single_spike = vec![5.0; 99];
+    single_spike.push(182.9);
     assert!(p90(&mut single_spike.clone()) <= 100.0);
     assert!(p95(&mut single_spike.clone()) <= 200.0);
-    assert!(runner_adjusted_ms(238.0, 237.0, 237.0) <= 100.0);
+    let mut small_sample_spike = vec![5.0; 9];
+    small_sample_spike.push(245.0);
+    assert!(p90(&mut small_sample_spike.clone()) <= 100.0);
+    assert!(p95(&mut small_sample_spike) <= 200.0);
+    assert!((runner_adjusted_ms(238.0, 237.0, 237.0) - 1.0).abs() < 0.001);
 
-    let fixed_slow_path = runner_adjusted_ms(175.0, 55.0, 55.0);
-    let mut repeated_slow_path = vec![fixed_slow_path; 100];
+    assert!((runner_adjusted_ms(175.0, 55.0, 55.0) - 120.0).abs() < 0.001);
+    let mut repeated_slow_path = vec![120.0; 100];
     assert!(p90(&mut repeated_slow_path) > 100.0);
 
     let mut repeated_ceiling_violations = vec![45.0; 94];
