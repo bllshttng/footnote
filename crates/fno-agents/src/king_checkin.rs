@@ -1225,6 +1225,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         crate::king_checkin_machine::newest_reading(&ctx.events_paths),
     );
     let workers_payload = crate::king_answers::fetch_workers_payload();
+    let overdue_watches = crate::king_answers::overdue_watches_reading();
     take(
         "workers",
         workers_payload
@@ -1232,6 +1233,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .map_err(Clone::clone)
             .and_then(crate::king_answers::workers_summary),
     );
+    take("watch_expiry", overdue_watches);
     // The scope-answer readings share one scope compile and one top call.
     let scope_ids =
         crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
@@ -1370,6 +1372,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     }
     if let Some(held) = get("held").filter(|r| r.ok) {
         data.insert("held_open".into(), held.value["open"].clone());
+    }
+    if let Some(watches) = get("watch_expiry").filter(|r| r.ok) {
+        data.insert(
+            "overdue_watches".into(),
+            watches.value.get("rows").cloned().unwrap_or(json!([])),
+        );
     }
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
@@ -1841,17 +1849,41 @@ fn render_lines(
         }
     }
 
+    if let Some(r) = failed("watch_expiry") {
+        lines.push(format!("READER FAILED watch expiry: {}", r.error));
+    }
     match failed("workers") {
         Some(r) => {
             lines.push(format!("READER FAILED workers: {}", r.error));
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
-        None => lines.push(format!(
-            "workers: live {}, oldest activity {}, subagents active {}",
-            dash(data.get("live_workers")),
-            dash(data.get("oldest_worker_seen")),
-            dash(data.get("live_subagents")),
-        )),
+        None => {
+            let mut line = format!(
+                "workers: live {}, oldest activity {}, subagents active {}",
+                dash(data.get("live_workers")),
+                dash(data.get("oldest_worker_seen")),
+                dash(data.get("live_subagents")),
+            );
+            if failed("watch_expiry").is_some() {
+                line.push_str(", overdue watches unmeasured");
+            } else if let Some(rows) = data.get("overdue_watches").and_then(Value::as_array) {
+                let overdue = rows
+                    .iter()
+                    .filter_map(|row| {
+                        let session = row.get("session_id").and_then(Value::as_str)?;
+                        let millis = row.get("overdue_ms").and_then(Value::as_i64)?;
+                        Some(format!(
+                            "overdue {session} {}s",
+                            millis.saturating_add(999) / 1000
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                if !overdue.is_empty() {
+                    line.push_str(&format!(", {}", overdue.join(", ")));
+                }
+            }
+            lines.push(line);
+        }
     }
     lines.extend(crate::king_answers::subagent_lines(readings));
 
@@ -3406,6 +3438,7 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("watch_expiry", json!({"rows": []})),
             Reading::took("answered", json!({"rows": []})),
             Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
@@ -3650,7 +3683,25 @@ mod tests {
 
     #[test]
     fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "workers",
+                json!({
+                    "live_workers": 3,
+                    "oldest_worker_seen": "90s w1",
+                    "live_subagents": null,
+                }),
+            ),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "watch_expiry",
+                json!({"rows": [{"session_id": "s-late", "overdue_ms": 125_000}]}),
+            ),
+        );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
@@ -3658,9 +3709,13 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(20)));
+        assert!(
+            workers_line.contains("overdue s-late 125s"),
+            "line: {workers_line}"
+        );
+        assert_eq!(data.get("coverage"), Some(&json!(21)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 21 of 21 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3748,7 +3803,7 @@ mod tests {
             ),
         );
         let data = build_data(&readings, "x-bbbb");
-        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("coverage"), Some(&json!(20)), "20 of 21 ok");
         assert_eq!(data.get("idle_subagents"), None);
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -3898,6 +3953,24 @@ mod tests {
         let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
+            Reading::took(
+                "workers",
+                json!({
+                    "live_workers": 3,
+                    "oldest_worker_seen": "90s w1",
+                    "live_subagents": null,
+                }),
+            ),
+        );
+        set_reading(
+            &mut readings,
+            Reading::failed(
+                "watch_expiry",
+                "watch expiry event has no valid timestamp".into(),
+            ),
+        );
+        set_reading(
+            &mut readings,
             Reading::failed("board", "board payload names no undriven_pr queue".into()),
         );
         let data = build_data(&readings, "x-bbbb");
@@ -3906,11 +3979,24 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
-        assert!(lines.iter().any(|l| l.contains("failed readers: board")));
-        assert_eq!(change, "no numeric movement; readings failed: board");
+            .any(|l| l == "READER FAILED watch expiry: watch expiry event has no valid timestamp"));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("workers:") && l.contains("overdue watches unmeasured")));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("coverage: 19 of 21 readings ok")));
+        assert!(lines.iter().any(|l| l.contains("failed readers: board (")
+            && l.contains(", watch_expiry (watch expiry event has no valid timestamp)")));
+        assert_eq!(
+            change,
+            "no numeric movement; readings failed: board, watch_expiry"
+        );
         assert_eq!(data.get("open_prs"), None);
-        assert_eq!(data.get("readers_failed"), Some(&json!(["board"])));
+        assert_eq!(
+            data.get("readers_failed"),
+            Some(&json!(["board", "watch_expiry"]))
+        );
     }
 
     #[test]
@@ -4071,7 +4157,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4203,7 +4289,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
+            .any(|l| l.starts_with("coverage: 20 of 21 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.

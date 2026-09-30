@@ -48,6 +48,12 @@ pub(crate) struct Watch {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct OverdueWatch {
+    pub session_id: String,
+    pub overdue_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct Evidence {
     pub event_id: String,
     pub seq: i64,
@@ -61,6 +67,16 @@ pub(crate) fn should_wake(watch: &Watch, now_ms: i64, evidence: &[Evidence]) -> 
     if now_ms < watch.expires_at_ms {
         return false;
     }
+    is_current_watch(watch, evidence)
+        && !evidence.iter().any(|row| {
+            row.session_id.as_deref() == Some(watch.session_id.as_str())
+                && row.kind == WAKE_EVENT
+                && row.data.get("watch_event_id").and_then(Value::as_str)
+                    == Some(watch.event_id.as_str())
+        })
+}
+
+pub(crate) fn is_current_watch(watch: &Watch, evidence: &[Evidence]) -> bool {
     !evidence.iter().any(|row| {
         if row.session_id.as_deref() != Some(watch.session_id.as_str()) {
             return false;
@@ -76,10 +92,6 @@ pub(crate) fn should_wake(watch: &Watch, now_ms: i64, evidence: &[Evidence]) -> 
             | "agent_stopped"
             | "agent_exited"
             | "inside_leg_completed" => is_later,
-            WAKE_EVENT => {
-                row.data.get("watch_event_id").and_then(Value::as_str)
-                    == Some(watch.event_id.as_str())
-            }
             _ => false,
         }
     })
@@ -217,6 +229,28 @@ fn watches(evidence: &[Evidence]) -> Vec<Watch> {
         }
     }
     latest.into_values().collect()
+}
+
+pub(crate) fn overdue(home: &AgentsHome) -> Result<Vec<OverdueWatch>, String> {
+    let now_ms = millis_now();
+    let evidence = read_evidence(home, now_ms)?;
+    let mut overdue = Vec::new();
+    for watch in watches(&evidence)
+        .into_iter()
+        .filter(|watch| now_ms >= watch.expires_at_ms && is_current_watch(watch, &evidence))
+    {
+        let Some(node) = current_node_claim(home, &watch.session_id)? else {
+            continue;
+        };
+        if !watch.node.is_empty() && node != watch.node {
+            continue;
+        }
+        overdue.push(OverdueWatch {
+            session_id: watch.session_id,
+            overdue_ms: now_ms.saturating_sub(watch.expires_at_ms),
+        });
+    }
+    Ok(overdue)
 }
 
 pub(crate) fn current_node_claim(

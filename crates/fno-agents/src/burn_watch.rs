@@ -934,6 +934,10 @@ mod tests {
             session_id: Some("s-1".into()),
             data: serde_json::json!({"watch_event_id": "watch-1"}),
         };
+        assert!(crate::watch_expiry::is_current_watch(
+            &watch,
+            &[receipt.clone()]
+        ));
         assert!(!crate::watch_expiry::should_wake(&watch, 103, &[receipt]));
 
         let mut review_watch = watch.clone();
