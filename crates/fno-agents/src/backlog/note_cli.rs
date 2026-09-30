@@ -570,29 +570,11 @@ fn write_human(
         eprintln!("Error: note text is empty");
         return 1;
     }
-    if parsed.clear {
-        let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
-        let submitted = parsed.if_revision.unwrap_or(rev);
-        if let Err(e) = node_state::clear_state(graph, &node_id, Some(submitted)) {
-            eprintln!("fno-agents backlog-note: {e}");
-            return map_state_err(&e);
-        }
-        if parsed.json_out {
-            crate::backlog::receipt::emit_line(
-                &json!({"status": "ok", "routed": "clear", "node_id": node_id, "revision": rev})
-                    .to_string(),
-            );
-        } else {
-            crate::backlog::receipt::emit_line(&format!(
-                "cleared {node_id}: current state cleared"
-            ));
-        }
-        return 0;
-    }
     // The cross-session guard: a note replaces the ONE current state, so a
-    // write over a revision this session cannot prove it wrote refuses
-    // until --replace names it deliberate. Write policy, not delivery:
-    // --quiet does not bypass it. Nothing is written on a refusal.
+    // write (a new note, or --clear) over a revision this session cannot
+    // prove it wrote refuses until --replace names it deliberate. Write
+    // policy, not delivery: --quiet does not bypass it. Nothing is written
+    // on a refusal.
     let prior = node_state::read_state(entry);
     if let Some(p) = &prior {
         if !parsed.replace && p.source_session_id != parsed.self_session {
@@ -616,6 +598,25 @@ Every replaced revision stays readable: fno backlog notes history {node_id}",
             );
             return 3;
         }
+    }
+    if parsed.clear {
+        let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
+        let submitted = parsed.if_revision.unwrap_or(rev);
+        if let Err(e) = node_state::clear_state(graph, &node_id, Some(submitted)) {
+            eprintln!("fno-agents backlog-note: {e}");
+            return map_state_err(&e);
+        }
+        if parsed.json_out {
+            crate::backlog::receipt::emit_line(
+                &json!({"status": "ok", "routed": "clear", "node_id": node_id, "revision": rev})
+                    .to_string(),
+            );
+        } else {
+            crate::backlog::receipt::emit_line(&format!(
+                "cleared {node_id}: current state cleared"
+            ));
+        }
+        return 0;
     }
     // The revision the CLI submits: explicit --if-revision, else the fetched
     // current revision (the optimistic-concurrency guard is always on).

@@ -689,6 +689,67 @@ fn the_same_session_replaces_its_own_state_without_replace() {
     assert_eq!(row[node_state::STATE_KEY]["body"], json!("my update"));
 }
 
+/// The clear action is a cross-session replacement too: it empties the
+/// state another session wrote, so the guard holds without --replace.
+#[test]
+fn a_cross_session_clear_refuses_without_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut row = fixture("c-1", "in_progress");
+    row["current_state"] = json!({
+        "body": "candor original finding text",
+        "revision": 1,
+        "updated_at": "2026-09-30T20:00:00+00:00",
+        "source_session_id": "sess-candor",
+        "source_harness": "claude",
+    });
+    write_graph(&graph, &[row]);
+    let g = graph_arg(&graph);
+    let (code, _, stderr) = note_captured(
+        &[
+            "c-1",
+            "--clear",
+            "--stdin",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    let (code, _, stderr) = note_captured(
+        &[
+            "c-1",
+            "--clear",
+            "--stdin",
+            "--replace",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "the explicit door clears: stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("c-1"))
+        .unwrap()
+        .clone();
+    assert!(row[node_state::STATE_KEY].is_null(), "state cleared");
+    // The emptied state stays readable in history.
+    let (records, total) =
+        fno_agents::backlog::note_history::read(&graph, Some("c-1"), 0, 50).unwrap();
+    assert_eq!(total, 1, "the clear journaled the outgoing state");
+    assert_eq!(records[0]["reason"], json!("state_cleared"));
+}
+
 /// A writer with no identity over an authored state cannot prove it wrote
 /// the prior revision, so the guard holds for it too.
 #[test]

@@ -137,8 +137,9 @@ def cmd_note(
         replace=replace,
     )
     if code != 0:
-        # 1 = budget refusal, 3 = a stale revision conflict; the child
-        # printed the reason on stderr.
+        # 1 = budget refusal, 3 = a refusal that wrote nothing (the
+        # cross-session guard, or a stale revision); the child printed the
+        # reason on stderr.
         raise typer.Exit(code=code)
 
     if claims:
