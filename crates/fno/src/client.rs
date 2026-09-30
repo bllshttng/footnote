@@ -501,60 +501,6 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Spawn `fno --server <socket>` detached: its own session (setsid) so the
-/// server never receives the terminal's SIGHUP, stderr to a per-session log.
-/// Two clients racing here both spawn; the bind is the lock, the losing
-/// server exits 0, and both clients attach to the winner (AC4-EDGE).
-fn spawn_server(path: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path(path))
-        .map_err(|e| format!("cannot open server log: {e}"))?;
-    let mut cmd = crate::process_admission::std_command(exe);
-    cmd.arg("--server")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(log);
-    // Config->env bridge for the interactive path. The pure-Rust mux
-    // server reads no config.toml, so `config.mux.shell_integration: off` was
-    // a silent no-op here (the Python spawn front-half already bridges
-    // dispatched panes). Latch it at server birth: an explicit env
-    // export wins (inherited naturally, never overwritten); otherwise a single
-    // bounded `fno config get` decides. Only `off` needs materializing - the
-    // server reads absent/anything-else as on (the default).
-    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
-        cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
-    }
-    // Same bridge, same reason, for the backlog board's project scope.
-    // Resolving it needs `fno config get`, and the SERVER must not shell out on
-    // its startup path: doing so delayed shutdown past the SIGTERM grace and
-    // perturbed multiclient frame ordering. The client already pays a bounded
-    // config read here, so the resolution happens once, in this process, and
-    // rides in on the env. An explicit export wins, inherited untouched.
-    if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
-        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
-        cmd.env(
-            "FNO_BOARD_SCOPE",
-            crate::backlog_view::board_scope_wire(&scope),
-        );
-    }
-    // Safety: setsid only detaches the child from our session/terminal; it is
-    // async-signal-safe and touches no shared state.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    crate::process_admission::std_spawn(&mut cmd)
-        .map(|_| ())
-        .map_err(|e| format!("cannot spawn the mux server: {e}"))
-}
-
 /// Whether the interactive path must disable OSC 133 injection. Bounded +
 /// fail-open through [`crate::server::config_get`]: any spawn/read error, a
 /// non-`off` value, or a read that overruns the budget all leave injection on
@@ -932,7 +878,7 @@ struct View {
     /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
     /// it is open, so an index into `feed.items` would silently re-point at a
     /// different event; the inspected event never changes under the reader.
-    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    feed_detail: Option<feed_detail::FeedDetailModal>,
     /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
     /// safety as [`View::ans_esc`]).
     feed_esc: Vec<u8>,
@@ -2059,7 +2005,7 @@ impl View {
             ans_esc: Vec::new(),
             feed: None,
             region_owner: region_focus::RegionOwner::Pane,
-            feed_detail_of: None,
+            feed_detail: None,
             feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
@@ -5323,15 +5269,8 @@ impl View {
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(item) = &self.feed_detail_of {
-            feed_detail::draw(
-                self,
-                item,
-                &mut cells,
-                (rows, cols),
-                overlay_origin,
-                overlay_dims,
-            );
+        if let Some(m) = &self.feed_detail {
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if questions::draw_detail(
             self,
             &mut cells,
@@ -6895,6 +6834,7 @@ enum TabHit {
 
 /// What a left-click on chrome resolves to: server commands to send, or a
 /// local one-line hint for a row that isn't directly actionable.
+#[derive(Debug, Clone)]
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
@@ -10122,9 +10062,9 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // Inspect first. The deep link is this view's own action, not the
+        // Inspect first: the deep link is the view's own action, not the
         // click path that opened it.
-        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
+        ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
@@ -12958,6 +12898,10 @@ fn exit_with_notice(notice: String) -> i32 {
 
 #[path = "client/compositor.rs"]
 mod compositor;
+
+#[path = "client/server_spawn.rs"]
+mod server_spawn;
+use self::server_spawn::spawn_server;
 
 use compositor::Compositor;
 

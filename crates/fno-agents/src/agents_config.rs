@@ -651,6 +651,45 @@ pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_ORPHAN_MIN_ELAPSED_SECS)
 }
 
+/// Absolute one-minute load trigger for the Rust machine-watch arm. These
+/// resource-meter thresholds are intentionally read here rather than added to
+/// the Python settings model.
+pub fn runaway_load_per_core(cwd: &Path) -> f64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "runaway_load_per_core"],
+    )
+    .and_then(toml_number)
+    .filter(|value| *value > 0.0)
+    .unwrap_or(4.0)
+}
+
+pub fn runaway_load_hold_seconds(cwd: &Path) -> u64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "runaway_load_hold_seconds"],
+    )
+    .and_then(|value| value.as_integer().and_then(|n| u64::try_from(n).ok()))
+    .filter(|seconds| *seconds > 0)
+    .unwrap_or(600)
+}
+
+pub fn hot_escalation_seconds(cwd: &Path) -> u64 {
+    config_lookup(
+        cwd,
+        &["resource_meter", "thresholds", "hot_escalation_seconds"],
+    )
+    .and_then(|value| value.as_integer().and_then(|n| u64::try_from(n).ok()))
+    .filter(|seconds| *seconds > 0)
+    .unwrap_or(1800)
+}
+
+fn toml_number(value: toml::Value) -> Option<f64> {
+    value
+        .as_float()
+        .or_else(|| value.as_integer().map(|number| number as f64))
+}
+
 /// The default run-slot cap for [`max_cargo_runs`]: how many cargo runs may
 /// hold the machine at once (compile or execute doors together).
 pub const DEFAULT_MAX_CARGO_RUNS: u32 = 2;

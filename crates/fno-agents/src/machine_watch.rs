@@ -16,6 +16,9 @@ pub const LOAD_PER_CORE_BAND: f64 = 10.0;
 /// admission for 30 minutes. Named for the notify-signals file pattern.
 pub const MACHINE_BRAKE_NAME: &str = "machine-brake.json";
 pub const MACHINE_BRAKE_HOLD_SECS: u64 = 1800;
+pub const RUNAWAY_LOAD_PER_CORE: f64 = 4.0;
+pub const RUNAWAY_LOAD_HOLD_SECS: u64 = 600;
+pub const HOT_ESCALATION_SECS: u64 = 1800;
 /// One-hour rolling baseline at the 300 s interval: 12 readings, armed at 4.
 const BASELINE_WINDOW_TICKS: usize = 12;
 const BASELINE_MIN_TICKS: usize = 4;
@@ -30,6 +33,27 @@ pub struct MachineWatchState {
     pub(crate) prev_ticks: Option<crate::machine_sample::HostTicks>,
     /// Trailing process counts; the 1h baseline the runaway arm reads.
     pub(crate) recent_processes: Vec<(Instant, u64)>,
+    pub(crate) absolute_load_since: Option<Instant>,
+    pub(crate) hot_since: Option<Instant>,
+    pub(crate) runaway_escalation_sent: bool,
+    pub(crate) last_observed: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Thresholds {
+    pub load_per_core: f64,
+    pub load_hold: Duration,
+    pub hot_escalation: Duration,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            load_per_core: RUNAWAY_LOAD_PER_CORE,
+            load_hold: Duration::from_secs(RUNAWAY_LOAD_HOLD_SECS),
+            hot_escalation: Duration::from_secs(HOT_ESCALATION_SECS),
+        }
+    }
 }
 
 pub struct Arm {
@@ -52,6 +76,7 @@ pub struct WatchOutcome {
     pub acted: u64,
     pub skip_reason: Option<String>,
     pub detail: String,
+    pub verdict: String,
 }
 
 pub fn decide(
@@ -83,6 +108,17 @@ pub fn decide(
             )
         };
         return ("runaway".into(), reason);
+    }
+    if let Some(issues) = sample
+        .mux_issues
+        .as_ref()
+        .and_then(|value| value.as_array())
+        .filter(|issues| !issues.is_empty())
+    {
+        return (
+            "hot".into(),
+            format!("mux owner/socket issue: {} finding(s)", issues.len()),
+        );
     }
     let busy_hot = sample.busy_fraction.is_some_and(|value| value > busy_band);
     let load_hot = sample
@@ -131,20 +167,46 @@ pub fn decide(
 pub fn tick_machine_watch(
     state: &mut MachineWatchState,
     reading: Result<&MachineSample, &str>,
+    notify: impl FnMut(&str, &str) -> bool,
+    now: Instant,
+    brake: impl FnMut(&MachineSample, &str),
+) -> WatchOutcome {
+    tick_machine_watch_with_thresholds(state, reading, notify, now, brake, Thresholds::default())
+}
+
+pub fn tick_machine_watch_with_thresholds(
+    state: &mut MachineWatchState,
+    reading: Result<&MachineSample, &str>,
     mut notify: impl FnMut(&str, &str) -> bool,
     now: Instant,
     mut brake: impl FnMut(&MachineSample, &str),
+    thresholds: Thresholds,
 ) -> WatchOutcome {
     let sample = match reading {
         Ok(sample) => sample,
         Err(why) => {
+            state.absolute_load_since = None;
+            state.hot_since = None;
+            state.hot_streak = 0;
+            state.runaway_escalation_sent = false;
+            state.last_observed = Some(now);
             return WatchOutcome {
                 acted: 0,
                 skip_reason: Some("machine_unreadable".into()),
                 detail: short(&format!("probe: {why}")),
-            }
+                verdict: "unreadable".into(),
+            };
         }
     };
+    if state.last_observed.is_some_and(|last| {
+        now.saturating_duration_since(last) >= Duration::from_secs(MACHINE_WATCH_INTERVAL_S * 2)
+    }) {
+        state.absolute_load_since = None;
+        state.hot_since = None;
+        state.hot_streak = 0;
+        state.runaway_escalation_sent = false;
+    }
+    state.last_observed = Some(now);
     // The current reading never sits on its own jury: baseline first, push after.
     let baseline = process_baseline(&state.recent_processes, now);
     if let Some(processes) = sample.processes {
@@ -158,15 +220,67 @@ pub fn tick_machine_watch(
     }
     let busy_band = sample.busy_band.unwrap_or(0.9);
     let load_band = sample.load_band_per_core.unwrap_or(LOAD_PER_CORE_BAND);
-    let (verdict, reason) = decide(sample, busy_band, load_band, baseline);
+    let (mut verdict, mut reason) = decide(sample, busy_band, load_band, baseline);
+    let mut forced_escalation = false;
+    let absolute_load_hot = sample
+        .load_1m
+        .zip(sample.cores)
+        .is_some_and(|(load, cores)| cores > 0.0 && load / cores > thresholds.load_per_core);
+    if absolute_load_hot {
+        let since = state.absolute_load_since.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(*since);
+        if elapsed >= thresholds.load_hold {
+            verdict = "runaway".into();
+            forced_escalation = true;
+            reason = format!(
+                "machine runaway: load_1m {} is {:.1} per core for {}s (threshold {:.1} for {}s)",
+                opt(sample.load_1m),
+                sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0),
+                elapsed.as_secs(),
+                thresholds.load_per_core,
+                thresholds.load_hold.as_secs(),
+            );
+        } else {
+            verdict = "hot".into();
+            reason = format!(
+                "machine hot: load_1m {} is {:.1} per core for {} of {}s (threshold {:.1})",
+                opt(sample.load_1m),
+                sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0),
+                elapsed.as_secs(),
+                thresholds.load_hold.as_secs(),
+                thresholds.load_per_core,
+            );
+        }
+    } else {
+        state.absolute_load_since = None;
+    }
+    if verdict == "hot" {
+        let since = state.hot_since.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(*since);
+        if elapsed >= thresholds.hot_escalation {
+            verdict = "runaway".into();
+            forced_escalation = true;
+            reason = format!(
+                "machine runaway: hot for {}s without a successful runaway action",
+                elapsed.as_secs()
+            );
+        }
+    } else {
+        state.hot_since = None;
+    }
+    if !forced_escalation {
+        state.runaway_escalation_sent = false;
+    }
     match verdict.as_str() {
         "calm" => {
             state.calm_streak = state.calm_streak.saturating_add(1);
             state.hot_streak = 0;
+            state.runaway_escalation_sent = false;
             WatchOutcome {
                 acted: 0,
                 skip_reason: Some("calm".into()),
                 detail: short(&reason),
+                verdict: "calm".into(),
             }
         }
         "runaway" => {
@@ -174,18 +288,22 @@ pub fn tick_machine_watch(
             state.hot_streak = 0;
             // A runaway skips the hot debounce: one 507 s sample against the
             // 300 s interval made that debounce worth ~20 minutes of runway.
+            if forced_escalation && !state.runaway_escalation_sent {
+                state.last_notified = None;
+            }
+            brake(sample, &reason);
             let outcome = emit_notice(
                 state,
                 sample,
                 &reason,
                 now,
                 "machine_watch: box runaway",
+                "runaway",
                 &mut notify,
             );
-            // The brake refreshes on every runaway tick, notice sent or not:
-            // the 30m hold must outlive the notice throttle, or a sustained
-            // runaway reopens the gate mid-fire.
-            brake(sample, &reason);
+            if forced_escalation && outcome.acted > 0 {
+                state.runaway_escalation_sent = true;
+            }
             outcome
         }
         "hot" => {
@@ -199,6 +317,7 @@ pub fn tick_machine_watch(
                         "{}/{} hot: {reason}",
                         state.hot_streak, MACHINE_HOT_SAMPLES
                     )),
+                    verdict: "hot".into(),
                 };
             }
             emit_notice(
@@ -207,6 +326,7 @@ pub fn tick_machine_watch(
                 &reason,
                 now,
                 "machine_watch: box hot",
+                "hot",
                 &mut notify,
             )
         }
@@ -214,6 +334,7 @@ pub fn tick_machine_watch(
             acted: 0,
             skip_reason: Some("machine_unreadable".into()),
             detail: short(&reason),
+            verdict: "unreadable".into(),
         },
     }
 }
@@ -225,6 +346,7 @@ fn emit_notice(
     reason: &str,
     now: Instant,
     title: &str,
+    verdict: &str,
     notify: &mut impl FnMut(&str, &str) -> bool,
 ) -> WatchOutcome {
     let throttle = Duration::from_secs(sample.throttle_minutes.saturating_mul(60));
@@ -238,6 +360,7 @@ fn emit_notice(
                         "hot, notice held {}s more: {reason}",
                         (throttle - held).as_secs()
                     )),
+                    verdict: verdict.into(),
                 };
             }
         }
@@ -248,12 +371,14 @@ fn emit_notice(
             acted: 1,
             skip_reason: None,
             detail: short(&format!("notified: {reason}")),
+            verdict: verdict.into(),
         }
     } else {
         WatchOutcome {
             acted: 0,
             skip_reason: Some("notify_failed".into()),
             detail: short(&reason),
+            verdict: verdict.into(),
         }
     }
 }
@@ -286,7 +411,7 @@ pub(crate) fn brake_path() -> PathBuf {
 
 /// The runaway brake: a self-expiring file the spawn admission honors.
 /// Best-effort - a failed write costs the refusal leg, never the notice.
-fn write_brake_file(sample: &MachineSample, reason: &str) {
+fn write_brake_file(sample: &MachineSample, reason: &str) -> Result<(), String> {
     let until = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() + MACHINE_BRAKE_HOLD_SECS)
@@ -305,14 +430,81 @@ fn write_brake_file(sample: &MachineSample, reason: &str) {
         "processes": sample.processes,
         "swap_used_gb": sample.swap_used_gb,
     });
-    let _ = std::fs::write(
-        brake_path(),
-        serde_json::to_string(&payload).unwrap_or_default(),
-    );
+    let path = brake_path();
+    std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default())
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn notice_body(reason: &str, sample: &MachineSample) -> String {
     let mut body = reason.to_string();
+    let mut sessions: Vec<&serde_json::Value> = sample
+        .sessions
+        .as_ref()
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .collect();
+    sessions.sort_by(|a, b| {
+        b.get("cpu_pct")
+            .and_then(|value| value.as_f64())
+            .partial_cmp(&a.get("cpu_pct").and_then(|value| value.as_f64()))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top_sessions: Vec<String> = sessions
+        .into_iter()
+        .take(3)
+        .map(|row| {
+            format!(
+                "{} [{}] {:.1}% ({})",
+                row.get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown worker"),
+                row.get("session_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown session"),
+                row.get("cpu_pct")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or_default(),
+                row.get("top_command")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("command unknown"),
+            )
+        })
+        .collect();
+    if !top_sessions.is_empty() {
+        body.push_str("; top sessions: ");
+        body.push_str(&top_sessions.join(", "));
+    }
+    if let Some(issues) = sample
+        .mux_issues
+        .as_ref()
+        .and_then(|value| value.as_array())
+        .filter(|issues| !issues.is_empty())
+    {
+        let findings: Vec<String> = issues
+            .iter()
+            .take(5)
+            .map(|issue| {
+                format!(
+                    "{} socket={} owner={}",
+                    issue
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    issue
+                        .get("socket")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    issue
+                        .get("owner_session")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                )
+            })
+            .collect();
+        body.push_str("; mux findings: ");
+        body.push_str(&findings.join(", "));
+    }
     let top: Vec<String> = sample
         .top_cpu
         .iter()
@@ -343,6 +535,23 @@ fn notice_body(reason: &str, sample: &MachineSample) -> String {
         body.push_str(&format!("; largest group {name} x{count} (ppid {ppid})"));
     }
     body
+}
+
+fn top_session_id(sample: &MachineSample) -> Option<String> {
+    sample
+        .sessions
+        .as_ref()?
+        .as_array()?
+        .iter()
+        .max_by(|a, b| {
+            a.get("cpu_pct")
+                .and_then(|value| value.as_f64())
+                .partial_cmp(&b.get("cpu_pct").and_then(|value| value.as_f64()))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?
+        .get("session_id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn opt(value: Option<f64>) -> String {
@@ -381,6 +590,14 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         .unwrap_or(0.9);
         sample.busy_band = Some(busy_band);
         sample.load_band_per_core = Some(LOAD_PER_CORE_BAND);
+        let thresholds = Thresholds {
+            load_per_core: crate::agents_config::runaway_load_per_core(&cwd),
+            load_hold: Duration::from_secs(crate::agents_config::runaway_load_hold_seconds(&cwd)),
+            hot_escalation: Duration::from_secs(crate::agents_config::hot_escalation_seconds(&cwd)),
+        };
+        sample.runaway_load_band_per_core = Some(thresholds.load_per_core);
+        sample.runaway_load_hold_seconds = Some(thresholds.load_hold.as_secs());
+        sample.hot_escalation_seconds = Some(thresholds.hot_escalation.as_secs());
         match crate::session_cost::price(&home, &sample.procs) {
             Ok(value) => {
                 sample.sessions = value.get("sessions").cloned();
@@ -417,15 +634,9 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         ) {
             tracing::warn!(%error, "machine process snapshot failed");
         }
-        let (verdict, _) = decide(&sample, busy_band, LOAD_PER_CORE_BAND, baseline);
-        sample.verdict = Some(verdict.clone());
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
-        );
-        let _ = journal.append(
-            "machine_sample",
-            sample.to_data(&verdict, busy_band, LOAD_PER_CORE_BAND),
         );
         let outcome = {
             let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -437,14 +648,47 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             .and_then(|v| v.as_integer())
             .unwrap_or(60)
             .clamp(0, 10080) as u64;
-            tick_machine_watch(
+            let stop_home = home.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let brake_error = std::cell::RefCell::new(None);
+            tick_machine_watch_with_thresholds(
                 &mut guard,
                 Ok(&sample),
-                |title, body| crate::operator_notice::notify_operator(title, body, None),
+                |title, body| {
+                    let mut body = body.to_string();
+                    if let Some(error) = brake_error.borrow_mut().take() {
+                        body.push_str(&format!("; spawn brake write failed: {error}"));
+                    }
+                    if title.ends_with("box runaway") {
+                        let stop_result = top_session_id(&sample).and_then(|session| {
+                            runtime.block_on(crate::daemon::stop_session_for_home(
+                                &stop_home, &session,
+                            ))
+                        });
+                        body.push_str(&match stop_result {
+                            Some((name, true)) => format!("; confirmed control stop: {name}"),
+                            Some((name, false)) => format!("; control stop not confirmed: {name}"),
+                            None => "; control stop unavailable: no unique registered top session"
+                                .into(),
+                        });
+                    }
+                    crate::operator_notice::notify_operator(title, &body, None)
+                },
                 Instant::now(),
-                |sample, reason| write_brake_file(sample, reason),
+                |sample, reason| {
+                    if let Err(error) = write_brake_file(sample, reason) {
+                        tracing::error!(%error, "machine runaway brake write failed");
+                        *brake_error.borrow_mut() = Some(error);
+                    }
+                },
+                thresholds,
             )
         };
+        sample.verdict = Some(outcome.verdict.clone());
+        let _ = journal.append(
+            "machine_sample",
+            sample.to_data(&outcome.verdict, busy_band, LOAD_PER_CORE_BAND),
+        );
         crate::tick_ledger::emit_tick(
             &journal,
             "machine_watch",
@@ -480,6 +724,34 @@ mod tests {
         let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(reason.contains("30.2 per core crosses load band 10"));
+
+        let mut state = MachineWatchState::default();
+        let mut absolute = sample(Some(0.0), Some(1.0));
+        absolute.load_1m = Some(96.0); // 8 per core, above the absolute 4 band.
+        let start = Instant::now();
+        let mut notices = 0;
+        let mut brakes = 0;
+        for elapsed in [0, 300, 600] {
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut state,
+                Ok(&absolute),
+                |_, _| {
+                    notices += 1;
+                    true
+                },
+                start + Duration::from_secs(elapsed),
+                |_, _| brakes += 1,
+                Thresholds::default(),
+            );
+            if elapsed == 600 {
+                assert_eq!(outcome.verdict, "runaway");
+            }
+        }
+        assert_eq!(brakes, 1);
+        assert_eq!(
+            notices, 2,
+            "runaway escalation pages despite the hot notice throttle"
+        );
     }
 
     #[test]
@@ -492,7 +764,9 @@ mod tests {
     fn two_hot_samples_notify_once() {
         let mut state = MachineWatchState::default();
         let mut calls = 0;
+        let mut brakes = 0;
         let hot = sample(Some(1.0), Some(1.0));
+        let start = Instant::now();
         assert_eq!(
             tick_machine_watch(
                 &mut state,
@@ -501,8 +775,8 @@ mod tests {
                     calls += 1;
                     true
                 },
-                Instant::now(),
-                |_, _| {}
+                start,
+                |_, _| brakes += 1
             )
             .acted,
             0
@@ -515,13 +789,34 @@ mod tests {
                     calls += 1;
                     true
                 },
-                Instant::now(),
-                |_, _| {}
+                start + Duration::from_secs(300),
+                |_, _| brakes += 1
             )
             .acted,
             1
         );
         assert_eq!(calls, 1);
+        let mut escalated = None;
+        for elapsed in (600..=HOT_ESCALATION_SECS).step_by(300) {
+            escalated = Some(tick_machine_watch(
+                &mut state,
+                Ok(&hot),
+                |_, _| {
+                    calls += 1;
+                    true
+                },
+                start + Duration::from_secs(elapsed),
+                |_, _| brakes += 1,
+            ));
+        }
+        let escalated = escalated.unwrap();
+        assert_eq!(escalated.verdict, "runaway");
+        assert_eq!(
+            escalated.acted, 1,
+            "escalation bypasses the earlier hot notice throttle"
+        );
+        assert_eq!(brakes, 1);
+        assert_eq!(calls, 2);
     }
 
     #[test]
@@ -565,22 +860,26 @@ mod tests {
         std::env::set_var("FNO_MACHINE_BRAKE", &path);
         let mut notify_calls = 0;
         let mut brake_calls = 0;
+        let actions = std::cell::RefCell::new(Vec::new());
         let outcome = tick_machine_watch(
             &mut state,
             Ok(&s),
             |_, _| {
                 notify_calls += 1;
+                actions.borrow_mut().push("notify");
                 true
             },
             Instant::now(),
             |s, r| {
                 brake_calls += 1;
-                write_brake_file(s, r);
+                actions.borrow_mut().push("brake");
+                write_brake_file(s, r).unwrap();
             },
         );
         assert_eq!(outcome.acted, 1, "no debounce on a runaway");
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 1, "the brake writes on the first tick");
+        assert_eq!(*actions.borrow(), vec!["brake", "notify"]);
         assert!(outcome.detail.contains("runaway"), "{}", outcome.detail);
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

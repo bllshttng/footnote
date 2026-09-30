@@ -50,17 +50,15 @@ def resolve_native_bin() -> str:
 
 
 def store_db_path(events_path: Path) -> Path:
-    """The store beside a journal: symlinks resolved, rotation suffixes and
-    the ``.jsonl`` stem stripped, ``.db`` appended - the same resolution the
-    native store performs, so a locator names one store from either side."""
-    resolved = Path(events_path).resolve()
-    stem = resolved.name
-    if stem.endswith(".jsonl"):
-        stem = stem[: -len(".jsonl")]
-    # A generation suffix (.1, .2) names the same store as the live journal.
-    if stem.rsplit(".", 1)[-1].isdigit():
-        stem = stem.rsplit(".", 1)[0]
-    return resolved.with_name(f"{stem}.db")
+    """Resolve the physical store through the native reader without importing."""
+    try:
+        receipt = subprocess.run(
+            [resolve_native_bin(), "doctor", "event", "rows", "--events", str(events_path), "--store-path-only"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return Path(json.loads(receipt.stdout)["store"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        raise EventStoreUnavailable(f"event store path unavailable for {events_path}: {exc}") from exc
 
 
 def native_rows(
