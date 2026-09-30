@@ -11,6 +11,14 @@
 //! the GraphQL-backed `gh pr list --json`: the quota broker refuses GraphQL
 //! reads at low budget, and that refusal must read as `unknown`, never as
 //! health.
+//!
+//! Burst handling: a merge that loses the single-flight race writes a
+//! pending marker, and the running winner re-pulls once at the end - one chain
+//! per burst, canonical left at the newest head, the buildable delta left to
+//! the next catch-up sweep. The chain's own cargo install holds the
+//! `test:priority` claim so the deploy does not queue behind worker test
+//! builds, and every chain run appends one line to
+//! `.fno/post-merge-sync-receipt.jsonl`.
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -39,19 +47,30 @@ const CAPTURE_TAIL_CHARS: usize = 2000;
 // restart`s never overlap in one checkout. Exactly-once-per-SHA is the
 // marker's job.
 const FLIGHT_KEY: &str = "post-merge-sync";
+// Where a race loser records its merge so the running winner re-pulls it once
+// at the end instead of the burst waiting for the next catch-up sweep.
+const PENDING_SUBDIR: &str = "post-merge-sync-pending";
+// TTL for the sync's own `test:priority` hold, same shape the priority door
+// documents (`worktree:<checkout>` holder, pid-unavailable, 30m).
+const PRIORITY_LANE_TTL_MS: i64 = 30 * 60 * 1000;
+// Bounds the end-of-run re-pull: a git pull over the network, not the whole
+// chain (which the sync_command timeout covers).
+const RE_PULL_TIMEOUT_SECS: u64 = 120;
 
 type GhRun = Rc<dyn Fn(&[String], &Path) -> Result<String, GhErr>>;
 type GitOrigin = Rc<dyn Fn(&Path) -> Option<String>>;
 type ShellRun = Rc<dyn Fn(&str, &Path) -> ShellOutcome>;
+type GitPull = Rc<dyn Fn(&Path) -> Result<String, String>>;
 type Check = Rc<dyn Fn(&Value) -> Value>;
 type Now = Rc<dyn Fn() -> DateTime<Utc>>;
 
 /// The seams the ported logic runs through; `real()` wires the live
-/// implementations. No trait hierarchy, five boxed closures.
+/// implementations. No trait hierarchy, six boxed closures.
 pub(crate) struct Deps {
     pub gh: GhRun,
     pub git_origin: GitOrigin,
     pub shell: ShellRun,
+    pub git_pull: GitPull,
     pub check: Check,
     pub now: Now,
 }
@@ -228,6 +247,117 @@ fn push_marker_err(e: std::io::Error, stderr: &mut Vec<String>) {
     ));
 }
 
+fn pending_dir(canonical: &Path) -> PathBuf {
+    canonical.join(".fno").join(PENDING_SUBDIR)
+}
+
+/// The race loser's dirty mark: one file per unsynced merge SHA. Best-effort
+/// the same way `write_marker` is - the cost of a lost mark is one burst the
+/// next catch-up sweep still covers.
+fn write_pending(canonical: &Path, sha: &str, stderr: &mut Vec<String>) {
+    let dir = pending_dir(canonical);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        stderr.push(format!(
+            "post-merge sync: pending marker write failed ({e}); the running sync will not re-pull"
+        ));
+        return;
+    }
+    if let Err(e) = std::fs::File::create(dir.join(sha)) {
+        stderr.push(format!(
+            "post-merge sync: pending marker write failed ({e}); the running sync will not re-pull"
+        ));
+    }
+}
+
+/// The winner's end-of-run re-pull: one `git pull --ff-only` when losers
+/// marked merges during this run, then the marks clear. A failed re-pull
+/// keeps them (the next sweep retries); the pending merges' synced markers
+/// stay UNWRITTEN either way, so a buildable merge still gets its full chain
+/// from the next catch-up sweep - the re-pull only converges HEAD.
+fn drain_pending(
+    deps: &Deps,
+    canonical: &Path,
+    stdout: &mut Vec<String>,
+    stderr: &mut Vec<String>,
+) -> u64 {
+    let dir = pending_dir(canonical);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut shas: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        // Only merge-SHA-shaped names count: a stray file in the dir (Finder
+        // drops .DS_Store) is neither a merge nor ours to delete.
+        .filter(|name| name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()))
+        .collect();
+    if shas.is_empty() {
+        return 0;
+    }
+    shas.sort();
+    let count = shas.len() as u64;
+    match (deps.git_pull)(canonical) {
+        Ok(head) => {
+            for sha in &shas {
+                let _ = std::fs::remove_file(dir.join(sha));
+            }
+            let head_note = if head.is_empty() {
+                String::new()
+            } else {
+                format!(", head {}", sha12(&head))
+            };
+            stdout.push(format!(
+                "post-merge sync: re-pulled {count} pending merge(s){head_note}"
+            ));
+            count
+        }
+        Err(detail) => {
+            stderr.push(format!(
+                "post-merge sync: re-pull failed ({detail}); {count} pending marker(s) kept, next sweep retries"
+            ));
+            0
+        }
+    }
+}
+
+/// One JSON line per chain run: the durable receipt for a DETACHED sync whose
+/// stdout nobody reads. Best-effort; a write failure is signalled, never
+/// fatal - the exit line on the caller's stderr already names the outcome.
+fn append_receipt(
+    deps: &Deps,
+    canonical: &Path,
+    pr: u64,
+    sha: &str,
+    exit: i32,
+    timed_out: bool,
+    re_pulled: u64,
+    stderr: &mut Vec<String>,
+) {
+    use std::io::Write;
+    let ts = (deps.now)().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let line = json!({
+        "ts": ts,
+        "pr": pr,
+        "sha": sha12(sha),
+        "exit": exit,
+        "timed_out": timed_out,
+        "re_pulled": re_pulled,
+    })
+    .to_string();
+    let path = canonical.join(".fno").join("post-merge-sync-receipt.jsonl");
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")
+    };
+    if let Err(e) = write() {
+        stderr.push(format!("post-merge sync: receipt write failed ({e})"));
+    }
+}
+
 fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
     let s = raw.trim();
     DateTime::parse_from_rfc3339(s)
@@ -302,6 +432,32 @@ fn real_git_origin(canonical: &Path) -> Option<String> {
         return None;
     }
     remote_slug(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// The winner's end-of-run re-pull: `--ff-only` so it can never diverge the
+/// canonical the way a raced chain did. Ok carries the post-pull HEAD for the
+/// receipt; an unreadable head keeps the receipt pull-counted but headless
+/// (the pull itself landed - that is the part the marker chain cares about).
+fn real_git_pull(canonical: &Path) -> Result<String, String> {
+    let mut pull = std::process::Command::new("git");
+    pull.arg("-C").arg(canonical).args(["pull", "--ff-only"]);
+    let out = match crate::bounded_cmd::output_with_timeout(pull, RE_PULL_TIMEOUT_SECS) {
+        Some(out) => out,
+        None => return Err("git not found or unreadable".to_string()),
+    };
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        return Err(format!(
+            "git pull --ff-only exit {code}: {}",
+            tail(String::from_utf8_lossy(&out.stderr).trim())
+        ));
+    }
+    let mut rev = std::process::Command::new("git");
+    rev.arg("-C").arg(canonical).args(["rev-parse", "HEAD"]);
+    match crate::bounded_cmd::output_with_timeout(rev, PROBE_TIMEOUT_SECS) {
+        Some(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        _ => Ok(String::new()),
+    }
 }
 
 fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
@@ -401,6 +557,7 @@ impl Deps {
             gh: Rc::new(real_gh),
             git_origin: Rc::new(real_git_origin),
             shell: Rc::new(real_shell),
+            git_pull: Rc::new(real_git_pull),
             check: Rc::new(|payload| crate::canonical_check::build_answer(payload)),
             now: Rc::new(chrono::Utc::now),
         }
@@ -542,8 +699,11 @@ fn run_sync_with_shell(deps: &Deps, cwd: &Path, pr: u64, shell: &ShellRun) -> Sy
         crate::claims::AcquireOutcome::Error(_) => Some(String::new()),
     };
     if let Some(by) = by {
+        // Dirty mark for the winner's end-of-run re-pull (the burst contract:
+        // one chain per burst, HEAD still converges to the newest merge).
+        write_pending(&canonical, &sha, &mut stderr);
         stdout.push(format!(
-            "post-merge sync: in progress elsewhere for {}{by}; skipping",
+            "post-merge sync: in progress elsewhere for {}{by}; marked pending; skipping",
             sha12(&sha)
         ));
         return (0, stdout, stderr);
@@ -634,7 +794,27 @@ fn sync_under_lease(
         canonical.display(),
         sha12(sha)
     ));
+    // The chain's cargo install takes the build-admit priority lane so the
+    // deploy does not park behind worker test builds (the 10.5-min build-admit
+    // park). Held elsewhere or unanswerable: build normal, say so.
+    let prio_holder = format!("worktree:{}", canonical.display());
+    let prio_opts = || crate::claims::AcquireOpts {
+        pid: None,
+        pid_unavailable: true,
+        ttl_ms: Some(PRIORITY_LANE_TTL_MS),
+        reason: Some("post-merge sync install priority".to_string()),
+        ..Default::default()
+    };
+    let prio = crate::claims::acquire(crate::test_run::PRIORITY_KEY, &prio_holder, prio_opts());
+    if let crate::claims::AcquireOutcome::HeldByOther { holder, .. } = &prio {
+        stderr.push(format!(
+            "post-merge install: test:priority held by {holder}; building without priority"
+        ));
+    }
     let out = shell(&cfg.sync_command, canonical);
+    if matches!(prio, crate::claims::AcquireOutcome::Acquired(_)) {
+        let _ = crate::claims::release(crate::test_run::PRIORITY_KEY, &prio_holder, None, None);
+    }
     if out.timed_out {
         stderr.push(format!(
             "post-merge sync: sync_command timed out after {}s; marker withheld, will retry",
@@ -644,12 +824,15 @@ fn sync_under_lease(
     if out.code == 0 {
         write_marker(&marker, stderr);
         stdout.push(format!("post-merge sync: synced {}", sha12(sha)));
+        let re_pulled = drain_pending(deps, canonical, stdout, stderr);
+        append_receipt(deps, canonical, pr, sha, 0, false, re_pulled, stderr);
         return 0;
     }
 
     // Surface the command and its output, not just the exit code: a real
     // failure here was a one-word typo the receipt hid for days. The marker
     // stays withheld, so retry behaviour is unchanged.
+    append_receipt(deps, canonical, pr, sha, out.code, out.timed_out, 0, stderr);
     let mut parts = vec![
         format!(
             "post-merge sync: failed (exit {}); marker withheld, will retry",
@@ -1134,6 +1317,7 @@ mod tests {
             gh,
             git_origin: Rc::new(|_| Some("owner/repo".to_string())),
             shell,
+            git_pull: Rc::new(|_| Err("no pull expected".to_string())),
             check,
             now,
         }
@@ -1264,7 +1448,110 @@ mod tests {
         let line = stdout.join("\n");
         assert!(line.contains("in progress elsewhere"), "{line}");
         assert!(line.contains("held by someone-else"));
+        // The burst contract's dirty mark: the loser leaves its merge SHA for
+        // the winner's end-of-run re-pull.
+        assert!(pending_dir(tmp.path()).join(SHA).exists());
         crate::claims::release(FLIGHT_KEY, "someone-else", Some(tmp.path()), None).unwrap();
+    }
+
+    #[test]
+    fn burst_winner_re_pulls_pending_once_and_ends_at_the_newer_head() {
+        // The node's burst contract: two merges seconds apart -> ONE chain
+        // runs (one update, one restart), the loser marks pending, the
+        // winner re-pulls once at the end, HEAD lands at the newer merge.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("FNO_CLAIMS_ROOT");
+        let claims_root = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", claims_root.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_cfg(tmp.path(), CFG_BODY);
+        let chain_runs = Rc::new(RefCell::new(0u32));
+        let flag = Rc::clone(&chain_runs);
+        let shell: ShellRun = Rc::new(move |_c, _d| {
+            *flag.borrow_mut() += 1;
+            ShellOutcome {
+                code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            }
+        });
+        // The pull stub runs once successfully, then fails, so one test
+        // covers both drain outcomes: success clears + receipts, failure
+        // keeps the marks for the next sweep.
+        let pulls = Rc::new(RefCell::new((0u32, true)));
+        let pflag = Rc::clone(&pulls);
+        let newer = "1111111111111111111111111111111111111111";
+        let git_pull: GitPull = Rc::new(move |_| {
+            let (count, ok) = *pflag.borrow();
+            *pflag.borrow_mut() = (count + 1, ok);
+            if ok {
+                Ok(newer.to_string())
+            } else {
+                Err("exit 1: merge conflict".to_string())
+            }
+        });
+        let deps = Deps {
+            gh: gh_stub(
+                view_row("MERGED", SHA, &["cli/x.py"], PR_URL),
+                ListStub::Rows("[]".to_string()),
+            ),
+            git_origin: Rc::new(|_| Some("owner/repo".to_string())),
+            shell,
+            git_pull,
+            check: Rc::new(|_| json!({})),
+            now: Rc::new(fixed_now),
+        };
+
+        // Phase 1: merge B lands mid-chain; the winner drains it.
+        write_pending(tmp.path(), newer, &mut Vec::new());
+        let (exit, stdout, _) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
+        assert_eq!(exit, 0);
+        assert_eq!(*chain_runs.borrow(), 1, "one chain, not a second");
+        assert_eq!(*pulls.borrow(), (1, true));
+        assert!(!pending_dir(tmp.path()).join(newer).exists());
+        let line = stdout.join("\n");
+        assert!(
+            line.contains(&format!(
+                "re-pulled 1 pending merge(s), head {}",
+                &newer[..12]
+            )),
+            "{line}"
+        );
+        let receipt = std::fs::read_to_string(
+            tmp.path()
+                .join(".fno")
+                .join("post-merge-sync-receipt.jsonl"),
+        )
+        .unwrap();
+        let row: Value = serde_json::from_str(receipt.trim()).unwrap();
+        assert_eq!(row["exit"], 0);
+        assert_eq!(row["re_pulled"], 1);
+        assert_eq!(row["pr"], 5);
+        // The priority lane was taken and released: no live hold left.
+        let (state, _) = crate::claims::status(crate::test_run::PRIORITY_KEY, None);
+        assert!(!matches!(
+            state,
+            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+        ));
+
+        // Phase 2: a failing pull keeps the marks for the next sweep.
+        pulls.borrow_mut().1 = false;
+        // Phase 1 marked this PR synced; drop the marker so phase 2 re-runs.
+        let _ = std::fs::remove_file(synced_marker(tmp.path(), SHA));
+        write_pending(tmp.path(), newer, &mut Vec::new());
+        let (exit, _stdout, stderr) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
+        assert_eq!(exit, 0);
+        assert_eq!(*chain_runs.borrow(), 2, "each sync runs its own chain once");
+        assert!(pending_dir(tmp.path()).join(newer).exists(), "kept");
+        assert!(stderr.join("\n").contains("re-pull failed"));
+        match previous {
+            Some(v) => std::env::set_var("FNO_CLAIMS_ROOT", v),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     #[test]
@@ -1349,6 +1636,7 @@ mod tests {
             git_origin: Rc::new(|_| None),
             gh,
             shell,
+            git_pull: Rc::new(|_| Err("no pull expected".to_string())),
             check: Rc::new(|_| json!({})),
             now: Rc::new(fixed_now),
         };
@@ -1368,6 +1656,7 @@ mod tests {
             git_origin: Rc::new(|_| Some("owner/repo".to_string())),
             gh,
             shell,
+            git_pull: Rc::new(|_| Err("no pull expected".to_string())),
             check: Rc::new(|_| json!({})),
             now: Rc::new(fixed_now),
         };
@@ -1387,6 +1676,7 @@ mod tests {
             git_origin: Rc::new(|_| Some("owner/repo".to_string())),
             gh,
             shell,
+            git_pull: Rc::new(|_| Err("no pull expected".to_string())),
             check: Rc::new(|_| json!({})),
             now: Rc::new(fixed_now),
         };
@@ -1512,6 +1802,9 @@ mod tests {
         assert_eq!(out.detail, "gh unavailable or unauthenticated");
         let st = compute_staleness(&deps, tmp.path(), false);
         assert_eq!(st.state, "unknown");
+        // The verbatim detail rides the staleness read too (folded here from
+        // its former standalone test to keep the suite shrink-only).
+        assert_eq!(st.detail, "gh unavailable or unauthenticated");
     }
 
     #[test]
@@ -1726,16 +2019,6 @@ mod tests {
         assert_eq!(st.state, "fresh");
         assert!(st.markerless.is_empty());
         assert_eq!(st.behind, Some(0));
-    }
-
-    #[test]
-    fn staleness_unknown_keeps_the_verbatim_detail_when_gh_is_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_cfg(tmp.path(), CFG_BODY);
-        let deps = catchup_deps(ListStub::Missing, ok_shell(), Rc::new(|_| json!({})));
-        let st = compute_staleness(&deps, tmp.path(), false);
-        assert_eq!(st.state, "unknown");
-        assert_eq!(st.detail, "gh unavailable or unauthenticated");
     }
 
     #[test]

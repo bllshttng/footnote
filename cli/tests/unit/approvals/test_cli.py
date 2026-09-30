@@ -20,6 +20,11 @@ from fno.approvals import (
 from fno.approvals.cli import approvals_app
 from fno.approvals.policy import ConfigAuthority
 
+# The `db` fixture files its request through the Rust effect gate
+# (`authorized-merge` op effect-submit), so the module needs this checkout's
+# fno-agents dev build; smoke legs skip via the dev_build marker.
+pytestmark = pytest.mark.dev_build
+
 runner = CliRunner()
 
 FOUNDER = "principal:founder"
