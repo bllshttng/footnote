@@ -732,23 +732,35 @@ def upsert_ledger_pr(
     Budget/NoProgress/Interrupted/Aborted/NoWork row, and a ``created``
     backstop is dropped by :func:`append_to_tasks_json`'s collapse rule if a
     full finalize row later lands for the node.
+
+    A keeper that answers ``unknown store method`` is an OLD binary still
+    holding the socket (a rebuild the running keeper never picked up). That
+    refusal degrades to a silent ``skipped-version-skew``: the close is
+    unaffected, and the next merge served by a current keeper runs the
+    whole-ledger fill, which backfills the axes this row would have carried.
+    Any OTHER keeper error propagates to the caller's warning.
     """
     from fno.graph.store import GRAPH_JSON, _client_for
 
-    return _client_for(GRAPH_JSON).request(
-        "ledger_backstop",
-        {
-            "ledger_path": str(_paths.ledger_json()),
-            "registry_path": str(_paths.agents_registry_path()),
-            "node_id": node_id,
-            "pr_number": pr_number,
-            "pr_url": pr_url,
-            "project": project,
-            "merged_at": merged_at,
-            "plan_path": plan_path,
-            "node_sessions": list(node_sessions or []),
-        },
-    )["outcome"]
+    try:
+        return _client_for(GRAPH_JSON).request(
+            "ledger_backstop",
+            {
+                "ledger_path": str(_paths.ledger_json()),
+                "registry_path": str(_paths.agents_registry_path()),
+                "node_id": node_id,
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "project": project,
+                "merged_at": merged_at,
+                "plan_path": plan_path,
+                "node_sessions": list(node_sessions or []),
+            },
+        )["outcome"]
+    except RuntimeError as exc:
+        if "unknown store method" in str(exc) and "ledger_backstop" in str(exc):
+            return "skipped-version-skew"
+        raise
 
 
 def harvest_ledger_sessions(nodes_by_id: dict, *, dry_run: bool) -> tuple[int, int]:
