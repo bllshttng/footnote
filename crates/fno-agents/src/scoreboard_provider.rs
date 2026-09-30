@@ -27,7 +27,10 @@ pub(crate) fn view(params: &Value) -> Result<Value, String> {
         .get("entries")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    let rows = params.get("rows").and_then(Value::as_array).unwrap_or(&empty);
+    let rows = params
+        .get("rows")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
     let since_days = params
         .get("since_days")
         .and_then(Value::as_i64)
@@ -55,7 +58,12 @@ struct Bucket {
     nid_rows: u64,
 }
 
-fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveDateTime) -> Result<Value, String> {
+fn build(
+    rows: &[Value],
+    entries: &[Value],
+    since_days: i64,
+    now: chrono::NaiveDateTime,
+) -> Result<Value, String> {
     let cutoff = now - chrono::Duration::days(since_days);
     let windowed: Vec<&Value> = rows
         .iter()
@@ -79,7 +87,10 @@ fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveD
         "ship_terminals": SHIP_TERMINALS,
     }))?;
     let empty_map = Map::new();
-    let by_node = cls.get("by_node").and_then(Value::as_object).unwrap_or(&empty_map);
+    let by_node = cls
+        .get("by_node")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
 
     let mut by_id: HashMap<&str, &Value> = HashMap::new();
     let mut fixes: HashMap<&str, Vec<&Value>> = HashMap::new();
@@ -118,17 +129,30 @@ fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveD
         let harness = key(r, "harness", UNATTRIBUTED);
         let provider = key(r, "provider", UNRECORDED);
         let model = key(r, "model", UNKNOWN);
-        if r.get("harness").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        if r.get("harness")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
             harness_n += 1;
         }
-        if r.get("provider").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        if r.get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
             provider_n += 1;
         }
-        if r.get("model").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        if r.get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
             model_n += 1;
         }
-        if r.get("harness").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
-            && r.get("model").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+        if r.get("harness")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+            && r.get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
         {
             attributed_n += 1;
         }
@@ -144,7 +168,11 @@ fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveD
         if num_opt(r.get("cost_usd")).is_some() {
             b.measured_cost = true;
         }
-        if let Some(nid) = r.get("graph_node_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(nid) = r
+            .get("graph_node_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             b.nids.insert(nid.to_string());
             b.nid_rows += 1;
         }
@@ -152,7 +180,11 @@ fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveD
             if let Some(it) = num_opt(r.get("iterations")) {
                 b.iterations.push(it);
             }
-            if let Some(nid) = r.get("graph_node_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(nid) = r
+                .get("graph_node_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 // Delivered nodes count ONCE per bucket; retries never stack credit.
                 b.delivered_nids.insert(nid.to_string());
                 node_buckets
@@ -167,8 +199,12 @@ fn build(rows: &[Value], entries: &[Value], since_days: i64, now: chrono::NaiveD
             {
                 b.shipped_linked += 1;
                 let outcome = node_outcome(
-                    r.get("graph_node_id").and_then(Value::as_str).unwrap_or_default(),
-                    r.get("completed").and_then(Value::as_str).and_then(parse_local),
+                    r.get("graph_node_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    r.get("completed")
+                        .and_then(Value::as_str)
+                        .and_then(parse_local),
                     &by_id,
                     &fixes,
                 );
@@ -249,8 +285,8 @@ fn row_shipped(row: &Value, by_node: &Map<String, Value>) -> bool {
         .get("termination_reason")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let is_backstop = tr == "reconcile-backstop"
-        && row.get("pr_number").map_or(false, |v| !v.is_null());
+    let is_backstop =
+        tr == "reconcile-backstop" && row.get("pr_number").map_or(false, |v| !v.is_null());
     if !SHIP_TERMINALS.contains(&tr) && !is_backstop {
         return false;
     }
@@ -307,9 +343,28 @@ fn node_outcome(
     "merged_clean"
 }
 
-/// The fold's `_num`: junk-tolerant cost coercion, junk -> 0.0.
+/// The fold's `_num`: junk-tolerant cost coercion, junk -> 0.0. Unlike
+/// `_num_opt`, a finite NEGATIVE reads as itself (Python's `float(v or 0.0)`
+/// never filtered the sign); the spend column stays sign-faithful.
 fn num(v: Option<&Value>) -> f64 {
-    num_opt(v).unwrap_or(0.0)
+    let Some(v) = v else { return 0.0 };
+    let f = match v {
+        Value::Number(_) => v.as_f64().unwrap_or(f64::NAN),
+        Value::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::String(s) if !s.is_empty() => s.parse::<f64>().unwrap_or(f64::NAN),
+        _ => return 0.0,
+    };
+    if f.is_finite() {
+        f
+    } else {
+        0.0
+    }
 }
 
 /// The fold's `_num_opt`: a MISSING/None/junk value is None, not 0.0, and a
@@ -390,7 +445,10 @@ fn render(pb: &Value) -> String {
     ] {
         out.push_str(&format!("  {label:<19}{}%\n", cov[key]));
     }
-    out.push_str(&format!("  attributed:          {}%\n", cov["attributed_pct"]));
+    out.push_str(&format!(
+        "  attributed:          {}%\n",
+        cov["attributed_pct"]
+    ));
     if cov["attributed_pct"].as_i64().unwrap_or(0) < 100 {
         out.push_str(&format!(
             "  ! rows below reflect {}% harness attribution - unattributed rows are a visible bucket, never dropped.\n",
@@ -399,8 +457,18 @@ fn render(pb: &Value) -> String {
     }
     out.push_str(&format!(
         "\n  {:<12}{:<16}{:<22}{:>6}{:>7}{:>7}{:>8}{:>10}{:>9}{:>13}{:>10}{:>9}\n",
-        "harness", "provider", "model", "runs", "ships", "nodes", "shared",
-        "spend$", "$/ship", "bounce%", "med iter", "retries"
+        "harness",
+        "provider",
+        "model",
+        "runs",
+        "ships",
+        "nodes",
+        "shared",
+        "spend$",
+        "$/ship",
+        "bounce%",
+        "med iter",
+        "retries"
     ));
     let mut prev = String::new();
     for row in pb["rows"].as_array().map_or(&[][..], |r| r.as_slice()) {
@@ -514,7 +582,9 @@ mod tests {
             axis_row(Some("claude"), Some("opus"), "DonePRGreen", None),
         ];
         rows[2]["completed"] = json!("2026-06-01T10:00:00");
-        rows.push(json!({"type": "execution", "completed": "2026-07-10T10:00:00", "harness": "claude"}));
+        rows.push(
+            json!({"type": "execution", "completed": "2026-07-10T10:00:00", "harness": "claude"}),
+        );
         let v = call(&rows, &graph());
         assert_eq!(v["view"]["coverage"]["rows"], 2, "{v}");
         assert_eq!(v["view"]["rows"][0]["runs"], 2);
@@ -560,9 +630,21 @@ mod tests {
         assert_eq!(r["bounce_rate_pct"], 100, "{r}");
         assert_eq!(r["shipped_linked"], 2);
         assert_eq!(r["median_iterations"], 5.0);
-        let v = call(&[axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1"))], &[json!({"id": "x-1"})]);
+        let v = call(
+            &[axis_row(
+                Some("claude"),
+                Some("opus"),
+                "DonePRGreen",
+                Some("x-1"),
+            )],
+            &[json!({"id": "x-1"})],
+        );
         let r = &v["view"]["rows"][0];
-        assert_eq!(r["bounce_rate_pct"], Value::Null, "no W4 fields, no fake 0%: {r}");
+        assert_eq!(
+            r["bounce_rate_pct"],
+            Value::Null,
+            "no W4 fields, no fake 0%: {r}"
+        );
         assert_eq!(r["shipped_linked"], 0);
     }
 
@@ -575,18 +657,29 @@ mod tests {
         ];
         let v = call(&rows, &graph());
         let rs = v["view"]["rows"].as_array().unwrap();
-        let total: f64 = rs.iter().map(|r| r["spend_usd"].as_f64().unwrap_or(0.0)).sum();
+        let total: f64 = rs
+            .iter()
+            .map(|r| r["spend_usd"].as_f64().unwrap_or(0.0))
+            .sum();
         assert!((total - 3.0).abs() < 1e-9, "spend reconciles: {v}");
         assert_eq!(v["view"]["coverage"]["harness_pct"], 67);
         assert_eq!(v["view"]["coverage"]["model_pct"], 67);
         assert_eq!(v["view"]["coverage"]["attributed_pct"], 67, "{v}");
         let last = rs.last().unwrap();
-        assert_eq!(last["harness"], "unattributed", "unattributed sorted last: {v}");
+        assert_eq!(
+            last["harness"], "unattributed",
+            "unattributed sorted last: {v}"
+        );
     }
 
     #[test]
     fn junk_values_never_crash_the_fold() {
-        let mut rows = vec![axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1"))];
+        let mut rows = vec![axis_row(
+            Some("claude"),
+            Some("opus"),
+            "DonePRGreen",
+            Some("x-1"),
+        )];
         rows[0]["cost_usd"] = json!("abc");
         rows[0]["iterations"] = json!("junk");
         rows[0]["model"] = json!(123);
@@ -595,7 +688,10 @@ mod tests {
         assert_eq!(r["spend_usd"], 0.0, "{r}");
         assert_eq!(r["cost_per_shipped_usd"], Value::Null, "no measured cost");
         assert_eq!(r["median_iterations"], Value::Null);
-        assert_eq!(r["model"], "unknown", "non-string lands in the fallback bucket");
+        assert_eq!(
+            r["model"], "unknown",
+            "non-string lands in the fallback bucket"
+        );
     }
 
     #[test]
@@ -608,13 +704,22 @@ mod tests {
         let v = call(&rows, &graph());
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("Coverage"), "{text}");
-        assert!(text.contains("harness:") && text.contains("provider:") && text.contains("model:"), "{text}");
+        assert!(
+            text.contains("harness:") && text.contains("provider:") && text.contains("model:"),
+            "{text}"
+        );
         assert!(text.contains("attributed:"), "{text}");
-        assert!(text.contains("! rows below reflect"), "below 100 warns: {text}");
+        assert!(
+            text.contains("! rows below reflect"),
+            "below 100 warns: {text}"
+        );
         let body = text.split("med iter").nth(1).unwrap_or_default();
         let blanked = body.lines().filter(|l| l.starts_with("              "));
         assert!(blanked.count() >= 1, "a repeated harness blanks: {text}");
         let empty = call(&[], &graph());
-        assert!(empty["text"].as_str().unwrap().contains("no terminal sessions in window"));
+        assert!(empty["text"]
+            .as_str()
+            .unwrap()
+            .contains("no terminal sessions in window"));
     }
 }
