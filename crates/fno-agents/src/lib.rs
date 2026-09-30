@@ -175,6 +175,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -215,7 +216,6 @@ pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod launch_workdir;
-pub mod gh_cache;
 pub mod law_match;
 mod lifecycle_child;
 pub mod list_row;
