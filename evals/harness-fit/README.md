@@ -85,6 +85,8 @@ The machine restarted at 12:21:17Z on 2026-09-30. Harbor last wrote its log at 1
 - Run 1. The opencode lane had reached task 6 of 10. At most one attempt was in flight, and it wrote no row. The lane finishes through the top-up script in one pass. The zcode lane runs next. Then the top-up runs its 3 passes over the claude and opencode lanes.
 - Resume token. Harbor stores the z.ai token masked in the job file, and the first resume at 14:13Z sent the masked value. The four reruns ended in HTTP 401 with zero tokens. The job was stopped at 14:33Z with four more trials still in setup. No agent reached the model, so all eight are parked and run again with the real token.
 - The driver then started the opencode job out of order. It was stopped within one minute, before any agent ran. That job starts fresh after the claude-code arm.
+- Pause. The 1-minute load read 359 on 12 cores at 16:43Z. The fleet lead ordered a pause, and both runs stopped at 16:45:48Z. Harbor has no drain, so four claude-code trials in flight stopped with no result. One opencode attempt stopped with no row. All five run again on resume, and the 24 claude-code results stand.
+- Load. From 16:40Z a sampler records the load average once a minute. run-0.md and run-1.md print the load beside each timeout and stall. They also print each rate without the results that ran above load 50. No load record exists before 16:40Z.
 - A trial or attempt that a restart kills again gets the same treatment. run-0.md and run-1.md count each one by reason.
 
 ## Scope and limits
