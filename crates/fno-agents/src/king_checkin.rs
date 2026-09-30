@@ -4143,9 +4143,10 @@ mod tests {
             &mut readings,
             Reading::took(
                 "held",
-                json!({"open": 2, "rows": [
+                json!({"open": 3, "rows": [
                     {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
-                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                    {"node": null, "question_id": "q-3", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
                 ]}),
             ),
         );
@@ -4163,11 +4164,16 @@ mod tests {
             .filter(|l| l.contains("fno backlog decide"))
             .collect();
         assert_eq!(verbs.len(), 2, "each row names the decide verb");
-    }
-
-    #[test]
-    fn held_absent_reads_none() {
-        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
+        let clears: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno inbox outstanding clear"))
+            .collect();
+        assert_eq!(clears.len(), 1, "the nodeless row names the clear verb");
+        assert!(
+            clears[0].contains("the user answers it on the question board"),
+            "lines: {lines:?}"
+        );
+        // An absent held read keeps its line and says none; coverage counts it.
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");

@@ -519,7 +519,7 @@ pub(crate) fn held_lines(readings: &[crate::king_checkin::Reading]) -> Vec<Strin
                 "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
             )),
             None => lines.push(format!(
-                "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
+                "  question {qid}: the user answers it on the question board; if this crown asked it: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
             )),
         }
     }
