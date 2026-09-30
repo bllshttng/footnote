@@ -950,7 +950,17 @@ mod tests {
         let _env_guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        struct RestoreClaimsRoot(Option<std::ffi::OsString>);
+        impl Drop for RestoreClaimsRoot {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("FNO_CLAIMS_ROOT", value);
+                } else {
+                    std::env::remove_var("FNO_CLAIMS_ROOT");
+                }
+            }
+        }
+        let _restore_claims_root = RestoreClaimsRoot(std::env::var_os("FNO_CLAIMS_ROOT"));
         let temp = tempfile::tempdir().unwrap();
         let claims_root = temp.path().join("claims-root");
         std::fs::create_dir_all(&claims_root).unwrap();
@@ -1017,10 +1027,6 @@ mod tests {
         std::fs::write(&broken_claims_root, "unreadable claims root").unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &broken_claims_root);
         let claims_error = crate::watch_expiry::run_pass(&home);
-        match prior_claims_root {
-            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
-            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
-        }
 
         assert!(matches!(
             acquired,
