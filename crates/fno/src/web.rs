@@ -2397,11 +2397,21 @@ eq(laneKeyOf(any, "epic", parents, byId), { key: "", title: "no epic" }, "a done
 eq(laneKeyOf(any, "none", parents, byId), { key: "all", title: "all" }, "none is one lane");
 eq(laneKeyOf(Object.assign({}, any, { project: "" }), "project", parents, byId), { key: "", title: "unscoped" }, "unscoped project lane");
 eq(voteText("x-9"), 'fno backlog encounter x-9 --operator --evidence "REPLACE: what it cost"', "vote command");
-console.log("snapshot page helpers: 13 cases ok");
+const nestIn = [
+  { id: "p1", title: "Parent" },
+  { id: "c1", title: "Kid", parent: "p1" },
+  { id: "l1", title: "Loose" },
+];
+const nested = nestChildren(nestIn);
+eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent");
+eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
+eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
+console.log("snapshot page helpers: 16 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
+            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
             lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
             lift_js_fn(BACKLOG_PAGE, "voteText"),
             asserts
@@ -2426,7 +2436,7 @@ console.log("snapshot page helpers: 13 cases ok");
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 assert!(
-                    stdout.contains("snapshot page helpers: 13 cases ok"),
+                    stdout.contains("snapshot page helpers: 16 cases ok"),
                     "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
                 );
             }

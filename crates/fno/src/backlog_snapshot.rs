@@ -208,7 +208,7 @@ fn snapshot_page(page: &str, payload: &Value) -> Result<String, String> {
     Ok(format!(
         "{}{}<script type=\"application/json\" id=\"fno-snapshot\">{}</script>{}",
         &page[..anchor],
-        &page[anchor..after],
+        "<body data-snapshot=\"true\">",
         safe,
         &page[after..]
     ))

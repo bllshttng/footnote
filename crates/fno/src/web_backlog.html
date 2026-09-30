@@ -115,6 +115,8 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 .ltitle { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .lmeta { color: #6f7a8f; font-size: 11px; }
 .lrow.blocked .ltitle { color: #f08a8a; }
+.lrow.lchild { padding-left: 34px; }
+.lrow.lchild .ltitle { font-weight: 500; font-size: 12.5px; }
 .vote-pill { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid #2b3a55; color: #9fc1ee; cursor: pointer; background: none; }
 .vote-pill.z { color: #5a6478; border-color: #232b3a; }
 .ktag { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid; }
@@ -239,6 +241,26 @@ function cardKeeps(card, nodes, state) {
 // One card's lane under the three lanes modes, from the embedded cards
 // alone. The epic rule mirrors the model: a card sits in its own lane when
 // other cards parent to it; an open parent's lane otherwise; "no epic" last.
+// The list's inline children: a card whose parent sits beside it renders
+// directly under that parent, indented one step. Cards whose parent lives
+// in another cell keep their own top-level row.
+function nestChildren(cards) {
+  const present = new Set(cards.map((c) => c.id));
+  const kids = new Map();
+  for (const c of cards) {
+    if (c.parent && present.has(c.parent)) {
+      if (!kids.has(c.parent)) kids.set(c.parent, []);
+      kids.get(c.parent).push(c);
+    }
+  }
+  const out = [];
+  for (const c of cards) {
+    if (c.parent && kids.has(c.parent)) continue;
+    out.push({ card: c, depth: 0 });
+    for (const k of kids.get(c.id) || []) out.push({ card: k, depth: 1 });
+  }
+  return out;
+}
 function laneKeyOf(card, lanesBy, parents, byId) {
   if (lanesBy === "none") return { key: "all", title: "all" };
   if (lanesBy === "epic") {
@@ -623,7 +645,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       b.appendChild(m);
     }
     addKindTag(b, card.kind);
-    addVotePill(b, card, "card");
+    addVotePill(b, card);
     if (card.blocked) {
       const chip = document.createElement("span");
       chip.className = "chip";
@@ -700,16 +722,18 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     });
     const rows = document.createElement("div");
     rows.className = "lrows";
-    for (const card of (lane.cells || []).flatMap((c) => c.cards || [])) {
-      rows.appendChild(listRow(card));
+    for (const cell of lane.cells || []) {
+      for (const { card, depth } of nestChildren(cell.cards || [])) {
+        rows.appendChild(listRow(card, depth));
+      }
     }
     sec.append(head, rows);
     return sec;
   }
-  function listRow(card) {
+  function listRow(card, depth) {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "lrow" + (card.blocked ? " blocked" : "");
+    b.className = "lrow" + (card.blocked ? " blocked" : "") + (depth ? " lchild" : "");
     const id = document.createElement("span");
     id.className = "lid";
     id.textContent = card.id;
@@ -728,7 +752,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     m.textContent = meta.join(" · ");
     b.appendChild(m);
     addKindTag(b, card.kind);
-    addVotePill(b, card, "list");
+    addVotePill(b, card);
     b.addEventListener("click", () => openNode(card.id));
     return b;
   }
@@ -742,13 +766,13 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     box.appendChild(el);
   }
   // One vote pill: the encounter count with the agent/operator split in the
-  // title. Click opens the node; in a snapshot the panel's copy button is
-  // the upvote action, matching the local page's pill.
-  function addVotePill(box, card, where) {
+  // title. Click opens the node; the panel carries the upvote action. A
+  // span, not a button: cards and rows are already buttons, and nesting one
+  // is invalid HTML.
+  function addVotePill(box, card) {
     const n = card.encounters || 0;
     const o = card.encounters_operator || 0;
-    const el = document.createElement("button");
-    el.type = "button";
+    const el = document.createElement("span");
     el.className = "vote-pill" + (n ? "" : " z");
     el.textContent = "▲ " + n;
     el.title = (n - o) + " agent, " + o + " operator";
@@ -803,8 +827,11 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   }
   // One backlog act: POST the JSON body, then show the verb's own last
   // line (or the refusal body). Every act control disables for the flight;
-  // on a landed write the board and the open node re-read.
+  // on a landed write the board and the open node re-read. The answer
+  // outlives that re-read: openNode re-renders the panel and would wipe the
+  // note the same tick, which read as "the launch did nothing".
   let acting = false;
+  let lastAct = null;
   async function act(body) {
     if (acting) return;
     acting = true;
@@ -817,7 +844,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
         body: JSON.stringify(body),
       });
     } catch (e) {
-      showActLine("bridge unreachable: " + (e && e.message ? e.message : e));
+      lastAct = { id: body.id, text: "bridge unreachable: " + (e && e.message ? e.message : e) };
+      showActLine(lastAct.text);
       acting = false;
       return;
     }
@@ -828,12 +856,14 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       ok = resp.ok && v.ok !== false;
       notice = v.notice || text;
     } catch { }
-    showActLine((resp.ok ? "" : resp.status + ": ") + notice);
+    lastAct = { id: body.id, text: (resp.ok ? "" : resp.status + ": ") + notice };
+    showActLine(lastAct.text);
     acting = false;
-    for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = false;
     if (ok) {
       fetchBoard();
       openNode(body.id);
+    } else {
+      for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = false;
     }
   }
   function showActLine(text) {
@@ -918,6 +948,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const note = document.createElement("div");
     note.id = "actnote";
     note.className = "actnote";
+    // The last answer for THIS node survives the re-render that just drew
+    // the group.
+    if (lastAct && lastAct.id === card.id && lastAct.text) note.textContent = lastAct.text;
     g.appendChild(note);
     const unavail = (feature) => (view.unavailable || []).find((u) => u.feature === feature);
     const fieldUn = unavail("field edits");
@@ -1088,7 +1121,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     addFieldRow(grid, "created_at", view.created_at);
     addFieldRow(grid, "completed_at", view.completed_at);
     addFieldRow(grid, "cwd", view.cwd);
-    addFieldRow(grid, "king", king);
+    addFieldRow(grid, "lead", king);
     addFieldRow(grid, "plan_path", view.plan_path);
     panelBody.appendChild(g);
     // Demand: the encounter count with the agent/operator split, and the
@@ -1117,8 +1150,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       oline.className = "planline";
       const ospan = document.createElement("span");
       ospan.textContent = "origin: " + view.origin + (view.origin_evidence ? " · " + view.origin_evidence : "");
-      dline.appendChild(oline);
       oline.appendChild(ospan);
+      dg.appendChild(oline);
     }
     panelBody.appendChild(dg);
     // The plan row: Copy path always; Open in Obsidian when the writer
