@@ -238,7 +238,7 @@ fn migrate_locked(connection: &mut Connection, graph: &Path) -> Result<(), Strin
         .and_then(|raw| raw.parse::<i64>().ok())
         .unwrap_or(2);
     // A schema-2 stamp stays for the json-backend rebuild that follows in
-    // the same open; it stamps schema 4 itself.
+    // the same open; it stamps the current store setup version itself.
     if current >= 3 {
         super::stamp_meta(&transaction, "schema_version", super::SCHEMA_VERSION)?;
     }
