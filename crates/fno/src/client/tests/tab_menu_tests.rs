@@ -3,8 +3,8 @@
 //! the file-budget gate. Helpers stay in the parent and arrive via super::*.
 use super::*;
 
-#[test]
-fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
+#[tokio::test]
+async fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     // AC3-HP: right-pressing a tab cell opens the menu pinned to that tab's
     // stable id, with close tab last after a rule.
     let mut v = view_with_agents(vec![]);
@@ -104,4 +104,32 @@ fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, &text).unwrap();
     assert!(text.contains("Split Up"), "the grid renders");
+
+    // The skew branch of the same family: against a server that never
+    // announced (pre-v97 layout; the v95 build among them cannot parse
+    // SplitDir and the unknown variant ended the client's session),
+    // the Split cell refuses by notice and sends nothing. The edges
+    // pin the threshold: v96 is the command's birth, not the
+    // announcement's.
+    assert!(!server_has_splitdir(None));
+    assert!(!server_has_splitdir(Some(95)));
+    assert!(server_has_splitdir(Some(96)));
+    assert!(server_has_splitdir(Some(97)));
+    v.server_proto = None;
+    let sel = v
+        .row_menu
+        .as_ref()
+        .unwrap()
+        .actions
+        .iter()
+        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
+        .expect("the viewed tab's menu offers the split cell");
+    v.row_menu.as_mut().unwrap().popup.sel = sel;
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "an unannounced server gets no split");
+    assert!(v
+        .notice
+        .as_ref()
+        .is_some_and(|(s, _)| s.contains("restart the mux server")));
 }

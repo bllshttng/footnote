@@ -1513,7 +1513,7 @@ mod tests {
     /// every meta key names a roster verb (a stale meta row would render a
     /// verb the harness does not declare).
     #[test]
-    fn native_verb_meta_covers_the_roster_exactly() {
+    fn contract_rows() {
         let contract = HarnessContract::packaged().unwrap();
         for (name, caps) in &contract.harness {
             for verb in &caps.native_verbs {
@@ -1538,10 +1538,7 @@ mod tests {
         );
         assert!(claude.native_verb_meta["/clear"].risk.is_guarded());
         assert!(!claude.native_verb_meta["/compact"].risk.is_guarded());
-    }
 
-    #[test]
-    fn packaged_contract_is_complete_for_every_harness() {
         let mut contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
@@ -1611,7 +1608,7 @@ mod tests {
     /// itself reads the contract; this table is the measured answer it must
     /// keep producing.
     #[test]
-    fn thread_lane_is_derived_from_the_attach_declaration() {
+    fn derive_rows() {
         let contract = HarnessContract::packaged().unwrap();
         let lane = |h: &str| contract.thread_lane(h).unwrap();
         assert_eq!(lane("claude"), "attach");
@@ -1625,13 +1622,7 @@ mod tests {
         assert_eq!(lane("agy"), "keeper");
         assert_eq!(lane("gemini"), "keeper");
         assert_eq!(lane("pi"), "keeper");
-    }
 
-    /// The attach-split answer, pinned per attach-lane harness: the attach
-    /// form's `pre_exec` is the encoding of "a process outside this spawn
-    /// owns the session's life", and this is the measured split.
-    #[test]
-    fn attach_needs_server_is_derived_from_the_pre_exec_declaration() {
         let contract = HarnessContract::packaged().unwrap();
         assert!(
             contract.attach_needs_server("codex").unwrap(),
@@ -1645,14 +1636,7 @@ mod tests {
             contract.attach_needs_server("no-such-harness").is_err(),
             "an unknown harness must error, never answer false"
         );
-    }
 
-    /// The measured answer, pinned per harness. `stop_hook` read "native" on
-    /// every row for a year because nothing here would have noticed if it
-    /// stopped being true. A uniform table passes this test only if every row
-    /// is uniform on purpose.
-    #[test]
-    fn loop_participation_is_measured_per_harness_and_not_uniform() {
         let contract = HarnessContract::packaged().unwrap();
         let value = |h: &str| contract.capabilities(h).unwrap().loop_participation.clone();
         assert_eq!(value("claude"), "native");
@@ -1688,10 +1672,7 @@ mod tests {
             .unwrap()
             .loop_extension
             .is_empty());
-    }
 
-    #[test]
-    fn an_out_of_enum_loop_participation_is_refused() {
         let text = CAPABILITY_TOML.replacen(
             "loop_participation = \"native\"",
             "loop_participation = \"sometimes\"",
@@ -1700,10 +1681,7 @@ mod tests {
         let err = HarnessContract::parse(&text).unwrap_err().to_string();
         assert!(err.contains("loop_participation"), "{err}");
         assert!(err.contains("claude"), "{err}");
-    }
 
-    #[test]
-    fn a_non_extension_harness_may_not_name_a_loop_artifact() {
         let text = CAPABILITY_TOML.replacen(
             "loop_participation = \"native\"\nloop_extension = \"\"",
             "loop_participation = \"native\"\nloop_extension = \"some/plugin.js\"",
@@ -1713,8 +1691,17 @@ mod tests {
         assert!(err.contains("loop_extension"), "{err}");
     }
 
+    /// The attach-split answer, pinned per attach-lane harness: the attach
+    /// form's `pre_exec` is the encoding of "a process outside this spawn
+    /// owns the session's life", and this is the measured split.
+
+    /// The measured answer, pinned per harness. `stop_hook` read "native" on
+    /// every row for a year because nothing here would have noticed if it
+    /// stopped being true. A uniform table passes this test only if every row
+    /// is uniform on purpose.
+
     #[test]
-    fn renders_identity_skeletons_from_the_shared_strategy() {
+    fn skeleton_rows() {
         let contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract
@@ -1779,10 +1766,7 @@ mod tests {
                 .unwrap(),
             ["agy", "--conversation", "cv-1"]
         );
-    }
 
-    #[test]
-    fn contract_exposes_permission_input_and_teardown_differences() {
         let contract = HarnessContract::packaged().unwrap();
         let claude = contract.capabilities("claude").unwrap();
         let codex = contract.capabilities("codex").unwrap();
@@ -1827,10 +1811,7 @@ mod tests {
         assert_eq!(codex.session_binding.strategy, "rollout-fd-or-daemon");
         assert!(codex.session_binding.required);
         assert_eq!(codex.session_binding.timeout_ms, 60_000);
-    }
 
-    #[test]
-    fn feature_claims_carry_the_verbs_that_exercise_them() {
         let contract = HarnessContract::packaged().unwrap();
         let claude_review = contract
             .capabilities("claude")
@@ -1856,10 +1837,7 @@ mod tests {
             .get("spawn")
             .unwrap();
         assert!(opencode_spawn.verbs.is_empty());
-    }
 
-    #[test]
-    fn permission_response_requires_the_matching_manifest_rule() {
         let contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract
@@ -1877,10 +1855,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
-    }
 
-    #[test]
-    fn malformed_fields_fail_with_harness_and_field() {
         for (needle, replacement, field) in [
             (
                 "ready_marker = \"idle_prompt\"",
@@ -1944,10 +1919,7 @@ mod tests {
             let err = HarnessContract::parse(&bad).unwrap_err().to_string();
             assert!(err.contains(field), "{field}: {err}");
         }
-    }
 
-    #[test]
-    fn ready_marker_must_exist_in_the_real_bundled_manifest() {
         let bad = CAPABILITY_TOML
             .replacen(
                 "ready_marker = \"idle_prompt\"",
@@ -1993,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_exec_composes_sh_exec_with_the_semicolon_intact() {
+    fn preexec_rows() {
         let (form, rendered) = form_with_pre_exec();
         let argv = with_pre_exec(&form, rendered);
         assert_eq!(argv.first().map(String::as_str), Some("sh"));
@@ -2012,10 +1984,7 @@ mod tests {
             script.ends_with("'codex' 'resume' 'SESS' '--remote' 'unix://'"),
             "{script}"
         );
-    }
 
-    #[test]
-    fn pre_exec_single_quotes_each_token_so_one_cannot_escape() {
         let form = ResumeForm {
             kind: "subcommand".into(),
             tokens: vec!["at'tach".into(), "{session_id}".into()],
@@ -2024,10 +1993,7 @@ mod tests {
         let argv = with_pre_exec(&form, vec!["at'tach".into(), "S".into()]);
         let script = &argv[2];
         assert_eq!(script, r"'pre'\''exec'; exec 'at'\''tach' 'S'", "{script}");
-    }
 
-    #[test]
-    fn a_form_without_pre_exec_renders_bare_with_no_shell_in_the_way() {
         let form = ResumeForm {
             kind: "subcommand".into(),
             tokens: vec!["claude".into(), "attach".into(), "{short_id}".into()],
@@ -2038,10 +2004,7 @@ mod tests {
             vec!["claude".into(), "attach".into(), "deadbeef".into()],
         );
         assert_eq!(argv, ["claude", "attach", "deadbeef"]);
-    }
 
-    #[test]
-    fn an_attach_form_may_name_either_id_spelling_but_not_neither() {
         let claude_attach = "tokens = [\"claude\", \"attach\", \"{short_id}\"]";
         // Either spelling is a legal attach id: a full session id where a
         // short one would collide.
@@ -2062,16 +2025,7 @@ mod tests {
         let err = HarnessContract::parse(&idless).unwrap_err().to_string();
         assert!(err.contains("interactive_attach"), "{err}");
         assert!(err.contains("drops its attach id"), "{err}");
-    }
 
-    /// AC3: codex's declared attach form renders action-then-assertion
-    /// (`daemon start`, then the TUI), execs so the pane's child is the
-    /// harness, and substitutes the FULL session id - a codex UUIDv7 head-8 is
-    /// a ~65.5s clock bucket and would attach the wrong sibling. Measured
-    /// 2026-08-29 against 0.149.1: session absent from `thread/loaded/list`
-    /// before the resume, present after.
-    #[test]
-    fn codex_declared_attach_renders_daemon_start_then_exec_with_full_session_id() {
         let contract = HarnessContract::packaged().unwrap();
         let session = "01a04ea5-a473-7872-8137-49ff3cc214e9";
         let argv = contract
@@ -2104,13 +2058,20 @@ mod tests {
         assert!(err.contains("session_id, not a short_id"), "{err}");
     }
 
+    /// AC3: codex's declared attach form renders action-then-assertion
+    /// (`daemon start`, then the TUI), execs so the pane's child is the
+    /// harness, and substitutes the FULL session id - a codex UUIDv7 head-8 is
+    /// a ~65.5s clock bucket and would attach the wrong sibling. Measured
+    /// 2026-08-29 against 0.149.1: session absent from `thread/loaded/list`
+    /// before the resume, present after.
+
     /// The features dimension beside the keystrokes. The measured
     /// cells are pinned: the spawn set must equal the roster the spawn
     /// refusal used to hardcode, and the pane-only rows must read absent,
     /// because a state that silently drifted would put a refusal back in a
     /// lane that works.
     #[test]
-    fn feature_claims_read_their_measured_states() {
+    fn feature_rows() {
         let contract = HarnessContract::packaged().unwrap();
         let state = |h: &str, k: &str| {
             contract
@@ -2131,10 +2092,7 @@ mod tests {
         assert_eq!(state("codex", "review"), "native");
         assert_eq!(state("claude", "mcp"), "unmeasured");
         assert_eq!(state("agy", "acp"), "unmeasured");
-    }
 
-    #[test]
-    fn an_out_of_set_feature_state_is_refused_naming_harness_key_and_value() {
         let bad = CAPABILITY_TOML.replacen(
             "[harness.claude.features.spawn]\nstate = \"native\"",
             "[harness.claude.features.spawn]\nstate = \"wired\"",
@@ -2144,10 +2102,7 @@ mod tests {
         assert!(err.contains("claude"), "{err}");
         assert!(err.contains("features.spawn"), "{err}");
         assert!(err.contains("wired"), "{err}");
-    }
 
-    #[test]
-    fn the_feature_key_set_is_closed() {
         let bad = CAPABILITY_TOML.replacen(
             "[harness.claude.features.spawn]",
             "[harness.claude.features.spwan]",
@@ -2156,10 +2111,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("claude"), "{err}");
         assert!(err.contains("spwan"), "{err}");
-    }
 
-    #[test]
-    fn a_used_feature_needs_its_probe_declaration() {
         // Rename the declaration out of the features namespace (a legal
         // field declaration, so the only remaining defect is the missing
         // coupling) and the use below it refuses by name.
@@ -2171,10 +2123,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("features.spawn"), "{err}");
         assert!(err.contains("declaration"), "{err}");
-    }
 
-    #[test]
-    fn a_feature_declaration_may_only_name_a_feature_key() {
         let bad = CAPABILITY_TOML.replacen(
             "[probe.\"features.spawn\"]",
             "[probe.\"features.spwan\"]",
@@ -2183,10 +2132,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("spwan"), "{err}");
         assert!(err.contains("feature keys"), "{err}");
-    }
 
-    #[test]
-    fn a_row_without_a_features_table_loads_with_no_refusal() {
         // The stanza is stripped whole, receipt line included: an orphaned
         // `measured_by` would land at the row level, where it is unknown.
         let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\nmeasured_by = { reader = \"agy spawn journey\", version = \"1.1.24\", date = \"2026-09-03\" }\n";
@@ -2200,7 +2146,7 @@ mod tests {
     }
 
     #[test]
-    fn every_harness_declares_a_conversion_strategy_and_the_supported_ones_match_the_plan_matrix() {
+    fn conversion_rows() {
         let contract = HarnessContract::packaged().unwrap();
         let want = [
             ("claude", "client-resume", true),
@@ -2233,10 +2179,7 @@ mod tests {
             let got = contract.conversion(harness).unwrap();
             assert!(got.refusal.is_empty(), "{harness} carries no refusal");
         }
-    }
 
-    #[test]
-    fn a_missing_conversion_stanza_reads_unsupported_with_the_named_refusal() {
         // Every packaged row carries a stanza, so drop one to read the
         // absent default.
         let stripped = CAPABILITY_TOML.replacen(
@@ -2249,10 +2192,7 @@ mod tests {
         assert_eq!(got.strategy, "unsupported");
         assert!(!got.preserves_id);
         assert_eq!(got.refusal, "no conversion declared for grok");
-    }
 
-    #[test]
-    fn an_unsupported_conversion_without_a_refusal_is_a_parse_refusal() {
         let bad = CAPABILITY_TOML.replacen(
             "refusal = \"gemini is deprecated in favor of agy; there is nothing to convert\"",
             "",
@@ -2261,10 +2201,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("gemini"), "{err}");
         assert!(err.contains("refusal"), "{err}");
-    }
 
-    #[test]
-    fn a_supported_conversion_cannot_carry_a_refusal() {
         let bad = CAPABILITY_TOML.replacen(
             "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true",
             "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true\nrefusal = \"never\"",
@@ -2273,10 +2210,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("agy"), "{err}");
         assert!(err.contains("conversion"), "{err}");
-    }
 
-    #[test]
-    fn an_unknown_conversion_strategy_is_a_parse_refusal() {
         let bad = CAPABILITY_TOML.replacen(
             "[harness.pi.conversion]\nstrategy = \"keeper-rebind\"",
             "[harness.pi.conversion]\nstrategy = \"keeper-re-bind\"",
@@ -2288,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_instrument_without_a_control_is_refused() {
+    fn instrument_rows() {
         let bad = CAPABILITY_TOML.replacen(
             "control = \"no reasoning effort options are available in this build\"",
             "control = \"\"",
@@ -2297,10 +2231,7 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("needs control"), "{err}");
         assert!(err.contains("declared"), "{err}");
-    }
 
-    #[test]
-    fn a_control_on_a_kind_that_does_not_own_it_is_refused() {
         let decl = ProbeDecl {
             kind: "unprobeable".into(),
             authority: String::new(),
@@ -2313,10 +2244,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("must not carry control"), "{err}");
-    }
 
-    #[test]
-    fn a_pattern_matching_its_own_control_is_refused_as_blind() {
         let decl = ProbeDecl {
             kind: "declared".into(),
             authority: "{bin} --help".into(),

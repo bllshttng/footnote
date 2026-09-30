@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 import warnings
 from pathlib import Path
 
@@ -1218,6 +1219,18 @@ def native_backlog_door(monkeypatch):
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
+@pytest.fixture(autouse=True)
+def _mint_fno_id_stubbed(monkeypatch):
+    """Hermetic default for the one session-id mint.
+
+    `fno.rust_binary.mint_fno_id` shells `fno-agents state mint-id`, and the
+    pytest shards run with no binary, so every Python row birth would raise
+    VerbUnavailable. A random UUIDv4 stands in; tests that pin the forwarder
+    WIRING re-stub it themselves.
+    """
+    monkeypatch.setattr("fno.rust_binary.mint_fno_id", lambda: str(uuid.uuid4()))
 
 
 @pytest.fixture(autouse=True)

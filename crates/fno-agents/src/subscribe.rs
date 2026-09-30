@@ -64,6 +64,9 @@ fn poll(journal: &std::path::Path, cursor: &mut Cursor) -> Vec<String> {
             continue;
         }
         cursor.seq = row.seq;
+        if row.history_only {
+            continue;
+        }
         out.push(row.line);
     }
     out
@@ -458,6 +461,25 @@ mod tests {
             "source": "daemon", "data": {"session_id": "s0", "state": "working"}});
         crate::event_store::append_envelope(&journal, &pre.to_string(), None).unwrap();
         let mut cursor = connect_cursor(&journal, now_ms);
+        let history = json!({"ts": stamp_rfc3339(now_ms + 5_000), "type": "inside_leg_report",
+            "source": "daemon", "data": {"session_id": "historical", "state": "blocked"}});
+        let receipt = crate::event_store::append_envelope(
+            &journal,
+            &history.to_string(),
+            Some("historical-transition"),
+        )
+        .unwrap();
+        let db = rusqlite::Connection::open(receipt.store).unwrap();
+        db.execute_batch(
+            "CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL)",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO recovery_history VALUES (?1,?2)",
+            rusqlite::params![receipt.event_id, "copy-batch"],
+        )
+        .unwrap();
+        drop(db);
         let post = json!({"ts": stamp_rfc3339(now_ms + 5_000), "type": "inside_leg_report",
             "source": "daemon", "data": {"session_id": "s1", "state": "blocked"}});
         crate::event_store::append_envelope(&journal, &post.to_string(), None).unwrap();

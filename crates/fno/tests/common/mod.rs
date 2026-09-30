@@ -942,6 +942,9 @@ pub struct FakeClient {
     pub order: Vec<Absorbed>,
     /// Launcher progress updates, newest last.
     pub launch_updates: Vec<fno::proto::AgentLaunchUpdate>,
+    /// The wire version off the latest absorbed Layout (v97); `None` while
+    /// none has arrived.
+    pub server_proto: Option<u32>,
     /// Bytes read off the socket that do not yet form a whole message.
     ///
     /// The stream carries length-prefixed frames and the socket has a short read
@@ -987,6 +990,7 @@ impl FakeClient {
             link_hovers: Vec::new(),
             order: Vec::new(),
             launch_updates: Vec::new(),
+            server_proto: None,
             carry: Vec::new(),
         }
     }
@@ -994,6 +998,18 @@ impl FakeClient {
     pub fn input(&mut self, bytes: &[u8]) {
         let mut w = self.stream.try_clone().unwrap();
         write_msg_sync(&mut w, &ClientMsg::Input(bytes.to_vec())).unwrap();
+    }
+
+    /// Write `bytes` verbatim as ONE frame (length prefix + body), no typed
+    /// message: the only door for a shape this build cannot name - the
+    /// protocol-skew frames the server's refusal path exists for.
+    pub fn send_raw_frame(&mut self, body: &[u8]) {
+        let mut w = self.stream.try_clone().unwrap();
+        let mut frame = (u32::try_from(body.len()).unwrap()).to_be_bytes().to_vec();
+        frame.extend_from_slice(body);
+        use std::io::Write;
+        w.write_all(&frame).unwrap();
+        w.flush().unwrap();
     }
 
     /// Send any typed message (the launcher suites use this for
@@ -1090,8 +1106,10 @@ impl FakeClient {
                 agents,
                 focus_node,
                 backlog,
+                proto,
                 .. // the rest of the v36 backlog fields: the harness asserts the card list only
             } => {
+                self.server_proto = proto;
                 self.layout = Some(LayoutSnap {
                     squads,
                     active_squad,

@@ -707,7 +707,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         Ok(row) => row,
         Err(code) => return code,
     };
-    let Some(session_id) = row.effective_identity().map(str::to_string) else {
+    let Some(session_id) = row.harness_session().map(str::to_string) else {
         eprintln!("fno mux command: live row has no full harness session id");
         return EXIT_ERROR;
     };
