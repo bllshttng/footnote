@@ -12,7 +12,8 @@ set -euo pipefail
 FNO="${FNO_BIN:-fno}"
 SERVER=demo
 # /tmp, not TMPDIR: a socket path must stay under 104 bytes on macOS.
-ROOT="$(mktemp -d /tmp/fno-demo.XXXXXX)"
+# pwd -P: macOS resolves /tmp to /private/tmp, and HOME must match the real path.
+ROOT="$(cd "$(mktemp -d /tmp/fno-demo.XXXXXX)" && pwd -P)"
 PANES=()
 
 cleanup() {
@@ -24,8 +25,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$ROOT/state" "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text"
-printf 'schema_version = 1\nstate_dir = "%s"\n' "$ROOT/state" >"$ROOT/config.toml"
+mkdir -p "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text"
+# State under $ROOT/.fno: the mux board reads the graph from $HOME/.fno.
+printf 'schema_version = 1\nstate_dir = "%s"\n' "$ROOT/.fno" >"$ROOT/config.toml"
 export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$ROOT/agents"
 unset FNO_SERVER FNO_SESSION FNO_PANE FNO_OWNER_BIRTH
 # Under an owner session the server lives as long as its owner. Left alone,
@@ -36,17 +38,21 @@ export FNO_OWNER_PID=$$
 printf '{"sideline_view":"backlog","experimental_backlog_view":true}\n' >"$ROOT/agents/mux-view.json"
 
 cd "$ROOT/code/checkout"
-for title in \
-  "Rate limit the checkout api per key" \
-  "Retry webhooks with backoff and a dead-letter queue" \
-  "Show order status on the receipt page" \
-  "Cache product search for 60 seconds" \
-  "Split the payments module out of the monolith" \
-  "Add an audit log for refunds" \
-  "Page the on-call when p95 latency passes 800ms" \
-  "Remove the legacy coupon service"; do
-  "$FNO" backlog idea "$title" --project checkout --difficulty medium >/dev/null
-done
+# Invented work. The board's lanes come from priority, and its scope from
+# the server's project, so these stay unscoped.
+file() { # file <priority> <title>
+  "$FNO" backlog idea "$2" -p "$1" --difficulty medium >/dev/null
+}
+file p1 "Rate limit the checkout api per key"
+file p1 "Retry webhooks with backoff and a dead-letter queue"
+file p1 "Cache product search for 60 seconds"
+file p1 "Show order status on the receipt page"
+file p1 "Page the on-call when p95 latency passes 800ms"
+file p2 "Add an audit log for refunds"
+file p2 "Split the payments module out of the monolith"
+file p2 "Remove the legacy coupon service"
+file p3 "Move image resizing to a queue worker"
+file p3 "Support Apple Pay on the checkout page"
 
 # Pane text: an invented transcript per harness, shown by a process that
 # never prints a prompt. The cursor is hidden, so no block reads as a glyph.
@@ -102,12 +108,32 @@ ${E}[1m> document the refund audit log${E}[0m
   Drafting docs/refunds.md from the new schema.
 EOF
 
-# The registry rows that name each pane's harness, model and state. They go
-# in before the panes: the server reads the registry on an interval, and a
-# fresh server numbers its panes from 1 in spawn order.
-python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" <<'PY'
+# Each pane prints its text, hides the cursor, and prints it again on every
+# resize, so the sizing attach below lands on a full screen.
+show() {
+  printf "draw() { printf '\\\\033[?25l\\\\033[2J\\\\033[H'; cat '%s'; }; trap draw WINCH; draw; while :; do sleep 1; done" "$1"
+}
+run() { # run <args...> : start a pane, record its id
+  PANES+=("$("$FNO" mux pane run --server "$SERVER" --json "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pane_id"])')")
+}
+
+W=(--workspace checkout)
+# The first tab stays the active one, so the three-pane tab comes first.
+run "${W[@]}" --cwd "$ROOT/code/checkout" --worker archer -- sh -c "$(show "$ROOT/text/codex.txt")"
+run "${W[@]}" --tab 1 --at "${PANES[0]}" --split right --worker scout -- sh -c "$(show "$ROOT/text/claude.txt")"
+run "${W[@]}" --tab 1 --at "${PANES[0]}" --split down --worker reviewer -- sh -c "$(show "$ROOT/text/opencode.txt")"
+run "${W[@]}" --worker pager -- sh -c "$(show "$ROOT/text/pi.txt")"
+run "${W[@]}" --worker scribe -- sh -c "$(show "$ROOT/text/docs.txt")"
+"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 1 --name agents >/dev/null
+"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 2 --name alerts >/dev/null
+"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 3 --name docs >/dev/null
+
+# The registry rows that name each pane's harness, model and state. The
+# server reads the registry on an interval, so wait a few seconds for it.
+python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${PANES[@]}" <<'PY'
 import json, sys, datetime
-path, server, cwd = sys.argv[1:]
+path, server, cwd = sys.argv[1:4]
+ids = [int(p) for p in sys.argv[4:]]
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def row(name, harness, model, pane, state):
     return {
@@ -118,38 +144,20 @@ def row(name, harness, model, pane, state):
         "inside_leg": {"state": state, "seq": 1, "received_at": now},
     }
 json.dump({"schema_version": 1, "agents": [
-    row("archer", "codex", "gpt-6-sol", 1, "working"),
-    row("scout", "claude", "opus", 2, "done"),
-    row("reviewer", "opencode", "zen", 3, "blocked"),
-    row("pager", "pi", "glm-5", 4, "working"),
-    row("scribe", "claude", "sonnet", 5, "done"),
+    row("archer", "codex", "gpt-6-sol", ids[0], "working"),
+    row("scout", "claude", "opus", ids[1], "done"),
+    row("reviewer", "opencode", "zen", ids[2], "blocked"),
+    row("pager", "pi", "glm-5", ids[3], "working"),
+    row("scribe", "claude", "sonnet", ids[4], "done"),
 ]}, open(path, "w"))
 PY
 
-# Each pane prints its text, hides the cursor, and prints it again on every
-# resize, so the sizing attach below lands on a full screen.
-show() {
-  printf "draw() { printf '\\\\033[?25l\\\\033[2J\\\\033[H'; cat '%s'; }; trap draw WINCH; draw; while :; do sleep 1; done" "$1"
-}
-run() { # run <expected id> <args...> : start a pane, check the id the registry names
-  local want="$1" got
-  shift
-  got="$("$FNO" mux pane run --server "$SERVER" --json "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pane_id"])')"
-  PANES+=("$got")
-  [ "$got" = "$want" ] || { echo "pane id $got, the registry names $want" >&2; exit 1; }
-}
+sleep 6
 
-W=(--workspace checkout)
-run 1 "${W[@]}" --cwd "$ROOT/code/checkout" --worker archer -- sh -c "$(show "$ROOT/text/codex.txt")"
-run 2 "${W[@]}" --at 1 --split right --worker scout -- sh -c "$(show "$ROOT/text/claude.txt")"
-run 3 "${W[@]}" --at 1 --split down --worker reviewer -- sh -c "$(show "$ROOT/text/opencode.txt")"
-run 4 "${W[@]}" --worker pager -- sh -c "$(show "$ROOT/text/pi.txt")"
-run 5 "${W[@]}" --worker scribe -- sh -c "$(show "$ROOT/text/docs.txt")"
-"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 1 --name agents >/dev/null
-"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 2 --name alerts >/dev/null
-"$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 3 --name docs >/dev/null
-"$FNO" mux pane focus 1 --server "$SERVER" >/dev/null
-sleep 2
+# The server reads the registry only while a viewer is attached, and the
+# first attach ends before the rows join. A warm-up shot starts that read.
+HOME="$ROOT" "$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout --out "$ROOT/warm.svg" >/dev/null
+sleep 3
 
 # The flags after ours win. HOME makes the status row read ~/code/checkout.
-HOME="$ROOT" "$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit "$@"
+HOME="$ROOT" "$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout "$@"

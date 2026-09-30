@@ -98,7 +98,7 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 /// database. Never `$HOME`: a test that points `$HOME` at a tempdir must stay
 /// outside the fence, while the store it guards does not.
 #[cfg(unix)]
-fn passwd_home() -> Option<PathBuf> {
+pub(crate) fn passwd_home() -> Option<PathBuf> {
     let mut buf = vec![0u8; 4096];
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
@@ -125,7 +125,7 @@ fn passwd_home() -> Option<PathBuf> {
 }
 
 #[cfg(not(unix))]
-fn passwd_home() -> Option<PathBuf> {
+pub(crate) fn passwd_home() -> Option<PathBuf> {
     None
 }
 

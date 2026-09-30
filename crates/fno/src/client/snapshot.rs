@@ -184,7 +184,13 @@ fn png(svg: &str, frame: &Frame, out: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("temp page: {e}"))?;
     let out_abs = std::path::absolute(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let status = std::process::Command::new(&chrome)
+    let mut cmd = std::process::Command::new(&chrome);
+    // Chrome hangs on macOS under a HOME that is not the user's, and the demo
+    // script sets one so paths read `~/...`. Hand it the passwd home back.
+    if let Some(home) = crate::live_store_fence::passwd_home() {
+        cmd.env("HOME", home);
+    }
+    let status = cmd
         .arg("--headless=new")
         .arg("--disable-gpu")
         .arg("--hide-scrollbars")
