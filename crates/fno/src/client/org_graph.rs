@@ -18,6 +18,13 @@ pub(crate) struct Graph {
     pub edges: Vec<Edge>,
 }
 
+pub(crate) fn unowned_key(agent: &crate::proto::AgentRow, index: usize) -> String {
+    match crate::org_model::agent_key(agent) {
+        Some(key) => format!("unowned:{key}:{:?}:{:?}", agent.pane_id, agent.attach_id),
+        None => format!("unowned:unknown:{index}"),
+    }
+}
+
 pub(crate) fn layout(tree: &OrgTree, width: usize) -> Graph {
     let mut graph = Graph::default();
     let column = (width / tree.leads.len().max(1)).max(44);
@@ -75,7 +82,7 @@ pub(crate) fn layout(tree: &OrgTree, width: usize) -> Graph {
     let x = tree.leads.len() * column;
     for (index, agent) in tree.unowned.iter().enumerate() {
         graph.boxes.push(Placed {
-            key: format!("unowned:{}", agent.name),
+            key: unowned_key(agent, index),
             x,
             y: index + 1,
             text: clipped(format!("Unowned · {}", agent.name), column - 2),
@@ -89,6 +96,7 @@ pub(crate) fn lines(
     width: usize,
     height: usize,
     pan: (usize, usize),
+    selected: Option<&str>,
 ) -> Vec<String> {
     let mut cells = vec![vec![' '; width]; height];
     let mut put = |x: usize, y: usize, text: &str| {
@@ -104,6 +112,10 @@ pub(crate) fn lines(
     };
     for placed in &graph.boxes {
         put(placed.x, placed.y, &placed.text);
+        if selected == Some(placed.key.as_str()) {
+            let offset = placed.text.chars().position(|c| c == ' ').unwrap_or(0);
+            put(placed.x + offset, placed.y, "▶");
+        }
     }
     for edge in &graph.edges {
         let from = graph.boxes.iter().find(|b| b.key == edge.from);

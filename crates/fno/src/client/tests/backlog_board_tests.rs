@@ -372,6 +372,43 @@ fn sideline_toggle_rows() {
         started_at: Some(crate::digest_overlay::now_secs() - 10800),
         ..Default::default()
     };
+    let mut second_seat = agent.clone();
+    second_seat.pane_id = Some(45);
+    v.layout.agents = vec![agent.clone(), second_seat.clone()];
+    assert_eq!(
+        crate::client::node_detail::resolve_session(
+            &v,
+            Some("session-live-full"),
+            Some("claude"),
+            Some(&second_seat)
+        )
+        .unwrap()
+        .pane_id,
+        Some(45)
+    );
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("session-live-full"),
+        Some("claude"),
+        None
+    )
+    .is_none());
+    let old_bare = crate::proto::AgentRow {
+        name: "before rename".into(),
+        pane_id: Some(66),
+        ..Default::default()
+    };
+    v.layout.agents = vec![crate::proto::AgentRow {
+        name: "after rename".into(),
+        pane_id: Some(66),
+        ..Default::default()
+    }];
+    assert_eq!(
+        crate::client::node_detail::resolve_session(&v, None, None, Some(&old_bare))
+            .unwrap()
+            .pane_id,
+        Some(66)
+    );
     v.layout.agents = vec![agent.clone()];
     sock.clear();
     rt.block_on(async {
@@ -437,6 +474,7 @@ fn sideline_toggle_rows() {
         "model":"requested-model", "model_basis":"spawn", "effort":"high", "effort_basis":"spawn",
         "status":"working", "status_basis":"transcript", "progress":"awaiting-operator", "progress_basis":"assistant",
         "last_message":message,
+        "last_event_at":"2026-09-30T12:34:56Z", "last_activity_basis":"transcript",
     }]})).unwrap();
     let payload = crate::client::org_detail::select_roster(&roster, &agent).unwrap();
     let changed = |request, identity, result| crate::client::org_detail::OrgMsg::Detail {
@@ -494,6 +532,7 @@ fn sideline_toggle_rows() {
         "3h",
         "x-1",
         "END-FULL-ROSTER-MESSAGE",
+        "Last activity: 2026-09-30T12:34:56Z (transcript)",
         "Needs-you:",
     ] {
         assert!(text.contains(expected), "detail omitted {expected}: {text}");

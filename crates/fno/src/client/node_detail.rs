@@ -24,25 +24,40 @@ pub(crate) fn resolve_session(
         captured.and_then(|a| a.harness_session_id.as_deref().or(a.attach_id.as_deref()))
     });
     let harness = harness.or_else(|| captured.and_then(|a| a.harness.as_deref()));
-    let candidates: Vec<_> = view
-        .layout
-        .agents
-        .iter()
-        .filter(|a| {
-            if harness.is_some_and(|h| a.harness.as_deref() != Some(h)) {
-                return false;
-            }
-            match sid {
-                Some(sid) => [a.harness_session_id.as_deref(), a.attach_id.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .any(|id| id == sid || (sid.len() <= 8 && id.starts_with(sid))),
-                None => captured.is_some_and(|old| {
-                    old.pane_id.is_some() && old.pane_id == a.pane_id && old.name == a.name
-                }),
-            }
-        })
-        .collect();
+    let candidates: Vec<_> =
+        view.layout
+            .agents
+            .iter()
+            .filter(|a| {
+                if harness.is_some_and(|h| a.harness.as_deref() != Some(h)) {
+                    return false;
+                }
+                match sid {
+                    Some(sid) => [a.harness_session_id.as_deref(), a.attach_id.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|id| id == sid || (sid.len() <= 8 && id.starts_with(sid))),
+                    None => captured
+                        .is_some_and(|old| old.pane_id.is_some() && old.pane_id == a.pane_id),
+                }
+            })
+            .collect();
+    if let Some(old) = captured {
+        let seats: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|a| {
+                if let Some(pane) = old.pane_id {
+                    a.pane_id == Some(pane)
+                } else {
+                    old.attach_id.is_some() && old.attach_id == a.attach_id
+                }
+            })
+            .collect();
+        if let [one] = seats.as_slice() {
+            return Some((*one).clone());
+        }
+    }
     match candidates.as_slice() {
         [one] => Some((*one).clone()),
         _ => None,
