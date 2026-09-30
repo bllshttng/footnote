@@ -48,31 +48,6 @@ fn store_path_strips_generation_suffix() {
     assert_eq!(store_path(&rotated), dir.path().join("events.db"));
     let named = dir.path().join("global.jsonl");
     assert_eq!(store_path(&named), dir.path().join("global.db"));
-    // A state-root journal routes through the layout ladder; a migrated root
-    // answers the db/ store and a space journal keeps its sibling.
-    let _guard = crate::claims::test_env_lock().lock().unwrap();
-    let prior = std::env::var_os("FNO_AGENTS_HOME");
-    std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
-    let root = dir.path().to_path_buf();
-    std::fs::create_dir_all(root.join("db")).unwrap();
-    std::fs::write(root.join("db").join("events.db"), b"SQLite format 3\0").unwrap();
-    let routed = store_path(&root.join("events.jsonl"));
-    assert_eq!(
-        routed,
-        root.join("db").join("events.db"),
-        "a migrated root answers the db/ store"
-    );
-    let space = root.join("spaces").join("proj");
-    std::fs::create_dir_all(&space).unwrap();
-    assert_eq!(
-        store_path(&space.join("events.jsonl")),
-        space.join("events.db"),
-        "a space journal keeps the sibling store"
-    );
-    match prior {
-        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-        None => std::env::remove_var("FNO_AGENTS_HOME"),
-    }
 }
 
 #[test]

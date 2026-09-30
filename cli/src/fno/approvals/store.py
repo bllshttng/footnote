@@ -141,7 +141,7 @@ def _new_token() -> str:
 def default_db_path() -> Path:
     from fno import paths
 
-    return paths.state_dir() / "db" / "approvals.db"
+    return paths.state_dir() / "approvals.db"
 
 
 def _refuse(
