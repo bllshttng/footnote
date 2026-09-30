@@ -420,6 +420,36 @@ fn multiclient_server_outlives_client_crash_mid_command() {
     a.wait_pane_text(15, l.focus, |t| t.contains("consistent#"));
 }
 
+#[test]
+fn multiclient_unknown_command_frame_refused_and_connection_kept() {
+    // A frame this build cannot decode (the SplitH a v95 client sends)
+    // costs the client a refusal notice, never the session: the stream
+    // stays on its frame boundary after the failed decode, so the next
+    // valid frame on the SAME connection is honored.
+    let scratch = Scratch::new("skewrefuse");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let mut c = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let first = c.wait_layout(10, "attached", |l| l.panes.len() == 1);
+    assert_eq!(
+        c.server_proto,
+        Some(fno::proto::PROTO_VERSION),
+        "the layout announces the wire version"
+    );
+    c.send_raw_frame(br#"{"Command":"SplitH"}"#);
+    c.wait(10, "refusal notice", |c| {
+        c.notices
+            .iter()
+            .any(|n| n.contains("unusable message refused"))
+            .then(|| ())
+    });
+    // The connection survived: the same socket carries a split this build
+    // speaks, and the client is still registered (no Bye, no close).
+    c.cmd(Command::SplitDir(Dir::Right));
+    let l = c.wait_layout(10, "split stands after the refusal", |l| l.panes.len() == 2);
+    assert_eq!(first.area, l.area);
+}
+
 // -- AC3: named sessions -----------------------------------------------------
 
 #[test]

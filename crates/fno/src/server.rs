@@ -647,6 +647,14 @@ pub(crate) enum CoreMsg {
         id: u64,
         notice: String,
     },
+    /// The reader refused one undecodable frame from client `id` and kept the
+    /// connection (the frame was fully consumed, so the stream stays on a
+    /// boundary). Routed back so the refusal rides the reliable channel the
+    /// core owns; the read loop itself holds no write half.
+    FrameRefused {
+        id: u64,
+        reason: String,
+    },
     /// (v83, ) One sideline launcher request from client `id`. The
     /// handler validates pre-birth, dedups by request id, and runs exactly
     /// one canonical spawn off-loop; progress returns as
@@ -7811,6 +7819,9 @@ impl Core {
             let _ = c
                 .reliable_tx
                 .try_send(ServerMsg::Notice { text: text.into() });
+            // A refusal with no layout side effect otherwise sits queued
+            // until the next dirty frame wakes the writer.
+            c.notify.notify_one();
         }
     }
 
@@ -8778,6 +8789,7 @@ impl Core {
             backlog_lanes: self.backlog_lanes.clone(),
             backlog_stale: self.backlog_stale,
             sweep_dead_count: self.dead_sweep_count(),
+            proto: Some(crate::proto::PROTO_VERSION),
         }
     }
 
@@ -11638,6 +11650,10 @@ impl Core {
                 }
                 Flow::Continue
             }
+            CoreMsg::FrameRefused { id, reason } => {
+                self.notice(id, reason);
+                Flow::Continue
+            }
             CoreMsg::AgentLaunch { id, request } => {
                 self.agent_launch(id, request);
                 Flow::Continue
@@ -13650,6 +13666,25 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                 eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
+            }
+            // A frame whose JSON body fails to decode (an unknown Command
+            // variant above all: protocol skew) is refused, not fatal. The
+            // length prefix and body were fully consumed before the decode,
+            // so the stream is still on a frame boundary - the client loses
+            // a notice, never the session. Every other error (io, an
+            // over-cap prefix whose body was never read, a closed peer)
+            // desyncs or has nothing left to read: the client is gone.
+            Err(crate::proto::ProtoError::Malformed(e)) => {
+                eprintln!("fno mux: client {id} sent an unusable frame: {e}");
+                let _ = core_tx
+                    .send(CoreMsg::FrameRefused {
+                        id,
+                        reason: format!(
+                            "unusable message refused; server speaks wire v{} ({e})",
+                            crate::proto::PROTO_VERSION
+                        ),
+                    })
+                    .await;
             }
             Err(e) => {
                 // Includes the abrupt-close case (killed client): routine, but

@@ -352,7 +352,11 @@ fn default_true() -> bool {
 /// launch-workdir` before the spawn argv is built; floor stays 58.
 /// v96: `Command::SplitDir(Dir)` replaces `SplitH`/`SplitV` - new variant,
 /// not additive; handshake stops the skew. Floor stays 58.
-pub const PROTO_VERSION: u32 = 96;
+/// v97: `ServerMsg::Layout.proto: Option<u32>` announces the server's wire
+/// version on the first layout a fresh attach receives, so a newer client
+/// can refuse commands an older server cannot parse instead of tripping
+/// the unknown-variant read failure. Floor stays 58.
+pub const PROTO_VERSION: u32 = 97;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -2192,6 +2196,12 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
+        /// (v97) The server's wire version, announced on every layout. `None`
+        /// reads on an older server's layout, which the client treats as
+        /// "cannot parse post-announcement commands" - the safe reading when
+        /// the announcer is absent.
+        #[serde(default)]
+        proto: Option<u32>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -4189,6 +4199,7 @@ mod tests {
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
                 sweep_dead_count: 0,
+                proto: Some(PROTO_VERSION),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
@@ -4250,6 +4261,42 @@ mod tests {
             let mut cursor = std::io::Cursor::new(bytes);
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
+    fn layout_wire_proto_announces_and_backfills() {
+        // v97: the announcement rides additive. A pre-97 layout (no key on
+        // the wire - every older server) reads `None`, the client's signal
+        // that the announcer is absent and post-announcement commands are
+        // refused client-side.
+        let old = r#"{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[24,80]}"#;
+        match serde_json::from_str::<ServerMsg>(old).unwrap() {
+            ServerMsg::Layout { proto, .. } => assert_eq!(proto, None),
+            other => panic!("expected a Layout, got {other:?}"),
+        }
+        let fresh = ServerMsg::Layout {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+            area: (24, 80),
+            agents: Vec::new(),
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+            sweep_dead_count: 0,
+            proto: Some(PROTO_VERSION),
+        };
+        let encoded = serde_json::to_string(&fresh).unwrap();
+        assert!(
+            encoded.contains(r#""proto":97"#),
+            "the version rides the wire: {encoded}"
+        );
+        match serde_json::from_str::<ServerMsg>(&encoded).unwrap() {
+            ServerMsg::Layout { proto, .. } => assert_eq!(proto, Some(PROTO_VERSION)),
+            other => panic!("expected a Layout, got {other:?}"),
         }
     }
 
