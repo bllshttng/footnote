@@ -105,3 +105,32 @@ fn tab_menu_opens_off_a_tab_cell_with_destructive_last() {
     std::fs::write(&out, &text).unwrap();
     assert!(text.contains("Split Up"), "the grid renders");
 }
+
+#[tokio::test]
+async fn tab_menu_split_refuses_when_the_server_never_announced() {
+    // A pre-v97 server (the v95 build among them) drops the client on
+    // the unknown SplitDir variant: the cell refuses by notice and sends
+    // nothing. The happy path with an announced server is covered by
+    // tab_menu_join_and_split_target_the_viewed_tab in the parent.
+    let mut v = view_with_agents(vec![]);
+    let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+    v.server_proto = None;
+    assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+    let sel = v
+        .row_menu
+        .as_ref()
+        .unwrap()
+        .actions
+        .iter()
+        .position(|a| matches!(a, super::MenuAction::TabSplit(Dir::Left)))
+        .expect("the viewed tab's menu offers the split cell");
+    v.row_menu.as_mut().unwrap().popup.sel = sel;
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "an unannounced server gets no split");
+    assert!(
+        v.notice
+            .as_ref()
+            .is_some_and(|(s, _)| s.contains("restart the mux server"))
+    );
+}
