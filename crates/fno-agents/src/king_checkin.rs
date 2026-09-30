@@ -1878,10 +1878,16 @@ fn render_lines(
     }
     match failed("main_ci") {
         Some(r) => lines.push(format!("READER FAILED main_ci: {}", r.error)),
-        None => lines.push(format!(
-            "main ci: {}",
-            crate::main_ci::main_ci_render(data.get("main_ci"))
-        )),
+        None => {
+            lines.push(format!(
+                "main ci: {}",
+                crate::main_ci::main_ci_render(data.get("main_ci"))
+            ));
+            for line in crate::main_ci::main_ci_stale_lines(data.get("main_ci"), chrono::Utc::now())
+            {
+                lines.push(line);
+            }
+        }
     }
     match failed("control_plane") {
         Some(r) => lines.push(format!("READER FAILED control_plane: {}", r.error)),
