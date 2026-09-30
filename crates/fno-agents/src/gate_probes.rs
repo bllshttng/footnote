@@ -5,7 +5,6 @@
 
 use crate::authorized_merge::{PrFacts, ProbeOutcome};
 use serde_json::Value;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
