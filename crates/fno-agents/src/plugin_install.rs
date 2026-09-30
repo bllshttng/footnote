@@ -1775,6 +1775,109 @@ fn files_byte_equal(a: &Path, b: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// zcode's CLI config: `~/.zcode/cli/config.json`, HOME-derived. Tests pass
+/// an explicit path to the inner fn.
+fn zcode_config_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "HOME is unset; cannot locate ~/.zcode/cli/config.json".to_string())?;
+    Ok(PathBuf::from(home)
+        .join(".zcode")
+        .join("cli")
+        .join("config.json"))
+}
+
+/// Link footnote's stage into zcode's `plugins.dirs` (the CLI's local
+/// plugin-dir list). agy_hooks discipline: read the file, refuse and write
+/// NOTHING over bytes that do not parse, set `plugins.enabled` and add the
+/// stage dir exactly once, leave every other key untouched, then read the
+/// file back.
+fn install_zcode(stage: &Path, _force: bool) -> Result<String, String> {
+    zcode_install_config(&zcode_config_path()?, stage)
+}
+
+fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, String> {
+    let existing = match std::fs::read_to_string(config_path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", config_path.display())),
+    };
+    let mut config: serde_json::Value = match existing.as_deref() {
+        Some(text) => serde_json::from_str(text).map_err(|e| {
+            format!(
+                "refusing: {} does not parse as JSON ({e}); fix or remove the file and retry",
+                config_path.display()
+            )
+        })?,
+        None => serde_json::json!({}),
+    };
+
+    if !config.is_object() {
+        return Err(format!(
+            "refusing: {} is not a JSON object",
+            config_path.display()
+        ));
+    }
+    let obj = config.as_object_mut().expect("checked object");
+    let plugins = obj
+        .entry("plugins")
+        .or_insert_with(|| serde_json::json!({}));
+    if !plugins.is_object() {
+        return Err(format!(
+            "refusing: plugins key in {} is not an object",
+            config_path.display()
+        ));
+    }
+    let plugins = plugins.as_object_mut().expect("checked object");
+    plugins.insert("enabled".into(), serde_json::Value::Bool(true));
+    let stage_str = stage.to_string_lossy().to_string();
+    let dirs = plugins
+        .entry("dirs")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !dirs.is_array() {
+        return Err(format!(
+            "refusing: plugins.dirs in {} is not an array",
+            config_path.display()
+        ));
+    }
+    let dirs = dirs.as_array_mut().expect("checked array");
+    if !dirs.iter().any(|d| d.as_str() == Some(stage_str.as_str())) {
+        dirs.push(serde_json::Value::String(stage_str.clone()));
+    }
+    let written = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("cannot serialize {}: {e}", config_path.display()))?;
+    std::fs::write(config_path, written)
+        .map_err(|e| format!("cannot write {}: {e}", config_path.display()))?;
+    // Read back: the receipt prints only when the file now lists the stage
+    // dir exactly once (the desktop may rewrite the file while it runs).
+    let back = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("cannot re-read {}: {e}", config_path.display()))?;
+    let parsed: serde_json::Value = serde_json::from_str(&back).map_err(|e| {
+        format!(
+            "{} no longer parses after write: {e}",
+            config_path.display()
+        )
+    })?;
+    let listed = parsed
+        .get("plugins")
+        .and_then(|p| p.get("dirs"))
+        .and_then(|d| d.as_array())
+        .map(|dirs| {
+            dirs.iter()
+                .filter(|d| d.as_str() == Some(stage_str.as_str()))
+                .count()
+        })
+        .unwrap_or(0);
+    if listed != 1 {
+        return Err(format!(
+            "post-write read lists the stage dir {listed} times, want 1"
+        ));
+    }
+    Ok(format!(
+        "zcode plugins.dirs lists {} (plugins.enabled=true)",
+        stage.display()
+    ))
+}
+
 fn install_harness(harness: &str, force: bool) -> Result<String, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let root = repo_root(&cwd)?;
@@ -1785,9 +1888,10 @@ fn install_harness(harness: &str, force: bool) -> Result<String, String> {
         "opencode" => install_opencode()?,
         "agy" => install_agy(&stage, force)?,
         "grok" => install_grok(&stage, force)?,
+        "zcode" => install_zcode(&stage, force)?,
         other => {
             return Err(format!(
-                "unknown harness '{other}'; want claude, codex, opencode, agy or grok"
+                "unknown harness '{other}'; want claude, codex, opencode, agy, grok or zcode"
             ))
         }
     };
@@ -1991,6 +2095,57 @@ pub(crate) fn loop_install_probe(
                 Err(format!(
                     "pi extension {} is absent or stale",
                     dest.display()
+                ))
+            })
+        }
+        "zcode" => {
+            let config_path = match zcode_config_path() {
+                Ok(path) => path,
+                Err(reason) => return Some(Err(reason)),
+            };
+            let root = match repo_root(&std::env::current_dir().unwrap_or_default()) {
+                Ok(root) => root,
+                Err(reason) => return Some(Err(reason)),
+            };
+            let stage = match build_stage(&root, &state_root().join("plugin-stage")) {
+                Ok(stage) => stage.0,
+                Err(reason) => return Some(Err(reason)),
+            };
+            let text = match std::fs::read_to_string(&config_path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Some(Err(format!(
+                        "zcode config {} is absent; run fno config plugin install zcode",
+                        config_path.display()
+                    )))
+                }
+                Err(e) => return Some(Err(format!("cannot read {}: {e}", config_path.display()))),
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return Some(Err(format!(
+                        "{} does not parse: {e}",
+                        config_path.display()
+                    )))
+                }
+            };
+            let listed = parsed
+                .get("plugins")
+                .and_then(|p| p.get("dirs"))
+                .and_then(|d| d.as_array())
+                .map(|dirs| {
+                    dirs.iter()
+                        .filter(|d| d.as_str() == Some(stage.to_string_lossy().as_ref()))
+                        .count()
+                })
+                .unwrap_or(0);
+            Some(if listed >= 1 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "zcode config {} does not list the current stage dir; run fno config plugin install zcode",
+                    config_path.display()
                 ))
             })
         }
@@ -2225,6 +2380,52 @@ fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), St
 mod tests {
     use super::*;
     use std::fs;
+
+    // zcode install: a malformed config is refused byte-identical.
+    #[test]
+    fn zcode_malformed_config_refused_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        std::fs::write(&cfg, "{not json").unwrap();
+        let before = std::fs::read(&cfg).unwrap();
+        let err = zcode_install_config(&cfg, Path::new("/stage")).unwrap_err();
+        assert!(err.contains("does not parse"), "{err}");
+        assert_eq!(std::fs::read(&cfg).unwrap(), before, "no bytes written");
+    }
+
+    // zcode install: idempotent; a second install lists the stage once.
+    #[test]
+    fn zcode_second_install_lists_stage_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        let first = zcode_install_config(&cfg, Path::new("/stage")).unwrap();
+        assert!(first.contains("plugins.dirs"), "{first}");
+        let _ = zcode_install_config(&cfg, Path::new("/stage")).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let dirs = parsed["plugins"]["dirs"].as_array().unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], "/stage");
+        assert_eq!(parsed["plugins"]["enabled"], serde_json::json!(true));
+    }
+
+    // zcode install: foreign keys and values survive the rewrite.
+    #[test]
+    fn zcode_install_preserves_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        std::fs::write(
+            &cfg,
+            r#"{"model":{"main":"builtin:x/GLM"},"plugins":{"enabled":false,"dirs":["/keep-me"]}}"#,
+        )
+        .unwrap();
+        let _ = zcode_install_config(&cfg, Path::new("/stage")).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["model"]["main"], "builtin:x/GLM");
+        let dirs = parsed["plugins"]["dirs"].as_array().unwrap();
+        assert!(dirs.iter().any(|d| d == "/keep-me"));
+    }
 
     /// One git command, panicking on failure - fixtures abort the test loudly.
     fn git_in(dir: &Path, args: &[&str]) {

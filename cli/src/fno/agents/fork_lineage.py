@@ -86,6 +86,23 @@ def respawn_ok(src):
     return answer.get("mechanism") == "respawn"
 
 
+#: Fallback wake name; a rowed session revives under its OWN name.
+WAKE_NAME_PREFIX = "wake-"
+
+
+def wake_spawn_name(entry: Any, session_uuid: str) -> str:
+    """The wake fork's spawn name: the row's OWN name when an exited claude row
+    exists for this uuid (Fix 3 revives in place), else the uuid-derived wake-
+    alias. Deterministic, so concurrent wakes still serialize on one flock."""
+    from fno.harness_identity import canonical_handle
+    named = (entry is not None and getattr(entry, "status", None) == "exited"
+             and getattr(entry, "harness", None) == "claude"
+             and getattr(entry, "harness_session_id", None) == session_uuid
+             and getattr(entry, "name", None))
+    alias = f"{WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    return getattr(entry, "name", "") if named else alias
+
+
 def predecessor_ids(resume_session_id: Optional[str], revive: bool) -> list[str]:
     """A fork to a new name retires the resumed uuid, so the row records it as
     a predecessor: mail addressed to the old id still lands on the surviving

@@ -78,7 +78,6 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import (
-    build_heir_owner,
     calling_agent_row,
     crown_validation_error,
     journal_spawn_crown,
@@ -1022,16 +1021,25 @@ def build_pane_argv(
     a byte-identical argv."""
     message = normalize_command(message, provider) if is_verb_seed(message) else message
 
-    from fno.agents.harness_map import is_declared, render_session_argv
+    from fno.agents.harness_map import (
+        DispatchResolveError,
+        is_declared,
+        render_session_argv,
+    )
 
     # An undeclared harness has no resume contract to render an identity from,
     # and none is invented: the generic arm below is the bare binary. Any
     # session pinning is a per-vendor flag shape this lane refuses to guess.
-    identity = (
-        render_session_argv(provider, "interactive_create", session_uuid)
-        if is_declared(provider)
-        else [provider]
-    )
+    # A DECLARED harness whose interactive_create lane is unsupported (zcode:
+    # its TUI is unbuildable on the measured install) is in the same boat for
+    # pane purposes - no pane identity exists - and falls through every arm
+    # to the refusal below, matching the readable-but-argvless contract.
+    identity = [provider]
+    if is_declared(provider):
+        try:
+            identity = render_session_argv(provider, "interactive_create", session_uuid)
+        except DispatchResolveError:
+            pass
 
     # resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
@@ -4484,7 +4492,8 @@ def dispatch_spawn_pane(
                 assert crown_plan is not None  # set by the pre-launch call above
                 rows, crown_outcome, crown_cleared = settle_spawn_crown(
                     rows, scope=crown_scope, plan=crown_plan, heir=name,
-                    heir_owner=build_heir_owner(provider, stored_session_uuid, str(cwd)),
+                    heir_harness=provider, heir_session=stored_session_uuid,
+                    heir_cwd=str(cwd),
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True

@@ -391,6 +391,11 @@ dual_owner_kinds = {
     # Python side carries it in schema.yaml for the validator and
     # `doctor event find`, the way the scratch pair above does.
     "pr_watch_unparked",
+    # pr_watch_draft_flip: the Rust pr_draft_ready flip is the one emitter
+    # (the sweep leg decides in Rust and journals there); the Python side
+    # carries it in schema.yaml for the validator and `doctor event find`,
+    # the way pr_watch_unparked above does.
+    "pr_watch_draft_flip",
     # operator_question: the ask leg is the Rust question-intake transport;
     # the king-wake, session-register, and stale-escalate Python arms still
     # emit their own asks until they port.
