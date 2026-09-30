@@ -1136,7 +1136,7 @@ impl View {
                 rows,
                 cols,
                 (0, 0, rows, cols),
-                b.detail.is_some(),
+                self.input_owner() == super::region_focus::RegionOwner::Board,
                 &self.theme,
             );
         }
@@ -1201,6 +1201,9 @@ fn backlog_board_open_fresh(view: &mut View) {
         .map(|b| b.gen.wrapping_add(1))
         .unwrap_or(0);
     view.backlog_board = Some(BoardView::new(gen));
+    // Opening the board is an explicit keyboard gesture: it takes the input
+    // owner, the same way `E` takes it for the feed.
+    view.region_owner = super::region_focus::RegionOwner::Board;
 }
 
 /// Point the sideline at `v`, persisting the choice.
