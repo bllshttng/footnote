@@ -331,9 +331,13 @@ fn fold_transcript(
             crate::reign_hygiene::claude_row_entries(&row, &mut fold.entries);
         }
         let codex_tool_name = if codex {
-            row.get("payload")
+            let payload = row.get("payload");
+            payload
                 .and_then(|p| p.get("name"))
                 .and_then(Value::as_str)
+                // A call row codex writes without a name keys by its row
+                // type, never the claude tool name.
+                .or_else(|| payload.and_then(|p| p.get("type")).and_then(Value::as_str))
         } else {
             None
         };
