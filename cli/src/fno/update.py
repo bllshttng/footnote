@@ -731,6 +731,7 @@ def update_readiness(
     )
     return {
         "update_ready": update_ready,
+        "last_update_event": _last_update_event(),
         "source_pin": pin,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
@@ -1447,34 +1448,23 @@ def _emit_update_event(type_name: str, **data) -> None:
         typer.echo(f"fno doctor update: WARNING: {type_name} event not journaled: {exc}", err=True)
 
 
-def _render_update_status() -> None:
-    """`fno doctor update --status`: the newest update event, one line.
+def _last_update_event() -> Optional[dict]:
+    """The newest journaled update event, or None.
 
-    JSON on a non-TTY so a script reads the same answer the operator does."""
-    from fno.events.store_client import EventStoreUnavailable, query_rows
-    from fno.paths import global_events_json
-
+    Read through `--check`'s readiness payload: the flag ratchet bars a new
+    Python flag, and `fno doctor event find` answers the same question for a
+    caller that wants raw rows. A store that cannot be read degrades to None,
+    never raises: readiness is advisory and every input degrades."""
     try:
+        from fno.events.store_client import query_rows
+        from fno.paths import global_events_json
+
         # No cap: the filtered type set is small and retention-managed, and a
         # capped read can hide the newest row behind its own horizon.
         rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES))
-    except EventStoreUnavailable as exc:
-        typer.echo(f"fno doctor update --status: the event store is unreadable: {exc}", err=True)
-        raise typer.Exit(1)
-    last = rows[-1] if rows else None
-    if last is None:
-        typer.echo("no fno doctor update has been journaled on this machine")
-        return
-    if not sys.stdout.isatty():
-        typer.echo(json.dumps(last, ensure_ascii=False))
-        return
-    data = last.get("data") or {}
-    parts = [str(last.get("type")), str(last.get("ts"))]
-    for key in ("old_rev", "new_rev", "outcome", "reason", "stage", "source_path"):
-        if key in data:
-            value = str(data[key])
-            parts.append(f"{key}={value[:12] if key.endswith('_rev') else value}")
-    typer.echo(" ".join(parts))
+    except Exception:  # noqa: BLE001
+        return None
+    return rows[-1] if rows else None
 
 
 def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[str]) -> list[str]:
@@ -1575,11 +1565,6 @@ def update_command(
         "--check",
         help="Print update readiness as JSON and exit without installing.",
     ),
-    status: bool = typer.Option(
-        False,
-        "--status",
-        help="Print the last journaled update event and exit.",
-    ),
 ) -> None:
     """Reinstall fno from its source directory.
 
@@ -1596,17 +1581,8 @@ def update_command(
     rust = rust is True
     no_rust = no_rust is True
     check = check is True
-    status = status is True
     if not isinstance(source, Path):
         source = None
-
-    if status:
-        if check or dry_run or rust or force or no_rust:
-            raise typer.BadParameter(
-                "--status cannot be combined with --check, --dry-run, --rust, --force, or --no-rust"
-            )
-        _render_update_status()
-        return
 
     if check:
         if dry_run or rust or force:

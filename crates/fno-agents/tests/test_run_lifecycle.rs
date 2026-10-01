@@ -723,74 +723,6 @@ fn the_waiting_line_names_the_holders_remaining_budget() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The node's check: the tests hold never stops an install build. `fno
-/// doctor update` marks its cargo legs FNO_INSTALL_BUILD=1; at the cargo
-/// doors such a build walks straight past the tests hold (law d-829648bb:
-/// nothing stops fno loading for the user) while a plain build waits.
-#[test]
-fn an_install_build_never_waits_at_the_tests_hold() {
-    let home = tmp_claims_root("install-hold-home");
-    let stopped = Command::new(bin())
-        .args([
-            "fleet-incident",
-            "stop",
-            "--reason",
-            "install-build hold test",
-        ])
-        .env("FNO_AGENTS_HOME", &home)
-        .output()
-        .expect("write the fleet stop");
-    assert!(stopped.status.success(), "the stop must land");
-
-    let wt = tmp_claims_root("install-hold-wt");
-    let cargo_pid = std::process::id().to_string();
-    let mut control = Command::new(bin())
-        .args(["test-run", "build-admit", "--cargo-pid"])
-        .arg(&cargo_pid)
-        .arg("--worktree")
-        .arg(&wt)
-        .env("FNO_AGENTS_HOME", &home)
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn the held control build");
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(
-        control.try_wait().unwrap().is_none(),
-        "a plain build must still wait at the tests hold"
-    );
-    control.kill().expect("kill the waiting control");
-    let _ = control.wait();
-
-    let start = Instant::now();
-    let out = Command::new(bin())
-        .args(["test-run", "build-admit", "--cargo-pid"])
-        .arg(&cargo_pid)
-        .arg("--worktree")
-        .arg(&wt)
-        .env("FNO_AGENTS_HOME", &home)
-        .env("FNO_INSTALL_BUILD", "1")
-        .output()
-        .expect("run the install build");
-    assert!(
-        out.status.success(),
-        "the install build walks past the tests hold: {:?}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "the install build must not wait out the hold, took {:?}",
-        start.elapsed()
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("fleet stop holds tests"),
-        "the install build must not park at the hold: {stderr}"
-    );
-
-    let _ = std::fs::remove_dir_all(&home);
-    let _ = std::fs::remove_dir_all(&wt);
-}
-
 /// AC7-ERR: a fleet stop written while a waiter queues is read at its
 /// ADMISSION, not only at entry: the waiter exits 90 after the holder
 /// releases, names fleet-stop, never spawns, and a clear reopens admission.
@@ -846,6 +778,55 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         !stderr.contains("suite_started"),
         "the argv must never spawn mid-incident: {stderr}"
     );
+
+    // Same stop, the install-build contract (law d-829648bb: nothing stops
+    // fno loading for the user): a plain build-admit parks at the hold while
+    // the marked install build walks straight through.
+    let wt = tmp_claims_root("fleet-recheck-wt");
+    let cargo_pid = std::process::id().to_string();
+    let mut plain = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the held plain build");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        plain.try_wait().unwrap().is_none(),
+        "a plain build must still wait at the tests hold"
+    );
+    plain.kill().expect("kill the waiting plain build");
+    let _ = plain.wait();
+
+    let start = Instant::now();
+    let out = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build");
+    assert!(
+        out.status.success(),
+        "the install build walks past the tests hold: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the install build must not wait out the hold, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("fleet stop holds tests"),
+        "the install build must not park at the hold: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&wt);
 
     let _ = holder.wait();
     let cleared = Command::new(bin())

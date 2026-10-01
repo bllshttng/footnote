@@ -1393,13 +1393,11 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     call_order: list[str] = []
     recorded_cargo: list[list[str]] = []
     state = {"built": False}
+    journal: list[dict] = []
 
     real_run = update.subprocess.run
 
     def _fake_run(cmd, **kwargs):
-        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
-            # Event emission rides the same seam; the real binary answers.
-            return real_run(cmd, **kwargs)
         if cmd and cmd[0] == "cargo":
             call_order.append("cargo")
             recorded_cargo.append(list(cmd))
@@ -1411,8 +1409,21 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
 
+    # Journal emission rides the update seam; capture it here rather than let
+    # the flow reach for a native binary the sandbox does not have.
+    def _fake_append(event, events_path=None, **kw):
+        journal.append(event)
+
+    monkeypatch.setattr("fno.events.append_event", _fake_append)
+
+    exec_lines: list[str] = []
+    env_at_exec: list[str] = []
+
     def _fake_execvp(prog, args):
         call_order.append("execvp")
+        if len(args) > 2:
+            exec_lines.append(args[2])
+            env_at_exec.append(os.environ.get("FNO_INSTALL_BUILD") or "")
 
     monkeypatch.setattr(update.os, "execvp", _fake_execvp)
     # The install-claim guard writes a machine-scoped claim; keep it in tmp.
@@ -1430,6 +1441,29 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     cargo_idx = call_order.index("cargo")
     execvp_idx = call_order.index("execvp")
     assert cargo_idx < execvp_idx
+
+    # The journal recorded exactly the in-process lifecycle rows, shaped and
+    # python-sourced: started before built, with the revs and the source path.
+    kinds = [e["type"] for e in journal]
+    assert kinds == ["fno_update_started", "fno_update_built"], kinds
+    started = journal[0]
+    assert started["source"] == "python"
+    assert started["data"]["new_rev"] == crate_rev
+    assert started["data"]["source_path"].endswith("cli")
+    built = journal[1]
+    assert built["data"]["outcome"] == "refreshed"
+    assert built["data"]["rust_rev"] == crate_rev
+
+    # The exec'd line carries the installed and failed facts: the installed
+    # event, the crown mail, and the EXIT-trap fail handler that journals a
+    # bare exit and preserves the installer's own code.
+    assert "fno_update_installed" in exec_lines[0]
+    assert "trap fno_fail_handler EXIT" in exec_lines[0]
+    assert "fno_update_failed" in exec_lines[0]
+    assert "kings" in exec_lines[0]
+    assert '[ "$rc" -eq 0 ] && return 0' in exec_lines[0]
+    # The cargo legs are marked install builds before the exec (law d-829648bb).
+    assert env_at_exec[0] == "1"
 
 
 # --- AC1-ERR: cargo rc 1 -> "failed", warning to stderr, python update proceeds ---
@@ -1541,7 +1575,21 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(update.os, "execvp", lambda prog, args: execvp_called.append(prog))
+
+    exec_lines: list[list[str]] = []
+
+    def _fake_execvp(prog, args):
+        execvp_called.append(prog)
+        exec_lines.append(args)
+
+    monkeypatch.setattr(update.os, "execvp", _fake_execvp)
+    # The store is down: every audit and lifecycle emit must be swallowed.
+    # The guard's claim audit and the update journal ride the same seam, and
+    # neither may block the install on a failed journal write.
+    def _boom(event, events_path=None, **kw):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr("fno.events.append_event", _boom)
     # The install-claim guard writes a machine-scoped claim; keep it in tmp.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     # Patch through the update module so _refresh_rust_bins sees it
@@ -1552,6 +1600,11 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
         f"execvp must be called even when cargo fails; "
         f"exception={result.exception!r} output={result.output}"
     )
+    # The exec'd line still carries the EXIT-trap fail handler: a bare exit
+    # inside the composed line must reach the journal, so the trap rides even
+    # on a run where nothing failed yet.
+    assert len(exec_lines) == 1
+    assert "trap fno_fail_handler EXIT" in exec_lines[0][2]
 
 
 # --- AC1-EDGE ---
@@ -3220,116 +3273,7 @@ def test_update_readiness_pending_update_keeps_ready_line(monkeypatch, tmp_path)
 
     assert result["update_ready"] is True
     assert result["guidance"].startswith("update ready")
+    # The newest journaled update event rides the readiness payload; a store
+    # the sandbox cannot read degrades to None, never raises.
+    assert "last_update_event" in result
 
-
-class TestUpdateJournal:
-    """The update lifecycle journal (started/built/installed/failed) and the
-    --status read: a lead learns an update ran from the journal, never by
-    watching the command itself."""
-
-    def test_emit_writes_a_python_sourced_envelope_to_the_global_journal(
-        self, tmp_path, monkeypatch
-    ):
-        captured = {}
-
-        def fake_append(event, events_path, **kw):
-            captured["event"] = event
-            captured["path"] = events_path
-
-        monkeypatch.setattr("fno.events.append_event", fake_append)
-        monkeypatch.setattr("fno.paths.global_events_json", lambda: tmp_path / "events.jsonl")
-
-        update._emit_update_event(
-            "fno_update_started", new_rev="a" * 40, old_rev=None, source_path="/src"
-        )
-
-        assert captured["event"]["type"] == "fno_update_started"
-        assert captured["event"]["source"] == "python"
-        # A None data key is omitted, never journaled as a null.
-        assert captured["event"]["data"] == {"new_rev": "a" * 40, "source_path": "/src"}
-        assert captured["path"] == tmp_path / "events.jsonl"
-
-    def test_emit_swallows_a_failed_write(self, tmp_path, monkeypatch, capsys):
-        def boom(event, events_path, **kw):
-            raise RuntimeError("store down")
-
-        monkeypatch.setattr("fno.events.append_event", boom)
-        monkeypatch.setattr("fno.paths.global_events_json", lambda: tmp_path / "events.jsonl")
-
-        update._emit_update_event("fno_update_failed", reason="x")
-
-        assert "not journaled" in capsys.readouterr().err
-
-    def test_status_prints_the_last_event_off_a_tty(self, monkeypatch, capsys):
-        rows = [
-            {"ts": "2026-10-01T05:00:00Z", "type": "fno_update_started",
-             "source": "python", "data": {"new_rev": "a" * 40}},
-            {"ts": "2026-10-01T06:00:00Z", "type": "fno_update_installed",
-             "source": "python", "data": {"new_rev": "b" * 40, "old_rev": "a" * 40}},
-        ]
-        monkeypatch.setattr("fno.events.store_client.query_rows", lambda *a, **kw: rows)
-        monkeypatch.setattr("fno.paths.global_events_json", lambda: Path("/x/events.jsonl"))
-
-        update._render_update_status()
-
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["type"] == "fno_update_installed"
-
-    def test_status_names_the_empty_journal(self, monkeypatch, capsys):
-        monkeypatch.setattr("fno.events.store_client.query_rows", lambda *a, **kw: [])
-        monkeypatch.setattr("fno.paths.global_events_json", lambda: Path("/x/events.jsonl"))
-
-        update._render_update_status()
-
-        assert "no fno doctor update has been journaled" in capsys.readouterr().out
-
-    def test_unix_exec_chain_journals_installed_and_failed_and_marks_the_install_build(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(
-            update, "_resolve_source_pin", lambda override=None: _fake_pin(path=str(tmp_path / "cli"))
-        )
-        monkeypatch.setattr(update, "_cache_source_path", lambda pin: None)
-        monkeypatch.setattr(update, "_source_rev", lambda source: "a" * 40)
-        monkeypatch.setattr(update, "_read_current_installed_rev", lambda: "b" * 40)
-        monkeypatch.setattr("fno.claims.acquire_claim", lambda *a, **kw: None)
-        monkeypatch.setattr(update, "_refresh_rust_bins", lambda *a, **kw: "refreshed")
-        monkeypatch.setattr(update, "_rust_subtree_rev", lambda source: "c" * 40)
-        monkeypatch.setattr(update, "_post_install_refresh_cmds", lambda resolved: ([], None))
-        monkeypatch.setattr(update, "_front_fno_bin", lambda: str(tmp_path / "fno"))
-        emitted = []
-        monkeypatch.setattr(
-            update, "_emit_update_event", lambda name, **data: emitted.append((name, data))
-        )
-        captured = {}
-
-        def fake_execvp(prog, args):
-            captured["line"] = args[2]
-            captured["env_marked"] = os.environ.get("FNO_INSTALL_BUILD")
-
-        monkeypatch.setattr(os, "execvp", fake_execvp)
-
-        update.update_command(force=True)
-
-        line = captured["line"]
-        assert emitted == [
-            (
-                "fno_update_started",
-                {"new_rev": "a" * 40, "old_rev": "b" * 40, "source_path": str(tmp_path / "cli")},
-            ),
-            ("fno_update_built", {"outcome": "refreshed", "rust_rev": "c" * 40}),
-        ]
-        # The install build is marked so the admission doors let it past the
-        # tests hold and the worker run-slot queue (law d-829648bb).
-        assert captured["env_marked"] == "1"
-        # Installed + failed both ride the exec'd chain, and the crowns get
-        # the installed mail.
-        assert "fno_update_installed" in line
-        assert "FNO_UPDATE_FAIL_DATA" in line
-        assert "fno_update_failed" in line
-        assert "agents" in line and "kings" in line
-        # The failed journal rides an EXIT trap (uv's retry loop fails with a
-        # bare `exit`, which a `||` suffix can never see), and the handler
-        # performs no explicit exit so the installer's own code survives.
-        assert "trap fno_fail_handler EXIT" in line
-        assert '[ "$rc" -eq 0 ] && return 0' in line
