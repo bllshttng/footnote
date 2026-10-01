@@ -696,34 +696,34 @@ mod tests {
     /// process ENV, so unpinned siblings race the reader: one test's list()
     /// resolved while a sibling had re-pinned the global arm and its
     /// first-wins merge displaced a seeded slot (CI 2026-09-30: a two-slot
-    /// seeding read back as one domain). The lock serializes every
-    /// pin-to-restore span; the guard rides the return value so Rust ties
-    /// release to the same scope that ends the test.
-    static CLAIMS_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// seeding read back as one domain). The pin takes the crate-wide
+    /// `claims::test_env_lock` that every other env-pinning test holds, and
+    /// Drop restores the var on success and on unwind alike, so a panicking
+    /// body cannot leak its root into a sibling on another thread.
+    struct ClaimsRootPin {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prior: Option<std::ffi::OsString>,
+    }
 
-    fn declare_claims_root(
-        dir: &Path,
-    ) -> (
-        std::sync::MutexGuard<'static, ()>,
-        Option<std::ffi::OsString>,
-    ) {
-        let guard = CLAIMS_ROOT_LOCK
+    impl Drop for ClaimsRootPin {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+                None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+            }
+        }
+    }
+
+    fn declare_claims_root(dir: &Path) -> ClaimsRootPin {
+        let guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prior = std::env::var_os("FNO_CLAIMS_ROOT");
         std::env::set_var("FNO_CLAIMS_ROOT", dir);
-        (guard, prior)
-    }
-
-    fn restore_claims_root(
-        guard: std::sync::MutexGuard<'static, ()>,
-        prior: Option<std::ffi::OsString>,
-    ) {
-        match prior {
-            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
-            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        ClaimsRootPin {
+            _guard: guard,
+            prior,
         }
-        drop(guard);
     }
 
     fn plan_with_files(dir: &Path, name: &str, files: &[&str]) -> PathBuf {
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn peer_lane_holds_back_its_node() {
         let dir = sandbox("peer-lane");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         acquire_lane_slot(2, "ab-held0001", None, None, None, root)
             .unwrap()
@@ -768,14 +768,13 @@ mod tests {
             root,
         );
         assert_eq!(verdict.as_deref(), Some("peer-lane"));
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn no_surface_answers_the_unevaluated_fail_open_token() {
         let dir = sandbox("no-surface");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         // An empty plan and a plan_path that resolves to nothing are both
         // "the gate did not run", never a silent pass: the token is loud.
@@ -795,14 +794,13 @@ mod tests {
                 "plan {plan:?}"
             );
         }
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn same_domain_annotation_joins_the_token() {
         let dir = sandbox("same-domain");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         let mut used = BTreeSet::new();
         used.insert("code".to_string());
@@ -818,14 +816,13 @@ mod tests {
             verdict.as_deref(),
             Some("unevaluated:no-surface+same-domain:code")
         );
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn high_collision_holds_back_the_candidate() {
         let dir = sandbox("high-collision");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         let candidate = plan_with_files(&dir, "cand.md", &["a.py", "b.py", "c.py", "d.py"]);
         let other = plan_with_files(&dir, "other.md", &["a.py", "b.py", "c.py", "z.py"]);
@@ -842,14 +839,13 @@ mod tests {
             root,
         );
         assert_eq!(verdict.as_deref(), Some("high-collision:ab-other001"));
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn clean_candidate_is_selectable() {
         let dir = sandbox("clean");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         // A selectable candidate has a REAL file surface with nothing in
         // flight against it; an empty plan answers the unevaluated token,
@@ -864,14 +860,13 @@ mod tests {
             root,
         );
         assert!(verdict.is_none(), "surface with no collision is selectable");
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_lane_domains_reads_slot_domains() {
         let dir = sandbox("domains");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         for (lane, domain) in [("ab-dom0001", "code"), ("ab-dom0002", "docs")] {
             let mut metadata = serde_json::Map::new();
@@ -885,14 +880,13 @@ mod tests {
             domains,
             BTreeSet::from(["code".to_string(), "docs".to_string()])
         );
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_worked_entries_joins_slots_and_node_claims() {
         let dir = sandbox("worked");
-        let (lock, prior) = declare_claims_root(&dir);
+        let _pin = declare_claims_root(&dir);
         let root = Some(dir.as_path());
         acquire_lane_slot(2, "ab-lane0001", None, None, None, root)
             .unwrap()
@@ -929,7 +923,6 @@ mod tests {
             .collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["ab-lane0001", "ab-node0002"]);
-        restore_claims_root(lock, prior);
         fs::remove_dir_all(&dir).ok();
     }
 
