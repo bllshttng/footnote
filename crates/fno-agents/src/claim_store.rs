@@ -111,9 +111,11 @@ fn import_lockfiles(connection: &mut Connection, directory: &Path) -> Result<(),
     for record in records {
         insert_record(&transaction, &record)?;
     }
+    // Two openers can race the first import of a fresh store; the rows above
+    // are INSERT OR IGNORE, so the marker is too.
     transaction
         .execute(
-            "INSERT INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1')",
+            "INSERT OR IGNORE INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1')",
             [],
         )
         .map_err(|error| error.to_string())?;
