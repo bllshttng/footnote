@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     fn parked_events(home: &AgentsHome) -> String {
-        std::fs::read_to_string(trace_events_path(home)).unwrap_or_default()
+        crate::event_store::journal_text(&trace_events_path(home), &[])
     }
 
     #[test]

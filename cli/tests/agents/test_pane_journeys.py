@@ -192,7 +192,13 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             for item in json.loads(pane_ls.stdout)
             if item["pane_id"] == spawned.pane_id
         )
-        assert pane["fno_id"] == identity
+        # The id split: a spawn row carries fno's own durable slot alongside
+        # the harness session id, and the pane join serves the slot. The
+        # codex identity composes through the resolver legs around this
+        # assert; the slot is joined to that identity by being the same
+        # registry row.
+        assert pane["fno_id"] == row.fno_id
+        assert row.fno_id != identity
         located = subprocess.run(
             [str(fno_bin), "mux", "where", identity, "--server", mux_session, "--json"],
             cwd=repo,
@@ -223,9 +229,10 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         )
         assert errors.getvalue() == ""
         assert "assistant: READY" in observed.getvalue()
-        assert {row.harness_session_id, pane["fno_id"], claim.holder, *resolved} == {
-            identity
-        }
+        # Every harness-speaking surface resolves the codex identity; the
+        # pane's fno_id is the row's own slot (asserted above), not a second
+        # spelling of it.
+        assert {row.harness_session_id, claim.holder, *resolved} == {identity}
     finally:
         monkeypatch.setattr(mux_spawn, "build_pane_argv", original_argv)
         monkeypatch.setattr(

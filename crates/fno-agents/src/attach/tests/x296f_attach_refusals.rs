@@ -23,7 +23,7 @@ fn a_codex_thread_row_with_no_session_id_refuses_naming_the_rollout() {
     let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
 
     assert_eq!(outcome, Some(13));
-    let log = std::fs::read_to_string(&events).unwrap_or_default();
+    let log = crate::event_store::journal_text(&events, &[]);
     assert!(
         log.contains("no-session-id-yet"),
         "the refusal must name its own reason in the event log: {log}"
@@ -51,7 +51,7 @@ fn a_codex_thread_attach_without_a_tty_refuses_naming_the_terminal() {
     let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
 
     assert_eq!(outcome, Some(13));
-    let log = std::fs::read_to_string(&events).unwrap_or_default();
+    let log = crate::event_store::journal_text(&events, &[]);
     assert!(
         log.contains("\"no-tty\""),
         "the refusal must name its own reason in the event log: {log}"
