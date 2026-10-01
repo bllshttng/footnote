@@ -62,7 +62,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 |---|---|---|---|---|
 | `king_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | wakes crowned kings on the 900 s beat | 900 s |
 | `watchdog` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the fleet watchdog classifier over lanes | 600 s |
-| `pr_watch_sweep` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | scans open-PR backlog nodes and fires `/pr check` | 600 s |
+| `pr_watch_sweep` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | scans open-PR backlog nodes and fires `/fno:ship pr check` | 600 s |
 | `pr_watch_merge` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the merge phase: fires the merge queue for ready PRs | 600 s |
 | `active_backlog` | `daemon` | `fno-agents-daemon` | the daemon's mission drain | 300 s |
 | `auto_continue` | `session` | backlog advance + the 1800 s heartbeat | reconciles web-merged PRs and dispatches the next node; upstream `pr_watch_merge` | 1800 s |

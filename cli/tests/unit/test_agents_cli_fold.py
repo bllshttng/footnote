@@ -52,13 +52,18 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
         ("claim", "agents claim"),
         ("king", "agents king"),
         ("mcp", "agents mcp"),
-        ("restart", "agents restart"),
         ("roles", "agents roles"),
         ("worker", "agents worker"),
     ):
         result = runner.invoke(app, [old, "--help"])
         assert result.exit_code == 0, (old, result.output)
         assert f"fno {old} is now fno {destination}" in (result.stderr or "")
+
+    # restart left the teach loop: a permanent alias now (2026-09-30
+    # operator ruling), it forwards and never teaches.
+    aliased = runner.invoke(app, ["restart", "--help"])
+    assert aliased.exit_code == 0, aliased.output
+    assert "is now" not in (aliased.stderr or "")
 
 
 def test_restored_mail_stays_folded_at_agents_as_a_silent_alias() -> None:

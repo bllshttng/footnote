@@ -5,7 +5,8 @@
 //! store owns the real decision write (`fno inbox approvals decide`).
 
 use fno_agents::effect_gate::{
-    hook_request, judge, map_tool_call, open_db, run_op, submit, verdict, EffectRequest,
+    default_db_path, hook_request, judge, map_tool_call, open_db, run_op, submit, verdict,
+    EffectRequest,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -244,6 +245,39 @@ fn hook_and_door_flows_refuse_recover_and_allow() {
     )
     .unwrap();
     assert!(refusal.contains("unreadable"), "{refusal}");
+
+    // The default approvals path routes through the state-layout resolver:
+    // a legacy root file still reads, the migrated db twin wins, and the
+    // resolver never moves or creates either file.
+    let layout = tmp_root("layout");
+    let state = layout.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    struct RestoreStateDir(Option<std::ffi::OsString>);
+    impl Drop for RestoreStateDir {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_STATE_DIR", value),
+                None => std::env::remove_var("FNO_STATE_DIR"),
+            }
+        }
+    }
+    let restore_state_dir = RestoreStateDir(std::env::var_os("FNO_STATE_DIR"));
+    std::env::set_var("FNO_STATE_DIR", &state);
+    std::fs::write(state.join("approvals.db"), b"legacy").unwrap();
+    assert_eq!(
+        default_db_path(std::path::Path::new(".")).unwrap(),
+        state.join("approvals.db"),
+        "an unmigrated root keeps reading the legacy approvals db"
+    );
+    std::fs::create_dir_all(state.join("db")).unwrap();
+    std::fs::write(state.join("db/approvals.db"), b"migrated").unwrap();
+    assert_eq!(
+        default_db_path(std::path::Path::new(".")).unwrap(),
+        state.join("db/approvals.db"),
+        "a migrated root reads the db twin"
+    );
+    assert!(state.join("approvals.db").exists(), "root file untouched");
+    drop(restore_state_dir);
 
     let out = run_op(
         "effect-classify",

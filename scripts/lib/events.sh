@@ -289,7 +289,7 @@ emit_event_raw() {
 
 # emit_polling_external_review key=value [key=value ...]
 #
-# Emits the polling_external_review event used by /pr check to register
+# Emits the polling_external_review event used by /fno:ship pr check to register
 # external-review polling as progress for the thrash detector. The fifth
 # thrash-fingerprint signal counts these lines; the 30-minute exemption
 # window in check_no_progress_thrash reads the most-recent next_check_at.

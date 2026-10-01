@@ -475,6 +475,100 @@ fn queue_rows() {
     let out = run_op("grant-nope", &json!({"cwd": "/tmp"}));
     let o: Value = serde_json::from_str(&out).expect("receipt is json");
     assert_eq!(o["error"], json!("unknown op grant-nope"));
+
+    // The bound-manifest fold, over a real linked worktree: the live
+    // manifest binds the node and refuses; an unbound node keeps the legacy
+    // posture; a legacy manifest without the posture key permits; an
+    // ambiguous binding fails closed; an unreadable manifest never reads as
+    // permission; the branch-keyed read serves the authority walk.
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (base, repo, wt) = bound_fixture();
+    let _home = HomeGuard::at(base.path());
+    write_manifest(
+        &wt,
+        "---\nauto_merge_approved: false\nauto_merge_source: flag-no-merge\nharness_session_id: w-bound\n---\ngraph_node_id: ab-bound1\n",
+    );
+    match bound_node_posture(&repo, "ab-bound1") {
+        Ok(Some(bound)) => {
+            assert_eq!(bound.approved, Some(false));
+            assert_eq!(bound.source.as_deref(), Some("flag-no-merge"));
+            assert_eq!(bound.session.as_deref(), Some("w-bound"));
+            assert!(bound.live, "the live manifest outranks archives");
+        }
+        other => panic!("expected the live bound manifest, got {other:?}"),
+    }
+    assert!(matches!(
+        bound_fold(&repo, "ab-bound1"),
+        ManifestFold::Refuse(_)
+    ));
+    assert!(matches!(
+        bound_fold(&repo, "ab-nobody"),
+        ManifestFold::Unbound
+    ));
+    assert!(matches!(
+        branch_bound_manifest(&repo, "feature/x"),
+        BoundRead::Read(_)
+    ));
+    assert!(matches!(branch_bound_manifest(&repo, ""), BoundRead::None));
+    // A legacy manifest without the posture key permits and stays silent.
+    let wt2 = base.path().join("wt2");
+    git_worktree(&repo, &wt2, "feature/y");
+    write_manifest(
+        &wt2,
+        "---\nharness_session_id: w-old\n---\ngraph_node_id: ab-legacy\n",
+    );
+    match bound_fold(&repo, "ab-legacy") {
+        ManifestFold::Permit(b) => assert_eq!(b.approved, None),
+        other => panic!("legacy manifest permits, got {other:?}"),
+    }
+    // Two binds of one node never grant.
+    let wt3 = base.path().join("wt3");
+    git_worktree(&repo, &wt3, "feature/z");
+    write_manifest(
+        &wt3,
+        "---\nauto_merge_approved: true\n---\ngraph_node_id: ab-legacy\n",
+    );
+    assert!(bound_node_posture(&repo, "ab-legacy").is_err());
+    // A manifest path that is not a file is unreadable, never permission.
+    let manifest = crate::state_path::resolve("target-state", &wt).expect("target-state resolves");
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::create_dir_all(&manifest).unwrap();
+    assert!(matches!(read_bound_manifest(&wt), BoundRead::Unreadable(_)));
+    drop(base);
+
+    // Queue parity: with config enabled in the scratch repo, a granted row
+    // whose node's bound manifest refuses drops, moving the count, and the
+    // queue never widens the merge verb's gates.
+    let (base, repo, wt) = bound_fixture();
+    let _home2 = HomeGuard::at(base.path());
+    write_manifest(
+        &wt,
+        "---\nauto_merge_approved: false\n---\ngraph_node_id: ab-qbound\n",
+    );
+    std::fs::create_dir_all(repo.join(".fno")).unwrap();
+    std::fs::write(
+        repo.join(".fno").join("config.toml"),
+        "[auto_merge]\nenabled = true\ngrant = \"dispatch\"\n",
+    )
+    .unwrap();
+    // Pin the config read to the fixture file: the queue verdict needs the
+    // live-config gate to answer true regardless of the runner's own env.
+    let _cfg = EnvRestore::set("FNO_CONFIG", repo.join(".fno").join("config.toml"));
+    let entries = vec![json!({
+        "id": "ab-qbound", "title": "t", "slug": "ab-qbound", "type": "feature",
+        "status": "ready", "priority": "p2",
+        "pr_number": 77,
+        "pr_url": "https://github.com/owner/repo/pull/77",
+        "cwd": repo.to_string_lossy(),
+        "sessions": [do_row(Some(receipt(true, "config", "2026-10-01T00:00:00Z")), "w1")],
+    })];
+    let q = queue_op(Ok(entries), 0, std::time::Instant::now());
+    assert_eq!(q["verdicts"]["granted"], json!(0), "{q}");
+    assert_eq!(q["verdicts"]["refused"], json!(1), "{q}");
+    assert_eq!(q["queue"].as_array().map(Vec::len), Some(0), "{q}");
+    drop(base);
 }
 
 // --- The ops ----------------------------------------------------------------
@@ -533,6 +627,119 @@ fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     ]);
     crate::graph_store::seed_rows(&graph, entries.as_array().unwrap()).unwrap();
     (dir, graph)
+}
+
+fn git(args: &[&str], cwd: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A scratch repo with one linked worktree, each carrying a `.fno` state
+/// dir. Returned TempDir keeps every path alive until the test ends.
+fn bound_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let repo_s = repo.to_str().expect("repo path is utf8");
+    git(&["init", "-q", repo_s], base.path());
+    std::fs::write(repo.join("README.md"), "x").unwrap();
+    git(&["add", "."], &repo);
+    git(
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+        &repo,
+    );
+    let wt = base.path().join("wt");
+    git_worktree(&repo, &wt, "feature/x");
+    (base, repo, wt)
+}
+
+fn git_worktree(repo: &std::path::Path, wt: &std::path::Path, branch: &str) {
+    let wt_s = wt.to_str().expect("worktree path is utf8");
+    git(&["worktree", "add", "-q", "-b", branch, wt_s], repo);
+    std::fs::create_dir_all(wt.join(".fno")).unwrap();
+}
+
+fn write_manifest(wt: &std::path::Path, text: &str) {
+    let path = crate::state_path::resolve("target-state", wt).expect("target-state resolves");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// Point the state roots at the fixture base so the canonical resolver
+/// answers inside the tempdir instead of the machine's own spaces. Held
+/// under the test env lock, restored on drop.
+struct HomeGuard {
+    agents_home: Option<std::ffi::OsString>,
+    spaces: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn at(base: &std::path::Path) -> Self {
+        let agents_home = std::env::var_os("FNO_AGENTS_HOME");
+        let spaces = std::env::var_os("FNO_SPACES_DIR");
+        std::env::set_var("FNO_AGENTS_HOME", base.join("home"));
+        std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+        Self {
+            agents_home,
+            spaces,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.agents_home.take() {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match self.spaces.take() {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+    }
+}
+
+/// Set one env var for the guarded span, restoring the previous value on
+/// drop even through a panic.
+struct EnvRestore {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: std::path::PathBuf) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
 }
 
 /// AC1-HP: the narrowed read keeps the open grant node and the grantless

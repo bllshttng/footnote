@@ -52,6 +52,6 @@ If `REVIEWER_TYPE` is `"none"`:
 - Log: "External review disabled in settings — skipping"
 
 Otherwise:
-- Invoke `fno:pr check {pr_number}` (the skill reads its own reviewer config)
+- Invoke `fno:ship pr check {pr_number}` (the skill reads its own reviewer config)
 
 ENFORCE: if `external_review_passed` is false and reviewer is not "none", MUST run this phase.

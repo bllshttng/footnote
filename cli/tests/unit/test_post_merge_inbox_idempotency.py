@@ -1,4 +1,4 @@
-"""Tests for skills/pr/scripts/inbox-has-pr.sh - the idempotency guard.
+"""Tests for skills/ship/scripts/inbox-has-pr.sh - the idempotency guard.
 
 The post-merge ritual must be a no-op on re-run (BDD: "idempotent re-run").
 The guard keys on a `<!-- post-merge:pr-<N> -->` marker so a second run for the
@@ -18,7 +18,7 @@ import pytest
 SCRIPT = (
     Path(__file__).resolve().parents[3]
     / "skills"
-    / "pr"
+    / "ship"
     / "scripts"
     / "inbox-has-pr.sh"
 )

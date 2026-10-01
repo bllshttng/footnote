@@ -41,11 +41,15 @@ const BUILD_IDLE_TAKEOVER: Duration = Duration::from_secs(30);
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Internal code a build-admit waiter uses to leave its wait after its run
+/// slot was stolen, so it can re-enter the slot queue. Consumed inside
+/// `run_build_admit`; never returned to cargo.
+const BUILD_SLOT_LOST: i32 = 3;
 
 /// Where cargo's own arguments start, when `argv` is a cargo test run:
 /// `test`/`t`, or `nextest run`/`r`, past any `+toolchain` pins. Any other
 /// program reads `None`.
-fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
+pub(crate) fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
     let is_cargo = argv
         .first()
         .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));
@@ -608,8 +612,25 @@ fn acquire_claim_blocking(
     keys: &[String],
     holder: &str,
     opts: impl Fn(usize) -> crate::claims::AcquireOpts,
+    lane_of: impl FnMut() -> Lane,
+    on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>, Wait) -> OnHeld,
+) -> Result<(), i32> {
+    acquire_claim_blocking_guarded(keys, holder, opts, lane_of, on_held, || true)
+}
+
+/// [`acquire_claim_blocking`] with an admission precondition polled once per
+/// wait turn, before the acquire attempt. When it turns false the attempt is
+/// skipped and `on_held` decides, exactly as for a gated lane: the caller
+/// that needs it (the build door) stops, re-queues, and returns with its
+/// precondition re-established instead of taking the claim in a forbidden
+/// state.
+fn acquire_claim_blocking_guarded(
+    keys: &[String],
+    holder: &str,
+    opts: impl Fn(usize) -> crate::claims::AcquireOpts,
     mut lane_of: impl FnMut() -> Lane,
     mut on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>, Wait) -> OnHeld,
+    mut may_acquire: impl FnMut() -> bool,
 ) -> Result<(), i32> {
     let admit_width = keys.len();
     let opts0 = opts(0);
@@ -718,6 +739,21 @@ fn acquire_claim_blocking(
                     }
                 }
             }
+        }
+        if !may_acquire() {
+            match on_held(
+                &holder_rows(keys, opts0.root.as_deref()),
+                pos_out,
+                Wait {
+                    lane,
+                    yielding_to: None,
+                },
+            ) {
+                OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
+                OnHeld::Admit => break 'wait Ok(()),
+                OnHeld::Stop(code) => break 'wait Err(code),
+            }
+            continue;
         }
         let mut held: Vec<(String, Option<i32>, String)> = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
@@ -935,79 +971,97 @@ fn run_build_admit(args: &[String]) -> i32 {
     }
 
     // Lock order: a run slot first, then build:cargo, so no cargo ever waits
-    // on build:cargo while it holds no slot.
-    if let Err(code) = admit_run_slot(cargo_pid, &worktree) {
-        return code;
-    }
-
-    let mut wait = CargoWait::new(cargo_pid, &worktree);
-    let mut idle = HolderIdle::new();
-    // The reason is decided inside the wait (a takeover) but read by opts,
-    // so it travels through a RefCell the two closures share.
-    let takeover_reason = std::cell::RefCell::new(None::<String>);
-
-    let opts = |_: usize| crate::claims::AcquireOpts {
-        pid: Some(cargo_pid),
-        reason: Some(
-            takeover_reason
-                .borrow()
-                .clone()
-                .unwrap_or_else(|| "cargo build".to_string()),
-        ),
-        events_dir: Some(worktree.clone()),
-        ..Default::default()
-    };
-    let lane_of = || {
-        if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
-            Lane::Priority
-        } else {
-            Lane::Normal
+    // on build:cargo while it holds no slot. The order is re-checked, not
+    // just followed: steal_parked_slot takes the slot of a cargo parked at
+    // this very door, so the waiter whose slot was taken must leave the
+    // build wait and re-enter the slot queue instead of taking build:cargo
+    // slotless once it frees (2026-09-29 and 2026-09-30, three times).
+    let slot_keys = cargo_slot_keys(&worktree);
+    loop {
+        if let Err(code) = admit_run_slot(cargo_pid, &worktree) {
+            return code;
         }
-    };
-    let result = acquire_claim_blocking(
-        &[BUILD_CLAIM_KEY.to_string()],
-        &holder,
-        opts,
-        lane_of,
-        |rows, pos, w| {
-            let mut scan = |table: &[crate::census::ProcRow],
-                            parent: &ParentMap|
-             -> Option<OnHeld> {
-                let (h, pid, _) = rows.first()?;
-                let holder_pid = (*pid).filter(|p| *p > 0)?;
-                // A holder that has stopped compiling keeps the slot for no
-                // one. Feed the idle clock on the scan poll_held already makes;
-                // when the window is out, release the holder's claim by its
-                // exact holder string (a holder mismatch is a silent no-op,
-                // which is how two waiters racing stay safe) and let the next
-                // poll acquire.
-                let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
-                // A takeover reason names the holder it displaced. When the
-                // claim passes to a different holder, the guard resets, so this
-                // waiter can still take over the new holder when it idles.
-                if idle.holder().is_some_and(|seen| seen != h.as_str()) {
-                    *takeover_reason.borrow_mut() = None;
-                }
-                let idle_for = idle.observe(h, compiling, Instant::now());
-                if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
-                    let waited = idle_for.as_secs();
+
+        let mut wait = CargoWait::new(cargo_pid, &worktree);
+        let mut idle = HolderIdle::new();
+        // The reason is decided inside the wait (a takeover) but read by opts,
+        // so it travels through a RefCell the two closures share.
+        let takeover_reason = std::cell::RefCell::new(None::<String>);
+
+        let opts = |_: usize| crate::claims::AcquireOpts {
+            pid: Some(cargo_pid),
+            reason: Some(
+                takeover_reason
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "cargo build".to_string()),
+            ),
+            events_dir: Some(worktree.clone()),
+            ..Default::default()
+        };
+        let lane_of = || {
+            if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+                Lane::Priority
+            } else {
+                Lane::Normal
+            }
+        };
+        let still_slotted = || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
+        let result = acquire_claim_blocking_guarded(
+            &[BUILD_CLAIM_KEY.to_string()],
+            &holder,
+            opts,
+            lane_of,
+            |rows, pos, w| {
+                // The precondition, read again on every held poll: a stolen
+                // slot must not grow into a slotless build:cargo hold.
+                if !still_slotted() {
                     eprintln!(
+                        "cargo admission: the run slot of {holder} was taken while parked at the build door; re-queueing for a slot"
+                    );
+                    return OnHeld::Stop(BUILD_SLOT_LOST);
+                }
+                let mut scan = |table: &[crate::census::ProcRow],
+                                parent: &ParentMap|
+                 -> Option<OnHeld> {
+                    let (h, pid, _) = rows.first()?;
+                    let holder_pid = (*pid).filter(|p| *p > 0)?;
+                    // A holder that has stopped compiling keeps the slot for no
+                    // one. Feed the idle clock on the scan poll_held already makes;
+                    // when the window is out, release the holder's claim by its
+                    // exact holder string (a holder mismatch is a silent no-op,
+                    // which is how two waiters racing stay safe) and let the next
+                    // poll acquire.
+                    let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                    // A takeover reason names the holder it displaced. When the
+                    // claim passes to a different holder, the guard resets, so this
+                    // waiter can still take over the new holder when it idles.
+                    if idle.holder().is_some_and(|seen| seen != h.as_str()) {
+                        *takeover_reason.borrow_mut() = None;
+                    }
+                    let idle_for = idle.observe(h, compiling, Instant::now());
+                    if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
+                        let waited = idle_for.as_secs();
+                        eprintln!(
                     "cargo admission: taking over; {h} (pid {holder_pid}) ran no compile for {waited}s"
                 );
-                    let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
-                    *takeover_reason.borrow_mut() = Some(format!(
-                        "cargo build; took over from {h}, no compile for {waited}s"
-                    ));
-                }
-                None
-            };
-            wait.poll_held(rows, None, pos.map(|(_, total)| total), Some(&mut scan), w)
-        },
-    );
-    wait.clear_marker();
-    match result {
-        Ok(()) => 0,
-        Err(code) => code,
+                        let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
+                        *takeover_reason.borrow_mut() = Some(format!(
+                            "cargo build; took over from {h}, no compile for {waited}s"
+                        ));
+                    }
+                    None
+                };
+                wait.poll_held(rows, None, pos.map(|(_, total)| total), Some(&mut scan), w)
+            },
+            still_slotted,
+        );
+        wait.clear_marker();
+        match result {
+            Ok(()) => return 0,
+            Err(BUILD_SLOT_LOST) => continue,
+            Err(code) => return code,
+        }
     }
 }
 
@@ -1203,7 +1257,37 @@ fn steal_parked_slot(
     false
 }
 
-fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
+/// The run-slot keys of one checkout: one per seat of the machine's cargo
+/// concurrency cap.
+fn cargo_slot_keys(worktree: &Path) -> Vec<String> {
+    let cap = crate::agents_config::max_cargo_runs(worktree) as usize;
+    (0..cap).map(|i| format!("test:cargo-run:{i}")).collect()
+}
+
+/// Whether this cargo's admission family holds a run slot right now: its
+/// exact holder string on some slot key, or a slot whose holder pid is this
+/// cargo or its ancestor (one admitted cargo covers its nested children).
+/// Any state counts while the row exists: a detached cargo whose recorded
+/// pid died reads Stale (Suspect on a refused probe), and only a real theft
+/// removes the row entirely, so the state gate would turn the door's own
+/// stale slot into a forever-false precondition and a hot re-admission
+/// cycle. The build door re-checks this before it may take `build:cargo`,
+/// so a waiter whose slot was stolen leaves the build wait instead of
+/// taking the lock while holding no slot.
+fn holds_run_slot(cargo_pid: u32, holder: &str, keys: &[String], root: Option<&Path>) -> bool {
+    keys.iter().any(|key| {
+        if let (_state, Some(rec)) = crate::claims::status(key, root) {
+            rec.holder == holder
+                || rec
+                    .pid
+                    .is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid))
+        } else {
+            false
+        }
+    })
+}
+
+fn admit_run_slot(cargo_pid: u32, new_worktree: &Path) -> Result<(), i32> {
     install_signal_handlers();
     // The tests hold parks the cargo doors instead of failing them: a
     // running cargo pauses at its next compile or test binary and resumes
@@ -1215,20 +1299,14 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     if held_code != 0 {
         return Err(held_code);
     }
-    let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let worktree =
+        std::fs::canonicalize(new_worktree).unwrap_or_else(|_| new_worktree.to_path_buf());
     let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
-    let cap = crate::agents_config::max_cargo_runs(&worktree) as usize;
-    let keys: Vec<String> = (0..cap).map(|i| format!("test:cargo-run:{i}")).collect();
+    let keys = cargo_slot_keys(&worktree);
+    let cap = keys.len();
 
-    for key in &keys {
-        if let (crate::claims::ClaimState::Live, Some(rec)) = crate::claims::status(key, None) {
-            let ancestor = rec
-                .pid
-                .is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid));
-            if rec.holder == holder || ancestor {
-                return Ok(());
-            }
-        }
+    if holds_run_slot(cargo_pid, &holder, &keys, None) {
+        return Ok(());
     }
 
     if admit_build_holder_free_slot(cargo_pid, &worktree, &holder, &keys, None).is_some() {
@@ -1508,6 +1586,27 @@ pub fn build_hold_message(cwd: &Path) -> Option<String> {
     build_hold_message_in(&crate::claims::build_waiters_dir()?, cwd)
 }
 
+/// The burn arm's read: how long the checkout that holds `cwd` has waited at
+/// the cargo build door, from a live `build-admit` marker's `since_ms`.
+pub(crate) fn build_wait_since_ms(cwd: &Path) -> Option<i64> {
+    build_wait_since_ms_in(&crate::claims::build_waiters_dir()?, cwd)
+}
+
+/// Testable form: the marker's `since_ms` for the first live hold on `cwd`
+/// or an ancestor checkout. Same walk `build_hold_message_in` does.
+fn build_wait_since_ms_in(dir: &Path, cwd: &Path) -> Option<i64> {
+    let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    for path in start.ancestors() {
+        if let Some((_, since_ms)) = live_waiter(dir, path) {
+            return Some(since_ms);
+        }
+        if path.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
 fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     for path in start.ancestors() {
@@ -1521,7 +1620,7 @@ fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     None
 }
 
-fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+fn live_waiter(dir: &Path, checkout: &Path) -> Option<(String, i64)> {
     let marker = dir.join(format!(
         "{}.json",
         crate::claims::encode_key(&checkout.to_string_lossy())
@@ -1541,6 +1640,11 @@ fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
         return None;
     }
     let holder = value["holder"].as_str().unwrap_or("another cargo");
+    Some((holder.to_string(), since_ms))
+}
+
+fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+    let (holder, _) = live_waiter(dir, checkout)?;
     Some(format!(
         "held for cargo build admission: {holder} is building"
     ))
@@ -2353,6 +2457,18 @@ mod tests {
         marker_for(&dir, &worktree, std::process::id());
         let message = build_hold_message_in(&dir, &nested).expect("a live waiter holds");
         assert!(message.contains("cargo:/other:42"), "{message}");
+        let marker = dir.join(format!(
+            "{}.json",
+            crate::claims::encode_key(&worktree.to_string_lossy())
+        ));
+        let written =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&marker).unwrap())
+                .unwrap();
+        assert_eq!(
+            build_wait_since_ms_in(&dir, &nested),
+            Some(written["since_ms"].as_i64().unwrap()),
+            "the burn counter reads the marker's since_ms from the nested path"
+        );
     }
 
     #[test]
@@ -2580,19 +2696,106 @@ mod tests {
         let fast =
             admit_build_holder_free_slot(100, &worktree, &holder_of(100), &keys, Some(&root));
         assert!(fast.is_none(), "a full cap sends the holder to the queue");
-        let stolen = steal_parked_slot(
-            &keys,
-            &holder_of(100),
-            100,
-            &worktree,
-            &waiters,
-            Some(&root),
+        // Phase 3 (2026-09-30 re-form): the parked waiter whose slot is
+        // stolen mid-wait must leave the build wait instead of taking
+        // build:cargo slotless when the lock frees. The waiter signals
+        // once parked; main steals its slot, then frees the lock after
+        // the waiter has left the wait; the next poll must stop with
+        // BUILD_SLOT_LOST and must never acquire.
+        assert!(
+            holds_run_slot(200, &holder_of(200), &keys, Some(&root)),
+            "the parked waiter holds a slot before the steal",
         );
-        assert!(stolen, "the parked holder's slot must be taken");
+        let root_t = root.clone();
+        let keys_t = keys.clone();
+        let victim_t = holder_of(200);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ptx, prx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn({
+                let tx = tx.clone();
+                move || {
+                    let r1 = root_t.clone();
+                    let r2 = root_t.clone();
+                    let k2 = keys_t.clone();
+                    let v2 = victim_t.clone();
+                    let r3 = root_t.clone();
+                    let k3 = keys_t.clone();
+                    let v3 = victim_t.clone();
+                    let v4 = victim_t.clone();
+                    let guarded = acquire_claim_blocking_guarded(
+                        &[BUILD_CLAIM_KEY.to_string()],
+                        &v4,
+                        move |_: usize| crate::claims::AcquireOpts {
+                            pid: Some(200),
+                            root: Some(r1.clone()),
+                            ..Default::default()
+                        },
+                        || Lane::Normal,
+                        move |_: &[(String, Option<i32>, String)],
+                              _: Option<(usize, usize)>,
+                              _: Wait| {
+                            if !holds_run_slot(200, &v2, &k2, Some(&r2)) {
+                                return OnHeld::Stop(BUILD_SLOT_LOST);
+                            }
+                            let _ = ptx.send(());
+                            OnHeld::Wait
+                        },
+                        || holds_run_slot(200, &v3, &k3, Some(&r3)),
+                    );
+                    tx.send(guarded).expect("send build-wait result");
+                }
+            });
+            prx.recv_timeout(Duration::from_secs(10))
+                .expect("the waiter must park while it holds a slot");
+            let stolen = steal_parked_slot(
+                &keys,
+                &holder_of(100),
+                100,
+                &worktree,
+                &waiters,
+                Some(&root),
+            );
+            assert!(stolen, "the parked holder's slot must be taken");
+            drop(tx);
+            let got = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the slotless waiter must stop, not outwait the bound");
+            assert_eq!(got, Err(BUILD_SLOT_LOST));
+        });
         let (_, s0) = crate::claims::status("test:cargo-run:0", Some(&root));
-        let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
         assert_eq!(s0.unwrap().holder, holder_of(100));
+        let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
         assert_eq!(s1.unwrap().holder, holder_of(300));
+        let _ = crate::claims::release(
+            BUILD_CLAIM_KEY,
+            &holder_of(100),
+            Some(&root),
+            Some(&worktree),
+        );
+        let (_, b) = crate::claims::status(BUILD_CLAIM_KEY, Some(&root));
+        assert!(
+            b.is_none(),
+            "the freed build lock must stay free, not taken by the slotless waiter"
+        );
+        // A slot whose recorded pid is dead reads Stale (Suspect behind a
+        // refused probe) and still counts as held: the detached cargo keeps
+        // its build wait instead of cycling slotless through re-admission
+        // (the 2026-10-01 CI wedge).
+        let _ = crate::claims::release(
+            "test:cargo-run:0",
+            &holder_of(100),
+            Some(&root),
+            Some(&worktree),
+        );
+        let mut doomed = Command::new("true").spawn().unwrap();
+        let dead = doomed.id();
+        doomed.wait().unwrap();
+        let _ = crate::claims::acquire("test:cargo-run:0", &holder_of(dead), opts());
+        assert!(
+            holds_run_slot(dead, &holder_of(dead), &keys, Some(&root)),
+            "a suspect slot still counts as held"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

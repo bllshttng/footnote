@@ -92,7 +92,9 @@ esac
 # strictly increasing. Wall-clock ns would regress if NTP steps the clock
 # backward between the two reports (dropping the `done`, pinning the badge at
 # `working`); the monotonic clock is host-global across processes and never
-# steps back. A missing/garbled session id -> silent exit 0.
+# steps back within one boot. A reboot restarts it at zero, so the daemon also
+# accepts a low seq that arrives long after the stored report
+# (`InsideLegReport::yields_to`). A missing/garbled session id -> silent exit 0.
 INPUT=$(cat)
 PARSED=$(python3 -c '
 import sys, json, time
@@ -110,6 +112,15 @@ try:
         eff = ev.get("level") or ""
     else:
         eff = ""
+    # The question text a background session is blocked on: PreToolUse carries
+    # tool_input, so the blocked report can name WHAT is being asked instead
+    # of the static "asking the user".
+    q = ""
+    ti = d.get("tool_input") if isinstance(d, dict) else None
+    if tool == "AskUserQuestion" and isinstance(ti, dict):
+        qs = ti.get("questions")
+        if isinstance(qs, list) and qs and isinstance(qs[0], dict):
+            q = str(qs[0].get("question") or "")
 except Exception:
     sys.exit(0)
 if not sid:
@@ -119,17 +130,19 @@ event = event.replace("\t", " ").replace("\n", " ")
 model = model.replace("\t", " ").replace("\n", " ")
 tool = tool.replace("\t", " ").replace("\n", " ")
 eff = eff.replace("\t", " ").replace("\n", " ")
-print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}\t{tool}")
+q = q.replace("\t", " ").replace("\n", " ")[:160]
+print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}\t{tool}\t{q}")
 ' <<<"$INPUT" 2>/dev/null) || PARSED=""
 
 # Keep marker emission INDEPENDENT of the parse: on a malformed/empty payload (or
 # no python3) SESSION_ID stays empty and the pane host still emits via the
 # presence-gate degrade. Only the state report (which needs both fields) is
 # skipped, below. A clean parse yields
-# "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>\t<tool_name>";
+# "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>\t<tool_name>\t<question>";
 # message is empty for every event that doesn't carry one (all but Notification),
 # model/effort only arrive on PostModelSwitch / effort-carrying inputs,
-# tool_name only on PreToolUse.
+# tool_name only on PreToolUse, and question only on an AskUserQuestion
+# PreToolUse whose tool_input carried a question.
 SESSION_ID=""
 SEQ=""
 MESSAGE=""
@@ -137,6 +150,7 @@ HOOK_EVENT=""
 MODEL=""
 EFFORT=""
 TOOL_NAME=""
+QUESTION=""
 if [[ "$PARSED" == *$'\t'* ]]; then
   SESSION_ID="${PARSED%%$'\t'*}"
   REST="${PARSED#*$'\t'}"
@@ -149,21 +163,29 @@ if [[ "$PARSED" == *$'\t'* ]]; then
   MODEL="${REST%%$'\t'*}"
   REST="${REST#*$'\t'}"
   EFFORT="${REST%%$'\t'*}"
-  TOOL_NAME="${REST#*$'\t'}"
+  REST="${REST#*$'\t'}"
+  TOOL_NAME="${REST%%$'\t'*}"
+  QUESTION="${REST#*$'\t'}"
 fi
 
 # C14 feed: a claude question picker (AskUserQuestion) or a plan approval
 # (ExitPlanMode) is the session ASKING the operator - the "session-asking"
 # half of the mail quiet wait. PreToolUse would report `working` (unblocked),
 # so the tool call is reclassified before the report: the daemon stores
-# `blocked` with reason `asking the user`, and the next PreToolUse (any other
-# tool) or Stop reports working/done as today, which clears it. Fail-open:
-# any other event or tool keeps today's state untouched.
+# `blocked` with the QUESTION TEXT when the payload carried one (so the
+# check-in names what the worker is waiting on), falling back to the static
+# `asking the user` when it did not; ExitPlanMode names the plan approval.
+# The next PreToolUse (any other tool) or Stop reports working/done as today,
+# which clears it. Fail-open: any other event or tool keeps today's state.
 if [[ "$HOOK_EVENT" == "PreToolUse" ]]; then
   case "$TOOL_NAME" in
-    AskUserQuestion | ExitPlanMode)
+    AskUserQuestion)
       STATE="blocked"
-      MESSAGE="asking the user"
+      MESSAGE="${QUESTION:-asking the user}"
+      ;;
+    ExitPlanMode)
+      STATE="blocked"
+      MESSAGE="plan approval requested"
       ;;
   esac
 fi

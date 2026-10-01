@@ -190,6 +190,10 @@ struct StoreFile {
     /// The backlog board's full-screen toggle. Default absent = false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     board_full: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    org_mode: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    org_sessions: Option<serde_json::Value>,
     /// The questions sideline block's visibility. Default absent = shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_block: Option<serde_json::Value>,
@@ -201,6 +205,9 @@ struct StoreFile {
     /// absent = hidden (one dim count line instead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_show_done: Option<serde_json::Value>,
+    /// The questions view's list pane width, in percent. Default absent = 45.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    questions_split: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -212,6 +219,63 @@ pub enum SidelineView {
     #[default]
     Agents,
     Backlog,
+    Org,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgMode {
+    #[default]
+    Tree,
+    Table,
+    Graph,
+}
+impl OrgMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Tree => Self::Table,
+            Self::Table => Self::Graph,
+            Self::Graph => Self::Tree,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgSessions {
+    #[default]
+    Current,
+    Former,
+    All,
+}
+impl OrgSessions {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Current => Self::Former,
+            Self::Former => Self::All,
+            Self::All => Self::Current,
+        }
+    }
+}
+pub fn load_org_prefs() -> (OrgMode, OrgSessions) {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return (OrgMode::default(), OrgSessions::default());
+    }
+    let file = read_raw();
+    (
+        file.org_mode
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        file.org_sessions
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+    )
+}
+pub fn save_org_prefs(mode: OrgMode, sessions: OrgSessions) {
+    mutate(|file| {
+        file.org_mode = serde_json::to_value(mode).ok();
+        file.org_sessions = serde_json::to_value(sessions).ok();
+    });
 }
 
 /// Read the sideline view pref. Absent, corrupt, or unknown reads as
@@ -298,6 +362,32 @@ pub fn save_questions_height(height: u16) {
     let clamped = height.clamp(2, 60);
     mutate(|file| {
         file.questions_height = serde_json::to_value(clamped).ok();
+    });
+}
+
+/// The questions view's shipped list pane width, in percent.
+pub const QUESTIONS_DEFAULT_SPLIT: u8 = 45;
+
+/// Read the questions view's list/detail split. Absent, corrupt, or out of
+/// range reads as the shipped default.
+pub fn load_questions_split() -> u8 {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return QUESTIONS_DEFAULT_SPLIT;
+    }
+    read_raw()
+        .questions_split
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u8::try_from(v).ok())
+        .filter(|p| (20..=80).contains(p))
+        .unwrap_or(QUESTIONS_DEFAULT_SPLIT)
+}
+
+/// Persist the questions view's split, clamped to the legal range.
+pub fn save_questions_split(pct: u8) {
+    let clamped = pct.clamp(20, 80);
+    mutate(|file| {
+        file.questions_split = serde_json::to_value(clamped).ok();
     });
 }
 
@@ -875,6 +965,14 @@ mod tests {
         );
         save_sideline_view(SidelineView::Backlog);
         assert_eq!(load_sideline_view(), SidelineView::Backlog);
+        save_sideline_view(SidelineView::Org);
+        assert_eq!(load_sideline_view(), SidelineView::Org);
+        for mode in [OrgMode::Tree, OrgMode::Table, OrgMode::Graph] {
+            for sessions in [OrgSessions::Current, OrgSessions::Former, OrgSessions::All] {
+                save_org_prefs(mode, sessions);
+                assert_eq!(load_org_prefs(), (mode, sessions));
+            }
+        }
         save_sideline_view(SidelineView::Agents);
         assert_eq!(load_sideline_view(), SidelineView::Agents);
     }
@@ -894,7 +992,7 @@ mod tests {
         assert!(!load_questions_show_done(), "absent reads hidden");
         std::fs::write(
             view_path(),
-            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3}"#,
+            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3,"questions_split":95}"#,
         )
         .unwrap();
         assert!(load_questions_block(), "corrupt reads visible");
@@ -904,6 +1002,9 @@ mod tests {
             "corrupt height reads the default"
         );
         assert!(!load_questions_show_done(), "corrupt reads hidden");
+        assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
+        save_questions_split(95);
+        assert_eq!(load_questions_split(), 80, "an out-of-range save clamps");
         save_questions_block(false);
         save_questions_height(12);
         save_questions_show_done(true);

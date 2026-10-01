@@ -685,7 +685,9 @@ fn now_ms() -> i64 {
 /// lands over a live draft or into a session that is asking the operator a
 /// question. Proceeds when the operator is neither typing nor holding an
 /// unfinished draft and the row is not Blocked. On timeout the reason is
-/// whichever blocker held last; Python maps any not-delivered reason to the
+/// whichever blocker held last, and a Blocked row names its stored reason
+/// (the question text, the permission prompt) so the queued mail says WHAT
+/// the session is waiting on; Python maps any not-delivered reason to the
 /// durable queue, so the mail waits on the bus. The injectable clock and
 /// sleeper keep the cadence unit-testable.
 fn wait_for_quiet_in(
@@ -696,18 +698,18 @@ fn wait_for_quiet_in(
     poll: Duration,
     now: &mut impl FnMut() -> i64,
     sleeper: &mut impl FnMut(Duration),
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let deadline = now() + budget.as_millis() as i64;
     loop {
         let ts = crate::operator_witness::typing_state(journal, session, now());
-        let blocked = registry_row_blocked(registry_path, session);
-        if !ts.recent && !ts.draft && !blocked {
+        let blocked = blocked_reason(registry_path, session);
+        if !ts.recent && !ts.draft && blocked.is_none() {
             return Ok(());
         }
-        let blocker = if blocked {
-            "session-asking"
-        } else {
-            "user-typing"
+        let blocker = match blocked.as_deref() {
+            Some(reason) if !reason.is_empty() => format!("session-asking: {reason}"),
+            Some(_) => "session-asking".to_string(),
+            None => "user-typing".to_string(),
         };
         if now() >= deadline {
             return Err(blocker);
@@ -716,27 +718,37 @@ fn wait_for_quiet_in(
     }
 }
 
-/// True when the registry row `session` addresses is effectively Blocked
-/// (a question picker, a permission wall): the C14 "session-asking" state.
-/// An unreadable registry or no row never blocks.
-fn registry_row_blocked(registry_path: &Path, session: &str) -> bool {
-    let Ok(registry) = crate::state::load_registry(registry_path) else {
-        return false;
-    };
-    let Some(entry) = registry.entries.iter().find(|e| {
+/// The stored reason of the registry row `session` addresses when it is
+/// effectively Blocked (a question picker, a permission wall): the C14
+/// "session-asking" state. `None` when the row is not Blocked; an unreadable
+/// registry or no row never blocks. The reason rides `inside_leg.reason` and
+/// falls back to the screen verdict's label for hook-less rows.
+fn blocked_reason(registry_path: &Path, session: &str) -> Option<String> {
+    let registry = crate::state::load_registry(registry_path).ok()?;
+    let entry = registry.entries.iter().find(|e| {
         e.harness_session_id.as_deref() == Some(session)
             || (session.len() == 8
                 && e.harness_session_id
                     .as_deref()
                     .is_some_and(|id| id.starts_with(session)))
-    }) else {
-        return false;
-    };
+    })?;
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    crate::wait::effective_state(entry, now_secs).0 == crate::wait::EffState::Blocked
+    if crate::wait::effective_state(entry, now_secs).0 != crate::wait::EffState::Blocked {
+        return None;
+    }
+    // A Blocked row is ALWAYS Some: an empty string renders as the bare
+    // "session-asking" label, so a reason-less row cannot read as quiet.
+    Some(
+        entry
+            .inside_leg
+            .as_ref()
+            .and_then(|leg| leg.reason.clone())
+            .or_else(|| entry.screen_state.as_ref().map(|ss| ss.state.clone()))
+            .unwrap_or_default(),
+    )
 }
 
 /// The escaped form of `marker` as it appears inside a transcript JSONL line: the
@@ -2140,7 +2152,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
                 &mut now_ms,
                 &mut |d| std::thread::sleep(d),
             ) {
-                return emit(false, reason);
+                return emit(false, &reason);
             }
         }
         MailInjectHarness::Codex | MailInjectHarness::Opencode => {}
@@ -3508,12 +3520,16 @@ mod tests {
             &mut now,
             &mut sleeper,
         );
-        assert_eq!(r, Err("user-typing"));
+        assert_eq!(r, Err("user-typing".to_string()));
         let _ = std::fs::remove_file(&journal);
     }
 
     #[test]
     fn wait_for_quiet_times_out_with_session_asking_on_a_blocked_row() {
+        // One contract, two rows: a blocked row names its stored reason (the
+        // question text the hook reported) so the queued mail says WHAT the
+        // session waits on, and degrades to the bare class when no reason is
+        // stored.
         let journal = empty_journal("quiet-blocked");
         let dir =
             std::env::temp_dir().join(format!("mailinj-reg-{}-quietblocked", std::process::id()));
@@ -3521,36 +3537,48 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let registry = dir.join("registry.json");
         let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let row = serde_json::json!({
-            "name": "wk", "status": "live", "cwd": "/repo", "harness": "claude",
-            "harness_session_id": "s1",
-            "created_at": "2026-09-26T00:00:00Z",
-            "inside_leg": {
-                "state": "blocked", "seq": 1, "received_at": now_iso, "ttl_ms": 60000
-            },
-        });
-        std::fs::write(
-            &registry,
-            serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string(),
-        )
-        .unwrap();
-        use std::cell::Cell;
-        let base = now_ms();
-        let tick = Cell::new(0i64);
-        let now = || base + tick.get() * 10;
-        let mut now = now;
-        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
-        let mut sleeper = sleeper;
-        let r = wait_for_quiet_in(
-            &journal,
-            &registry,
-            "s1",
-            Duration::from_millis(50),
-            Duration::ZERO,
-            &mut now,
-            &mut sleeper,
-        );
-        assert_eq!(r, Err("session-asking"));
+        for (reason, expected) in [
+            (None, "session-asking"),
+            (
+                Some("Pick a budget door: hard cap or soft warn?"),
+                "session-asking: Pick a budget door: hard cap or soft warn?",
+            ),
+        ] {
+            let mut leg = serde_json::json!({
+                "state": "blocked", "seq": 1, "received_at": now_iso, "ttl_ms": 60000,
+            });
+            if let Some(text) = reason {
+                leg["reason"] = serde_json::json!(text);
+            }
+            let row = serde_json::json!({
+                "name": "wk", "status": "live", "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "s1",
+                "created_at": "2026-09-26T00:00:00Z",
+                "inside_leg": leg,
+            });
+            std::fs::write(
+                &registry,
+                serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string(),
+            )
+            .unwrap();
+            use std::cell::Cell;
+            let base = now_ms();
+            let tick = Cell::new(0i64);
+            let now = || base + tick.get() * 10;
+            let mut now = now;
+            let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+            let mut sleeper = sleeper;
+            let r = wait_for_quiet_in(
+                &journal,
+                &registry,
+                "s1",
+                Duration::from_millis(50),
+                Duration::ZERO,
+                &mut now,
+                &mut sleeper,
+            );
+            assert_eq!(r, Err(expected.to_string()));
+        }
         let _ = std::fs::remove_file(&journal);
         let _ = std::fs::remove_dir_all(&dir);
     }

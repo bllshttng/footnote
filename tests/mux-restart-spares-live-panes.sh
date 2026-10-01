@@ -64,6 +64,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Warm the python CLI's venv before the server exists: a cold runner
+# provisions inside the restart call (measured 2m11s), which outlives the
+# sandbox server's 60s idle grace and turns the spare assertion into a
+# no-op rc=0.
+uv run --project "$REPO_ROOT/cli" fno-py --version >/dev/null 2>&1 || true
+
 "$MUX_BIN" mux server --session "$SESSION" >"$TMP_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in {1..100}; do if "$MUX_BIN" mux ls --json | python3 -c 'import json,os,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("session")==os.environ["SESSION"] and r.get("state")=="live" for r in rows) else 1)'; then break; fi; sleep 0.05; done

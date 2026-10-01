@@ -99,7 +99,10 @@ def _session_identity(from_pid: Optional[int]) -> tuple[Optional[int], Optional[
             check=False,
         )
         payload = json.loads(proc.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+        # AttributeError: a caller's stubbed or foreign subprocess result
+        # carries no stdout; this read degrades like every other failure and
+        # never raises into a caller that holds a claim lock.
         return (None, None)
     if not isinstance(payload, dict):
         return (None, None)

@@ -88,9 +88,7 @@ a headless one-shot - skip this section and go to Step 4.
 
 ### 3a. Warm-window triage of this PR's deferral-born nodes
 
-`deferred=N` in the judgment line is the count of this PR's open deferral-born
-nodes (the ones `/pr create` filed from this PR's "Out of scope" section). If
-`N=0`, skip. Otherwise list and decide each:
+`deferred=N` in the judgment line is the count of this PR's open deferral-born nodes (the ones `/fno:ship pr create` filed from this PR's "Out of scope" section). If `N=0`, skip. Otherwise list and decide each:
 
 ```bash
 fno backlog find 'deferred from PR #<n>'
@@ -141,7 +139,7 @@ marker on the first line is the idempotency guard (a re-run is a full no-op):
 <!-- post-merge:pr-123 -->
 ## Post-merge follow-ups - PR #123 (2026-07-23)
 
-_<pr title>, merged 2026-07-23. Written by /fno:pr merged._
+_<pr title>, merged 2026-07-23. Written by /fno:ship pr merged._
 
 - A thing to keep an eye on now that this shipped.
 - [ ] a decision/sign-off only the maintainer can make

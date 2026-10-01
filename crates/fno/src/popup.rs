@@ -79,6 +79,15 @@ pub enum PopupRow {
         enabled: bool,
         color: Color,
     },
+    /// A text field: ` label: text` with one cursor cell, or the dimmed
+    /// placeholder while empty. Never a target: the keyboard owns it.
+    Input {
+        label: String,
+        text: String,
+        /// A char index into `text`; its length is the cell past the end.
+        cursor: usize,
+        placeholder: String,
+    },
 }
 
 impl PopupRow {
@@ -94,9 +103,74 @@ impl PopupRow {
             PopupRow::Entry { enabled: false, .. }
             | PopupRow::SwatchEntry { enabled: false, .. } => 0,
             PopupRow::Entry { .. } | PopupRow::SwatchEntry { .. } | PopupRow::FullWidth(_) => 1,
-            PopupRow::Header(_) | PopupRow::Rule | PopupRow::Info { .. } => 0,
+            PopupRow::Header(_)
+            | PopupRow::Rule
+            | PopupRow::Info { .. }
+            | PopupRow::Input { .. } => 0,
         }
     }
+}
+
+/// Wrap rows wider than `w` content columns instead of ellipsizing them. A
+/// Header splits at word bounds into several Headers; a plain-body Entry keeps
+/// its key and the label's first line, and the rest of the label follows as
+/// inert continuation Headers indented under the label column. Returns each
+/// output row's source index, so a caller with a parallel vector (a modal's
+/// row events) can follow the rows.
+pub fn wrap_rows(rows: Vec<PopupRow>, w: usize) -> (Vec<PopupRow>, Vec<usize>) {
+    let kw = rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { glyph, .. } => Some(chrome::str_cols(glyph)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let wrap = |text: &str, width: usize| {
+        let mut out = Vec::new();
+        crate::client::wrap_line(text, width.max(1), &mut out);
+        out
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    let mut src = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        match row {
+            // A Header renders as " {s}" with two cells of air after it.
+            PopupRow::Header(s) if chrome::str_cols(&s) + 2 > w => {
+                for line in wrap(&s, w.saturating_sub(2)) {
+                    out.push(PopupRow::Header(line));
+                    src.push(i);
+                }
+            }
+            // An Entry: pad + key column + gap + label + air in a plain body,
+            // glyph + space + label + gap + air otherwise; kw + 5 covers both.
+            PopupRow::Entry {
+                glyph,
+                label,
+                hint,
+                enabled,
+            } if kw + 5 + chrome::str_cols(&label) > w => {
+                let label_w = w.saturating_sub(kw + 5);
+                let mut lines = wrap(&label, label_w).into_iter();
+                out.push(PopupRow::Entry {
+                    glyph,
+                    label: lines.next().unwrap_or_default(),
+                    hint,
+                    enabled,
+                });
+                src.push(i);
+                for line in lines {
+                    out.push(PopupRow::Header(format!("{}{line}", " ".repeat(kw + 1))));
+                    src.push(i);
+                }
+            }
+            row => {
+                out.push(row);
+                src.push(i);
+            }
+        }
+    }
+    (out, src)
 }
 
 /// Menu glyphs must stay in the BMP. Astral symbols render as tofu on
@@ -125,7 +199,8 @@ fn validate_menu_glyphs(rows: &[PopupRow]) {
             PopupRow::Header(_)
             | PopupRow::Rule
             | PopupRow::FullWidth(_)
-            | PopupRow::Info { .. } => {}
+            | PopupRow::Info { .. }
+            | PopupRow::Input { .. } => {}
         }
     }
 }
@@ -178,6 +253,9 @@ pub struct Popup {
     /// action id); a picker whose hint is a prose error needs the opposite:
     /// the diagnosis label must never ellipsize.
     pub label_first: bool,
+    /// The content width ceiling, [`WIDTH_CAP`] by default. The screen still
+    /// caps it in [`Popup::render`].
+    pub width_cap: usize,
 }
 
 /// One laid-out line ready to draw, plus its style and the selected sub-span
@@ -233,6 +311,31 @@ impl Rendered {
         let col = col as usize;
         row >= r0 && row < r0 + h && col >= c0 && col < c0 + self.width
     }
+
+    fn hits_at(&self, row: u16, col: u16) -> impl Iterator<Item = usize> + '_ {
+        let (r0, c0) = self.origin;
+        let line = (row as usize)
+            .checked_sub(r0)
+            .and_then(|li| self.lines.get(li));
+        let cc = (col as usize).checked_sub(c0);
+        line.into_iter().flat_map(move |line| {
+            line.hits
+                .iter()
+                .filter(move |(_, off, len)| cc.is_some_and(|cc| cc >= *off && cc < off + len))
+                .map(|(t, _, _)| *t)
+        })
+    }
+
+    /// The body row target under a screen cell. Tabs and esc spans are not
+    /// rows: returning one would clamp `select` onto the last entry.
+    pub fn row_target_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.hits_at(row, col).find(|t| chrome::is_row_hit(*t))
+    }
+
+    /// The tab index under a screen cell.
+    pub fn tab_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.hits_at(row, col).find_map(chrome::tab_of_hit)
+    }
 }
 
 impl Popup {
@@ -249,7 +352,14 @@ impl Popup {
             plain_body: false,
             body_cap_pct: 0,
             label_first: false,
+            width_cap: WIDTH_CAP,
         }
+    }
+
+    /// Raise (or lower) the content width ceiling (see the field doc).
+    pub fn width_cap(mut self, w: usize) -> Self {
+        self.width_cap = w;
+        self
     }
 
     /// Set the chrome title (the modal's heading).
@@ -471,6 +581,15 @@ impl Popup {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
                 PopupRow::Rule => 0,
                 PopupRow::Info { label: _, value } => 1 + kw + 1 + chrome::str_cols(value) + 2,
+                PopupRow::Input {
+                    label,
+                    text,
+                    placeholder,
+                    ..
+                } => {
+                    let body = chrome::str_cols(text).max(1 + chrome::str_cols(placeholder));
+                    1 + chrome::str_cols(label) + 2 + body + 1 + 2
+                }
                 PopupRow::Entry {
                     glyph, label, hint, ..
                 } => {
@@ -523,7 +642,9 @@ impl Popup {
         // framed block spans `width + 4`: cap the builder width to the
         // terminal minus the borders and the pad, or the right border leaves
         // a full-width screen.
-        let cap = WIDTH_CAP.min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
+        let cap = self
+            .width_cap
+            .min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
         let width = if self.full_width_selection {
             content_w
                 .min(cap)
@@ -581,6 +702,12 @@ impl Popup {
                         pad_role: Role::PanelBody,
                     }
                 }
+                PopupRow::Input {
+                    label,
+                    text,
+                    cursor,
+                    placeholder,
+                } => input_line(label, text, *cursor, placeholder, width),
                 PopupRow::FullWidth(s) => {
                     let ti = target_idx;
                     target_idx += 1;
@@ -855,6 +982,47 @@ impl Popup {
     }
 }
 
+/// Lay out one text field row. A text wider than the room shows the window
+/// that keeps the cursor cell in view.
+fn input_line(
+    label: &str,
+    text: &str,
+    cursor: usize,
+    placeholder: &str,
+    width: usize,
+) -> RenderedLine {
+    let head = format!(" {label}: ");
+    let head_n = head.chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let room = width.saturating_sub(head_n + 1).max(1);
+    let start = (cursor + 1).saturating_sub(room);
+    let end = chars.len().min(start + room);
+    let mut line: String = head.clone();
+    line.extend(&chars[start..end]);
+    let cursor_at = head_n + cursor - start;
+    if cursor == chars.len() {
+        line.push(' ');
+    }
+    let mut segs = vec![
+        (1usize, head_n.saturating_sub(2), Role::BodyAccent),
+        (cursor_at, 1, Role::BodyCursor),
+    ];
+    if chars.is_empty() && !placeholder.is_empty() {
+        line.push_str(placeholder);
+        segs.push((cursor_at + 1, placeholder.chars().count(), Role::PanelMeta));
+    }
+    RenderedLine {
+        text: pad(&line, width),
+        disabled: false,
+        sel_span: None,
+        hits: vec![],
+        roles: vec![],
+        segs,
+        pad_role: Role::PanelBody,
+    }
+}
+
 /// Compute the on-screen top-left `(row, col)` for a block of `w`×`h` cells.
 /// Centered blocks center; anchored blocks open at the cell and clamp to the
 /// screen, flipping ABOVE the anchor when the block would overflow the bottom.
@@ -936,6 +1104,7 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &
             &line.roles,
             theme,
         );
+        chrome::record_close_spans((rows, cols), (r0 + i, c0), r.width, &line.hits);
     }
 }
 

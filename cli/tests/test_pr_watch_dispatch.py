@@ -1884,7 +1884,7 @@ class TestCommentsInActivity:
     """AC-P2-comments: bot COMMENT (not formal review) triggers review dispatch."""
 
     def test_comment_newer_than_watermark_triggers_review_dispatch(self, tmp_path):
-        """AC-P2-comments: a bot comment newer than watermark fires /pr check.
+        """AC-P2-comments: a bot comment newer than watermark fires /fno:ship pr check.
 
         Codex P2 _discover.py:212: read_pr_state only inspects 'reviews';
         comments from configured reviewers must also be included.

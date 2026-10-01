@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(row.substrate.as_deref(), Some("thread"));
         assert_eq!(row.host_mode.as_deref(), Some("interactive"));
         let events =
-            std::fs::read_to_string(crate::client_verbs::trace_events_path(&home)).unwrap();
+            crate::event_store::journal_text(&crate::client_verbs::trace_events_path(&home), &[]);
         assert!(events.contains("agent_lane_rebound"));
         assert!(events.contains("2179"));
     }

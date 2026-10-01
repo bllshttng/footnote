@@ -229,7 +229,7 @@ def test_null_ts_event_does_not_crash(graph_env, monkeypatch):
          "data": {"error": "boom", "node_id": "x-c2"}},
     ]
     monkeypatch.setattr(
-        "fno.events.store_client.query_rows", lambda target: rows
+        "fno.events.store_client.query_rows", lambda target, types=None: rows
     )
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output

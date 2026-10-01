@@ -26,12 +26,12 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
 | `CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:198 |
+| `CODEX_COMPANION_SESSION_ID` | rs | The Codex session id used as the owner-session fallback when a lazy mux server starts from an agent shell. |
 | `CODEX_HOME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:211 |
 | `CODEX_SESSION_ID` | py+rs | unclear: cli/src/fno/adapters/hermes.py:142 |
 | `CODEX_THREAD_ID` | py+rs | The codex thread id: codex sets it per thread in child tool env (the root session keeps CODEX_SESSION_ID), never in its own process env. The rollout witness matches it against a daemon row at this cwd to complete a name_only pane's own identity. |
 | `COLORFGBG` | rs | The rxvt-style `fg;bg` terminal color report; a background field of 7 or 15 reads as a light terminal, which picks the `footnote-paper` mux theme default, and anything else keeps `footnote-superscript`. |
 | `COLORTERM` | rs | unclear: crates/fno/src/mux_cli.rs:1508 |
-| `CODEX_COMPANION_SESSION_ID` | rs | The Codex session id used as the owner-session fallback when a lazy mux server starts from an agent shell. |
 | `CRON_JOB` | py | unclear: cli/src/fno/agents/context.py:94 |
 | `DATABASE_URL` | py | unclear: cli/src/fno/codemap_cli/db-schema.py:208 |
 | `EDITOR` | rs | The editor the board's full description edit runs in; `vi` when unset. |
@@ -71,6 +71,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
 | `FNO_CARGO_TARGETS_BASE` | rs | Overrides the managed fno cargo build base the `cargo_build_dirs` lane sweeps and the tree-removal reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
+| `FNO_CHROME` | rs | The Chrome or Chromium binary `fno mux serve --snapshot --format png` runs. |
 | `FNO_CLAIMS_ROOT` | py+rs | unclear: cli/src/fno/agents/account_env.py:158 |
 | `FNO_CLAUDE_DAEMON_DIR` | py+rs | unclear: cli/src/fno/agents/discover.py:2353 |
 | `FNO_CLAUDE_PROJECTS_DIR` | rs | Overrides the claude transcript projects root the announce status scan reads. |
@@ -108,6 +109,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_HOME` | py+rs | Relocates fno's config-free sidecars (plugin-root pointer, push-stamps, corrections log, decision index) and the Rust defaults when no config sets state_dir. Does not move state_dir or the backlog; a store write under FNO_HOME that targets the default store ($HOME/.fno) is refused. Sandbox with FNO_CONFIG (docs/path-config.md). |
 | `FNO_IDLE_EXIT_GRACE_MS` | rs | unclear: crates/fno/src/server.rs:14324 |
 | `FNO_INBOX_ROOT` | py+rs | unclear: cli/src/fno/inbox/store.py:218 |
+| `FNO_KEEPER_ORPHAN_POLL_MS` | rs | Pane keeper poll interval in ms for the socket-dir-gone check; default 30000. Tests set it low. |
 | `FNO_KILLCHECK_GIT_BIN` | rs | unclear: crates/fno-agents/src/kill_criteria.rs:58 |
 | `FNO_LAUNCH_ACCOUNT` | py | unclear: cli/src/fno/agents/rust_runtime.py:1204 |
 | `FNO_LLM_STUB` | py | unclear: cli/src/fno/llm.py:38 |
@@ -247,7 +249,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `PWD` | py+rs | unclear: cli/src/fno/adapters/providers/cli.py:54 |
 | `PYTEST_CURRENT_TEST` | py+rs | unclear: cli/src/fno/cli.py:404 |
 | `PYTHONPATH` | rs | unclear: crates/fno-agents/src/finalize.rs:1090 |
-| `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating. |
+| `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating, and a Working row's status glyph stays a still `●` instead of spinning. |
 | `SHELL` | py+rs | The user's login shell. |
 | `SMOKE_CHANGED_RECEIPT` | py | unclear: cli/src/fno/test_cmd.py:1726 |
 | `SMOKE_FAILURE_RECORD` | py | unclear: cli/src/fno/test_cmd.py:2066 |
@@ -272,6 +274,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `USERNAME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:185 |
 | `USERPROFILE` | rs | unclear: crates/fno-agents/src/publish_review.rs:195 |
 | `UV_CACHE_DIR` | rs | Authoritative uv cache directory: the cache root a bounded codex worker is granted as a writable root; set but missing grants nothing (no fallback, uv reads exactly this variable). |
+| `UV_PROJECT_ENVIRONMENT` | rs | The venv path an `uv sync` would write; the spawn-door venv guard holds a worktree whose value resolves into the canonical checkout, so a worktree install cannot rewrite the canonical cli venv's scripts. |
 | `WORKTREE_STATUS_REGISTRY` | py | unclear: cli/src/fno/agents/registry.py:2525 |
 | `XDG_CACHE_HOME` | rs | unclear: crates/fno/src/bootstrap.rs:1395 |
 | `XDG_CONFIG_HOME` | rs | Relocates OpenCode's config dir ($XDG_CONFIG_HOME/opencode) ahead of the ~/.config/opencode default; unset reads the default. |

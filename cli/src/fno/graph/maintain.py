@@ -1028,7 +1028,7 @@ def detect_suspect_reverts(entries: list[dict], events: Optional[list[dict]] = N
     if events is None:
         from fno.graph.failure import read_events
 
-        events = read_events()
+        events = read_events(types=["node_undeferred"])
     # Earliest node_undeferred ts per node id; a later reversal is still
     # evidence, but the earliest one is the one closest to the drain that
     # (per the incident) fired hours afterward.
@@ -2567,7 +2567,7 @@ def run_pass(
     _enter_leg("failure-defers")
     from fno.graph import failure as _failure
 
-    events = _failure.read_events()
+    events = _failure.read_events(types=list(_failure.FAILURE_EVENT_TYPES))
     defer_cands = detect_failure_defers(entries, events, max_failed_attempts)
     # Blast-radius guard: cap per-run auto-defers (ALWAYS logged, no silent
     # cap) so a provider outage cannot defer half the board.

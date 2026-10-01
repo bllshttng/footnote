@@ -46,6 +46,12 @@ import shlex
 import subprocess
 import sys
 import time
+
+# The shared liveness-row writer (hooks/lib) sits beside this script; the
+# guard runs under whatever interpreter the harness hands it, so the import
+# path is built from __file__, never the cwd.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from guard_mark import guard_mark
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
@@ -596,7 +602,7 @@ def _get_active_target_session(prefer_pr=None):
     - prefer_pr given: a session whose external artifact records that exact PR
       wins. Otherwise any session whose artifact records a DIFFERENT PR is
       excluded (typo / wrong-PR protection); only "neutral" sessions whose
-      artifact records no PR (backward compat: /pr check's artifact omits
+      artifact records no PR (backward compat: /fno:ship pr check's artifact omits
       pr_number) may authorize, and only when exactly one remains -> else deny.
 
     The megawalk-state.md file deliberately does NOT authorize gh pr create or
@@ -1062,7 +1068,7 @@ def _check_pr_merge_allowed(command=""):
           (phase: external, session_id matches state file).
 
     State-file-only attestation is NOT sufficient. The artifact is written by
-    /pr check when it completes; its presence proves external review actually
+    /fno:ship pr check when it completes; its presence proves external review actually
     ran this session. The LLM can still write the artifact, but doing so is a
     clear auditable violation rather than a one-line `touch`.
 
@@ -1823,7 +1829,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
     if body_files and not judged:
         return None
     detail = "" if not judged else (f"the body file {judged[0]} exists and carries "
-        f"no Fixes line; or open the whole-path door /fno:pr create.\n")
+        f"no Fixes line; or open the whole-path door /fno:ship pr create.\n")
     # This message NAMES candidates and never prescribes a trailer to paste.
     # A refusal is the highest-trust text a blocked agent reads, so advice here
     # is a PRODUCER of claims, and this producer has no graph to check against.
@@ -1925,38 +1931,10 @@ def _find_graphql_pr_reads(segments):
 
 def _guard_mark(decision, tool):
     """One guard_decision event row per run: the liveness signal that this
-    guard actually ran and what it decided. Without it, a guard that cannot
-    prove it ran is indistinguishable from one that never launched. Row shape
-    matches hooks/lib/guard-mark.sh output so bash and python guards write
-    indistinguishable rows. Best-effort by contract: any failure is swallowed
+    guard actually ran and what it decided. The shared writer commits it to
+    the journal's store; best-effort by contract: any failure is swallowed
     and can never change the decision."""
-    if decision == "deny":
-        # One vocabulary across every guard: bash guards say block, and the
-        # audit row is shared surface, so a refusal is "block" whichever
-        # language recorded it.
-        decision = "block"
-    try:
-        pin = os.environ.get("FNO_EVENTS_PATH")
-        if pin:
-            path = pin
-        elif os.path.isdir(".git") or os.path.isdir(".fno"):
-            path = os.path.join(".fno", "events.jsonl")
-        else:
-            root = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip()
-            path = os.path.join(root or os.getcwd(), ".fno", "events.jsonl")
-        row = (
-            '{"ts":"%s","type":"guard_decision","data":{"guard":"git-protection",'
-            '"decision":"%s","tool":"%s"},"source":"hook"}'
-            % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision, tool)
-        )
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(row + "\n")
-    except Exception:
-        pass
+    guard_mark("git-protection", decision, tool)
 
 
 _GUARD_MARKED = {"done": False}
@@ -2201,7 +2179,7 @@ Auto-merge directly from Claude Code requires ALL of:
         <repo>/.fno/artifacts/external-<session_id>.md
         with matching frontmatter (phase: external, session_id: <sid>)
 
-The artifact proves /pr check actually ran for this session. A stale
+The artifact proves /fno:ship pr check actually ran for this session. A stale
 or missing artifact blocks the merge even if the state flag is true.
 
 Ahead of the two factors above sits a third veto: review coverage. A bare
@@ -2210,7 +2188,7 @@ PR's current head. A missing or stale row is refused here even when both
 factors pass, because nothing reviewed the head that would merge. The
 sanctioned primitive `fno do pr merge` recomputes that row itself.
 
-If /pr check was skipped or failed, the correct recovery is to run it
+If /fno:ship pr check was skipped or failed, the correct recovery is to run it
 again or explicitly configure --no-external. Do not forge the artifact.
 
 ⚠️  Operator escape hatch, when the two-factor path is genuinely broken

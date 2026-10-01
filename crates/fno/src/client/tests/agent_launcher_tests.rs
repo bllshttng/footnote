@@ -252,20 +252,6 @@ fn chip_walk_rows() {
 }
 
 #[test]
-fn enter_inserts_newline_in_message_and_never_submits() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    type_message(&mut v, "line one");
-    let before = v.launcher.as_ref().unwrap().armed;
-    type_message(&mut v, "\nline two");
-    let l = v.launcher.as_ref().unwrap();
-    assert_eq!(l.draft.message, "line one\nline two");
-    assert_eq!(before, None);
-    assert_eq!(l.armed, None, "Enter inside the message never submits");
-}
-
-#[test]
 fn paste_rows() {
     let mut v = view_with_launcher();
     type_message(&mut v, "");
@@ -622,8 +608,6 @@ fn click_rows() {
         );
         assert!(opened, "the Project picker opened");
     }
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     let l = v.launcher.as_ref().unwrap();
     let picker = l.picker.as_ref().expect("the picker is open");
@@ -645,18 +629,7 @@ fn click_rows() {
                 })
         })
         .expect("the picker's esc chip carries a hit span");
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: hit_row,
-        col: hit_col,
-        shift: false,
-    };
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(consumed, "a click on the picker's esc chip is consumed");
-    });
+    rt.block_on(super::click_close(&mut v, (hit_row, hit_col)));
     let l = v.launcher.as_ref().unwrap();
     assert!(l.picker.is_none(), "the chip click closed the picker");
     assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
@@ -1434,47 +1407,111 @@ fn where_picker_lists_local_and_the_placement_rows() {
 }
 
 #[test]
-fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
-    // AC3: a visible input marker before the first message row, and dim
-    // placeholder text on an empty draft. A fresh open focuses the input.
+fn shell_mode_keys_glyph_and_placeholders() {
+    // The composer's bang mode: `!` on an empty input is the mode switch
+    // (AC1), every later key is command text with the launch gestures
+    // literal (AC3), Backspace on an empty line leaves again (AC2), and
+    // the glyph + placeholder paint the mode. Folds the retired
+    // paint-marker test's contract (plain glyph and placeholder on a
+    // fresh dock and after typing).
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
+    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+
+    // AC1: the `!` is consumed as the mode switch.
+    type_message(&mut v, "!");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert!(l.shell);
+        assert!(l.draft.message.is_empty(), "the ! is consumed");
+    }
+    assert_painted(&v, '!', "shell command in");
+
+    // AC3: in shell mode the launch gestures land as text and open no
+    // picker.
+    type_message(&mut v, "git log --oneline @x");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert_eq!(l.draft.message, "git log --oneline @x");
+        assert!(l.picker.is_none(), "no picker in shell mode");
+    }
+
+    // Typing replaces the placeholder; the glyph stays.
+    assert_painted(&v, '!', "git log");
+
+    // AC2: Backspace through the text, then one more leaves shell mode.
+    for _ in 0..30 {
+        type_message(&mut v, "\x7f");
+        if v.launcher
+            .as_ref()
+            .is_some_and(|l| l.draft.message.is_empty())
+        {
+            break;
+        }
+    }
+    assert!(v.launcher.as_ref().unwrap().shell, "still in shell mode");
+    type_message(&mut v, "\x7f");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert!(!l.shell, "the empty-line Backspace left shell mode");
+        assert!(l.draft.message.is_empty());
+    }
+    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+
+    // Folded from the retired newline test: ^j inserts a newline in the
+    // message and Enter never fires from inside it.
+    type_message(&mut v, "line one");
+    type_message(&mut v, "\nline two");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert_eq!(l.draft.message, "line one\nline two");
+        assert_eq!(l.armed, None, "Enter inside the message never submits");
+    }
+    for _ in 0..30 {
+        type_message(&mut v, "\x7f");
+        if v.launcher
+            .as_ref()
+            .is_some_and(|l| l.draft.message.is_empty())
+        {
+            break;
+        }
+    }
+
+    // AC3: a `!` mid-text is literal, and a pasted `!ls` never enters
+    // shell mode.
+    type_message(&mut v, "fix the !bang parser");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert!(!l.shell);
+        assert_eq!(l.draft.message, "fix the !bang parser");
+    }
+    type_message(&mut v, "\x1b[200~!ls\x1b[201~");
+    {
+        let l = v.launcher.as_ref().unwrap();
+        assert!(!l.shell, "a paste never enters shell mode");
+        assert!(l.draft.message.contains("!ls"), "paste is literal text");
+        assert!(l.picker.is_none());
+    }
+}
+
+/// Paint the sheet and assert the first editor row carries `glyph` and
+/// `placeholder` (the placeholder text may be a prefix of a longer one).
+fn assert_painted(v: &View, glyph: char, placeholder: &str) {
     let l = v.launcher.as_ref().unwrap();
-    let sl = l.sheet_layout(&v).unwrap();
-    let inner_w = sl.framed_w.saturating_sub(2) as usize;
+    let sl = l.sheet_layout(v).unwrap();
     let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
     let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
-    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+    l.paint_sheet(v, &mut cells, rows_n, cols, &sl);
     let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
-    let marker = (0..2)
-        .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
-        .collect::<String>();
-    assert!(
-        marker.contains('\u{276f}'),
-        "prompt marker painted: {marker:?}"
-    );
-    let row: String = (0..inner_w)
+    let row: String = (0..cols.saturating_sub(ox + 1))
         .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
         .collect();
+    assert!(row.contains(glyph), "glyph {glyph} painted: {row:?}");
     assert!(
-        row.contains("What do you want to work on?"),
-        "placeholder on an empty draft: {row:?}"
-    );
-    // Typing replaces the placeholder and keeps the marker.
-    type_message(&mut v, "ship it");
-    let l = v.launcher.as_ref().unwrap();
-    let sl = l.sheet_layout(&v).unwrap();
-    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
-    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
-    let row: String = (0..inner_w)
-        .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
-        .collect();
-    assert!(row.contains("ship it"), "draft paints: {row:?}");
-    assert!(
-        !row.contains("What do you want"),
-        "placeholder gone: {row:?}"
+        row.contains(placeholder),
+        "placeholder {placeholder:?} painted: {row:?}"
     );
 }
 

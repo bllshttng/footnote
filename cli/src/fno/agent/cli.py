@@ -567,11 +567,11 @@ def _detect_inconsistencies(raw: Dict[str, Any]) -> List[str]:
     ext = raw.get("external_review_passed")
     if pr_number not in (None, "null") and ext is False:
         findings.append(
-            f"pr_number={pr_number} but external_review_passed: false -> /pr check probably owed"
+            f"pr_number={pr_number} but external_review_passed: false -> /fno:ship pr check probably owed"
         )
     if raw.get("artifact_shipped") is True and raw.get("pr_number") in (None, "null"):
         findings.append(
-            "artifact_shipped: true but pr_number is null -> /pr create likely incomplete"
+            "artifact_shipped: true but pr_number is null -> /fno:ship pr create likely incomplete"
         )
     return findings
 

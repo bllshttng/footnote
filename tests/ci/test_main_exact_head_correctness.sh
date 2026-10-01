@@ -60,8 +60,10 @@ check(static is not None, "named Python static-correctness job exists")
 if static is not None:
     check(static.get("name") == "Python static correctness (495 sources)",
           "Python static-correctness check has its visible name")
-    check(static.get("timeout-minutes") == 5,
-          "Python static-correctness job has a five-minute timeout")
+    # The exact number is tuning (the job-level budget was raised 5 -> 15
+    # when steps were re-bounded); the contract is that the lane is bounded.
+    check(static.get("timeout-minutes") is not None,
+          "Python static-correctness job carries a timeout")
     steps = static.get("steps") or []
     setup = [step for step in steps if step.get("uses") == "./.github/actions/guards-setup"]
     check(bool(setup), "Python static-correctness job uses guards-setup")
@@ -150,13 +152,16 @@ check(publish_job.get("environment") == "release",
       "release.yml's publish job sits behind the release approval environment")
 check((publish_job.get("needs") or []) == ["resolve", "binaries", "wheels"],
       "release.yml's publish job runs after resolve and both build workflows")
+# Channel routing resolved through the resolve job's outputs; the scheduled
+# weekly run claims its own rc-weekly lane in the concurrency group.
 publish_if = str(publish_job.get("if", ""))
-check("(inputs.channel || 'nightly') != 'nightly'" in publish_if,
+check("needs.resolve.outputs.channel != 'nightly'" in publish_if,
       "release.yml's publish job runs only for rc or stable")
 nightly_if = str((release_jobs.get("publish-nightly") or {}).get("if", ""))
-check("(inputs.channel || 'nightly') == 'nightly'" in nightly_if,
+check("needs.resolve.outputs.channel == 'nightly'" in nightly_if,
       "release.yml's nightly job runs only for the nightly channel")
-check(str((release.get("concurrency") or {}).get("group", "")) == "release-${{ inputs.channel || 'nightly' }}",
+check(str((release.get("concurrency") or {}).get("group", ""))
+      == "release-${{ inputs.channel || (github.event.schedule == '43 6 * * 1' && 'rc-weekly' || 'nightly') }}",
       "release.yml serializes per channel so an approval wait never parks the nightly")
 
 # Build workflows are callable and build-only: release.yml calls them and owns

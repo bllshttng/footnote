@@ -44,6 +44,10 @@ pub struct FeedRow {
     pub title: String,
     #[serde(rename = "ref")]
     pub r#ref: Option<String>,
+    /// The registry row's worker name, set on a removal: the handle the
+    /// resume gesture and the copied `fno agents resume` command address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Who took the action, when that is a mechanism rather than a session:
     /// `stale-escalate`, `fno agents stale-escalate`. It is provenance, never
     /// an attach target.
@@ -448,6 +452,7 @@ pub fn project(
             // NOT RECORDED.
             model: r.model.clone(),
             title: format!("{} removed", r.name),
+            name: Some(r.name.clone()),
             actor: removed_by,
             reason: r.reason.clone(),
             crown: r.crown.clone(),
@@ -470,15 +475,21 @@ pub fn project(
     }
 
     // Close rows: every pane close and server stop the mux
-    // recorded. The reason rides verbatim; cause is the enum's word, so the
-    // row tells the operator WHO closed it (operator vs the death path) and
-    // WHY in one line.
+    // recorded, plus the composer's bang-mode shell rows (one run or
+    // refusal each). The reason rides verbatim; cause is the enum's word,
+    // so the row tells the operator WHO closed it (operator vs the death
+    // path) and WHY in one line.
     for line in closes_raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         let kind = match v.get("type").and_then(Value::as_str) {
-            Some(k @ ("pane_closed" | "server_stopped")) => k,
+            Some(
+                k @ ("pane_closed"
+                | "server_stopped"
+                | "composer_shell_ran"
+                | "composer_shell_refused"),
+            ) => k,
             _ => continue,
         };
         let Some(data) = v.get("data") else { continue };
@@ -495,6 +506,30 @@ pub fn project(
             });
             continue;
         }
+        if kind == "composer_shell_ran" {
+            let cwd = s_field(data, "cwd").unwrap_or_default();
+            let line = s_field(data, "line").unwrap_or_default();
+            let pane = data.get("pane").and_then(Value::as_u64).unwrap_or(0);
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_ran".into(),
+                title: format!("shell in {cwd}: {line} (pane {pane})"),
+                ..FeedRow::default()
+            });
+            continue;
+        }
+        if kind == "composer_shell_refused" {
+            let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_refused".into(),
+                title: format!("shell refused: {reason}"),
+                reason: Some(reason),
+                ..FeedRow::default()
+            });
+            continue;
+        }
+
         let name = s_field(data, "name").unwrap_or_default();
         let pane = data
             .get("pane")
@@ -1020,7 +1055,16 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         args.since_epoch,
     );
     let crown_raw = crown_journals(home);
-    let closes_raw = agents_journal(home, &["pane_closed", "server_stopped"], args.since_epoch);
+    let closes_raw = agents_journal(
+        home,
+        &[
+            "pane_closed",
+            "server_stopped",
+            "composer_shell_ran",
+            "composer_shell_refused",
+        ],
+        args.since_epoch,
+    );
 
     let Projection {
         rows,
@@ -1324,6 +1368,7 @@ mod tests {
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
         // The remover moved to the actor field; the title says what happened.
         assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
+        assert_eq!(row.name.as_deref(), Some("t-d145"));
         assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
         assert_eq!(row.reason.as_deref(), Some("every named node done: x-aaaa"));
         assert_eq!(
@@ -1617,6 +1662,10 @@ mod tests {
             "\n",
             r#"{"ts":"2026-09-30T10:00:09Z","type":"server_stopped","source":"daemon","data":{"mux_session":"main","cause":"shutdown","panes":0}}"#,
             "\n",
+            r#"{"ts":"2026-09-30T10:00:07Z","type":"composer_shell_ran","source":"cli","data":{"mux_session":"main","cwd":"/tmp/p","shell":"/bin/zsh","line":"git status","pane":3}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:00:08Z","type":"composer_shell_refused","source":"cli","data":{"mux_session":"main","cwd":"","line":"git status","reason":"no project chosen; pick one on the Project chip","outcome":"refused"}}"#,
+            "\n",
             "{not json",
         );
         let p = project("", &[], &[], "", "", closes);
@@ -1644,5 +1693,24 @@ mod tests {
             .find(|r| r.kind == "server_stopped")
             .expect("the stop row renders");
         assert_eq!(stopped.title, "mux server stopped: shutdown");
+        let ran = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_ran")
+            .expect("the composer ran row renders");
+        assert_eq!(ran.title, "shell in /tmp/p: git status (pane 3)");
+        let refused = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_refused")
+            .expect("the composer refused row renders");
+        assert_eq!(
+            refused.title,
+            "shell refused: no project chosen; pick one on the Project chip"
+        );
+        assert_eq!(
+            refused.reason.as_deref(),
+            Some("no project chosen; pick one on the Project chip")
+        );
     }
 }

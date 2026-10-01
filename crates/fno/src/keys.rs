@@ -101,7 +101,7 @@ pub fn parse_key(spec: &str) -> Option<u8> {
 
 /// How a byte prints in the which-key modal: `C-b` for a control byte, the
 /// character itself otherwise.
-fn key_disp(b: u8) -> String {
+pub fn key_disp(b: u8) -> String {
     match b {
         1..=26 => format!("C-{}", (b - 1 + b'a') as char),
         _ => (b as char).to_string(),
@@ -285,6 +285,60 @@ fn resolve_prefix_change_with_rebinds(
             .unwrap_or_else(|| "prefix could not be applied exactly; unchanged".to_string()));
     }
     Ok(map)
+}
+
+/// Resolve moving one action to `byte` against the live keymap, with the
+/// same rules a config file gets. A refusal carries the resolver's sentence
+/// and changes nothing; the returned map is safe to pass to [`reinstall`].
+pub fn resolve_rebind(action: &str, byte: u8) -> Result<Keymap, String> {
+    let map = keymap();
+    resolve_rebind_with(map.prefix, &map.rebinds, action, byte)
+}
+
+fn resolve_rebind_with(
+    prefix: u8,
+    live: &[(String, u8)],
+    action: &str,
+    byte: u8,
+) -> Result<Keymap, String> {
+    let default = default_bindings()
+        .into_iter()
+        .find(|kb| kb.action == action)
+        .map(|kb| kb.key);
+    // Moving an action back to its shipped key drops the rebind.
+    let mut specs: Vec<(String, String)> = live
+        .iter()
+        .filter(|(a, _)| a != action)
+        .map(|(a, b)| (a.clone(), key_disp(*b)))
+        .collect();
+    if default != Some(byte) {
+        specs.push((action.to_string(), key_disp(byte)));
+    }
+    let (map, warnings) = resolve_keymap(Some(&key_disp(prefix)), &specs);
+    if let Some(warning) = warnings.first() {
+        return Err(warning.0.clone());
+    }
+    if !bindings_for(&map)
+        .iter()
+        .any(|kb| kb.action == action && kb.key == byte)
+    {
+        return Err(format!(
+            "config.mux.keys.{action}: {} could not be applied; unchanged",
+            key_disp(byte)
+        ));
+    }
+    Ok(map)
+}
+
+/// The whole `[mux.keys]` table for a map, as the JSON object `fno config
+/// set mux.keys` takes.
+pub fn rebinds_json(map: &Keymap) -> String {
+    let table: serde_json::Map<String, serde_json::Value> = map
+        .rebinds
+        .iter()
+        .map(|(action, byte)| (action.clone(), key_disp(*byte).into()))
+        .collect();
+    serde_json::Value::Object(table).to_string()
 }
 
 static KEYMAP: std::sync::RwLock<Option<Keymap>> = std::sync::RwLock::new(None);
@@ -1267,7 +1321,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "cycle-sideline-view",
             CycleSidelineView,
             Global,
-            "cycle sideline view (agents, backlog)",
+            "cycle sideline view (agents, backlog, org)",
         ),
         b(
             b'b',
@@ -1347,6 +1401,24 @@ fn default_bindings() -> Vec<KeyBinding> {
 /// deliberately absent here and refused as rebind targets.
 pub fn key_bindings() -> Vec<KeyBinding> {
     bindings_for(&keymap())
+}
+
+/// Every rebindable binding as the settings page lists it: the live table
+/// plus the actions that ship with no chord, which read "unbound" so the
+/// page can give them one.
+pub fn editable_bindings() -> Vec<KeyBinding> {
+    let map = keymap();
+    let mut rows = default_bindings();
+    for kb in &mut rows {
+        if kb.key == 0 {
+            kb.disp = "unbound".into();
+        }
+        if let Some((_, byte)) = map.rebinds.iter().find(|(a, _)| a == kb.action) {
+            kb.key = *byte;
+            kb.disp = key_disp(*byte);
+        }
+    }
+    rows
 }
 
 fn bindings_for(map: &Keymap) -> Vec<KeyBinding> {
@@ -2184,6 +2256,23 @@ mod tests {
 
         let digit = resolve_prefix_change_with_rebinds("3", &[]).unwrap_err();
         assert!(digit.contains("1-9 select tabs"), "{digit}");
+
+        // One settings rebind runs the same rules against the live map.
+        let p = DEFAULT_PREFIX;
+        let digit = resolve_rebind_with(p, &[], "detach", b'3').unwrap_err();
+        assert!(digit.contains("1-9 select tabs"), "{digit}");
+        let on_prefix = resolve_rebind_with(p, &[], "detach", p).unwrap_err();
+        assert!(on_prefix.contains("is the prefix"), "{on_prefix}");
+        let taken = resolve_rebind_with(p, &[], "detach", b'c').unwrap_err();
+        assert!(
+            taken.starts_with("config.mux.keys.detach: c would also be"),
+            "{taken}"
+        );
+        let free = resolve_rebind_with(p, &[], "detach", b'Q').unwrap();
+        assert_eq!(free.rebinds, vec![("detach".to_string(), b'Q')]);
+        assert_eq!(rebinds_json(&free), r#"{"detach":"Q"}"#);
+        let home = resolve_rebind_with(p, &free.rebinds, "detach", b'd').unwrap();
+        assert!(home.rebinds.is_empty(), "the shipped key drops the rebind");
     }
 
     #[test]

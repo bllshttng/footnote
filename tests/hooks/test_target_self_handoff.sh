@@ -186,7 +186,7 @@ HEAD9="$(git -C "$TMP" rev-parse HEAD)"
 FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO resume receipt write \
   --node "$NODE" --session s1 --phase review --generation 3 \
   --repo testrepo --worktree "$TMP" --branch feature/x-test \
-  --head "$HEAD9" --next-verb "/fno:pr create" --next-target "$NODE" \
+  --head "$HEAD9" --next-verb "/fno:ship pr create" --next-target "$NODE" \
   --idempotency-keys "$(printf 'pr_create:%s\nmerge:%s' "${HEAD9:0:7}" "${HEAD9:0:7}")" >/dev/null
 run_validate
 KEYS="$(printf '%s' "$VAL" | python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('idempotency_keys',[])))")"

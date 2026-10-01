@@ -584,6 +584,16 @@ pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarnin
     (map, warnings)
 }
 
+/// The file the settings key page edits: `$FNO_CONFIG` when it pins one,
+/// else this checkout's `.fno/config.toml`, the file `fno config set
+/// --local` writes.
+pub(crate) fn keys_file_path(cwd: &Path) -> PathBuf {
+    match non_empty_env("FNO_CONFIG") {
+        Some(explicit) => PathBuf::from(explicit),
+        None => project_root(cwd).join(".fno").join("config.toml"),
+    }
+}
+
 /// A warning when `$FNO_CONFIG` names a file this reader cannot parse.
 ///
 /// The Python loader reads an explicitly pinned file AS-IS and parses YAML by
@@ -835,7 +845,7 @@ fn canonical_suppressed(value: Option<&std::ffi::OsStr>) -> bool {
 /// canonical-candidate test assert `Some(...)` against a function forced to
 /// return `None` - green everywhere except the one gate that runs before a
 /// push.
-fn canonical_suppressed_by_env() -> bool {
+pub(crate) fn canonical_suppressed_by_env() -> bool {
     canonical_suppressed(std::env::var_os("FNO_NO_CANONICAL_CONFIG").as_deref())
 }
 
@@ -869,7 +879,7 @@ fn canonical_suppressed_by_env() -> bool {
 /// `fno_agents::agents_config` verbatim. A third reader with its own idea of
 /// truthiness would resurrect the very split-brain this candidate fixes, just
 /// for operators who set it to "0" or "true".
-fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
+pub(crate) fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
     if suppressed {
         return None;
     }
@@ -884,7 +894,7 @@ fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
 /// without an env var the whole process shares.
 ///
 /// Falls back to `cwd` outside a repo, which is where a bare `.fno/` would be.
-fn repo_root_from(cwd: &Path) -> PathBuf {
+pub(crate) fn repo_root_from(cwd: &Path) -> PathBuf {
     let mut dir = cwd;
     loop {
         // A linked worktree's `.git` is a FILE, not a directory.
@@ -1524,6 +1534,13 @@ mod tests {
 
     #[test]
     fn config_layer_rows() {
+        // The config ladder below reads FNO_CONFIG ambient, and the env-pinning
+        // tests hold this same lock while theirs is set: without it, a sibling
+        // fixture's pin short-circuits the ladder and status_row reads as its
+        // default mid-race.
+        let _env = super::ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // mux is routinely attached from a subdirectory. Anchored on cwd, the
         // project layer reads <repo>/sub/.fno/config.toml, which does not
         // exist, and every project key silently reads as unset.

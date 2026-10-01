@@ -7,7 +7,7 @@
 #   - Reviews since merged_at
 #   - Sigma-review artifacts with done-with-concerns verdict (ungraduated)
 #
-# Emits JSON to stdout. The CALLER (a main-thread LLM step in /pr check or
+# Emits JSON to stdout. The CALLER (a main-thread LLM step in /fno:ship pr check or
 # the stop hook) decides what is memory-worthy and calls write-memory-entry.sh.
 # This script only discovers signal; it does not launch an agent.
 #

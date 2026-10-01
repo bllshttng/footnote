@@ -221,6 +221,7 @@ pub mod lane_heal;
 pub mod launch_workdir;
 pub mod law_match;
 pub mod ledger_axes;
+pub(crate) mod ledger_workers;
 mod lifecycle_child;
 pub mod list_row;
 pub mod live_store_fence;
@@ -357,6 +358,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_escalation;
 pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
@@ -407,6 +409,7 @@ pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
 pub mod test_delta;
+pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
 pub mod tracker;
@@ -1019,6 +1022,8 @@ mod tests {
             "x",
             "mux_pane_counters",
             "operator_decision",
+            // The hook emits this in Python; Rust only stages fixtures of it.
+            "loop_check_watch_idle",
         ];
         let test_only: BTreeSet<&str> = TEST_ONLY_EMIT_KINDS.iter().copied().collect();
 
