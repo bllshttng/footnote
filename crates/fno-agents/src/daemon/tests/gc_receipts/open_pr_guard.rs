@@ -219,7 +219,7 @@ fn gc_sweep_keeps_a_rebound_worker_on_its_current_node_open_pr() {
                     "ended_at": "2026-10-01T03:35:52Z"}],
             },
             {
-                "id": "x-0e01", "status": "in_review", "pr_number": 4301,
+                "id": "x-0n01", "status": "in_review", "pr_number": 4301,
                 "merge_status": null,
                 "sessions": [{"session_id": "rebound-uuid", "phase": "execute",
                     "harness": "claude", "started_at": "2026-10-01T04:02:26Z"}],
@@ -257,7 +257,7 @@ fn gc_sweep_keeps_a_rebound_worker_on_its_current_node_open_pr() {
         summary
             .kept_open_pr
             .iter()
-            .any(|(id, node)| id == "rebd0001" && node.contains("x-0e01")),
+            .any(|(id, node)| id == "rebd0001" && node.contains("x-0n01")),
         "the keep names the current node: {summary:#?}"
     );
     std::fs::remove_dir_all(home.root()).ok();
