@@ -1,124 +1,78 @@
-"""Unit tests for the update modal's PR-grouped release notes (fno.update).
+"""Tests for the update modal's release-notes bridge (fno.update).
 
-Every fixture is a REAL git repo with GitHub-style merge commits, so the rev
-range the notes are built from is a real first-parent merge chain, not a
-canned string.
+The builder is native (crates/fno-agents/src/release_notes.rs) and carries
+its git-fixture tests there. Here the bridge is judged: an unavailable
+native leg degrades to None (the payload never blocks), a native answer
+passes through untouched, and the readiness payload carries the result. The
+tests monkeypatch ``verb_call`` because the pytest CI legs delete the
+fno-agents debug binary, so these tests must never reach a real binary.
 """
 
 from __future__ import annotations
 
-import os as _os
-import subprocess as _sp
+import json
+import types
 from pathlib import Path
+
+import pytest
 
 from fno import update
 
+_NOTES = {
+    "highlights": [
+        {"pr": 105, "url": None, "text": "card rows"},
+        {"pr": 101, "url": None, "text": "new sidebar"},
+    ],
+    "groups": [
+        {"area": "agents", "lines": [{"pr": 104, "url": None, "text": "stop the crash"}]}
+    ],
+    "hidden_line": "3 test/docs/ci/chore PRs hidden",
+}
 
-def _run_git(directory: Path, *args: str) -> str:
-    env = {
-        **_os.environ,
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@e",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@e",
-    }
-    proc = _sp.run(
-        ["git", *args], cwd=directory, check=True, capture_output=True, text=True, env=env
+
+def test_bridge_none_when_native_leg_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(verb, payload, unavailable, **kw):
+        raise unavailable("no binary")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", boom)
+    assert update._release_notes("rev", Path("/src")) is None
+
+
+def test_bridge_passes_payload_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def fake(verb, payload, unavailable, **kw):
+        seen["verb"] = verb
+        seen["payload"] = payload
+        return {"notes": _NOTES}
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", fake)
+    notes = update._release_notes("rev123", Path("/src"))
+    assert notes == _NOTES
+    assert seen["verb"] == "release-notes"
+    assert seen["payload"] == {"installed_rev": "rev123", "source": "/src"}
+
+
+def test_update_readiness_carries_release_notes(monkeypatch, tmp_path) -> None:
+    from fno import doctor
+
+    src = tmp_path / "cli"
+    src.mkdir()
+    monkeypatch.setattr(doctor, "_read_marker", lambda: "aaa1111")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
+    monkeypatch.setattr(doctor, "_source_rev", lambda source: "bbb2222")
+    monkeypatch.setattr(
+        update, "_resolve_source_pin",
+        lambda source: {"path": str(src), "decision": "allow"},
     )
-    return proc.stdout.strip()
-
-
-def _gh_merge_repo(directory: Path, prs: list[tuple[int, str]]) -> tuple[str, str]:
-    """A repo whose main is a chain of GitHub-style merge commits (subject
-    ``Merge pull request #N from ...``, body first line the PR title). Returns
-    (base, head) so tests pass base as installed_rev."""
-    directory.mkdir(parents=True, exist_ok=True)
-    _run_git(directory, "init", "-q", "-b", "main")
-    (directory / "f.txt").write_text("x", encoding="utf-8")
-    _run_git(directory, "add", ".")
-    _run_git(directory, "commit", "-qm", "init")
-    base = _run_git(directory, "rev-parse", "HEAD")
-    for pr, title in prs:
-        _run_git(directory, "checkout", "-q", "-b", f"p{pr}")
-        (directory / f"{pr}.txt").write_text(str(pr), encoding="utf-8")
-        _run_git(directory, "add", ".")
-        _run_git(directory, "commit", "-qm", f"work for #{pr}")
-        _run_git(directory, "checkout", "-q", "main")
-        _run_git(
-            directory,
-            "merge", "--no-ff", "-q",
-            "-m", f"Merge pull request #{pr} from bllshttng/feature/x-{pr}-thing",
-            "-m", title,
-            f"p{pr}",
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
+    monkeypatch.setattr(update, "_release_notes", lambda installed, source: _NOTES)
+    result = update.update_readiness(
+        runner=lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"session": "main", "state": "live", "panes": 1, "wire_version": 47}]),
         )
-    return base, _run_git(directory, "rev-parse", "HEAD")
-
-
-def test_release_notes_groups_by_area_and_hides_churn(tmp_path: Path) -> None:
-    base, _head = _gh_merge_repo(
-        tmp_path,
-        [
-            (101, "feat(mux): new sidebar"),
-            (102, "test(board): cover the sorter"),
-            (103, "docs: readme"),
-            (104, "fix(agents): stop the crash"),
-            (105, "feat(board): card rows"),
-            (100, "chore: lint"),
-        ],
     )
-    notes = update._release_notes(base, tmp_path)
-    assert notes is not None
-    # Newest first; feats lead.
-    assert [ln["pr"] for ln in notes["highlights"]] == [105, 101]
-    # Both highlights left their groups; mux emptied, so only agents remains.
-    assert [g["area"] for g in notes["groups"]] == ["agents"]
-    agents = notes["groups"][0]["lines"]
-    assert agents[0]["pr"] == 104
-    assert agents[0]["text"] == "stop the crash"
-    assert agents[0]["url"] is None
-    assert notes["hidden_line"] == "3 test/docs/ci/chore PRs hidden"
-
-
-def test_release_notes_no_feats_leads_with_first_two_visible(tmp_path: Path) -> None:
-    base, _head = _gh_merge_repo(
-        tmp_path,
-        [
-            (201, "fix(mux): pane restore order"),
-            (202, "refactor(agents): fold the prober"),
-            (203, "test: cover it"),
-        ],
-    )
-    notes = update._release_notes(base, tmp_path)
-    assert [ln["pr"] for ln in notes["highlights"]] == [202, 201]
-    assert notes["hidden_line"] == "1 test/docs/ci/chore PR hidden"
-
-
-def test_release_notes_only_churn_shows_chores_group(tmp_path: Path) -> "dict":
-    base, _head = _gh_merge_repo(
-        tmp_path,
-        [
-            (301, "test: cover it"),
-            (302, "docs: readme"),
-        ],
-    )
-    notes = update._release_notes(base, tmp_path)
-    assert [g["area"] for g in notes["groups"]] == ["chores"]
-    assert notes["hidden_line"] is None
-    # Nothing user-facing changed, so there is nothing to highlight.
-    assert notes["highlights"] == []
-
-
-def test_release_notes_none_on_git_failure() -> None:
-    assert update._release_notes("deadbeef", Path("/nonexistent/src")) is None
-
-
-def test_origin_pr_url_base_reads_origin(tmp_path: Path) -> None:
-    _run_git(tmp_path.mkdir(exist_ok=True) or tmp_path, "init", "-q", "-b", "main")
-    _run_git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
-    assert update._origin_pr_url_base(tmp_path) == "https://github.com/o/r/pull"
-
-
-def test_origin_pr_url_base_none_without_remote(tmp_path: Path) -> None:
-    tmp_path.mkdir(exist_ok=True)
-    _run_git(tmp_path, "init", "-q", "-b", "main")
-    assert update._origin_pr_url_base(tmp_path) is None
+    assert result["release_notes"] == _NOTES

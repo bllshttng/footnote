@@ -19,6 +19,11 @@ pub(crate) struct UpdateReadiness {
     pub(crate) source_rev: Option<String>,
     #[serde(default)]
     pub(crate) changelog: Vec<String>,
+    /// Release notes Python shaped for the modal (one line per merged PR,
+    /// grouped, highlights first). Tolerated absent: an older Python payload
+    /// still renders through `changelog`.
+    #[serde(default)]
+    pub(crate) release_notes: Option<ReleaseNotes>,
     pub(crate) guidance: String,
     pub(crate) degraded: Option<String>,
     /// One row per running long-lived process (change 7). Tolerated
@@ -40,6 +45,35 @@ pub(crate) struct UpdateReadiness {
 pub(crate) struct SourcePinView {
     #[serde(default)]
     pub(crate) behind: Option<u64>,
+}
+
+/// One release-notes line: the plain-English summary, the PR number for the
+/// label, and, when the tap can open it, the PR's URL. Every string is
+/// Python's (Locked Decision 6); the TUI only decides row type from `url`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct ReleaseNoteLine {
+    #[serde(default)]
+    pub(crate) pr: Option<u64>,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct ReleaseNotesGroup {
+    pub(crate) area: String,
+    #[serde(default)]
+    pub(crate) lines: Vec<ReleaseNoteLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct ReleaseNotes {
+    #[serde(default)]
+    pub(crate) highlights: Vec<ReleaseNoteLine>,
+    #[serde(default)]
+    pub(crate) groups: Vec<ReleaseNotesGroup>,
+    #[serde(default)]
+    pub(crate) hidden_line: Option<String>,
 }
 
 /// One census row the modal renders: what a restart does to this process
@@ -302,7 +336,52 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                 short(r.installed_rev.as_deref()),
                 short(r.source_rev.as_deref())
             )));
-            if !r.changelog.is_empty() {
+            // Shaped notes win; the raw changelog stays the fallback for an
+            // older Python payload. A tappable line is an Entry (its action
+            // pairs by selectable-row index); a line without a URL renders as
+            // a Header so it is never a dead selectable row.
+            let notes = r.release_notes.as_ref().filter(|n| {
+                n.highlights.iter().any(|l| !l.text.is_empty())
+                    || n.groups.iter().any(|g| !g.lines.is_empty())
+            });
+            if let Some(notes) = notes {
+                rows.push(PopupRow::Rule);
+                let push_line = |rows: &mut Vec<PopupRow>,
+                                 actions: &mut Vec<AuxAction>,
+                                 line: &ReleaseNoteLine| {
+                    let label = match line.pr {
+                        Some(pr) => format!("{} (#{pr})", line.text),
+                        None => line.text.clone(),
+                    };
+                    match &line.url {
+                        Some(url) => {
+                            rows.push(PopupRow::Entry {
+                                glyph: "•".into(),
+                                label,
+                                hint: String::new(),
+                                enabled: true,
+                            });
+                            actions.push(AuxAction::OpenPr(url.clone()));
+                        }
+                        None => rows.push(PopupRow::Header(label)),
+                    }
+                };
+                for line in &notes.highlights {
+                    push_line(&mut rows, &mut actions, line);
+                }
+                for group in &notes.groups {
+                    if group.lines.is_empty() {
+                        continue;
+                    }
+                    rows.push(PopupRow::Header(group.area.clone()));
+                    for line in &group.lines {
+                        push_line(&mut rows, &mut actions, line);
+                    }
+                }
+                if let Some(hidden) = &notes.hidden_line {
+                    rows.push(PopupRow::Header(hidden.clone()));
+                }
+            } else if !r.changelog.is_empty() {
                 rows.push(PopupRow::Rule);
                 for subject in &r.changelog {
                     rows.push(PopupRow::Header(subject.clone()));
@@ -400,6 +479,43 @@ impl View {
         self.update_verb_inflight = false;
         self.set_notice(verdict);
         self.update_probe_want = true;
+    }
+}
+
+/// The event loop's update wants: kick a readiness probe and an upgrade
+/// verb, at most one of each in flight. The select loop never blocks on the
+/// probe - the menu and overlay render whatever is already in
+/// `view.update_outcome`. Lives here so the over-budget client.rs shrinks
+/// (the update surface owns its own pump).
+pub(crate) fn pump_wants(
+    view: &mut View,
+    update_tx: &tokio::sync::mpsc::UnboundedSender<UpdateProbe>,
+    restart_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    if view.update_probe_want && !view.update_probe_inflight {
+        view.update_probe_want = false;
+        view.update_probe_inflight = true;
+        let tx = update_tx.clone();
+        tokio::spawn(async move {
+            let outcome = probe_update().await;
+            let _ = tx.send(outcome);
+        });
+    }
+    if let (false, Some(channel)) = (view.update_verb_inflight, view.update_verb_want) {
+        kick_upgrade(view, restart_tx.clone(), channel);
+    }
+}
+
+/// Open one release-notes PR in the browser. Off-loop: the opener may
+/// cold-start a browser.
+pub(crate) async fn open_pr(view: &mut View, url: String) {
+    let notice = crate::link::for_notice(&url);
+    let outcome = tokio::task::spawn_blocking(move || crate::link::open_url(&url))
+        .await
+        .unwrap_or_else(|_| Err("opener task failed".to_string()));
+    match outcome {
+        Ok(()) => view.set_notice(format!("opened {notice}")),
+        Err(e) => view.set_notice(format!("open failed: {e}")),
     }
 }
 

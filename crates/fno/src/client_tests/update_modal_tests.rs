@@ -4,7 +4,10 @@
 use super::tests::view_with_agents;
 use super::*;
 use crate::client::release_check::{Channel, ReleaseOutcome};
-use crate::client::update_menu::{RunningRow, UpdateOutcome, UpdateProbe, UpdateReadiness};
+use crate::client::update_menu::{
+    ReleaseNoteLine, ReleaseNotes, ReleaseNotesGroup, RunningRow, UpdateOutcome, UpdateProbe,
+    UpdateReadiness,
+};
 
 fn degraded_release_probe(release: ReleaseOutcome, running: Vec<RunningRow>) -> UpdateProbe {
     let running_stale = running.len();
@@ -14,6 +17,7 @@ fn degraded_release_probe(release: ReleaseOutcome, running: Vec<RunningRow>) -> 
             installed_rev: None,
             source_rev: None,
             changelog: vec![],
+            release_notes: None,
             guidance: "update check degraded (local source tree unavailable)".into(),
             degraded: Some("local source tree unavailable".into()),
             running,
@@ -170,6 +174,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
         changelog: vec![],
+        release_notes: None,
         guidance: "installed same is current; 2 running process(es) are older builds".into(),
         degraded: None,
         running: vec![
@@ -352,6 +357,7 @@ fn sideline_menu_omits_update_row_when_not_ready() {
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
         changelog: vec![],
+        release_notes: None,
         guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
         degraded: None,
         running: vec![],
@@ -397,6 +403,7 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
         changelog: vec![],
+        release_notes: None,
         guidance: "update check degraded (fno mux ls --json failed) - ...".into(),
         degraded: Some("fno mux ls --json failed".into()),
         running: vec![],
@@ -487,6 +494,7 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
         changelog: vec!["fix(x): thing".into()],
+        release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
         degraded: None,
         running: vec![],
@@ -520,6 +528,7 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
         changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
+        release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
         degraded: None,
         running: vec![],
@@ -540,4 +549,103 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
     assert!(headers.contains(&"fix(x): thing"));
     assert!(headers.contains(&"feat(y): other thing"));
     assert!(headers.iter().any(|h| h.contains("14 shells survive")));
+}
+
+/// Shaped release notes win over the raw changelog: highlights first, then
+/// area groups, then the hidden count. A line with a URL is a tappable Entry
+/// carrying OpenPr; the action list pairs with selectable rows by index.
+#[test]
+fn update_modal_renders_release_notes_with_tappable_prs() {
+    let notes = ReleaseNotes {
+        highlights: vec![ReleaseNoteLine {
+            pr: Some(105),
+            url: Some("https://github.com/o/r/pull/105".into()),
+            text: "card rows".into(),
+        }],
+        groups: vec![ReleaseNotesGroup {
+            area: "mux".into(),
+            lines: vec![ReleaseNoteLine {
+                pr: Some(104),
+                url: None,
+                text: "stop the crash".into(),
+            }],
+        }],
+        hidden_line: Some("3 test/docs/ci/chore PRs hidden".into()),
+    };
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: true,
+        installed_rev: Some("aaa1111".into()),
+        source_rev: Some("bbb2222".into()),
+        changelog: vec!["fix(x): raw subject".into()],
+        release_notes: Some(notes),
+        guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.clone().into()));
+    let entry_labels: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Only the URL line is an Entry; no stale rows means no restart row.
+    assert_eq!(entry_labels, vec!["card rows (#105)"]);
+    let headers: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"mux"));
+    assert!(headers.contains(&"stop the crash (#104)"));
+    assert!(headers.contains(&"3 test/docs/ci/chore PRs hidden"));
+    // Raw changelog suppressed when shaped notes exist.
+    assert!(!headers.contains(&"fix(x): raw subject"));
+    // Actions pair by selectable-row index: the one OpenPr, no restart.
+    assert_eq!(
+        modal.actions,
+        vec![AuxAction::OpenPr("https://github.com/o/r/pull/105".into())]
+    );
+}
+
+/// An empty shaped-notes payload (no highlights, no group lines) falls back
+/// to the raw changelog rather than rendering nothing.
+#[test]
+fn update_modal_falls_back_to_changelog_when_notes_empty() {
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: true,
+        installed_rev: Some("aaa1111".into()),
+        source_rev: Some("bbb2222".into()),
+        changelog: vec!["fix(x): raw subject".into()],
+        release_notes: Some(ReleaseNotes {
+            highlights: vec![],
+            groups: vec![],
+            hidden_line: None,
+        }),
+        guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.clone().into()));
+    let headers: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"fix(x): raw subject"));
 }

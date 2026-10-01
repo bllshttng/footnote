@@ -510,126 +510,26 @@ def _changelog_subjects(
     return [line for line in proc.stdout.splitlines() if line.strip()][:10]
 
 
-_MERGE_SUBJECT_RE = re.compile(r"^Merge pull request #(\d+) from \S+")
-_TYPE_PREFIX_RE = re.compile(
-    r"^(feat|fix|refactor|perf|test|docs|ci|chore|build|style)(?:\(([a-z0-9_/-]+)\))?:\s*",
-    re.IGNORECASE,
-)
-_HIDDEN_TYPES = {"test", "docs", "ci", "chore", "build", "style"}
-_AREA_BY_SCOPE = {
-    "mux": "mux",
-    "backlog": "backlog",
-    "agents": "agents",
-    "review": "review",
-    "reign": "review",
-    "merge": "merge",
-    "pr": "merge",
-    "ship": "merge",
-}
-_AREA_ORDER = ["mux", "backlog", "agents", "review", "merge", "general"]
-
-
-def _origin_pr_url_base(
-    source: Path,
-    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
-) -> Optional[str]:
-    """``https://github.com/<owner>/<repo>/pull`` from the checkout's origin,
-    or None on any failure - a missing URL only costs the tap, never the row."""
-    try:
-        proc = runner(
-            ["git", "-C", str(source), "remote", "get-url", "origin"],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    m = re.search(r"([-.\w]+)/([-.\w]+?)(?:\.git)?/?\s*$", proc.stdout.strip())
-    return f"https://github.com/{m.group(1)}/{m.group(2)}/pull" if m else None
-
-
 def _release_notes(
     installed_rev: str,
     source: Path,
-    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> Optional[dict]:
-    """Release notes for the update modal, built from the merged PRs between
-    ``installed_rev`` and source HEAD (first-parent merge commits), not every
-    commit. One line per PR with the conventional-commit prefix stripped, two
-    highlights leading, the rest grouped by user-facing area, and
-    test/docs/ci/chore hidden behind a count - shown when nothing else
-    changed. None on any git failure; the payload never blocks on this (same
-    contract as ``_changelog_subjects``). PR titles come from the merge
-    commit's body, which GitHub fills with the PR title, so this stays
-    offline."""
+    """Release notes for the update modal, built by the native leg
+    (crates/fno-agents/src/release_notes.rs) through the verb seam: one line
+    per merged PR between ``installed_rev`` and source HEAD, grouped by
+    user-facing area, churn hidden behind a count. None on any failure - the
+    payload never blocks on this (same contract as ``_changelog_subjects``)."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
     try:
-        proc = runner(
-            ["git", "-C", str(source), "log", "--first-parent", "--merges",
-             "--format=%H%x1f%s%x1f%b%x1e", f"{installed_rev}..HEAD"],
-            capture_output=True, text=True, check=False, timeout=5,
+        answer = verb_call(
+            "release-notes",
+            {"installed_rev": installed_rev, "source": str(source)},
+            VerbUnavailable,
         )
-    except (OSError, subprocess.SubprocessError):
+    except VerbUnavailable:
         return None
-    if proc.returncode != 0:
-        return None
-    url_base = _origin_pr_url_base(source, runner)
-    visible: list[dict] = []
-    hidden: list[dict] = []
-    for record in proc.stdout.split("\x1e"):
-        parts = record.split("\x1f")
-        if len(parts) < 3:
-            continue
-        m = _MERGE_SUBJECT_RE.match(parts[1].strip())
-        if not m:
-            continue
-        title = next((ln.strip() for ln in parts[2].splitlines() if ln.strip()), "")
-        typ = _TYPE_PREFIX_RE.match(title)
-        scope = (typ.group(2) if typ else "") or ""
-        area = _AREA_BY_SCOPE.get(scope.lower().split("/")[0], "general")
-        text = " ".join(_TYPE_PREFIX_RE.sub("", title, count=1).split())
-        line = {
-            "pr": int(m.group(1)),
-            "url": f"{url_base}/{m.group(1)}" if url_base else None,
-            "text": text or f"pull request #{m.group(1)}",
-            "area": area,
-            "is_feat": bool(typ) and typ.group(1).lower() == "feat",
-        }
-        (hidden if typ and typ.group(1).lower() in _HIDDEN_TYPES else visible).append(line)
-
-    groups = [
-        {"area": area, "lines": [ln for ln in visible if ln["area"] == area]}
-        for area in _AREA_ORDER
-    ]
-    groups = [g for g in groups if g["lines"]]
-    feats = [ln for ln in visible if ln["is_feat"]]
-    highlights = (feats or visible)[:2]
-    # Highlights lead the modal; their groups lose them so no PR shows twice.
-    hset = {id(ln) for ln in highlights}
-    groups = [
-        {"area": g["area"], "lines": [ln for ln in g["lines"] if id(ln) not in hset]}
-        for g in groups
-    ]
-    groups = [g for g in groups if g["lines"]]
-    if not visible:
-        # Nothing user-facing changed: the hidden kinds ARE the release.
-        groups = [{"area": "chores", "lines": hidden}]
-        hidden = []
-    hidden_line = (
-        f"{len(hidden)} test/docs/ci/chore PR{'s' if len(hidden) != 1 else ''} hidden"
-        if hidden else None
-    )
-    for ln in visible:
-        del ln["area"], ln["is_feat"]
-
-    notes = {
-        "highlights": [{k: ln[k] for k in ("pr", "url", "text")} for ln in highlights],
-        "groups": [
-            {"area": g["area"], "lines": [{k: ln[k] for k in ("pr", "url", "text")} for ln in g["lines"]]}
-            for g in groups
-        ],
-        "hidden_line": hidden_line,
-    }
-    return notes
+    return answer.get("notes") or None
 
 
 def _wire_label(wires: list[int]) -> str:
@@ -796,7 +696,7 @@ def update_readiness(
     release_notes: Optional[dict] = None
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
-        release_notes = _release_notes(installed_rev, resolved_source, runner)
+        release_notes = _release_notes(installed_rev, resolved_source)
 
     # Census rows; never the name `running`: python_tool owns it.
     census_rows = running_components(runner)
