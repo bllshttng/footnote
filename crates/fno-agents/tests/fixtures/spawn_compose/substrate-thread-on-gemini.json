@@ -1,0 +1,124 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w23",
+    "/fno:target x-21"
+  ],
+  "config_toml": "[agents.defaults]\nprovider = \"gemini\"\nsubstrate = \"thread\"\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--harness",
+      "gemini",
+      "--permission-mode",
+      "bypassPermissions",
+      "--name",
+      "w23",
+      "/fno:target x-21"
+    ],
+    "exit": 0,
+    "journal": {
+      "applied": [
+        [
+          "harness",
+          "gemini",
+          "agents.defaults.provider"
+        ],
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous.permission_mode"
+        ]
+      ],
+      "fingerprint": "",
+      "kind": "spawn_defaults_applied",
+      "name": "w23",
+      "resolved": {
+        "account": {
+          "rung": null,
+          "value": ""
+        },
+        "effort": {
+          "rung": null,
+          "value": ""
+        },
+        "model": {
+          "rung": null,
+          "value": ""
+        },
+        "pane_group": {
+          "rung": null,
+          "value": ""
+        },
+        "permission_mode": {
+          "rung": "builtin.autonomous",
+          "value": "bypassPermissions"
+        },
+        "provider": {
+          "rung": "agents.defaults",
+          "value": "gemini"
+        },
+        "route": {
+          "rung": null,
+          "value": ""
+        },
+        "substrate": {
+          "rung": "agents.defaults",
+          "value": "thread"
+        }
+      },
+      "seed": "/fno:target x-21",
+      "suppressed": [
+        [
+          "substrate",
+          "thread",
+          "agents.defaults",
+          "gemini does not support substrate 'thread'; thread requires a journey-proven lane (claude and codex today; opencode remains unearned), so the spawn falls back to the pane default"
+        ]
+      ],
+      "verb": "target"
+    },
+    "stderr": [
+      "fno agents spawn: substrate skipped (gemini does not support substrate 'thread'; thread requires a journey-proven lane (claude and codex today; opencode remains unearned), so the spawn falls back to the pane default); agents.defaults.substrate = 'thread' ignored",
+      "fno agents spawn: applied harness=gemini (agents.defaults.provider), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w23",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-21",
+    "seed_form": "positional",
+    "seed_index": 3,
+    "spawn_tokens": [
+      "--name",
+      "w23",
+      "/fno:target x-21"
+    ],
+    "tab_flag_present": false
+  }
+}

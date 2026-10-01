@@ -133,6 +133,13 @@ impl MergeValue for Value {
 pub fn resolve(payload: Value) -> Result<Value, String> {
     match payload.get("kind").and_then(Value::as_str) {
         Some("overlay") => resolve_overlay(&payload),
+        Some("compat") => Ok(crate::effort_surface::compat(&payload)),
+        Some("compose") => {
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let inputs = crate::spawn_compose::gather(&payload, &cwd);
+            Ok(crate::spawn_compose::compose(&inputs).to_value())
+        }
         Some("model-vendor") => resolve_model_vendor(&payload),
         Some("lane-vendor") => {
             let toks: Vec<String> = payload
@@ -162,7 +169,7 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("crown-widen") => crate::crown_widen::resolve(&payload),
         Some("court-rivals") => crate::court_rivals::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen|court-rivals"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen|court-rivals"
         )),
     }
 }

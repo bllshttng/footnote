@@ -31,7 +31,7 @@ Driver-specific functions (`driver_invoke`, `driver_check_promise`, `driver_pers
 
 ## How to add a new harness
 
-1. Add the harness to `KNOWN_HARNESSES` in `cli/src/fno/harness_names.py`. It appears in the matrix as an all-`unmeasured` column at once.
+1. Add the harness to `KNOWN_HARNESSES` in `crates/fno-agents/src/provider.rs`, the one roster. Python's `fno.harness_names` proxies it. It appears in the matrix as an all-`unmeasured` column at once.
 2. Add its capability row to `harness_capabilities.toml`, measured cell by cell. `fno doctor harness <name> --live` is the onboarding gate.
 3. Run `fno doctor harness-matrix --write` and commit both generated docs.
 4. For a wrapper-driven harness, implement `scripts/lib/driver-<name>.sh` with the four function contract, optionally a promise sentinel plugin (`docs/harnesses/promise-sentinel.md`), and write `docs/SETUP-<NAME>.md`.

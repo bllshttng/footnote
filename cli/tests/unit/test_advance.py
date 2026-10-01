@@ -1300,16 +1300,23 @@ def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
     assert captured["model"] == "glm-5.3-flash[1m]"
 
 
-def _declare_grid_inventory(monkeypatch):
-    """Declare the two-harness inventory the grid tests resolve against (the
-    built-in candidate tables are gone; rows are config now)."""
-    from fno import route_resolve as rr
+_GRID_ROWS = [
+    {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+    {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+]
 
-    inv = rr.inventory_from_rows([
-        {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
-        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
-    ])
-    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+def _pin_grid_rows(cfg):
+    """Declare the two-harness inventory on the pinned config FILE: the verb
+    gathers its own rows, so a Python stub is invisible to it."""
+    lines = [""]
+    for row in _GRID_ROWS:
+        lines.append("[[routing.models]]")
+        for key, value in row.items():
+            lines.append(f'{key} = "{value}"')
+        lines.append("")
+    with open(cfg, "a") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
@@ -1361,6 +1368,9 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
@@ -1390,8 +1400,8 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     captured, fake_run = _fake_spawn_run("sid-grid1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    _declare_grid_inventory(monkeypatch)
-    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _cfg, _state = _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _pin_grid_rows(_cfg)
     sid = adv._spawn_worker(
         "x-grid1",
         None,
@@ -1404,7 +1414,11 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     cmd = captured["cmd"]
     i = cmd.index("--harness")
     assert cmd[i + 1] == "codex"
-    assert "gpt-5.6-sol" in cmd
+    # The model is the verb's full-fold pick (builtins fold in beside the
+    # declared rows; the goldens pin that world), so the transport contract
+    # here is: a capacity-scoped model rides.
+    mi = cmd.index("--model")
+    assert cmd[mi + 1], "the grid's cheapest clearing pick rides as --model"
 
 
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
@@ -1465,8 +1479,8 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
         return _FakeProc(stdout='{"short_id": "s"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    _declare_grid_inventory(monkeypatch)
-    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _cfg, _state = _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _pin_grid_rows(_cfg)
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
     assert receipts and receipts[0]["status"] == "dispatched"
@@ -1501,8 +1515,8 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     # The grid needs a declared inventory before capacity is consulted;
     # without it the lane declines on no-inventory-declared instead of the
     # capacity decline this test exists to pin.
-    _declare_grid_inventory(monkeypatch)
-    _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
+    _cfg, _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")
+    _pin_grid_rows(_cfg)
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
@@ -4493,3 +4507,18 @@ def test_observe_warning_without_a_clock_names_basis_only(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "basis=pid-absent" in err
     assert "reclaimable_at=" not in err
+
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (construction is all that
+    survives in Python; the fold is the verb's)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)

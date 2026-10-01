@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Harness-roster parity gate: the shipped roster against its evidence.
+"""Harness-roster parity gate: the shipped evidence against the one roster.
 
-``KNOWN_HARNESSES`` in ``cli/src/fno/harness_names.py`` is the COMPLETE roster
-of harnesses footnote supports. Three shipped evidence surfaces must union to
-exactly that set, and every one-sided difference is NAMED, never counted:
+The COMPLETE roster of harnesses footnote supports lives in
+Rust, as ``KNOWN_HARNESSES`` in ``crates/fno-agents/src/provider.rs`` (the
+Python tuple copy is gone; ``fno.harness_names`` proxies the binary). This
+gate parses that same const out of the Rust SOURCE - stdlib only, no package
+install, no Rust build, no network - and holds every shipped evidence
+surface as a SUBSET of it, every one-sided difference NAMED, never counted:
 
   setup docs     ``docs/SETUP-<name>.md`` filenames: the harnesses the shipped
                  setup docs tell operators they can host the loop family under
@@ -11,6 +14,12 @@ exactly that set, and every one-sided difference is NAMED, never counted:
                  ``crates/fno-agents/src/provider.rs``: the native dispatch cases
   adapter rows   literal ``_register("<name>", Class)`` calls in
                  ``cli/src/fno/adapters/__init__.py``: the Python adapter registry
+
+The subset direction is deliberate: the roster is the source of truth, so a
+name may land in Rust ahead of its evidence (the roster entry IS the support
+claim), but a surface naming a harness the roster does not carry is a
+drift the gate refuses. A roster entry nobody names is invisible here by
+design - see the format/subset pins in the Rust unit tests.
 
 The gate also pins the ``HERMES_SESSION_ID`` invariant independently of roster
 parity: the variable must sit in ``_EXTRA_IDENTITY_NAMES`` (the scrub set) and
@@ -43,11 +52,14 @@ from typing import IO, Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-NAMES_PY = "cli/src/fno/harness_names.py"
 PROVIDER_RS = "crates/fno-agents/src/provider.rs"
 ADAPTERS_PY = "cli/src/fno/adapters/__init__.py"
 IDENTITY_PY = "cli/src/fno/harness_identity.py"
 SETUP_GLOB = "SETUP-*.md"
+
+ROSTER_CONST_RE = re.compile(
+    r"pub const KNOWN_HARNESSES: &\[&str\] = &\[(.*?)\];", re.DOTALL
+)
 
 MARKER_VARS = (
     "HARNESS_SESSION_MARKERS",
@@ -68,44 +80,19 @@ def _read(root: Path, rel: str) -> str:
         raise GateError(f"{rel}: unreadable ({exc})") from exc
 
 
-def _string_tuple(tree: ast.Module, var: str, rel: str) -> tuple[str, ...]:
-    """First-elements of ``var``'s tuple-of-pairs assignment, literal-only."""
-    for node in ast.walk(tree):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, (ast.AnnAssign,)) and node.target:
-            targets = [node.target]
-        if not any(isinstance(t, ast.Name) and t.id == var for t in targets):
-            continue
-        value = getattr(node, "value", None)
-        if not isinstance(value, ast.Tuple):
-            raise GateError(f"{rel}: {var} is not a tuple literal")
-        names: list[str] = []
-        for elt in value.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                names.append(elt.value)  # a bare string tuple (KNOWN_HARNESSES)
-            elif (
-                isinstance(elt, ast.Tuple)
-                and len(elt.elts) == 2
-                and isinstance(elt.elts[0], ast.Constant)
-                and isinstance(elt.elts[0].value, str)
-            ):
-                names.append(elt.elts[0].value)  # a pair tuple (marker tables)
-            else:
-                raise GateError(f"{rel}: {var} holds a non-literal element")
-        if not names:
-            raise GateError(f"{rel}: {var} is empty")
-        return tuple(names)
-    raise GateError(f"{rel}: no assignment to {var} found")
+def extract_roster(text: str) -> tuple[str, ...]:
+    """The quoted names of ``KNOWN_HARNESSES`` in provider.rs, literal-only.
 
-
-def extract_known_harnesses(text: str) -> tuple[str, ...]:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError as exc:
-        raise GateError(f"{NAMES_PY}: unparseable ({exc})") from exc
-    return _string_tuple(tree, "KNOWN_HARNESSES", NAMES_PY)
+    The bracket-slice assumes no ``]`` inside a roster name; the Rust unit
+    test pins every name to lowercase kebab, so that holds by construction.
+    """
+    match = ROSTER_CONST_RE.search(text)
+    if match is None:
+        raise GateError(f"{PROVIDER_RS}: pub const KNOWN_HARNESSES not found")
+    names = re.findall(r'"([A-Za-z0-9_-]+)"', match.group(1))
+    if not names:
+        raise GateError(f"{PROVIDER_RS}: KNOWN_HARNESSES is empty")
+    return tuple(names)
 
 
 def extract_setup_harnesses(root: Path) -> tuple[str, ...]:
@@ -192,12 +179,45 @@ def extract_marker_tables(text: str) -> dict[str, tuple[str, ...]]:
     return {var: _string_tuple(tree, var, IDENTITY_PY) for var in MARKER_VARS}
 
 
+def _string_tuple(tree: ast.Module, var: str, rel: str) -> tuple[str, ...]:
+    """First-elements of ``var``'s tuple-of-pairs assignment, literal-only."""
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign,)) and node.target:
+            targets = [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == var for t in targets):
+            continue
+        value = getattr(node, "value", None)
+        if not isinstance(value, ast.Tuple):
+            raise GateError(f"{rel}: {var} is not a tuple literal")
+        names: list[str] = []
+        for elt in value.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                names.append(elt.value)  # a bare string element
+            elif (
+                isinstance(elt, ast.Tuple)
+                and len(elt.elts) == 2
+                and isinstance(elt.elts[0], ast.Constant)
+                and isinstance(elt.elts[0].value, str)
+            ):
+                names.append(elt.elts[0].value)  # a pair tuple (marker tables)
+            else:
+                raise GateError(f"{rel}: {var} holds a non-literal element")
+        if not names:
+            raise GateError(f"{rel}: {var} is empty")
+        return tuple(names)
+    raise GateError(f"{rel}: no assignment to {var} found")
+
+
 def collect(root: Path) -> dict[str, Any]:
     """Read every evidence surface; any fail-closed error propagates."""
+    provider_text = _read(root, PROVIDER_RS)
     return {
-        "canonical": extract_known_harnesses(_read(root, NAMES_PY)),
+        "roster": extract_roster(provider_text),
         "setup docs": extract_setup_harnesses(root),
-        "provider dispatch": extract_provider_arms(_read(root, PROVIDER_RS)),
+        "provider dispatch": extract_provider_arms(provider_text),
         "adapter registry": extract_adapter_names(_read(root, ADAPTERS_PY)),
         "markers": extract_marker_tables(_read(root, IDENTITY_PY)),
     }
@@ -205,30 +225,19 @@ def collect(root: Path) -> dict[str, Any]:
 
 def check(facts: dict[str, Any]) -> list[str]:
     """Every divergence, as printable lines. Empty list is the pass."""
-    canonical = set(facts["canonical"])
-    surfaces = {
-        name: set(facts[name])
-        for name in ("setup docs", "provider dispatch", "adapter registry")
-    }
+    roster = set(facts["roster"])
     problems: list[str] = []
-    for name, values in surfaces.items():
+    for name in ("setup docs", "provider dispatch", "adapter registry"):
+        values: set[str] = set(facts[name])
         if not values:
             problems.append(f"{name}: extracted zero names")
-    union: set[str] = set()
-    for values in surfaces.values():
-        union |= values
-    missing = union - canonical
-    extra = canonical - union
-    if missing:
-        problems.append(
-            "missing_from_known (evidence naming a harness the roster does not "
-            f"carry): {', '.join(sorted(missing))}"
-        )
-    if extra:
-        problems.append(
-            "known_without_evidence (roster entry no surface names): "
-            f"{', '.join(sorted(extra))}"
-        )
+            continue
+        unrostered = values - roster
+        if unrostered:
+            problems.append(
+                f"not_in_roster ({name} names a harness the Rust roster does "
+                f"not carry): {', '.join(sorted(unrostered))}"
+            )
     # The HERMES_SESSION_ID invariant is checked independently: marker tables
     # are a different contract from roster membership, and a green roster must
     # never launder a promoted marker past this gate.
@@ -254,8 +263,8 @@ def check(facts: dict[str, Any]) -> list[str]:
 
 
 def report(facts: dict[str, Any], out: IO[str]) -> None:
-    canonical: tuple[str, ...] = facts["canonical"]
-    print(f"canonical (KNOWN_HARNESSES, {len(canonical)}): {', '.join(canonical)}", file=out)
+    roster: tuple[str, ...] = facts["roster"]
+    print(f"roster (provider.rs KNOWN_HARNESSES, {len(roster)}): {', '.join(roster)}", file=out)
     for name in ("setup docs", "provider dispatch", "adapter registry"):
         values: tuple[str, ...] = facts[name]
         print(f"{name}: {', '.join(values)}", file=out)
@@ -274,14 +283,16 @@ def run_gate(root: Path, out: IO[str] = sys.stdout) -> int:
         print(f"DIVERGENT: {line}", file=out)
     if problems:
         print(
-            "harness roster parity: RED - fix by aligning KNOWN_HARNESSES with "
-            "the named surface (or the surface with the roster) in the same change",
+            "harness roster parity: RED - a surface names a harness the Rust "
+            "roster does not carry; add it to provider.rs KNOWN_HARNESSES "
+            "(the one list) or fix the surface",
             file=out,
         )
         return 1
     print(
-        f"harness roster parity: GREEN - {len(facts['canonical'])} names, every "
-        "one evidence-backed, HERMES_SESSION_ID scrubbed and non-resolving",
+        f"harness roster parity: GREEN - {len(facts['roster'])} rostered names, "
+        "every evidence surface a subset, HERMES_SESSION_ID scrubbed and "
+        "non-resolving",
         file=out,
     )
     return 0
@@ -304,18 +315,19 @@ BASE_MARKERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID")
 BASE_EXTRA = ("CLAUDECODE_SESSION_ID", "HERMES_SESSION_ID")
 
 
-def _names_py(roster: tuple[str, ...]) -> str:
-    body = "".join(f'    "{name}",\n' for name in roster)
-    return f"KNOWN_HARNESSES: tuple[str, ...] = (\n{body})\n"
+def _roster_const(names: tuple[str, ...]) -> str:
+    body = "".join(f'    "{name}",\n' for name in names)
+    return f"pub const KNOWN_HARNESSES: &[&str] = &[\n{body}];\n"
 
 
-def _provider_rs(arms: tuple[str, ...]) -> str:
+def _provider_rs(roster: tuple[str, ...], arms: tuple[str, ...]) -> str:
     body = "".join(
         f'        "{name}" => Some(Box::new(Provider{name.capitalize()})),\n'
         for name in arms
     )
     return (
-        "pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {\n"
+        _roster_const(roster)
+        + "pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {\n"
         "    match name {\n"
         f"{body}"
         "        _ => None,\n"
@@ -357,14 +369,18 @@ def _write_tree(
     adapters_text: Optional[str] = None,
     provider_text: Optional[str] = None,
     skip_adapters: bool = False,
+    skip_roster_const: bool = False,
 ) -> None:
     (root / "docs").mkdir(parents=True, exist_ok=True)
     (root / "cli/src/fno/agents").mkdir(parents=True, exist_ok=True)
     (root / "cli/src/fno/adapters").mkdir(parents=True, exist_ok=True)
     (root / "crates/fno-agents/src").mkdir(parents=True, exist_ok=True)
-    (root / NAMES_PY).write_text(_names_py(roster), encoding="utf-8")
     (root / PROVIDER_RS).write_text(
-        provider_text if provider_text is not None else _provider_rs(providers),
+        provider_text
+        if provider_text is not None
+        else _provider_rs(
+            () if skip_roster_const else roster, providers
+        ),
         encoding="utf-8",
     )
     if not skip_adapters:
@@ -403,18 +419,24 @@ def _case(
 
 def run_selftest() -> int:
     cases = [
-        _case("exact match passes", 0, ("GREEN", "hermes", "openclaw")),
+        _case("exact subsets pass", 0, ("GREEN", "hermes", "openclaw")),
         _case(
-            "setup-only ghost fails naming the docs surface",
+            "a setup doc naming an unrostered ghost fails",
             1,
-            ("missing_from_known", "ghost", "setup docs"),
+            ("not_in_roster", "ghost", "setup docs"),
             setup_docs=("hermes", "openclaw", "ghost"),
         ),
         _case(
-            "roster entry with no evidence fails",
+            "an adapter row naming an unrostered name fails",
             1,
-            ("known_without_evidence", "openclaw"),
-            setup_docs=("hermes",),
+            ("not_in_roster", "ghost", "adapter registry"),
+            adapters=("ghost",),
+        ),
+        _case(
+            "a dispatch arm naming an unrostered name fails",
+            1,
+            ("not_in_roster", "ghost", "provider dispatch"),
+            providers=BASE_PROVIDERS + ("ghost",),
         ),
         _case(
             "adapter registry with zero rows fails closed",
@@ -426,7 +448,19 @@ def run_selftest() -> int:
             "provider.rs without for_name fails closed",
             1,
             ("FAIL-CLOSED", "fn for_name not found"),
+            provider_text=_roster_const(BASE_ROSTER) + "pub fn other() {}\n",
+        ),
+        _case(
+            "provider.rs without the roster const fails closed",
+            1,
+            ("FAIL-CLOSED", "KNOWN_HARNESSES not found"),
             provider_text="pub fn other() {}\n",
+        ),
+        _case(
+            "an empty roster const fails closed",
+            1,
+            ("FAIL-CLOSED", "KNOWN_HARNESSES is empty"),
+            skip_roster_const=True,
         ),
         _case(
             "missing adapters file fails closed",
@@ -457,7 +491,8 @@ def run_selftest() -> int:
             0,
             ("GREEN",),
             provider_text=(
-                "pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {\n"
+                _roster_const(BASE_ROSTER)
+                + "pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {\n"
                 "    match name {\n"
                 '        "a{b" => Some(Box::new(BraceProvider)),\n'
                 '        "claude" => Some(Box::new(ClaudeProvider)),\n'
