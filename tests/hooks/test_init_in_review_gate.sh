@@ -64,6 +64,7 @@ if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
             # other code is "could not read the graph".
             [[ -n "${STUB_ARCHIVED_RC:-}" ]] && exit "$STUB_ARCHIVED_RC"
             printf '%s\n' "${STUB_ARCHIVED:-null}"; exit 0;;
+        pr_number) printf '%s\n' "${STUB_PR:-null}"; exit 0;;
     esac
 fi
 exit 0
@@ -192,6 +193,13 @@ T="$TMP_BASE/broken"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_BIND=broken); EC=$?
 [[ $EC -eq 0 ]] && pass "broken: exit 0" || fail "broken: expected exit 0, got $EC. Output: $OUT"
 grep -q "binding guard is not running for $NODE" <<<"$OUT" && pass "broken: names the gap" || fail "broken: no warning. Got: $OUT"
+
+# A lagging fno-agents gives no verdict, but a node that has a PR still refuses.
+T="$TMP_BASE/broken-pr"; make_repo "$T"
+OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_BIND=broken STUB_PR=999); EC=$?
+[[ $EC -eq 1 ]] && pass "broken-pr: refuses" || fail "broken-pr: expected exit 1, got $EC. Output: $OUT"
+grep -q "has PR #999 and fno backlog target-binding gave no verdict" <<<"$OUT" && pass "broken-pr: names the PR and the fix" || fail "broken-pr: message missing. Got: $OUT"
+[[ ! -f "$T/space/target-state.md" ]] && pass "broken-pr: no state file" || fail "broken-pr: manifest written for a node with a PR"
 
 # --- an UNREADABLE graph on the presence probe fails open LOUDLY -------------
 echo ""

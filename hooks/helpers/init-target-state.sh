@@ -1022,7 +1022,15 @@ if [[ ! -f "$STATE_FILE" ]]; then
       0:continue) ;;
       1:refused) echo "Refusing to write state file." >&2; exit 1 ;;
       3:forked) echo "Refusing to write state file in this tree: start the child named above." >&2; exit 3 ;;
-      *) echo "target: WARNING: fno backlog target-binding answered exit $_bind_rc (verdict '${_BIND_VERDICT:-none}'); the in_review binding guard is not running for $_GUARD_NODE" >&2 ;;
+      *)
+        # No verdict (an fno-agents older than this hook): a node that has a
+        # PR still refuses, so a lagging binary never opens the guard.
+        _BIND_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "$_BIND_PR" =~ ^[0-9]+$ ]]; then
+          echo "[init-target-state] REFUSED: node $_GUARD_NODE has PR #$_BIND_PR and fno backlog target-binding gave no verdict (exit $_bind_rc). Run: fno doctor update" >&2
+          exit 1
+        fi
+        echo "target: WARNING: fno backlog target-binding answered exit $_bind_rc (verdict '${_BIND_VERDICT:-none}'); the in_review binding guard is not running for $_GUARD_NODE" >&2 ;;
     esac
   fi
   unset TARGET_ALLOW_IN_REVIEW FNO_TARGET_BINDING
