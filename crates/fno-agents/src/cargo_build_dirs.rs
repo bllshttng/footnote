@@ -530,10 +530,17 @@ fn remove_empty_shard(dir: &Path) -> bool {
     false
 }
 
-/// Every currently running process matching `command`'s cwd, via one `lsof`
-/// read (the same tool `pane_stop.rs` already relies on; works on macOS and
-/// Linux). A missing command filter reads all process cwds for the merge-tree
-/// guard; the cargo lane keeps its narrower filter.
+/// Every currently running process matching `command`'s cwd. A command
+/// filter never walks the whole machine: one `ps -Ao pid=,comm=` pass names
+/// the candidate pids and `lsof -a -p` reads only those, so the common "no
+/// matching process" case costs no `lsof` at all - a whole-machine
+/// `lsof -a -d cwd` sweep per lane under load fed the very load the
+/// footprint lanes measure. `lsof -c` compares at most the first nine
+/// characters of the process name, so the ps pass keeps the same prefix rule
+/// over the command's basename and the two selectors cannot drift. A missing
+/// filter reads all process cwds for the merge-tree guard - go through
+/// [`live_cwds_cached`] so a pass judging many trees sweeps once, not per
+/// tree.
 ///
 /// `FNO_TEST_LIVE_CARGO_CWDS` (colon-separated paths) substitutes for the
 /// real read in tests: a process whose kernel-reported name is genuinely
@@ -541,10 +548,11 @@ fn remove_empty_shard(dir: &Path) -> bool {
 /// file's own path, not argv0 or a script's shebang target), so the seam is
 /// what lets a test drive the tree-to-shard mapping below deterministically.
 ///
-/// `Err` only when `lsof` itself could not be run (missing binary): a normal
-/// "no matching process right now" read is `Ok(vec![])`, never an error.
+/// `Err` only when the read itself could not be run (a missing `ps` or
+/// `lsof` binary): a normal "no matching process right now" read is
+/// `Ok(vec![])`, never an error.
 pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
-    if command.is_some() {
+    if let Some(command) = command {
         if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
             return Ok(raw
                 .split(':')
@@ -553,11 +561,26 @@ pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
                 .collect());
         }
     }
-    let mut cmd = Command::new("lsof");
-    cmd.args(["-a", "-d", "cwd"]);
-    if let Some(command) = command {
-        cmd.args(["-c", command]);
+    match command {
+        Some(command) => {
+            let pids = matching_command_pids(command)?;
+            if pids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let list = pids
+                .iter()
+                .map(|pid| pid.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            read_lsof_cwds(|cmd| cmd.args(["-a", "-p", &list, "-d", "cwd"]))
+        }
+        None => read_lsof_cwds(|cmd| cmd.args(["-a", "-d", "cwd"])),
     }
+}
+
+fn read_lsof_cwds(configure: impl FnOnce(&mut Command)) -> Result<Vec<PathBuf>, ()> {
+    let mut cmd = Command::new("lsof");
+    configure(&mut cmd);
     cmd.arg("-Fn");
     let Ok(output) = cmd.output() else {
         return Err(());
@@ -567,6 +590,52 @@ pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
         .filter_map(|line| line.strip_prefix('n'))
         .map(PathBuf::from)
         .collect())
+}
+
+/// Pids whose `ps` command name starts with `command` - the same prefix rule
+/// `lsof -c` applies. `Err` when `ps` itself could not be run.
+fn matching_command_pids(command: &str) -> Result<Vec<u32>, ()> {
+    let output = Command::new("ps")
+        .args(["-Ao", "pid=,comm="])
+        .output()
+        .map_err(|_| ())?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, comm) = line.trim_start().split_once(' ')?;
+            let name = comm.trim_start().rsplit('/').next()?;
+            if name.starts_with(command) {
+                pid.parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// How long [`live_cwds_cached`] serves one machine-wide read.
+const CWD_CACHE_TTL: Duration = Duration::from_secs(30);
+static CWD_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<PathBuf>)>> =
+    std::sync::Mutex::new(None);
+
+/// The merge-tree guard's whole-process cwd map, cached process-wide for
+/// [`CWD_CACHE_TTL`]: one sweep per window serves every tree the pass judges
+/// instead of one whole-machine `lsof` per tree. A process that
+/// enters a tree inside the window reads as absent for at most the TTL -
+/// far inside the reap's grace window and its claim/lock gates, which hold
+/// the tree on their own. `Err` when the underlying read could not run.
+pub(crate) fn live_cwds_cached() -> Result<Vec<PathBuf>, ()> {
+    let Ok(mut guard) = CWD_CACHE.lock() else {
+        return Err(());
+    };
+    if let Some((at, cwds)) = guard.as_ref() {
+        if at.elapsed() < CWD_CACHE_TTL {
+            return Ok(cwds.clone());
+        }
+    }
+    let cwds = live_cwds(None)?;
+    *guard = Some((std::time::Instant::now(), cwds.clone()));
+    Ok(cwds)
 }
 
 /// Every hash dir a live cargo command might still need, plus whether the
