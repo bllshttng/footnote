@@ -1664,11 +1664,13 @@ mod tests {
 
     type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
 
-    /// The per-process fake world the state roots pin to, for the whole
-    /// run. Pins are SET-FOREVER and the dir is never deleted: a restored
-    /// pin reopens live-$HOME reads (the runner's world), a deleted dir
-    /// starves later readers of a readable-empty world, and both shipped
-    /// 28 and 6 CI failures before this shape landed.
+    /// The per-process fake world the CLAIMS root pins to, for the whole
+    /// run. The claims pin is SET-FOREVER and the dir is never deleted:
+    /// restoring it reopens live-$HOME claims reads (28 CI failures), and
+    /// a deleted dir starves later readers of a readable-empty world (6).
+    /// The STATE pins are NOT set-forever: a persisting empty state world
+    /// shadows the tests that pin their own (5 CI failures), so those
+    /// snapshot-restore like the config path.
     fn fake_root() -> &'static std::path::Path {
         static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let root = ROOT.get_or_init(|| {
@@ -1688,10 +1690,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let root = fake_root();
-        // Snapshot only the config path: the state roots are SET-FOREVER
-        // (see fake_root), and FNO_TEST_HERMETIC is never touched, so CI's
-        // declared ambient ("0") survives the whole process.
-        let saved: Saved = vec![("FNO_CONFIG", std::env::var_os("FNO_CONFIG"))];
+        // Snapshot the config and state pins for restore; only the claims
+        // root is set-forever (see fake_root). FNO_TEST_HERMETIC is never
+        // touched, so CI's declared ambient ("0") survives the process.
+        let saved: Saved = vec![
+            ("FNO_CONFIG", std::env::var_os("FNO_CONFIG")),
+            ("FNO_STATE_DIR", std::env::var_os("FNO_STATE_DIR")),
+            ("FNO_AGENTS_HOME", std::env::var_os("FNO_AGENTS_HOME")),
+        ];
         // The consult arm reads the declared rows, the policy and the lanes
         // from DISK (the gather's own read); pin an empty config or the
         // test process's ambient config answers the walk.

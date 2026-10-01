@@ -4616,10 +4616,10 @@ mod tests {
     /// state file. Drop clears both.
     type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
 
-    /// The per-process fake world the state roots pin to, for the whole
-    /// run. Pins are SET-FOREVER and the dir is never deleted: a restored
-    /// pin reopens live-$HOME reads, a deleted dir starves later readers
-    /// of a readable-empty world, and both shipped CI failures before
+    /// The per-process fake world the CLAIMS root pins to, for the whole
+    /// run. The pin is SET-FOREVER and the dir never deleted: restoring it
+    /// reopens live-$HOME claims reads, and a deleted dir starves later
+    /// readers of a readable-empty world. Both shipped CI failures before
     /// this shape landed.
     fn fake_root() -> &'static std::path::Path {
         static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -4649,7 +4649,7 @@ mod tests {
             // read as codex or gemini and decline the lane. Scrub the same
             // ambient identity set a spawned child scrubs; identity vars
             // are not state roots, so the snapshot restores them on drop.
-            let saved: Saved = claims::AMBIENT_IDENTITY_NAMES
+            let mut saved: Saved = claims::AMBIENT_IDENTITY_NAMES
                 .iter()
                 .map(|n| (*n, std::env::var_os(n)))
                 .collect();
@@ -4663,14 +4663,17 @@ mod tests {
             std::fs::write(&state, state_json).unwrap();
             std::env::set_var("FNO_CONFIG", &cfg);
             std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
-            // Pin the whole state world to the shared fake root: SET-FOREVER
-            // (see fake_root), never restored to unset and never deleted.
-            // A reader outside this window lands on a readable-empty world,
-            // never on the live $HOME the runner (or this machine) has.
-            std::env::set_var("FNO_STATE_DIR", fake_root().join("state"));
+            // Pin the state world to the capacity tempdir for the window
+            // (snapshot-restored on drop: a persisting empty state world
+            // shadows the tests that pin their own), and the claims root
+            // to the shared fake root SET-FOREVER (restoring it reopens
+            // live-$HOME claims reads).
+            saved.push(("FNO_STATE_DIR", std::env::var_os("FNO_STATE_DIR")));
+            std::env::set_var("FNO_STATE_DIR", dir.path());
+            saved.push(("FNO_AGENTS_HOME", std::env::var_os("FNO_AGENTS_HOME")));
+            std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents-home"));
             std::env::set_var("FNO_CLAIMS_ROOT", fake_root());
             std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
-            std::env::set_var("FNO_AGENTS_HOME", fake_root().join("agents-home"));
             match fno_bin {
                 Some(path) => std::env::set_var("FNO_BIN", path),
                 None => std::env::remove_var("FNO_BIN"),
