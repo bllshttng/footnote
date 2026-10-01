@@ -45,34 +45,17 @@ pub(crate) fn view(params: &Value) -> Result<Value, String> {
     Ok(json!({"view": built, "text": text}))
 }
 
-/// The `fno-agents scoreboard-escalation` verb: the operator door for the
-/// view. Read-only; the sources and defaults mirror `digest` (project
-/// journal first, then the global one, ledger and graph store beside them).
-pub fn run_scoreboard_escalation(rest: &[String], home: &AgentsHome) -> i32 {
-    let mut since_days: i64 = 28;
-    let mut json_out = false;
-    let mut it = rest.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--json" => json_out = true,
-            "--since-days" => match it.next().and_then(|v| v.parse::<i64>().ok()) {
-                Some(n) => since_days = n,
-                None => {
-                    eprintln!("fno-agents: --since-days needs a number");
-                    return 2;
-                }
-            },
-            other => {
-                eprintln!("fno-agents: unknown argument {other}");
-                return 2;
-            }
-        }
-    }
+/// The escalation view's CLI body: the operator door under
+/// `evals-macro --escalation`. Read-only; the sources and defaults mirror
+/// `digest` (project journal first, then the global one, ledger and graph
+/// store beside them).
+pub fn run_escalation_view(since_days: i64, json_out: bool) -> i32 {
     if since_days < 1 {
-        eprintln!("fno-agents: --since-days must be at least 1");
+        eprintln!("evals-macro: --since-days must be at least 1");
         return 2;
     }
 
+    let home = AgentsHome::from_env();
     let fno_dir = home
         .root()
         .parent()
