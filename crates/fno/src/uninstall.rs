@@ -6,6 +6,7 @@
 //! passed and the user types the confirmation word on a terminal.
 
 use std::io::{BufRead, IsTerminal, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -128,19 +129,27 @@ fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-/// This user's processes whose name matches `pattern` (a pgrep regex), as
-/// `(pid, name)`, never this process.
+/// This user's processes whose full command line matches `pattern` (a pgrep
+/// regex), as `(pid, name)`, never this process. `-f` because Linux cuts the
+/// process name to 15 characters, which `fno-agents-daemon` exceeds.
 fn processes(pattern: &str) -> Vec<(u32, String)> {
     let me = std::process::id();
-    run(&argv(&["pgrep", "-l", "-U", &uid().to_string(), pattern]))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (pid, name) = line.trim().split_once(' ')?;
-            Some((pid.parse().ok()?, name.to_string()))
-        })
-        .filter(|(pid, _)| *pid != me)
-        .collect()
+    run(&argv(&[
+        "pgrep",
+        "-l",
+        "-f",
+        "-U",
+        &uid().to_string(),
+        pattern,
+    ]))
+    .unwrap_or_default()
+    .lines()
+    .filter_map(|line| {
+        let (pid, name) = line.trim().split_once(' ')?;
+        Some((pid.parse().ok()?, name.to_string()))
+    })
+    .filter(|(pid, _)| *pid != me)
+    .collect()
 }
 
 /// The launchd label of a plist fno installed, or `None` for anyone else's.
@@ -235,9 +244,23 @@ pub(crate) fn strip_codex_toml(text: &str) -> Option<String> {
     let mut in_trust_table = false;
     for line in text.lines() {
         let t = line.trim();
+        // The block ends at its `command` line. Any line the template never
+        // writes ends it early, so an edited block cannot eat the rest of
+        // the file.
         if in_block {
-            in_block = !t.starts_with("command");
-            continue;
+            if t.starts_with("command") {
+                in_block = false;
+                continue;
+            }
+            let template_line = t.is_empty()
+                || t.starts_with('#')
+                || t == "[[hooks.SessionStart]]"
+                || t == "[[hooks.SessionStart.hooks]]"
+                || t == "type = \"command\"";
+            if template_line {
+                continue;
+            }
+            in_block = false;
         }
         if t.starts_with(CODEX_BLOCK_MARK) {
             in_block = true;
@@ -411,7 +434,7 @@ fn discover() -> Vec<Item> {
         add("bootstrap cache".into(), Action::RemovePath(sentinel));
     }
 
-    let daemons: Vec<u32> = processes("^fno-agents-daemon$")
+    let daemons: Vec<u32> = processes("(^|/)fno-agents-daemon( |$)")
         .into_iter()
         .map(|(p, _)| p)
         .collect();
@@ -441,10 +464,33 @@ fn discover() -> Vec<Item> {
     items
 }
 
+/// Write through a temp sibling and rename, so an interrupted run never
+/// leaves a truncated settings file. The rename lands on the symlink's
+/// target, so a dotfiles-managed file stays a symlink.
 fn rewrite(path: &Path, text: String) -> Result<String, String> {
-    std::fs::write(path, text)
-        .map(|_| format!("edited {}", path.display()))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let target = std::fs::canonicalize(path).map_err(err)?;
+    let mut tmp = target.clone().into_os_string();
+    tmp.push(".fno-uninstall.tmp");
+    // A codex config can hold secrets at 0600: the temp file is born with
+    // the original's mode, never readable wider for a moment.
+    let mode = std::fs::metadata(&target)
+        .map_err(err)?
+        .permissions()
+        .mode();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode & 0o7777)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(err)?;
+    std::fs::rename(&tmp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        err(e)
+    })?;
+    Ok(format!("edited {}", path.display()))
 }
 
 fn stop_daemon(pids: &[u32]) -> Result<String, String> {
@@ -534,7 +580,7 @@ fn residue() -> Vec<String> {
     for (label, plist) in launch_agents() {
         left.push(format!("launchd agent {label}: {}", plist.display()));
     }
-    for (pid, name) in processes("^fno") {
+    for (pid, name) in processes("(^|/)fno[^/ ]*( |$)") {
         left.push(format!("running: {name} (pid {pid})"));
     }
     let codex_config = env_dir("CODEX_HOME", ".codex").join("config.toml");
@@ -556,6 +602,12 @@ fn ask(prompt: &str) -> String {
 }
 
 pub fn run_uninstall(opts: Opts) -> i32 {
+    // Every path below hangs off HOME. A relative one would point --purge at
+    // the .fno dir of whatever project the user stands in.
+    if !home().is_absolute() {
+        eprintln!("fno uninstall: HOME is unset or not absolute; refusing to guess the state dir.");
+        return 2;
+    }
     let tty = std::io::stdin().is_terminal();
     let state = home().join(".fno");
     let items = discover();
@@ -698,6 +750,13 @@ mod tests {
             Some("model = \"x\"\n\n[plugins.\"other@x\"]\nenabled = true\n")
         );
         assert_eq!(strip_codex_toml("model = \"x\"\n"), None);
+        // A block that lost its command line ends at the first line the
+        // template never writes, so the rest of the config survives.
+        let edited = "# Added by `fno config setup cli-hooks` - footnote\n[[hooks.SessionStart]]\n[plugins.\"other@x\"]\nenabled = true\n";
+        assert_eq!(
+            strip_codex_toml(edited).as_deref(),
+            Some("[plugins.\"other@x\"]\nenabled = true\n")
+        );
 
         let rc = "alias ll=ls\n# fno: cargo build-dir\nexport CARGO_BUILD_BUILD_DIR=\"/u/.fno/b\"\nexport KEEP=1\n";
         assert_eq!(
