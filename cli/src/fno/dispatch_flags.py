@@ -8,8 +8,9 @@ callers into an upward import for what is pure flag validation.
 The residual upward edge this module used to carry is closed :
 ``fno.harness_identity`` built ``LEGACY_HANDLE_RE`` at import time from
 ``fno.agents.harness_map.known_harnesses()``, so importing it eagerly imported
-``fno.agents``. The harness-name set now lives at this layer
-(``fno.harness_names``), so ``fno.harness_identity`` builds the regex from L0
+``fno.agents``. The harness-name set is served at this layer
+(``fno.harness_names``; since x-bd68 the list itself lives in Rust and that
+module proxies it), so ``fno.harness_identity`` builds the regex from L0
 data with no runtime import; ``fno.harness_identity`` and ``fno.harness_names``
 are both declared in the boundary map at this layer, so the (absent) edge is
 visible to the check rather than hiding in an unmapped blind spot. The runtime
