@@ -12,6 +12,11 @@
 //! call sites. [`drift`] names the disagreement a caller turns into a drift
 //! event.
 
+// This first wave lands the door alone; its call sites land in the waves
+// that follow, so nothing outside the tests reads it yet. Delete this allow
+// when they wire in.
+#![allow(dead_code)]
+
 use crate::daemon::pid_is_gone;
 use crate::state::{InsideLegState, RegistryEntry};
 
@@ -29,7 +34,8 @@ pub(crate) enum RowVerdict {
 }
 
 /// Current wall clock in epoch seconds, 0 when the clock is unreadable. A 0
-/// only ages a TTL-bearing report out (fail closed), never holds one live.
+/// disqualifies the TTL rung below: `is_live_at(0)` would saturate any past
+/// stamp to "inside TTL" and hold a stale report live (fail open).
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -49,7 +55,7 @@ pub(crate) fn fno_verdict(e: &RegistryEntry) -> RowVerdict {
         return RowVerdict::Finished(format!("registry status {:?}", e.status));
     }
     if let Some(leg) = &e.inside_leg {
-        if leg.state == InsideLegState::Working && leg.is_live_at(now) {
+        if now > 0 && leg.state == InsideLegState::Working && leg.is_live_at(now) {
             return RowVerdict::Live("inside_leg");
         }
     }
@@ -186,16 +192,14 @@ mod tests {
         assert_eq!(fno_verdict(&live), RowVerdict::Live("pid"));
     }
 
-    /// Spawn a child, reap it: its pid is provably ESRCH afterward.
+    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
+    /// so only a reaped pid is provably ESRCH.
     fn spawn_and_reap_pid() -> u32 {
-        let child = std::process::Command::new("/usr/bin/true")
+        let mut child = std::process::Command::new("/usr/bin/true")
             .spawn()
             .expect("spawn true");
         let pid = child.id();
-        let status = std::process::Command::new("/usr/bin/true")
-            .status()
-            .expect("run true");
-        assert!(status.success());
+        child.wait().expect("reap true");
         pid
     }
 
