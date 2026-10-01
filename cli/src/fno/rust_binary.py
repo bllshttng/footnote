@@ -162,9 +162,8 @@ def call_binary_json(
     text and a None payload. Callers keep the failure shape theirs (refuse
     closed, raise, or exit) - this seam only standardizes the door.
 
-    ``binary`` accepts a pre-resolved binary applying the rule
-    :func:`verb_call` states: the dev checkout's build outranks the stale
-    installed copy.
+    ``binary`` pre-resolves the door; the dev build outranks the stale
+    installed copy (the rule :func:`verb_call` states).
     """
     import json
     import subprocess

@@ -2,13 +2,12 @@
 
 The COMPLETE harness roster lives in Rust, ``KNOWN_HARNESSES`` in
 ``crates/fno-agents/src/provider.rs``, the one list (x-bd68); this module is
-its Python door. Reading ``KNOWN_HARNESSES`` runs one ``fno-agents
-harness-roster`` subprocess per process, cached in the module globals, so
-the graph-store and doctor regexes that run per write never pay a subprocess
-per call; the read is fail-closed, and the parity gate holds every evidence
-surface as a subset of the same Rust source. No ``fno.agents`` import here,
-so the platform layer drags no runtime. ``SPAWN_HARNESSES`` stays Python: it
-is the set of BUILT thread/headless seam arms, not roster membership.
+its Python door: ``KNOWN_HARNESSES`` runs one ``fno-agents harness-roster``
+subprocess per process, cached in the module globals (never a subprocess per
+call) and fail-closed, while ``scripts/ci/check-harness-roster-parity.py``
+holds every evidence surface as a subset of that source. No ``fno.agents``
+import, so the platform layer drags no runtime. ``SPAWN_HARNESSES`` stays
+Python: it is the set of BUILT thread/headless seam arms, not roster.
 """
 from __future__ import annotations
 
@@ -20,8 +19,7 @@ if TYPE_CHECKING:  # served by __getattr__ below; type checkers only
     KNOWN_HARNESSES: tuple[str, ...]
 
 # Every harness with a BUILT spawn-seam arm, measured per
-# docs/architecture/thread-lanes.md; zcode's arm is the headless one-shot
-# seam, and kimi is absent until its ACP lane admits a provider.
+# docs/architecture/thread-lanes.md; kimi is absent until its ACP lane admits a provider.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -71,8 +69,7 @@ def __getattr__(name: str) -> Any:
 
 def unknown_thread_harness_message(name: str) -> str:
     """The one refusal every thread-substrate seam raises: both halves derive
-    from this module (the SPAWN tuple and the served roster), and the pane
-    lane execs whatever is on PATH (docs/architecture/thread-lanes.md)."""
+    from this module, and the pane lane execs whatever is on PATH."""
     accepted = ", ".join(SPAWN_HARNESSES)
     lines = [
         f"unknown harness {name!r} on the thread substrate (--harness names "
