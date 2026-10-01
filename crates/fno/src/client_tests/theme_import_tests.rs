@@ -68,7 +68,7 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
     let (theme_rows, theme_actions) = view.settings_rows_for(SettingsTab::Theme);
     assert!(matches!(
         theme_rows.last(),
-        Some(PopupRow::Entry { label, .. }) if label == "+ add own theme"
+        Some(PopupRow::Entry { label, .. }) if label == "add theme file"
     ));
     assert_eq!(theme_actions.len(), crate::theme::THEME_NAMES.len() + 1);
     assert!(theme_actions
@@ -84,9 +84,32 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
     .unwrap();
     view.settings_tab = SettingsTab::Theme;
     theme_import_ui::open(&mut view);
-    let mut typed = source_path.to_string_lossy().as_bytes().to_vec();
-    typed.push(b'\n');
-    theme_import_ui::entry_keys(&mut view, &typed)
+    // A dropped file: the terminal pastes the path quoted, with its space
+    // escaped, and the field takes it whole through the real key path.
+    let spaced = source_dir.path().join("My Theme");
+    std::fs::create_dir_all(&spaced).unwrap();
+    let dropped = spaced.join(format!("{name}.toml"));
+    std::fs::copy(&source_path, &dropped).unwrap();
+    let typed = format!(
+        "\x1b[200~'{}'\x1b[201~",
+        dropped.display().to_string().replace(' ', "\\ ")
+    );
+    let (mut scanner, mut carry, mut buf) = (Scanner::default(), Vec::new(), Vec::new());
+    handle_stdin(
+        &mut view,
+        &mut scanner,
+        &mut carry,
+        typed.as_bytes(),
+        &mut buf,
+    )
+    .await
+    .unwrap();
+    let echo = crate::vt::frame_text(&view.compose());
+    assert!(
+        echo.contains(&format!("{name}.toml' ")),
+        "the field shows the drop"
+    );
+    handle_stdin(&mut view, &mut scanner, &mut carry, b"\r", &mut buf)
         .await
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -100,12 +123,9 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
     ));
     let local_preview = view.theme_import.clone();
 
-    view.theme_import = theme_import_ui::ThemeImportUi::Entry(String::new());
-    view.reopen_settings_keeping_sel();
-    let refused_url = b"http://github.com/octo/themes/blob/main/theme.conf\n".to_vec();
-    theme_import_ui::entry_keys(&mut view, &refused_url)
-        .await
-        .unwrap();
+    theme_import_ui::open(&mut view);
+    let refused_url = "http://github.com/octo/themes/blob/main/theme.conf".to_string();
+    assert!(theme_import_ui::submit(&mut view, refused_url));
     assert!(
         view.notice
             .as_ref()
@@ -205,6 +225,13 @@ async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
         theme_import_ui::ThemeImportUi::Idle
     ));
     crate::digest_overlay::set_themes_dir_for_test(None);
+
+    // The picker is a local macOS dialog only.
+    let argv = theme_import_ui::picker_argv("macos", false).unwrap();
+    assert_eq!(argv[0], "osascript");
+    assert!(argv[2].contains("choose file"));
+    assert_eq!(theme_import_ui::picker_argv("linux", false), None);
+    assert_eq!(theme_import_ui::picker_argv("macos", true), None);
 
     view.theme_import = theme_import_ui::ThemeImportUi::Idle;
     for tab in [
