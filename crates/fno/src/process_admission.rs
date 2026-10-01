@@ -604,7 +604,11 @@ pub fn admit_fallback() -> Result<AdmissionPermit, AdmissionFailure> {
     admit_fleet_for(true)
 }
 
-fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
+/// [`admit_fleet`] for a spawn the caller knows a human asked for. The mux
+/// server has no TTY, so `human_at_tty` reads false there even for a resume
+/// from the user's own tap. The server passes that fact here, and the
+/// runaway brake warns instead of refusing the user's own resume.
+pub fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
     if human {
         return Ok(admit_human());
     }
@@ -2200,20 +2204,39 @@ mod tests {
         let text = failure.to_string();
         assert!(text.contains("largest group g i t x8000"), "{text}");
         assert!(!text.contains("outside the fleet"), "{text}");
-        // pid 1 descends from no fno root: the refusal says whose load it is.
+        // pid 1 descends from no fno root: the refusal says whose load it
+        // is. A process snapshot that cannot resolve pid 1 gets the
+        // suffix-free line instead, so assert only what the snapshot supports.
+        let pid1_outside = group_outside_fleet(1);
         arm(1);
         let text = admit_fleet().err().expect("brake refuses").to_string();
-        assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
+        if pid1_outside == Some(true) {
+            assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
+        } else {
+            assert!(text.contains("(ppid 1)"), "{text}");
+        }
         // A human's shell pane is the recovery path and passes the brake.
         let shell = admit_shell_pane();
         // The mux server has no TTY: a row tap from the user's own client
         // passes the brake by the flag the server hands in, an agent's does not.
         let tap = admit_pane_for(true, 0, None);
         let agent_pane = admit_pane_for(false, 0, None);
+        // The same flag at the fleet scope: the server hands a resume tap's
+        // human fact in, and a braked resume of an agent spawn stays refused.
+        let resume_tap = admit_fleet_for(true);
+        let agent_resume = admit_fleet_for(false);
         std::env::remove_var("FNO_AGENT_SELF");
         assert!(shell.is_ok(), "a shell pane passes the brake");
         assert!(tap.is_ok(), "the user's own row tap passes the brake");
         assert!(agent_pane.is_err(), "an agent's pane stays braked");
+        assert!(
+            resume_tap.is_ok(),
+            "the user's own resume tap passes the brake"
+        );
+        assert!(
+            agent_resume.is_err(),
+            "an agent's fleet resume stays braked"
+        );
         // The absent-file branch: admission reads byte-for-byte as before.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
         let permit = admit_fleet();
