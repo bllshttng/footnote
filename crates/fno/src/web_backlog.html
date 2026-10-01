@@ -1785,7 +1785,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     recentEl.hidden = false;
   }
   searchInput.addEventListener("focus", () => {
-    if (!searchInput.value) drawRecent();
+    drawRecent();
   });
   searchInput.addEventListener("blur", () => setTimeout(hideRecent, 150));
   document.getElementById("sheetclose").addEventListener("click", () => { sheetEl.hidden = true; });
