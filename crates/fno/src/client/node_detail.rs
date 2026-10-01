@@ -408,32 +408,36 @@ fn render_details(view: &crate::backlog_model::NodeView, w: usize, out: &mut Vec
     }
 }
 
-/// Word-wrap one paragraph into lines of at most `w` chars on whitespace
-/// boundaries; a single word longer than `w` is hard-cut.
+/// Word-wrap one paragraph into lines of at most `w` display columns on
+/// whitespace. The one wrap rule: a word wider than `w` breaks across lines,
+/// and a wide char never straddles a break.
 pub(crate) fn wrap_line(para: &str, w: usize, out: &mut Vec<String>) {
+    use crate::chrome::{char_cols, str_cols};
+    let w = w.max(1);
     if para.is_empty() {
         out.push(String::new());
         return;
     }
     let mut line = String::new();
+    let mut used = 0;
     for word in para.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w {
+        if used > 0 && used + 1 + str_cols(word) > w {
             out.push(std::mem::take(&mut line));
+            used = 0;
         }
-        if line.is_empty() {
-            let n = word.chars().count();
-            if n > w {
-                let cut: String = word.chars().take(w).collect();
-                out.push(cut);
-                let rest: String = word.chars().skip(w).collect();
-                line = rest;
-                continue;
-            }
-        }
-        if !line.is_empty() {
+        if used > 0 {
             line.push(' ');
+            used += 1;
         }
-        line.push_str(word);
+        for ch in word.chars() {
+            let cw = char_cols(ch);
+            if used > 0 && used + cw > w {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(ch);
+            used += cw;
+        }
     }
     if !line.is_empty() {
         out.push(line);

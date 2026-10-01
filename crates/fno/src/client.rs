@@ -2685,7 +2685,7 @@ impl View {
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
-        self.keys_modal = Some(keys_modal::build_keys_modal().fit(self.term.1));
+        self.keys_modal = Some(keys_modal::build_keys_modal());
         self.keys_modal_esc.clear();
     }
 
@@ -2714,9 +2714,9 @@ impl View {
     /// get the fix. `clamp_sel_to_view` never drifted because it already routed
     /// through `viewport_h`.
     fn follow_modal_selection(&mut self) {
-        let trows = self.term.0.max(1) as usize;
+        let term = self.term;
         if let Some(m) = self.keys_modal.as_mut() {
-            m.popup.follow_sel(trows);
+            m.popup.follow_sel(term);
         }
     }
 
@@ -7645,27 +7645,6 @@ fn humanize_age(secs: Option<u64>) -> String {
     format!("{body:>4}")
 }
 
-/// Wrap `s` into lines no wider than `w` display chars, breaking on spaces. A
-/// single word longer than `w` becomes its own line (pad_to ellipsizes it) - a
-/// status sentence has no such words in practice, so the simple greedy pass is
-/// enough. Always returns at least one (possibly empty) line.
-fn wrap_words(s: &str, w: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for word in s.split_whitespace() {
-        match out.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= w => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => out.push(word.to_string()),
-        }
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
-
 /// Build the read-only peek overlay lines: a header (badge glyph + name
 /// + full wrapped status sentence), the answerable block when the row is
 /// blocked (prompt + numbered options, reused verbatim), a divider, then the
@@ -7725,7 +7704,13 @@ fn peek_overlay_lines(
     }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
-        for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
+        let mut wrapped = Vec::new();
+        wrap_line(
+            &sanitize_peek_line(reason),
+            PEEK_OVERLAY_W - 3,
+            &mut wrapped,
+        );
+        for wl in wrapped {
             lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
         }
     }
@@ -9945,13 +9930,13 @@ async fn row_menu_keys(
             ModalKey::Up => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Up);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Down);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Left => {
@@ -9967,13 +9952,13 @@ async fn row_menu_keys(
             ModalKey::PageUp => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::PageDown => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by((trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
@@ -9996,7 +9981,7 @@ async fn row_menu_keys(
                     Some(i) => {
                         if let Some(m) = view.row_menu.as_mut() {
                             m.popup.select(i);
-                            m.popup.follow_sel(trows);
+                            m.popup.follow_sel(view.term);
                         }
                         row_menu_execute_selected(view, sock_w).await?;
                     }
@@ -10124,7 +10109,7 @@ async fn execute_aux_action(
             view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
-            view.aux = Some(build_update_modal(view.update_outcome.as_ref()).fit(view.term.1));
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
             view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {
@@ -10243,13 +10228,13 @@ async fn aux_keys(
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Down);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Left => {
@@ -10265,13 +10250,13 @@ async fn aux_keys(
             ModalKey::PageUp => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::PageDown => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by((trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::Enter => {

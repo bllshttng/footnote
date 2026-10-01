@@ -1054,7 +1054,6 @@ pub(crate) async fn feed_keys(
     view.feed_esc = esc;
     for tok in toks {
         if view.feed_detail.is_some() {
-            let trows = view.term.0.max(1) as usize;
             match tok {
                 ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
                     view.feed_detail = None;
@@ -1062,7 +1061,7 @@ pub(crate) async fn feed_keys(
                 ModalKey::Up => {
                     if let Some(m) = view.feed_detail.as_mut() {
                         m.popup.nav(crate::popup::NavDir::Up);
-                        m.popup.follow_sel(trows);
+                        m.popup.follow_sel(view.term);
                     }
                 }
                 // The node_created modal's composer gesture, carried over
@@ -1092,7 +1091,7 @@ pub(crate) async fn feed_keys(
                 ModalKey::Down => {
                     if let Some(m) = view.feed_detail.as_mut() {
                         m.popup.nav(crate::popup::NavDir::Down);
-                        m.popup.follow_sel(trows);
+                        m.popup.follow_sel(view.term);
                     }
                 }
                 ModalKey::Enter => feed_detail::execute_selected(view, sock_w).await?,

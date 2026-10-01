@@ -1502,12 +1502,12 @@ pub(crate) async fn launcher_keys(
                     }
                     LKey::Up => {
                         picker.popup.nav(NavDir::Up);
-                        picker.popup.follow_sel(view.term.0 as usize);
+                        picker.popup.follow_sel(view.term);
                         l.picker = Some(picker);
                     }
                     LKey::Down => {
                         picker.popup.nav(NavDir::Down);
-                        picker.popup.follow_sel(view.term.0 as usize);
+                        picker.popup.follow_sel(view.term);
                         l.picker = Some(picker);
                     }
                     LKey::Enter => {

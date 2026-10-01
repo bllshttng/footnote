@@ -111,21 +111,15 @@ impl PopupRow {
     }
 }
 
-/// Wrap rows wider than `w` content columns instead of ellipsizing them. A
-/// Header splits at word bounds into several Headers; a plain-body Entry keeps
-/// its key and the label's first line, and the rest of the label follows as
-/// inert continuation Headers indented under the label column. Returns each
-/// output row's source index, so a caller with a parallel vector (a modal's
-/// row events) can follow the rows.
-pub fn wrap_rows(rows: Vec<PopupRow>, w: usize) -> (Vec<PopupRow>, Vec<usize>) {
-    let kw = rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { glyph, .. } => Some(chrome::str_cols(glyph)),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+/// Wrap rows wider than `w` content columns instead of cutting them. A
+/// Header splits at word bounds into several Headers. An Entry, Info or
+/// SwatchEntry keeps its key and its text's first line, and the rest follows as
+/// inert continuation Headers indented under the text column. An Entry hint
+/// that leaves its label too little room moves onto continuation lines of its
+/// own. A FullWidth row keeps its first line selectable. Returns each output
+/// row's source index; continuations are inert, so the selectable order holds.
+fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupRow>, Vec<usize>) {
+    const MIN_LABEL_W: usize = 12;
     let wrap = |text: &str, width: usize| {
         let mut out = Vec::new();
         crate::client::wrap_line(text, width.max(1), &mut out);
@@ -133,39 +127,111 @@ pub fn wrap_rows(rows: Vec<PopupRow>, w: usize) -> (Vec<PopupRow>, Vec<usize>) {
     };
     let mut out = Vec::with_capacity(rows.len());
     let mut src = Vec::with_capacity(rows.len());
-    for (i, row) in rows.into_iter().enumerate() {
+    fn tail(
+        out: &mut Vec<PopupRow>,
+        src: &mut Vec<usize>,
+        i: usize,
+        indent: usize,
+        lines: Vec<String>,
+    ) {
+        for line in lines {
+            out.push(PopupRow::Header(format!("{}{line}", " ".repeat(indent))));
+            src.push(i);
+        }
+    }
+    for (i, row) in rows.iter().enumerate() {
+        let cols = chrome::str_cols;
         match row {
             // A Header renders as " {s}" with two cells of air after it.
-            PopupRow::Header(s) if chrome::str_cols(&s) + 2 > w => {
-                for line in wrap(&s, w.saturating_sub(2)) {
-                    out.push(PopupRow::Header(line));
-                    src.push(i);
-                }
+            PopupRow::Header(s) | PopupRow::FullWidth(s) if cols(s) + 1 > w => {
+                let mut lines = wrap(s, w.saturating_sub(2)).into_iter();
+                let first = lines.next().unwrap_or_default();
+                out.push(match row {
+                    PopupRow::FullWidth(_) => PopupRow::FullWidth(first),
+                    _ => PopupRow::Header(first),
+                });
+                src.push(i);
+                tail(&mut out, &mut src, i, 0, lines.collect());
             }
-            // An Entry: pad + key column + gap + label + air in a plain body,
-            // glyph + space + label + gap + air otherwise; kw + 5 covers both.
+            // An Entry wraps only where render would cut it: pad + key column
+            // + gap + label in a plain body, pad + glyph + space + label
+            // otherwise, and a non-plain hint needs its space and two cells of
+            // air too. Wrapped lines keep kw + 5 for air.
             PopupRow::Entry {
                 glyph,
                 label,
                 hint,
                 enabled,
-            } if kw + 5 + chrome::str_cols(&label) > w => {
-                let label_w = w.saturating_sub(kw + 5);
-                let mut lines = wrap(&label, label_w).into_iter();
+            } if 2
+                + cols(label)
+                + if plain {
+                    kw
+                } else if hint.is_empty() {
+                    cols(glyph)
+                } else {
+                    cols(glyph) + cols(hint) + 3
+                }
+                > w =>
+            {
+                let with_hint = w.saturating_sub(cols(glyph) + cols(hint) + 5);
+                let hint_inline = plain || hint.is_empty() || with_hint >= MIN_LABEL_W;
+                let label_w = if hint_inline && !plain && !hint.is_empty() {
+                    with_hint
+                } else {
+                    w.saturating_sub(kw + 5)
+                };
+                let mut lines = wrap(label, label_w).into_iter();
                 out.push(PopupRow::Entry {
-                    glyph,
+                    glyph: glyph.clone(),
                     label: lines.next().unwrap_or_default(),
-                    hint,
-                    enabled,
+                    hint: if hint_inline {
+                        hint.clone()
+                    } else {
+                        String::new()
+                    },
+                    enabled: *enabled,
                 });
                 src.push(i);
-                for line in lines {
-                    out.push(PopupRow::Header(format!("{}{line}", " ".repeat(kw + 1))));
-                    src.push(i);
+                tail(&mut out, &mut src, i, kw + 1, lines.collect());
+                if !hint_inline {
+                    tail(
+                        &mut out,
+                        &mut src,
+                        i,
+                        kw + 1,
+                        wrap(hint, w.saturating_sub(kw + 5)),
+                    );
                 }
             }
+            PopupRow::Info { label, value } if kw + 2 + cols(value) > w => {
+                let mut lines = wrap(value, w.saturating_sub(kw + 4)).into_iter();
+                out.push(PopupRow::Info {
+                    label: label.clone(),
+                    value: lines.next().unwrap_or_default(),
+                });
+                src.push(i);
+                tail(&mut out, &mut src, i, kw + 1, lines.collect());
+            }
+            PopupRow::SwatchEntry {
+                glyph,
+                label,
+                hint,
+                enabled,
+                color,
+            } if plain && kw + 5 + cols(label) > w => {
+                let mut lines = wrap(label, w.saturating_sub(kw + 8)).into_iter();
+                out.push(PopupRow::SwatchEntry {
+                    glyph: glyph.clone(),
+                    label: lines.next().unwrap_or_default(),
+                    hint: hint.clone(),
+                    enabled: *enabled,
+                    color: *color,
+                });
+                src.push(i);
+                tail(&mut out, &mut src, i, kw + 4, lines.collect());
+            }
             row => {
-                out.push(row);
+                out.push(row.clone());
                 src.push(i);
             }
         }
@@ -439,14 +505,26 @@ impl Popup {
     /// too-short terminal still shows one body row. Must agree with the window
     /// [`Popup::render`] cuts, else `follow_sel`/`clamp_sel` could park the
     /// selection in a body row render() windows out (an invisible Enter target).
-    fn viewport_h(&self, term_rows: usize) -> usize {
+    fn viewport_h(&self, term_rows: usize, lines: usize) -> usize {
         let avail = term_rows.saturating_sub(self.chrome.rows_overhead()).max(1);
         let avail = if self.body_cap_pct > 0 {
             avail.min((term_rows * self.body_cap_pct / 100).max(1))
         } else {
             avail
         };
-        self.rows.len().min(avail)
+        lines.min(avail)
+    }
+
+    /// Each laid-out body line's source row at a `tcols`-wide terminal: the
+    /// layout [`Popup::render`] draws, so scroll and selection agree with it.
+    fn line_src(&self, tcols: usize) -> Vec<usize> {
+        wrap_rows(
+            &self.rows,
+            self.layout_w(tcols),
+            self.key_col_w(),
+            self.plain_body,
+        )
+        .1
     }
 
     /// The fixed key-column width for a plain-body popup: the widest entry
@@ -469,27 +547,33 @@ impl Popup {
     /// After an arrow move, scroll so the selected row stays visible (a tall
     /// menu/modal must never leave the selection off-screen, where Enter would
     /// run an invisible entry).
-    pub fn follow_sel(&mut self, term_rows: usize) {
-        let vis_h = self.viewport_h(term_rows);
+    pub fn follow_sel(&mut self, term: (u16, u16)) {
+        let src = self.line_src(term.1.max(1) as usize);
+        let vis_h = self.viewport_h(term.0.max(1) as usize, src.len());
         if let Some((ri, _)) = self.selected() {
-            if ri < self.scroll {
-                self.scroll = ri;
-            } else if ri >= self.scroll + vis_h {
-                self.scroll = ri + 1 - vis_h;
+            let li = src.iter().position(|&r| r == ri).unwrap_or(0);
+            if li < self.scroll {
+                self.scroll = li;
+            } else if li >= self.scroll + vis_h {
+                self.scroll = li + 1 - vis_h;
             }
         }
-        self.scroll = self.scroll.min(self.rows.len().saturating_sub(vis_h));
+        self.scroll = self.scroll.min(src.len().saturating_sub(vis_h));
     }
 
     /// After a page/wheel scroll, pull the selection onto a visible row, so a
     /// subsequent Enter can never execute an off-screen target.
-    pub fn clamp_sel_to_view(&mut self, term_rows: usize) {
-        let vis_h = self.viewport_h(term_rows);
-        let scroll = self.scroll.min(self.rows.len().saturating_sub(vis_h));
-        let (lo, hi) = (scroll, scroll + vis_h);
+    pub fn clamp_sel_to_view(&mut self, term: (u16, u16)) {
+        let src = self.line_src(term.1.max(1) as usize);
+        let vis_h = self.viewport_h(term.0.max(1) as usize, src.len());
+        let scroll = self.scroll.min(src.len().saturating_sub(vis_h));
+        let visible = |ri: usize| {
+            let li = src.iter().position(|&r| r == ri).unwrap_or(0);
+            li >= scroll && li < scroll + vis_h
+        };
         if let Some((ri, _)) = self.selected() {
-            if ri < lo || ri >= hi {
-                if let Some(idx) = self.targets().iter().position(|(r, _)| *r >= lo && *r < hi) {
+            if !visible(ri) {
+                if let Some(idx) = self.targets().iter().position(|(r, _)| visible(*r)) {
                     self.sel = idx;
                 }
             }
@@ -624,12 +708,9 @@ impl Popup {
             .unwrap_or(0)
     }
 
-    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
-    /// width from its content, position it (centered or clamped/flipped anchor),
-    /// and render each row to a padded line with selection + hit-test spans.
-    pub fn render(&self, term: (u16, u16)) -> Rendered {
-        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
-        let sel = self.selected();
+    /// The body width [`Popup::render`] lays rows out at for a `tcols`-wide
+    /// terminal.
+    fn layout_w(&self, tcols: usize) -> usize {
         // Content width: the widest row before padding, raised to the caller's
         // tabbed floor and the chrome's own minimum (title/footer/tabs), so
         // the frame never pads the extra columns with body background the
@@ -645,19 +726,31 @@ impl Popup {
         let cap = self
             .width_cap
             .min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
-        let width = if self.full_width_selection {
+        if self.full_width_selection {
             content_w
                 .min(cap)
                 .max(self.chrome.min_inner_w().min(tcols))
                 .max(1)
         } else {
             content_w.clamp(1, cap)
-        };
+        }
+    }
+
+    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
+    /// width from its content, position it (centered or clamped/flipped anchor),
+    /// and render each row to a padded line with selection + hit-test spans. A
+    /// row wider than the block wraps onto inert continuation lines.
+    pub fn render(&self, term: (u16, u16)) -> Rendered {
+        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
+        let sel = self.selected();
+        let width = self.layout_w(tcols);
+        let kw = self.key_col_w();
+        let (rows, src) = wrap_rows(&self.rows, width, kw, self.plain_body);
 
         let mut target_idx = 0usize;
-        let mut lines = Vec::with_capacity(self.rows.len());
-        let kw = self.key_col_w();
-        for (ri, row) in self.rows.iter().enumerate() {
+        let mut lines = Vec::with_capacity(rows.len());
+        for (li, row) in rows.iter().enumerate() {
+            let ri = src[li];
             let line = match row {
                 PopupRow::Header(s) => {
                     let text = pad(&format!(" {s}"), width);
@@ -928,7 +1021,7 @@ impl Popup {
         // the bottom border off-screen, which is the single easiest bug to ship
         // here (an anchored menu near the bottom edge flips above its anchor).
         let body_total = lines.len();
-        let body_vis_h = self.viewport_h(trows);
+        let body_vis_h = self.viewport_h(trows, body_total);
         let scroll = self.scroll.min(body_total.saturating_sub(body_vis_h));
         let windowed: Vec<RenderedLine> = lines[scroll..scroll + body_vis_h].to_vec();
         let scroll_state = (body_total > body_vis_h).then_some(Scroll {
@@ -1134,41 +1227,35 @@ mod tests {
     }
 
     #[test]
-    fn label_first_keeps_the_label_whole_and_clips_the_hint() {
+    fn a_long_hint_wraps_and_the_label_stays_whole() {
         // The composer's regression: a disabled row whose LABEL names the
-        // failure must not ellipsize so a long prose hint can paint. The
-        // default keeps the hint whole instead; both shapes hold.
+        // failure must not lose it so a long prose hint can paint. Neither
+        // shape cuts either column now: the hint moves to its own lines.
         let rows = vec![disabled(
             "\u{2022}",
             "model list unavailable",
             "account records unavailable: Usage: fno-py config get [OPTIONS] {key}",
         )];
-        let entry_line = |p: &Popup| -> String {
-            p.render((24, 120))
+        for label_first in [false, true] {
+            let mut p = Popup::new(rows.clone(), Anchor::At { row: 1, col: 1 })
+                .full_chrome()
+                .full_width_selection();
+            if label_first {
+                p = p.label_first();
+            }
+            let text: String = p
+                .render((24, 120))
                 .lines
                 .iter()
                 .map(|l| l.text.clone())
-                .find(|t| t.contains("unavailable"))
-                .expect("the entry row renders")
-        };
-        let wide_hint = Popup::new(rows.clone(), Anchor::At { row: 1, col: 1 })
-            .full_chrome()
-            .full_width_selection();
-        let text = entry_line(&wide_hint);
-        assert!(
-            !text.contains("model list unavailable"),
-            "the default protects the hint and clips the label: {text:?}"
-        );
-        let label_whole = Popup::new(rows, Anchor::At { row: 1, col: 1 })
-            .full_chrome()
-            .full_width_selection()
-            .label_first();
-        let text = entry_line(&label_whole);
-        assert!(
-            text.contains("model list unavailable"),
-            "label_first keeps the label whole: {text:?}"
-        );
-        assert!(!text.contains("{key}"), "the long hint clips: {text:?}");
+                .collect();
+            assert!(
+                text.contains("model list unavailable"),
+                "label whole: {text:?}"
+            );
+            assert!(text.contains("{key}"), "hint whole: {text:?}");
+            assert!(!text.contains('\u{2026}'), "no ellipsis: {text:?}");
+        }
     }
 
     fn disabled(g: &str, l: &str, reason: &str) -> PopupRow {
@@ -1477,7 +1564,7 @@ mod tests {
         // Terminal 5 rows tall. Walk selection down past the fold; scroll follows.
         for _ in 0..8 {
             p.nav(NavDir::Down);
-            p.follow_sel(5);
+            p.follow_sel((5, 80));
         }
         let (ri, _) = p.selected().unwrap();
         assert_eq!(ri, 8);
@@ -1503,7 +1590,7 @@ mod tests {
         let mut p = Popup::new(rows, Anchor::Center);
         assert_eq!(p.selected(), Some((0, 0)));
         p.scroll_by(6); // page down
-        p.clamp_sel_to_view(5);
+        p.clamp_sel_to_view((5, 80));
         let (ri, _) = p.selected().unwrap();
         assert!(ri >= p.scroll, "selection moved into the scrolled viewport");
     }

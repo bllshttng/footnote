@@ -237,12 +237,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
     // rendered row ends in an ellipsis on a wide screen or a narrow one, and
     // the restart entry keeps its action.
     for cols in [200u16, 50] {
-        let fitted = AuxPopup {
-            popup: wide.popup.clone(),
-            actions: wide.actions.clone(),
-        }
-        .fit(cols);
-        let r = fitted.popup.render((80, cols));
+        let r = wide.popup.render((80, cols));
         for line in &r.lines {
             assert!(
                 !line.text.contains('\u{2026}'),
@@ -257,7 +252,6 @@ fn update_modal_names_stale_processes_and_offers_restart() {
                 "grows past the old cap"
             );
         }
-        assert_eq!(fitted.actions, wide.actions, "actions follow at {cols}");
     }
 
     let modal = build_update_modal(Some(&outcome.clone().into()));
