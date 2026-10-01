@@ -773,27 +773,35 @@ pub(crate) fn bound_node_posture(
     root: &Path,
     node_id: &str,
 ) -> Result<Option<BoundManifestRead>, String> {
-    let mut binds: Vec<BoundManifestRead> = Vec::new();
+    let mut live_binds: Vec<BoundManifestRead> = Vec::new();
+    let mut archived_binds: Vec<BoundManifestRead> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     for wt in worktree_paths(root) {
         match read_bound_manifest(&wt) {
             BoundRead::None => {}
             BoundRead::Unreadable(why) => unreadable.push(why),
             BoundRead::Read(r) => {
-                if r.node_id.as_deref() == Some(node_id) {
-                    binds.push(r);
+                if r.node_id.as_deref() != Some(node_id) {
+                    continue;
+                }
+                if r.live {
+                    live_binds.push(r);
+                } else {
+                    archived_binds.push(r);
                 }
             }
         }
     }
-    match binds.len() {
-        1 => Ok(binds.pop()),
-        0 if unreadable.is_empty() => Ok(None),
-        0 => Err(format!(
-            "unreadable bound manifests: {}",
-            unreadable.join("; ")
-        )),
-        _ => Err(format!(
+    // A valid live manifest outranks archives across trees, not only within
+    // one: a re-dispatched node's fresh bind decides over the predecessor's
+    // archived form.
+    if live_binds.len() > 1 || (live_binds.is_empty() && archived_binds.len() > 1) {
+        let binds = if live_binds.is_empty() {
+            &archived_binds
+        } else {
+            &live_binds
+        };
+        return Err(format!(
             "{} worktrees bind node {node_id}: {}",
             binds.len(),
             binds
@@ -801,8 +809,21 @@ pub(crate) fn bound_node_posture(
                 .map(|b| b.manifest_path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ));
     }
+    if let Some(bound) = live_binds.pop() {
+        return Ok(Some(bound));
+    }
+    if let Some(bound) = archived_binds.pop() {
+        return Ok(Some(bound));
+    }
+    if unreadable.is_empty() {
+        return Ok(None);
+    }
+    Err(format!(
+        "unreadable bound manifests: {}",
+        unreadable.join("; ")
+    ))
 }
 
 /// What the node's bound manifest does to a merge authority.
@@ -982,7 +1003,7 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
                 });
             }
             for (key, by) in [
-                ("granted", -(refused_drops + unknown_drops) as i64),
+                ("granted", -(refused_drops as i64 + unknown_drops as i64)),
                 ("refused", refused_drops as i64),
                 ("unknown", unknown_drops as i64),
             ] {
