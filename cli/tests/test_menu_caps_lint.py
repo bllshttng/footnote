@@ -69,13 +69,14 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
 
 
 def test_root_namespace_names_pin_today_by_name():
-    """AC2-HP/AC4-HP: the folded surface is eleven, pinned by name.
+    """AC2-HP/AC4-HP: the folded surface is twelve, pinned by name.
 
     The pre-fold red state (20 real roots failing at cap 12) is the branch's
     own history: the gate commit landed first and the folds brought it green.
-    This pin holds the ELEVEN (d-b93d7754) - agents, backlog, config, do,
-    doctor, help, inbox, mux, update, version, whoami - so the next root
-    addition is a named event, not a drift.
+    This pin holds the TWELVE (d-b93d7754, plus the native uninstall) -
+    agents, backlog, config, do, doctor, help, inbox, mux, uninstall, update,
+    version, whoami - so the next root addition is a named event, not a drift.
+    Twelve is the cap: the next root needs a fold first.
     """
     names = set(L._root_namespace_names())
     assert names == {
@@ -87,6 +88,7 @@ def test_root_namespace_names_pin_today_by_name():
         "help",
         "inbox",
         "mux",
+        "uninstall",
         "update",
         "version",
         "whoami",
@@ -119,7 +121,7 @@ def test_root_namespace_cap_fails_and_names_the_overage(monkeypatch):
     over, and never offers hiding as a remedy (hiding is the evasion the
     rewritten gate exists to kill)."""
     today = len(L._root_namespace_names())
-    assert today == 11, f"surface drifted from eleven: {L._root_namespace_names()}"
+    assert today == 12, f"surface drifted from twelve: {L._root_namespace_names()}"
     monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 10)
     result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 1, result.output

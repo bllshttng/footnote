@@ -76,7 +76,7 @@ mod tests {
         assert!(text.contains("#compdef fno"), "generated zsh header kept");
         assert!(text.starts_with("if (( $+functions[compdef] )); then"));
         assert!(text.contains("_default"), "fallback for foreign roots");
-        assert!(text.contains("_fno_native_roots=(mux version)"));
+        assert!(text.contains("_fno_native_roots=(mux uninstall version)"));
         // The fallback decision happens at the FIRST word only.
         assert!(text.contains("CURRENT > 2"));
     }

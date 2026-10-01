@@ -85,6 +85,7 @@ pub mod theme_import;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;
 pub mod tree;
+pub mod uninstall;
 pub mod version;
 pub mod view_store;
 pub mod vt;
