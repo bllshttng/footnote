@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
@@ -562,24 +563,14 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
 # recognize one and refuse it with a message naming the fix, and so `fno
 # doctor` can still report mail queued to one before the flip as the dead
 # letter it is. Never an accepted address, never generated. Built from the
-# roster door rather than a literal list: a hardcoded copy silently stops
-# covering a harness the moment one is added.
-_LEGACY_HANDLE_RE: "re.Pattern[str] | None" = None
-
-
+# roster door, lazily (module __getattr__): an eager build paid a roster
+# subprocess on every import, which broke the binary-less CI lints.
+@lru_cache(maxsize=1)
 def _legacy_handle_re() -> "re.Pattern[str]":
-    global _LEGACY_HANDLE_RE
-    if _LEGACY_HANDLE_RE is None:
-        _LEGACY_HANDLE_RE = re.compile(
-            rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$"
-        )
-    return _LEGACY_HANDLE_RE
+    return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
 
 
 def __getattr__(name: str) -> Any:
-    """Serve ``LEGACY_HANDLE_RE`` on first read: the eager build made every
-    import of this module pay a roster subprocess, which broke the
-    binary-less CI lints."""
     if name == "LEGACY_HANDLE_RE":
         return _legacy_handle_re()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

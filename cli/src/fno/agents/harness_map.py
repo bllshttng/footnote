@@ -824,10 +824,9 @@ _PACKAGED_CONTRACT_TEXT = (
 )
 MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
 # The bundled table's harness rows stay a non-empty subset of the complete
-# roster (KNOWN_HARNESSES is wider than the capability table on purpose).
-# The subset pin lives on the Rust side (the provider round-trip test reads
-# the same table's source): an import-time assert here paid a roster
-# subprocess on every import, which broke the binary-less CI lints.
+# roster; the subset pin lives on the Rust side (the provider round-trip
+# test reads the table's source), since an import-time assert here paid a
+# roster subprocess on every import.
 
 #: Fail-open report of every override block a reader declined, naming the
 #: config file and the reason (AC1-ERR). A warning never un-configures a
