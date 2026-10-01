@@ -315,7 +315,8 @@ impl View {
                 .enumerate()
                 .map(|(i, drow)| {
                     let depth = row_depths.get(i).copied().unwrap_or(0);
-                    self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
+                    let slots = (name_w, rects[2].width as usize, rects[4].width as usize);
+                    self.sideline_table_row(drow, depth, slots, now)
                 })
                 .collect();
             let table = RtTable::new(
@@ -472,9 +473,9 @@ impl View {
                     cell.fg = fg;
                     cell.flags = flags;
                 }
-                // The state accent survives the band on the glyph and the
-                // state word only (the operator's color ruling); the band
-                // owns the remaining cells. A row with no colored state
+                // The state accent survives the band on the glyph (and the
+                // list's state word) only (the operator's color ruling); the
+                // band owns the remaining cells. A row with no colored state
                 // (Default) keeps the band's own explicit pair everywhere.
                 if let DisplayRow::Agent(a) = drow {
                     let lat = agent_lattice_state(a);
@@ -485,15 +486,14 @@ impl View {
                         agent_lane_fg(a, lat, style.fg)
                     };
                     if accent != Color::Default {
-                        let word_rect = if card { Some(rects[2]) } else { None };
-                        for rect in std::iter::once(rects[0]).chain(word_rect) {
-                            let end = rect.x.saturating_add(rect.width).min(text_w as u16);
-                            for col in rect.x..end {
-                                cells[r * cols + col as usize].fg = accent;
-                            }
+                        let end = rects[0].x.saturating_add(rects[0].width).min(text_w as u16);
+                        for col in rects[0].x..end {
+                            cells[r * cols + col as usize].fg = accent;
                         }
                     }
                 }
+            } else if let (true, DisplayRow::Agent(a)) = (card, drow) {
+                self.paint_ctx_fill(cells, r * cols, text_w, rects[2], a);
             }
             let row_stamp = self.row_stamp_for(drow);
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
@@ -582,10 +582,10 @@ impl View {
         &self,
         drow: &DisplayRow<'_>,
         depth: usize,
-        name_w: usize,
-        right_slot_w: usize,
+        (name_w, meter_w, right_slot_w): (usize, usize, usize),
         now: u64,
     ) -> RtRow<'static> {
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
         // An EXITED focus row is legibly dead: DIM accent on its cells and
         // no band (a dead "you are here" never reads as a live one). A live
         // focus row's band is the overlay's accent highlight.
@@ -654,8 +654,9 @@ impl View {
                 } else {
                     String::new()
                 };
-                if let Some(tok) =
-                    sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
+                // A card names its model on line 2; the token is the list's.
+                if let Some(tok) = sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
+                    .filter(|_| !card)
                 {
                     suffix.push_str(&format!(" {tok}"));
                 }
@@ -683,11 +684,16 @@ impl View {
                 let prefix_width = prefix.width();
                 let suffix_width = suffix.width();
                 let base_width = name_w.saturating_sub(prefix_width);
+                let label = if card {
+                    card_line::slug(a, &self.backlog)
+                } else {
+                    a.name.clone()
+                };
                 let name = if suffix_width < base_width {
-                    let base = fit_name(&a.name, base_width - suffix_width);
+                    let base = fit_name(&label, base_width - suffix_width);
                     format!("{prefix}{base}{suffix}")
                 } else {
-                    let base = fit_name(&a.name, base_width);
+                    let base = fit_name(&label, base_width);
                     format!("{prefix}{base}")
                 };
                 // The message column reads the sentence, not the markup, and
@@ -699,7 +705,6 @@ impl View {
                 let tail = row_message_text(a)
                     .map(|t| format!("\u{b7} {t}"))
                     .unwrap_or_default();
-                let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
                 let pr =
                     a.pr.map(|n| format!("#{n}"))
                         .unwrap_or_else(|| "\u{2014}".into());
@@ -721,9 +726,9 @@ impl View {
                 };
                 (
                     vec![
-                        // Card line 1: glyph in the status column, the word
-                        // in the message column, no age on line 1. List mode
-                        // paints the exact pre-card cells.
+                        // Card line 1: glyph, slug, context bar and node, PR.
+                        // The spinning glyph carries the state, so no word.
+                        // List mode paints the exact pre-card cells.
                         // A Working row's spin glyph takes the blank lead
                         // column of the right-aligned word, so the word stays put.
                         rt_cell(
@@ -741,16 +746,11 @@ impl View {
                         rt_cell(fit_name(&name, name_w), body_fg, cell_flags_v, false),
                         rt_cell(
                             if card {
-                                format!(
-                                    "{} {} up {}",
-                                    status_word(lat),
-                                    row_meter::ctx_cell(a.context_used_pct),
-                                    row_meter::up_cell(a.started_at, now)
-                                )
+                                card_line::meter_node(a, meter_w).text
                             } else {
                                 tail
                             },
-                            if card { cell_fg } else { body_fg },
+                            body_fg,
                             quiet | focus_bit,
                             false,
                         ),
@@ -978,7 +978,26 @@ impl View {
         }
     }
 
-    /// Line 2 of a card: two spaces, then `harness · king · message · cwd`,
+    /// The card bar's fill in theme colors: the brand, red once the window
+    /// nears auto-compact. A banded row keeps the band's own pair.
+    fn paint_ctx_fill(&self, cells: &mut [Cell], at: usize, text_w: usize, rect: RtRect, a: &AgentRow) {
+        let (Some(fill), Some(pct)) = (
+            card_line::meter_node(a, rect.width as usize).fill,
+            a.context_used_pct,
+        ) else {
+            return;
+        };
+        let fg = if pct >= row_meter::CTX_NEAR_COMPACT_PCT {
+            Color::Indexed(1)
+        } else {
+            self.theme.brand
+        };
+        for col in fill.map(|c| rect.x as usize + c).filter(|c| *c < text_w) {
+            cells[at + col].fg = fg;
+        }
+    }
+
+    /// Line 2 of a card: two spaces, then `harness/model · king · message · cwd`,
     /// with the age right-aligned to the panel edge. Segments that are `None`
     /// drop out of the join; a worker with no harness, king, message or
     /// foreign cwd paints just its age.
@@ -990,8 +1009,8 @@ impl View {
         text_w: usize,
     ) -> String {
         let mut segments: Vec<String> = Vec::new();
-        if let Some(h) = a.harness.as_deref() {
-            segments.push(h.to_string());
+        if let Some(h) = card_line::harness_model(a) {
+            segments.push(h);
         }
         if let Some(k) = self.king_label(a) {
             segments.push(k);

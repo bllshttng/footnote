@@ -171,33 +171,98 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
 }
 
 #[test]
-fn card_frame_paints_glyph_name_word_pr_on_line1_king_message_age_on_line2() {
-    // AC6/AC7: working worker w1 with PR 42: line 1 = glyph, w1, Work, #42;
-    // line 2 = harness, king handle, message, age. A worker with no crowned
-    // ancestor has no king segment (and no empty `·  ·`).
+fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_line2() {
+    // Line 1 = glyph, slug, context bar, node, #42: no state word (the glyph
+    // carries it) and no uptime (peek has it). Line 2 = harness/model, king
+    // handle, message, age. A worker with no crowned ancestor has no king
+    // segment (and no empty `·  ·`).
     let mut agents = king_and_worker();
-    let mut stamped = serde_json::to_value(&agents[1]).unwrap();
-    stamped["context_used_pct"] = serde_json::json!(26);
-    stamped["started_at"] = serde_json::json!(crate::digest_overlay::now_secs() - 10800);
-    agents[1] = serde_json::from_value(stamped).unwrap();
+    agents[1].context_used_pct = Some(26);
+    agents[1].started_at = Some(crate::digest_overlay::now_secs() - 10800);
+    agents[1].node = Some("x-4310".into());
+    agents[1].model = Some("gpt-6.1-sol".into());
+    agents[0].model = Some("claude-opus-5-5".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
     let frame = v.compose();
     let text = frame_text(&frame);
-    assert!(text.contains("26%▪▫▫ up 3h"), "{text:?}");
+    assert!(text.contains("[26%|###     ]  x-4310"), "{text:?}");
+    assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     v.layout.agents[1].context_used_pct = Some(129);
     let over_window = frame_text(&v.compose());
-    assert!(over_window.contains("129%▪▪▪ up 3h"), "{over_window:?}");
+    assert!(over_window.contains("[129%|########] x-4310"), "{over_window:?}");
+    v.layout.agents[1].context_used_pct = None;
+    let unmeasured = frame_text(&v.compose());
+    let dash = format!(" -{}x-4310", " ".repeat(15));
+    assert!(unmeasured.contains(&dash), "{unmeasured:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
-    assert!(text.contains("claude"), "{text:?}");
+    assert!(text.contains("claude/opus"), "{text:?}");
     assert!(text.contains("king-a"), "{text:?}");
     assert!(text.contains("one message"), "{text:?}");
     // The king's own card shows its crown scope, not a king name.
     assert!(text.contains("fno"), "{text:?}");
-    // Line 2's segment join: harness, then the king handle.
-    assert!(text.contains("codex \u{b7} king-a"), "{text:?}");
+    // Line 2's segment join: harness/model, then the king handle.
+    assert!(text.contains("codex/gpt-6.1-sol \u{b7} king-a"), "{text:?}");
+}
+
+#[test]
+fn card_slug_drops_node_and_model_and_the_node_taps_open() {
+    // The name loses the node and model the card shows in their own
+    // columns; a name that was only `t-<node>-<model>` reads the node slug.
+    let mut a = agent_row("t-x-5316-opus", 5, Some(AgentBadge::Working), false);
+    a.node = Some("x-5316".into());
+    a.model = Some("claude-opus-5-5".into());
+    let card = |id: &str, slug: &str| crate::proto::BacklogCard {
+        id: id.into(),
+        slug: slug.into(),
+        priority: "p2".into(),
+        state: crate::proto::CardState::InFlight,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+    };
+    assert_eq!(card_line::slug(&a, &[card("x-5316", "gc-sweep")]), "t-gc-sweep");
+    assert_eq!(card_line::slug(&a, &[]), "t-x-5316", "no slug keeps the node");
+    a.name = "t-x4fb5-glm".into();
+    a.node = Some("x-4fb5".into());
+    a.model = Some("glm-5.3-flash[1m]".into());
+    assert_eq!(card_line::slug(&a, &[card("x-4fb5", "status")]), "t-status");
+    assert_eq!(card_line::harness_model(&a), Some("glm-5.3-flash".into()));
+    a.name = "t-cards-org-opus".into();
+    a.model = Some("claude-opus-5-5".into());
+    a.harness = Some("claude".into());
+    assert_eq!(card_line::slug(&a, &[]), "t-cards-org");
+    assert_eq!(card_line::harness_model(&a), Some("claude/opus".into()));
+    // Narrow: the bar goes first, then the node; neither is ellipsized.
+    a.context_used_pct = Some(28);
+    assert_eq!(card_line::meter_node(&a, 30).text, "[28%|###     ]  x-4fb5");
+    assert_eq!(card_line::meter_node(&a, 21).text, "x-4fb5");
+    assert_eq!(card_line::meter_node(&a, 5).text, "");
+    // The node is a tap target where it is painted.
+    let mut agents = king_and_worker();
+    agents[1].node = Some("x-4310".into());
+    let mut v = card_view(agents);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, _) = card_rows_for(&v, "w1");
+    let frame = v.compose();
+    let row = agent_i - v.sideline_offset();
+    let line = row_text(&frame, row, v.sideline_paint_w() - 1);
+    let col = line.find("x-4310").expect("node painted") as u16 + 2;
+    assert!(
+        matches!(v.chrome_hit(row as u16, col), Some(ChromeHit::OpenNode(id)) if id == "x-4310"),
+        "{line:?}"
+    );
+    assert!(
+        !matches!(v.chrome_hit(row as u16, 3), Some(ChromeHit::OpenNode(_))),
+        "the glyph still focuses the row"
+    );
 }
 
 #[test]
@@ -218,39 +283,26 @@ fn card_detail_click_routes_to_the_agent_above() {
 }
 
 #[test]
-fn hovering_card_line_two_snapshots_one_solid_highlight_on_both_lines() {
-    let mut v = card_view(king_and_worker());
-    v.term = (30, 140);
-    v.sideline_width = 80;
-    let (agent_i, detail_i) = card_rows_for(&v, "w1");
-    v.hover_row = Some(detail_i);
-
-    let frame = v.compose();
-    let width = v.sideline_paint_w().saturating_sub(1);
-    let line = "#".repeat(width);
-    assert_eq!(
-        card_highlight_snapshot(&v, &frame, agent_i, detail_i),
-        format!("{line}\n{line}"),
-        "hover snapshot includes every cell and column boundary on both lines"
-    );
-}
-
-#[test]
-fn selecting_card_line_one_snapshots_one_solid_highlight_on_both_lines() {
-    let mut v = card_view(king_and_worker());
-    v.term = (30, 140);
-    v.sideline_width = 80;
-    let (agent_i, detail_i) = card_rows_for(&v, "w1");
-    v.selector = Some(agent_i);
-
-    let frame = v.compose();
-    let width = v.sideline_paint_w().saturating_sub(1);
-    let line = "#".repeat(width);
-    assert_eq!(
-        card_highlight_snapshot(&v, &frame, agent_i, detail_i),
-        format!("{line}\n{line}"),
-        "selection snapshot includes every cell and column boundary on both lines"
-    );
+fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
+    for select in [false, true] {
+        let mut v = card_view(king_and_worker());
+        v.term = (30, 140);
+        v.sideline_width = 80;
+        let (agent_i, detail_i) = card_rows_for(&v, "w1");
+        if select {
+            v.selector = Some(agent_i);
+        } else {
+            v.hover_row = Some(detail_i);
+        }
+        let frame = v.compose();
+        let width = v.sideline_paint_w().saturating_sub(1);
+        let line = "#".repeat(width);
+        assert_eq!(
+            card_highlight_snapshot(&v, &frame, agent_i, detail_i),
+            format!("{line}\n{line}"),
+            "select={select}: the snapshot covers every cell and column boundary on both lines"
+        );
+    }
 }
 
 #[test]
@@ -573,6 +625,9 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
     assert_eq!(row_meter::ctx_cell(Some(100)), "100%▪▪▪");
     assert_eq!(row_meter::ctx_cell(Some(129)), "129%▪▪▪");
+    assert_eq!(row_meter::ctx_bar(None), format!("{:<15}", "-"));
+    assert_eq!(row_meter::ctx_bar(Some(0)), "[0%|        ]  ");
+    assert_eq!(row_meter::ctx_bar(Some(28)), "[28%|###     ] ");
     assert_eq!(row_meter::up_cell(None, now), "-");
     assert_eq!(row_meter::up_cell(Some(now + 1), now), "0s");
 }

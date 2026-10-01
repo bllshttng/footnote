@@ -4193,30 +4193,6 @@ impl View {
         (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
     }
 
-    fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
-        if (self.density != Density::Extended && !self.sideline_full)
-            || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
-        {
-            return None;
-        }
-        let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = self.worker_column_rects(text_w as u16);
-        let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
-        if hit(rects[0]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Status))
-        } else if hit(rects[1]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
-        } else if hit(rects[2]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::LastMessage))
-        } else if hit(rects[3]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Pr))
-        } else if hit(rects[4]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Age))
-        } else {
-            None
-        }
-    }
-
     /// What acting on sideline display row `i` does - the single resolver both
     /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
     /// route through, so the two inputs can never diverge. `None` only
@@ -6804,6 +6780,8 @@ enum ChromeHit {
     OpenQuestionDetail(String),
     /// Open the questions view on the list (the `+N more` row's click).
     OpenQuestionsList,
+    /// A card's node tap: the plan in Obsidian, else the node details pane.
+    OpenNode(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -7802,6 +7780,9 @@ fn peek_overlay_lines(
     }
     if let Some(pr) = a.pr {
         header.push_str(&format!(" · PR #{pr}"));
+    }
+    if a.started_at.is_some() {
+        header.push_str(&format!(" · up {}", row_meter::up_cell(a.started_at, now_secs)));
     }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
@@ -9908,6 +9889,7 @@ async fn apply_hit(
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
+        ChromeHit::OpenNode(id) => node_link::open(view, id).await,
     }
     Ok(())
 }
@@ -12267,6 +12249,8 @@ mod court_block;
 mod glyph_legend;
 
 mod row_meter;
+mod card_line;
+mod node_link;
 #[path = "client/sideline.rs"]
 mod sideline;
 
