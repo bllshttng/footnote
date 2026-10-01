@@ -37,7 +37,7 @@ def _real_mux_binaries(repo: Path) -> tuple[Path, Path] | None:
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """One derived pane identity reaches every public peer surface unchanged."""
+    """Late harness binding preserves the pane's stable Footnote identity."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
     binaries = _real_mux_binaries(repo)
@@ -135,7 +135,10 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         # precondition instead of assuming the spawn won the race: this test
         # passed serially and failed only under parallel load, where child
         # startup is the thing that slips.
-        probe_pid = load_registry(path=agents_home / "registry.json")[0].pid
+        birth_row = load_registry(path=agents_home / "registry.json")[0]
+        footnote_identity = birth_row.fno_id
+        assert footnote_identity is not None
+        probe_pid = birth_row.pid
         deadline = time.monotonic() + 30.0
         opened = None
         while time.monotonic() < deadline:
@@ -157,6 +160,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         registry_path = agents_home / "registry.json"
         row = load_registry(path=registry_path)[0]
         assert row.harness_session_id == identity
+        assert row.fno_id == footnote_identity
         assert row.status == "live"
         assert resolve_agent(requested_name, path=registry_path).entry == row
 
@@ -192,7 +196,10 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             for item in json.loads(pane_ls.stdout)
             if item["pane_id"] == spawned.pane_id
         )
-        assert pane["fno_id"] == identity
+        assert pane["fno_id"] == footnote_identity
+        assert pane["harness_session_id"] == identity
+        assert pane["fno_id"] == row.fno_id
+        assert row.fno_id != identity
         located = subprocess.run(
             [str(fno_bin), "mux", "where", identity, "--server", mux_session, "--json"],
             cwd=repo,
@@ -223,9 +230,12 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         )
         assert errors.getvalue() == ""
         assert "assistant: READY" in observed.getvalue()
-        assert {row.harness_session_id, pane["fno_id"], claim.holder, *resolved} == {
-            identity
-        }
+        assert {
+            row.harness_session_id,
+            pane["harness_session_id"],
+            claim.holder,
+            *resolved,
+        } == {identity}
     finally:
         monkeypatch.setattr(mux_spawn, "build_pane_argv", original_argv)
         monkeypatch.setattr(

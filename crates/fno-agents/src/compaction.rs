@@ -241,7 +241,14 @@ fn past_ceiling_or_compacting(stamp: &CompactionStamp, now_epoch: i64) -> Compac
     }
 }
 
+/// The window-boundary timestamp of a transcript row: a claude
+/// `subtype:"compact_boundary"` row, or a codex `type:"compacted"` row. The
+/// claude prefilter callers (`visit_boundaries`, `first_boundary_after`) key
+/// on the `compact_boundary` string, so a codex row never reaches them.
 pub(crate) fn boundary_ts(row: &serde_json::Value) -> Option<&str> {
+    if row.get("type").and_then(|v| v.as_str()) == Some("compacted") {
+        return row.get("timestamp").and_then(|v| v.as_str());
+    }
     (row.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary"))
         .then(|| row.get("timestamp").and_then(|v| v.as_str()))
         .flatten()

@@ -650,6 +650,11 @@ class AgentEntry:
     # v26 served facts; the Rust sweep writes them, python is a passthrough.
     liveness: Optional[str] = None
     liveness_measured_at: Optional[str] = None
+    context_used_pct: Optional[int] = None
+    context_used_tokens: Optional[int] = None
+    context_window_tokens: Optional[int] = None
+    context_measured_at: Optional[str] = None
+    mail_unread: Optional[int] = None
     harness_title: Optional[str] = None
     lineage_kind: Optional[str] = None
 

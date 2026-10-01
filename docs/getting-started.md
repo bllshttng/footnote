@@ -224,6 +224,29 @@ fno agents restart --mux   # restart the daemon AND the mux server onto the fres
 
 `fno agents restart` on its own restarts only the agents daemon (PTY workers survive). The `--mux` flag also restarts the mux server, which is **destructive** - it ends live mux sessions - so it is opt-in; reattach afterward. `fno doctor` flags a running mux server that predates the installed binary and reminds you to run it. In a running Claude Code session, bump the plugin (or relaunch) to pick up new skills/hooks after a pull.
 
+## Uninstall
+
+Run it from a plain terminal, not from inside an fno mux pane:
+
+```bash
+fno uninstall --dry-run    # list every item found; change nothing
+fno uninstall              # ask once, then remove them all
+fno uninstall --yes        # no question; needed when stdin is not a terminal
+```
+
+It removes each item through its own uninstall verb, in this order:
+
+1. The launchd agents (`~/Library/LaunchAgents/sh.fno.*.plist` and the autocorrect agents).
+2. The Claude Code and Codex plugins and their `footnote` marketplaces, and the OpenCode plugin files.
+3. The hooks fno added to `~/.claude/settings.json`, `~/.gemini/settings.json` and `~/.codex/config.toml`. Your own hooks stay.
+4. The `uv` tool, the Homebrew formula and the bootstrap cache.
+5. The daemon and the mux sessions, which it stops.
+6. The `cargo` binaries, `fno` last.
+
+`~/.fno` stays. `--purge` deletes it too, after you type `purge`. It holds your backlog and any worktrees under `~/.fno/worktrees`, so commit or push that work first. The run ends with a list of anything named fno that is still on `PATH`, in `LaunchAgents` or running. Exit 0 means that list is empty.
+
+## Next steps
+
 - [Target pipeline](guides/target.md) - the full autonomous loop: flags, gates, cross-project, resume
 - [Think and plan](guides/think-and-plan.md) - design exploration and planning
 - [PR lifecycle](guides/pr-lifecycle.md) - review, create, check, merged

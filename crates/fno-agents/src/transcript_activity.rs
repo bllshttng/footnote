@@ -415,8 +415,9 @@ fn count_runs(text: &str, hour: &str, activity: &mut Activity) {
     }
 }
 
-pub(crate) fn codex_call_text(line: &str) -> Option<String> {
-    let row = serde_json::from_str::<Value>(line).ok()?;
+/// The command text of a parsed codex call row: `None` for non-call rows and
+/// calls with no input, arguments or action.
+pub(crate) fn codex_row_call_text(row: &Value) -> Option<String> {
     let p = row.get("payload")?;
     match p.get("type").and_then(|v| v.as_str())? {
         "custom_tool_call" | "function_call" | "local_shell_call" => {}
@@ -428,6 +429,10 @@ pub(crate) fn codex_call_text(line: &str) -> Option<String> {
             other => other.to_string(),
         })
     })
+}
+
+pub(crate) fn codex_call_text(line: &str) -> Option<String> {
+    codex_row_call_text(&serde_json::from_str::<Value>(line).ok()?)
 }
 
 fn process_line(

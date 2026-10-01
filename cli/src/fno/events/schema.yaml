@@ -4510,6 +4510,54 @@ event_types:
           description: "How many panes the server held at exit."
     consumers: [operator]
 
+  - name: composer_shell_ran
+    retention: durable
+    description: "The composer's bang mode ran one shell line: a leading ! turned the input into a shell prompt and Enter sent the line through PaneRun. One row per run, naming the project cwd, the resolved login shell, the line and the pane that hosts it."
+    sources: [cli, test]
+    data:
+      required: [mux_session, cwd, shell, line, pane]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the line was sent to."
+        cwd:
+          type: string
+          description: "The project cwd the pane was spawned in (the composer's Project chip)."
+        shell:
+          type: string
+          description: "The resolved login shell the line runs under."
+        line:
+          type: string
+          description: "The shell line verbatim, cut to 512 chars."
+        pane:
+          type: integer
+          description: "The pane id PaneSpawned returned for the new pane."
+    consumers: [operator]
+
+  - name: composer_shell_refused
+    retention: durable
+    description: "The composer's bang mode refused to run a shell line: no project chosen, the control socket refused, or the reply never arrived. One row per refusal with the reason; the composer keeps the line and shell mode so the user can retry."
+    sources: [cli, test]
+    data:
+      required: [mux_session, cwd, line, reason, outcome]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the line was meant for."
+        cwd:
+          type: string
+          description: "The project cwd at the attempt (empty when no project was chosen)."
+        line:
+          type: string
+          description: "The shell line verbatim, cut to 512 chars."
+        reason:
+          type: string
+          description: "The refusal reason verbatim."
+        outcome:
+          enum: [refused, unanswered]
+          description: "refused: the run never started. unanswered: the verb reached the server and no reply came back inside the deadline; the server's side is unknown."
+    consumers: [operator]
+
   - name: mail_origin_classified
     retention: durable
     description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."

@@ -12,7 +12,6 @@ use crate::attention::AttentionItem;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 
 /// How long the ladder waits for the resume to show up in the asker's
 /// transcript before it escalates to the crown.
@@ -369,7 +368,8 @@ fn run_resume(
     // The offset is the PRE-resume transcript length: `fno agents resume`
     // delivers synchronously, so a marker injected before this runner returns
     // must sit after the offset the confirm scan reads from, not before it.
-    let pre_len = transcript_for(&sid, &harness).map(|p| transcript_len(&p));
+    let pre_len =
+        crate::context_run::session_transcript(&sid, &harness).map(|p| transcript_len(&p));
     let (code, _stdout, _stderr) = runner(&argv);
     state.offset = pre_len;
     state.resumed_at = Some(now);
@@ -470,21 +470,10 @@ fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
         .map(|c| c.holder.clone())
 }
 
-/// The asker's transcript, by harness: claude resolves by session uuid, codex
-/// by thread id over the rollout store. Other harnesses have no transcript
-/// finder today, so their answers go to the crown (the plan's rung b table).
-fn transcript_for(sid: &str, harness: &str) -> Option<PathBuf> {
-    match harness {
-        "claude" => crate::claude_drive::find_transcript(sid),
-        "codex" => codex_rollout(sid),
-        _ => None,
-    }
-}
-
 /// Whether the question id shows up in the asker's transcript after the byte
 /// offset the resume saved: the content-confirm the mail lane lacks.
 fn transcript_confirm(sid: &str, harness: &str, marker: &str, offset: Option<u64>) -> bool {
-    let Some(path) = transcript_for(sid, harness) else {
+    let Some(path) = crate::context_run::session_transcript(sid, harness) else {
         return false;
     };
     crate::mail_inject::confirm_content_after(&path, marker, offset.unwrap_or(0)).unwrap_or(false)
@@ -653,19 +642,11 @@ pub fn real_runner_pub(argv: &[String]) -> (i32, String, String) {
     }
 }
 
-/// The codex thread's rollout transcript, over the store the gc inventory
-/// walks. Other harnesses have no finder today.
-fn codex_rollout(thread_id: &str) -> Option<PathBuf> {
-    let sessions = crate::gc_inventory::codex_store_sessions().ok()?;
-    sessions
-        .get(&thread_id.to_ascii_lowercase())
-        .and_then(|paths| paths.first().cloned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::attention::AttentionItem;
+    use std::path::PathBuf;
 
     /// Four staged worlds, driven through tick_answers with a fake SinkIo.
     struct FakeIo {
