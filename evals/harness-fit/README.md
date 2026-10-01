@@ -121,6 +121,16 @@ The 150 guard paused both runs at 03:17Z. The user then said: "resume but with l
 - Docker networks. Each killed trial left its network behind. At 02:36Z, 46 trials failed on "all predefined address pools have been fully subnetted". Those trials never started an agent. They reran and count as infrastructure, not as the arm. A pause now removes the leftover networks.
 - Every other rule stays.
 
+## Amendment 9 (2026-10-01, drain, never kill, before any results commit)
+
+Under Amendment 8 the guard paused every 20 to 60 minutes. Each pause killed the trials in flight, and a trial takes 15 to 45 minutes. Run 0 finished 2 trials in 3 hours. The user said the guards make the study struggle. Vellum then ruled on the question: drain, never kill.
+
+- Drain. When the 5-minute load stays at 48 or more for 5 minutes, both runs start no new trial or attempt. In-flight work finishes and counts.
+- Lift. When the load stays at 24 or less for 10 minutes, new work starts again.
+- Kill. Only a load of 150 or more for 5 minutes kills both runs. Killed work reruns on resume, as before.
+- Mechanism. A `logs/drain` file holds each new Run 0 trial before its first timer, so a held trial loses nothing. Run 1 checks the same file before each attempt. The zcode lane now runs one attempt at a time through the top-up for the same reason.
+- Concurrency stays at 2 Run 0 trials. Every other rule stays.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
