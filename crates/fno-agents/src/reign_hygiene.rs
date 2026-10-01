@@ -1,6 +1,6 @@
 //! Five reign-hygiene checks judge order in a source-ordered transcript
 //! projection. Claude tool uses retain their command or path target; Codex
-//! calls share `codex_call_text`. Bash command text stays intact because a
+//! calls share `codex_row_call_text`. Bash command text stays intact because a
 //! source path in Bash can prove a read. User and assistant text remain
 //! distinct, and injected skill/system user markers are not operator asks. An
 //! unreadable, malformed, or over-budget transcript is unmeasurable, never clean.
