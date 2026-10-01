@@ -1464,8 +1464,8 @@ pub(crate) fn work_state_key(session_id: &str) -> String {
 /// working graph plus the archive; `status` is the entry's stored `status`
 /// field only, never a derived overlay.
 ///
-/// Each session's list puts its CURRENT node first: rows with no `ended_at`
-/// before ended ones, then the newest `started_at`. A worker rebound to a new
+/// Each session's list puts its CURRENT node first: open non-ship rows
+/// before ended or ship rows, then the newest `started_at`. A worker rebound to a new
 /// node keeps its ended row on the old one, and graph order alone made the
 /// old node the one every first-row reader judged it by.
 pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
@@ -1505,10 +1505,12 @@ fn sessions_index_with(
             if sid.is_empty() {
                 continue;
             }
-            if !include_ship && row.get("phase").and_then(Value::as_str) == Some("ship") {
+            let ship = row.get("phase").and_then(Value::as_str) == Some("ship");
+            if !include_ship && ship {
                 continue;
             }
-            let ended = row.as_object().is_some_and(|o| o.contains_key("ended_at"));
+            // No terminal closes a ship row, so it never ranks as current work.
+            let ended = ship || row.as_object().is_some_and(|o| o.contains_key("ended_at"));
             let started = row
                 .get("started_at")
                 .and_then(Value::as_str)
