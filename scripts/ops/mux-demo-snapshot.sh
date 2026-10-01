@@ -21,6 +21,22 @@ cleanup() {
     "$FNO" mux pane kill "$p" --server "$SERVER" >/dev/null 2>&1 || true
   done
   "$FNO" mux kill-server "$SERVER" --end-unkept >/dev/null 2>&1 || true
+  # kill-server keeps kept panes by design, so every keeper outlives it. A
+  # keeper's --sock and its pane child's argv both sit under ROOT: end them all,
+  # then prove none is left before the root goes.
+  pkill -TERM -f -- "$ROOT/" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f -- "$ROOT/" >/dev/null || break
+    sleep 0.5
+  done
+  pkill -KILL -f -- "$ROOT/" 2>/dev/null || true
+  sleep 0.5
+  if pgrep -f -- "$ROOT/" >/dev/null; then
+    echo "mux-demo-snapshot: processes under $ROOT survive; root kept:" >&2
+    pgrep -fl -- "$ROOT/" >&2
+    exit 1
+  fi
   if [ -n "${FNO_DEMO_KEEP:-}" ]; then echo "kept $ROOT" >&2; else rm -rf "$ROOT"; fi
 }
 trap cleanup EXIT
