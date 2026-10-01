@@ -175,6 +175,13 @@ pub struct RegistryAgent {
     /// document: two ticks over unchanged bytes compare equal and the row
     /// change gate never fires from the clock.
     pub liveness_measured_at: Option<u64>,
+    pub context_used_pct: Option<u8>,
+    pub context_tokens: Option<(u64, u64)>,
+    pub context_measured_at: Option<u64>,
+    pub started_at: Option<u64>,
+    pub mail_unread: Option<u32>,
+    pub node: Option<String>,
+
     /// The LAST title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), stored by the daemon sweep. The
     /// render joins it into the subline when it differs from the label; the
@@ -2233,6 +2240,32 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             lineage_reason,
             liveness,
             liveness_measured_at: measured_at,
+            context_used_pct: row
+                .get("context_used_pct")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u8::try_from(n).ok()),
+            context_tokens: row
+                .get("context_used_tokens")
+                .and_then(|v| v.as_u64())
+                .zip(row.get("context_window_tokens").and_then(|v| v.as_u64())),
+            context_measured_at: row
+                .get("context_measured_at")
+                .and_then(|v| v.as_str())
+                .and_then(rfc3339_like_to_secs),
+            started_at: row
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(rfc3339_like_to_secs),
+            mail_unread: row
+                .get("mail_unread")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+            node: row
+                .get("node")
+                .and_then(|v| v.as_str())
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned),
+
             harness_title,
             route_provider_id: row
                 .get("route_provider_id")
@@ -2474,6 +2507,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             harness_title: None,
             // A synthesized foreign roster row carries no registry stamps.
             route_provider_id: None,
+            ..Default::default()
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -2543,6 +2577,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             harness_title: r.harness_title.clone(),
             // A synthesized parked child records no route axis of its own.
             route_provider_id: None,
+            ..Default::default()
         });
     }
     out.extend(parked);
@@ -3681,8 +3716,10 @@ unheard_of_field = true
         let raw = reg(
             r#"{"name":"stamped","cwd":"/w","status":"live","provider":"claude",
                 "last_message_at":"2027-01-15T07:00:00Z",
+                "context_used_pct":26, "created_at":"2027-01-15T05:00:00Z",
                 "inside_leg":{"state":"working","seq":1,"received_at":"2027-01-15T07:59:30Z","ttl_ms":120000}},
-               {"name":"bare","cwd":"/w","status":"live","provider":"claude"}"#,
+               {"name":"bare","cwd":"/w","status":"live","provider":"claude"},
+               {"name":"over-window","cwd":"/w","status":"live","provider":"claude","context_used_pct":129}"#,
         );
         let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
         let rows = derive_rows(&raw, now).unwrap();
@@ -3693,6 +3730,10 @@ unheard_of_field = true
             rfc3339_like_to_secs("2027-01-15T07:59:30Z")
         );
         assert_eq!(get("bare").updated_at, None);
+        assert_eq!(get("stamped").context_used_pct, Some(26));
+        assert_eq!(get("stamped").started_at, Some(now - 10800));
+        assert_eq!(get("bare").context_used_pct, None);
+        assert_eq!(get("over-window").context_used_pct, Some(129));
     }
 
     #[test]
@@ -4316,6 +4357,7 @@ config_dir = "~/.claude-alt"
             harness: Some("claude".to_string()),
             liveness_measured_at: None,
             harness_title: None,
+            ..Default::default()
         }
     }
 

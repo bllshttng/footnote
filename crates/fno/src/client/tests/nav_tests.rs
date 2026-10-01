@@ -44,8 +44,6 @@ fn nav_filter_state_composes_with_text() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -67,6 +65,7 @@ fn nav_filter_state_composes_with_text() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }];
     let composed = NavView {
         query: "notes".into(),
@@ -206,8 +205,6 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             exited: false,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -229,6 +226,7 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         },
         AgentRow {
             spawned_by_name: None,
@@ -249,8 +247,6 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             exited: false,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -272,6 +268,7 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         },
     ];
     let rows = v.nav_rows();

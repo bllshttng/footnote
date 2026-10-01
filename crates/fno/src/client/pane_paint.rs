@@ -373,7 +373,7 @@ impl View {
         let status = agent.map(|a| {
             let st = agent_lattice_state(a);
             let ls = lattice_style(st, self.theme.needs_you);
-            (ls.glyph, ls.flags, ls.fg, status_word(st))
+            (status_glyph(st), ls.flags, ls.fg, status_word(st))
         });
         let fields = crate::pane_border::EdgeFields {
             name: meta.map(|m| m.label.as_str()).unwrap_or("shell"),

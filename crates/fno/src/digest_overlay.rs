@@ -1524,6 +1524,13 @@ mod tests {
 
     #[test]
     fn config_layer_rows() {
+        // The config ladder below reads FNO_CONFIG ambient, and the env-pinning
+        // tests hold this same lock while theirs is set: without it, a sibling
+        // fixture's pin short-circuits the ladder and status_row reads as its
+        // default mid-race.
+        let _env = super::ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // mux is routinely attached from a subdirectory. Anchored on cwd, the
         // project layer reads <repo>/sub/.fno/config.toml, which does not
         // exist, and every project key silently reads as unset.

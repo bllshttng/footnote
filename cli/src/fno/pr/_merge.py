@@ -55,7 +55,7 @@ POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
 # gh merge call and its post-merge followups (typically seconds), so the wait
 # is short and bounded - a peer still holding it past the window is reported
 # as "held" (exit 2) for the caller to retry, never an indefinite block.
-# Scope: the lock + freshness hold cover the IMMEDIATE merge path. There is no
+# Scope: the lock covers the IMMEDIATE merge path. There is no
 # queued lane anymore (dropped --auto): require_checks_pass is enforced
 # by reading the checks under the lock and merging only on green, so every
 # merge this verb performs is serialized here.
@@ -1617,9 +1617,7 @@ def _merge_lock(pr_number: int) -> Iterator[_MergeLockYield]:
 
 
 def _pr_base_head_refs(pr_number: int, cwd: str) -> Optional[Tuple[str, str]]:
-    """(base, head) ref names for a PR, or None on any read miss. Shared by
-    `_behind_by` and `_base_move_paths` so the two probes cannot drift apart
-    about how the refs are read; each keeps its own miss polarity."""
+    """(base, head) ref names for a PR, or None on any read miss."""
     try:
         view = _gh(
             ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
@@ -1849,20 +1847,9 @@ def run_merge(
     # staleness check inside the gate already refused a current mismatch; this
     # makes gh itself refuse if the head moves between here and the merge.
 
-    # (2b) Merge serialization + overlap hold (parallel mode G4, LD#9).
-    # Builds run parallel; merges run one at a time, and while lanes are live a
-    # PR whose changed files OVERLAP the base move is held for `fno do pr rebase`
-    # first, so a lane never merges code the base moved under. The predicate is
-    # overlap, not distance: a base move that touches none of the PR's files
-    # cannot carry a semantic conflict into this merge, while holding on
-    # distance alone taxed every open lane with a rebase and a re-review per
-    # peer merge (N open PRs, N-1 rebases each round, GitHub itself reporting
-    # MERGEABLE the whole time). `_behind_by` stays the cheap first test: at
-    # zero there is no base move, so the overlap probes never run in the common
-    # sequential case. Both checks run UNDER the lock: a peer merge landing
-    # between the freshness read and our merge is exactly the race the lock
-    # exists to close. Sequential runs (no live lanes) skip the freshness hold
-    # and see only an uncontended lock - behavior unchanged.
+    # (2b) Merge serialization: builds run parallel, merges run one at a time.
+    # The authorized-merge gate reads CI freshness under the lock, so a peer
+    # merge cannot land between that read and this merge.
     with _merge_lock(pr_number) as (lock, release_now, held_detail):
         if lock == "held":
             reason = "merge serialized: another merge holds the lock; retry"
