@@ -3326,9 +3326,6 @@ def _a2a_handle_re() -> "re.Pattern[str]":
     return re.compile(rf"^(?:(?:{'|'.join(KNOWN_HARNESSES)})-)?[0-9a-fA-F]{{6,}}$")
 
 
-_A2A_HANDLE_RE = _a2a_handle_re()
-
-
 def _plugin_hooks_json() -> Optional[Path]:
     """Locate the claude plugin's hooks.json (CLAUDE_PLUGIN_ROOT, else source)."""
     root = os.environ.get("CLAUDE_PLUGIN_ROOT")
@@ -3466,7 +3463,7 @@ def _stale_dead_letters(
             # addressee. The regex stays as the fallback for legacy handle mail
             # that predates the US6 stamp.
             meta = getattr(m, "meta", None) or {}
-            if meta.get("owner") or _A2A_HANDLE_RE.match(to):
+            if meta.get("owner") or _a2a_handle_re().match(to):
                 recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings
         return []

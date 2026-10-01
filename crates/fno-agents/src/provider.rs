@@ -2737,6 +2737,19 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), KNOWN_HARNESSES.len(), "duplicate roster name");
+        // The bundled capability table's harness rows stay a subset of the
+        // one roster. The Python import-time assert that used to hold this
+        // moved here, where the table's source lives: the packaged copy the
+        // Python tree reads is byte-identical (the freshness gate), so this
+        // pin covers it transitively.
+        let caps = crate::harness_capabilities::HarnessContract::packaged()
+            .expect("the packaged capability table parses");
+        for name in caps.harness.keys() {
+            assert!(
+                KNOWN_HARNESSES.contains(&name.as_str()),
+                "capability row {name} is absent from KNOWN_HARNESSES"
+            );
+        }
     }
 
     // ---- claude short-id parse ----

@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
 
@@ -558,22 +558,31 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
     return bool(_HEAD8_RE.match(token.strip()))
 
 
-# The retired harness-prefixed address. Kept ONLY so the send path can recognize
-# one and refuse it with a message naming the fix, and so `fno doctor` can still
-# report mail queued to one before the flip as the dead letter it is. Never an
-# accepted address, never generated.
-#
-# Built from the harness map rather than a literal list: a hardcoded copy silently
-# stops covering a harness the moment one is added, which is the same drift that
-# produced the two-conventions mess this address change exists to end.
+# The retired harness-prefixed address. Kept ONLY so the send path can
+# recognize one and refuse it with a message naming the fix, and so `fno
+# doctor` can still report mail queued to one before the flip as the dead
+# letter it is. Never an accepted address, never generated. Built from the
+# roster door rather than a literal list: a hardcoded copy silently stops
+# covering a harness the moment one is added.
+_LEGACY_HANDLE_RE: "re.Pattern[str] | None" = None
+
+
 def _legacy_handle_re() -> "re.Pattern[str]":
-    return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
+    global _LEGACY_HANDLE_RE
+    if _LEGACY_HANDLE_RE is None:
+        _LEGACY_HANDLE_RE = re.compile(
+            rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$"
+        )
+    return _LEGACY_HANDLE_RE
 
 
-# Built eagerly from the roster door (fno.harness_names), not the capability
-# table: platform layer, no runtime import, and a new harness is covered the
-# moment it lands on the roster.
-LEGACY_HANDLE_RE = _legacy_handle_re()
+def __getattr__(name: str) -> Any:
+    """Serve ``LEGACY_HANDLE_RE`` on first read: the eager build made every
+    import of this module pay a roster subprocess, which broke the
+    binary-less CI lints."""
+    if name == "LEGACY_HANDLE_RE":
+        return _legacy_handle_re()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:

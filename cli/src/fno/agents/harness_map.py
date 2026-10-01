@@ -823,9 +823,11 @@ _PACKAGED_CONTRACT_TEXT = (
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
 MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
-# Non-empty subset of the complete roster, mirroring parse_capability_contract:
-# the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
-assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
+# The bundled table's harness rows stay a non-empty subset of the complete
+# roster (KNOWN_HARNESSES is wider than the capability table on purpose).
+# The subset pin lives on the Rust side (the provider round-trip test reads
+# the same table's source): an import-time assert here paid a roster
+# subprocess on every import, which broke the binary-less CI lints.
 
 #: Fail-open report of every override block a reader declined, naming the
 #: config file and the reason (AC1-ERR). A warning never un-configures a

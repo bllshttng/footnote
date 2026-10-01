@@ -10,9 +10,10 @@ The residual upward edge this module used to carry is closed :
 ``fno.agents.harness_map.known_harnesses()``, so importing it eagerly imported
 ``fno.agents``. The harness-name set is served at this layer
 (``fno.harness_names``, the door over the Rust roster), so the regex builds
-from L0 data with no runtime import. The runtime capability table
-(``fno.agents.harness_map``) asserts its keys stay in sync with
-the name list, preserving the single-source-of-truth property.
+from L0 data with no runtime import, and reads it lazily (an eager build made
+every import pay a roster subprocess, which broke binary-less CI lints). The
+runtime capability table (``fno.agents.harness_map``) keeps its keys in sync
+with the name list, preserving the single-source-of-truth property.
 
 ``resolve_dispatch_harness`` centralizes one precedence so every dispatch verb
 defaults the harness the same way:

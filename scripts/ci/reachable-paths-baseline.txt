@@ -52,7 +52,6 @@ A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume
 A	claims unreadable: claim key is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/undispatched.rs	# CLASSIFY protocol|msg-twin|data
 A	claude logs: claude binary not found on path; install claude or check $path	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/loopcheck.rs	# CLASSIFY protocol|msg-twin|data
-A	cli/src/fno/harness_names.py	py=scripts/ci/check-harness-roster-parity.py;rs=crates/fno-agents/src/harness_matrix.rs	# CLASSIFY protocol|msg-twin|data
 A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/claude_supervisor.rs|crates/fno/src/client/server_spawn.rs	# CLASSIFY protocol|msg-twin|data
 A	codex_companion_transcript_path	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/claude_supervisor.rs	# CLASSIFY protocol|msg-twin|data
 A	codex_internal_originator_override	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
