@@ -31,6 +31,12 @@ import subprocess
 import sys
 import time
 
+# The shared liveness-row writer (hooks/lib) sits beside this script; the
+# guard runs under whatever interpreter the harness hands it, so the import
+# path is built from __file__, never the cwd.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from guard_mark import guard_mark
+
 # Characters shlex may accumulate into a single operator token, and the ones
 # that actually END a command. `|` is absent: it starts a new pipeline stage,
 # not a new command, and is split separately.
@@ -374,33 +380,10 @@ def decide(command, cwd=None, depth=0):
 
 def _guard_mark(decision):
     """One guard_decision row per run: the positive liveness signal that this
-    guard ran and what it decided. Row shape matches hooks/lib/guard-mark.sh
-    so bash and python guards write indistinguishable rows. Best-effort by
-    contract: any failure is swallowed and can never change a decision."""
-    try:
-        pin = os.environ.get("FNO_EVENTS_PATH")
-        if pin:
-            path = pin
-        elif os.path.isdir(".git") or os.path.isdir(".fno"):
-            path = os.path.join(".fno", "events.jsonl")
-        else:
-            root = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-            path = os.path.join(root or os.getcwd(), ".fno", "events.jsonl")
-        row = (
-            '{"ts":"%s","type":"guard_decision","data":{"guard":"recursive-grep-guard",'
-            '"decision":"%s","tool":"Bash"},"source":"hook"}'
-            % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision)
-        )
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(row + "\n")
-    except Exception:
-        pass
+    guard ran and what it decided. The shared writer commits it to the
+    journal's store; best-effort by contract: any failure is swallowed and
+    can never change a decision."""
+    guard_mark("recursive-grep-guard", decision, "Bash")
 
 
 def main():

@@ -36,9 +36,11 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def test_ready_accepts_json_flag(tmp_graph):
+    plan = tmp_graph.parent / "p.md"
+    plan.write_text("---\nstatus: ready\ntype: feature\n---\n\n# Accept JSON in ready output\n")
     seed_graph(tmp_graph, json.dumps({"entries": [
-        {"id": "ab-R", "title": "R", "status": "ready",
-         "plan_path": "p.md", "project": "x"}
+        {"id": "ab-R", "title": "Accept JSON in ready output", "status": "ready",
+         "plan_path": str(plan), "project": "x"}
     ]}))
     r = runner.invoke(app, ["backlog", "ready", "--project", "x", "--json"],
                       catch_exceptions=False)

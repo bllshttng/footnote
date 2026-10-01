@@ -1267,7 +1267,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "cycle-sideline-view",
             CycleSidelineView,
             Global,
-            "cycle sideline view (agents, backlog)",
+            "cycle sideline view (agents, backlog, org)",
         ),
         b(
             b'b',

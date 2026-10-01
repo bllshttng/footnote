@@ -128,6 +128,7 @@ pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
+pub mod court_rivals;
 pub mod crown_alarm;
 pub mod crown_identity;
 pub mod crown_names;
@@ -177,6 +178,7 @@ pub mod gc_sweep;
 pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
+pub mod gh_cache;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -193,7 +195,7 @@ pub mod heal;
 pub mod heal_pid;
 pub mod honesty_sweep;
 pub mod hook;
-mod identity;
+pub mod identity;
 pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
@@ -218,6 +220,8 @@ pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod launch_workdir;
 pub mod law_match;
+pub mod ledger_axes;
+pub(crate) mod ledger_workers;
 mod lifecycle_child;
 pub mod list_row;
 pub mod live_store_fence;
@@ -239,6 +243,7 @@ pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
@@ -274,6 +279,7 @@ pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
+pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
@@ -286,6 +292,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_draft_ready;
 pub mod pr_list;
 pub mod pr_nudge;
 pub mod pr_park;
@@ -326,6 +333,7 @@ pub mod reign_hygiene;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
+pub(crate) mod resolve_tier;
 pub mod restart_run;
 pub mod resume_args;
 pub mod resume_gate;
@@ -350,6 +358,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
 pub mod screen;
@@ -362,6 +371,7 @@ pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod skill_drift;
 pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
@@ -398,6 +408,7 @@ pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
 pub mod test_delta;
+pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
 pub mod tracker;
@@ -411,6 +422,8 @@ pub mod wake_meter;
 pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
+pub mod zcode;
+pub mod zcode_ask;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -1356,6 +1369,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The pr-watch sweep flipped an open fno-bound draft PR back to ready
+    // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
+    "pr_watch_draft_flip",
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
@@ -1364,6 +1380,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Spawn coordinator: the durable accepted record written BEFORE
     // any backend launch; not a birth, correlated to it by spawn_id.
     "agent_spawn_accepted",
+    // A launch the spawn gate or the dispatch door refused before any
+    // worker existed; the feed projects it so a refused launch shows.
+    "agent_spawn_refused",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",

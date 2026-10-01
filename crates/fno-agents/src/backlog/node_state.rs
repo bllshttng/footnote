@@ -129,7 +129,7 @@ impl std::fmt::Display for StateError {
                 submitted_revision,
             } => write!(
                 f,
-                "state conflict: current revision {current_revision} != submitted {submitted_revision}; re-read with `fno backlog note <node> --read` and resubmit"
+                "state conflict: current revision {current_revision} != submitted {submitted_revision}; re-read with `fno backlog get <node>` and resubmit"
             ),
             StateError::EmptyBody => write!(
                 f,

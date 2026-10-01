@@ -32,7 +32,17 @@ impl Core {
         // built the resume command.
         for ((_, session_id), pane) in &self.worker_session_pane {
             if *pane == pid {
-                ids.insert(session_id.clone());
+                // Map the recorded harness session to its row first, so the
+                // pane reads the row's OWN id; the raw recorded session falls
+                // back only when no row matches.
+                match agents
+                    .iter()
+                    .find(|a| a.answers_to(session_id))
+                    .and_then(|a| a.effective_identity())
+                {
+                    Some(identity) => ids.insert(identity.to_string()),
+                    None => ids.insert(session_id.clone()),
+                };
             }
         }
         if ids.is_empty() {

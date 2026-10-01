@@ -4,7 +4,7 @@ use crate::loopcheck::TerminationReason;
 use serde_json::Value;
 use std::path::Path;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct KingManifest {
     pub(crate) fno_id: String,
     pub(crate) scope: String,

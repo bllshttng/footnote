@@ -18,7 +18,7 @@ use super::*;
 /// [`sideline_column_rects`] - by the callers that need the solver's answer
 /// beside the paint: one geometry authority, and it is the solver.
 const SIDELINE_RIGHT_SLOT_W: u16 = 6;
-pub(super) const SIDELINE_COLUMNS: [Constraint; 5] = [
+const CARD_COLUMNS: [Constraint; 5] = [
     Constraint::Length(5),
     Constraint::Min(22),
     Constraint::Fill(3),
@@ -30,17 +30,47 @@ pub(super) const SIDELINE_COLUMNS: [Constraint; 5] = [
     Constraint::Length(SIDELINE_RIGHT_SLOT_W),
 ];
 
+pub(super) const SIDELINE_COLUMNS: [Constraint; 7] = [
+    CARD_COLUMNS[0],
+    CARD_COLUMNS[1],
+    CARD_COLUMNS[2],
+    CARD_COLUMNS[3],
+    CARD_COLUMNS[4],
+    Constraint::Length(7),
+    Constraint::Length(4),
+];
+
 /// The solver's column rects for a text width: the same call the Table makes
 /// internally (same constraints, same spacing, same flex), so a caller that
 /// must know a column's width reads the SAME answer the paint uses.
+#[cfg(test)]
 pub(super) fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
-    Layout::horizontal(SIDELINE_COLUMNS)
+    Layout::horizontal(CARD_COLUMNS)
         .flex(Flex::Start)
         .spacing(1)
         .split(RtRect::new(0, 0, text_w, 1))
 }
 
 impl View {
+    fn worker_columns(&self, text_w: u16) -> &[Constraint] {
+        if self.sideline_layout == sideline_color::SidelineLayout::List
+            && (self.density == Density::Extended || self.sideline_full)
+            // Fixed cells and six gaps leave at least eight message columns.
+            && text_w >= 5 + 22 + 6 + 6 + 7 + 4 + 6 + 8
+        {
+            &SIDELINE_COLUMNS
+        } else {
+            &CARD_COLUMNS
+        }
+    }
+
+    pub(super) fn worker_column_rects(&self, text_w: u16) -> std::rc::Rc<[RtRect]> {
+        Layout::horizontal(self.worker_columns(text_w).iter().copied())
+            .flex(Flex::Start)
+            .spacing(1)
+            .split(RtRect::new(0, 0, text_w, 1))
+    }
+
     /// Rows of chrome the full-screen sideline paints under (the tab strip),
     /// so the click mappers invert the same offset the painter used.
     pub(super) fn sideline_top(&self) -> usize {
@@ -105,7 +135,7 @@ impl View {
         // rows: every resolver that answers "which sideline row is this"
         // (hover, right-click menu, drag pickup, press-hold) must answer
         // none there, or a press on the board acts on a phantom row.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
             return None;
         }
         // The sideline owns row 0 in normal mode (the strip moved right of
@@ -162,8 +192,19 @@ impl View {
                                   // The backlog view: the board's own render inside THIS column, no
                                   // second border, the cursor row wearing the sideline band. The
                                   // divider paints as in the agents view, then the agent path stops.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
-            if let Some(b) = &self.backlog_board {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
+            if self.sideline_view == crate::view_store::SidelineView::Org {
+                if !self.board_full {
+                    org_board::paint(
+                        self,
+                        cells,
+                        rows,
+                        cols,
+                        text_w,
+                        rows.saturating_sub(self.bottom_row_is_chrome() as usize),
+                    );
+                }
+            } else if let Some(b) = &self.backlog_board {
                 if !self.board_full {
                     let chrome_rows = self.bottom_row_is_chrome() as usize;
                     backlog_board::backlog_panes::paint(
@@ -266,7 +307,7 @@ impl View {
         // widget's render-time scroll keeps visible.
         let mut st = self.sideline_state.get().with_selected(self.selector);
         let mut off = st.offset();
-        let rects = sideline_column_rects(text_w as u16);
+        let rects = self.worker_column_rects(text_w as u16);
         if density != Density::Slim {
             let name_w = rects[1].width as usize;
             let table_rows: Vec<RtRow> = display
@@ -277,13 +318,16 @@ impl View {
                     self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
                 })
                 .collect();
-            let table = RtTable::new(table_rows, SIDELINE_COLUMNS)
-                .flex(Flex::Start)
-                .highlight_spacing(HighlightSpacing::Never)
-                // The overlay pass is the one band painter: the Table's own
-                // row highlight (REVERSED by default) would paint an INVERSE
-                // band the spec forbids inside a highlight.
-                .row_highlight_style(RtStyle::new());
+            let table = RtTable::new(
+                table_rows,
+                self.worker_columns(text_w as u16).iter().copied(),
+            )
+            .flex(Flex::Start)
+            .highlight_spacing(HighlightSpacing::Never)
+            // The overlay pass is the one band painter: the Table's own
+            // row highlight (REVERSED by default) would paint an INVERSE
+            // band the spec forbids inside a highlight.
+            .row_highlight_style(RtStyle::new());
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, table_area, &mut buf, &mut st);
             off = st.offset();
@@ -547,7 +591,7 @@ impl View {
         // focus row's band is the overlay's accent highlight.
         let is_focus = matches!(drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
         let focus_exited = is_focus && matches!(drow, DisplayRow::Agent(a) if a.exited);
-        let (row_cells, _): (Vec<RtCell>, u8) = match drow {
+        let (mut row_cells, _): (Vec<RtCell>, u8) = match drow {
             // The full-width rows - squad and section bands, sublines, the
             // idle fold, the footer, the empty state - paint in the overlay
             // pass (`paint_legacy_row`): a band is edge-to-edge at EVERY
@@ -680,11 +724,15 @@ impl View {
                         // Card line 1: glyph in the status column, the word
                         // in the message column, no age on line 1. List mode
                         // paints the exact pre-card cells.
+                        // A Working row's spin glyph takes the blank lead
+                        // column of the right-aligned word, so the word stays put.
                         rt_cell(
-                            if card {
-                                style.glyph.to_string()
-                            } else {
-                                status_word(lat).to_string()
+                            match (card, lat) {
+                                (true, _) => status_glyph(lat).to_string(),
+                                (false, LatticeState::Working) => {
+                                    format!("{}{}", status_glyph(lat), status_word(lat))
+                                }
+                                (false, _) => status_word(lat).to_string(),
                             },
                             cell_fg,
                             cell_flags_v,
@@ -693,7 +741,12 @@ impl View {
                         rt_cell(fit_name(&name, name_w), body_fg, cell_flags_v, false),
                         rt_cell(
                             if card {
-                                status_word(lat).to_string()
+                                format!(
+                                    "{} {} up {}",
+                                    status_word(lat),
+                                    row_meter::ctx_cell(a.context_used_pct),
+                                    row_meter::up_cell(a.started_at, now)
+                                )
                             } else {
                                 tail
                             },
@@ -766,6 +819,22 @@ impl View {
                 )
             }
         };
+        if self
+            .worker_columns(self.sideline_paint_w().saturating_sub(1) as u16)
+            .len()
+            == 7
+        {
+            let (ctx, up) = match drow {
+                DisplayRow::Agent(a) => (
+                    row_meter::ctx_cell(a.context_used_pct),
+                    row_meter::up_cell(a.started_at, now),
+                ),
+                DisplayRow::TableHead => ("ctx".into(), "up".into()),
+                _ => (String::new(), String::new()),
+            };
+            row_cells.push(rt_cell(ctx, Color::Default, cell_flags::DIM, false));
+            row_cells.push(rt_cell(up, Color::Default, cell_flags::DIM, false));
+        }
         RtRow::new(row_cells)
     }
 

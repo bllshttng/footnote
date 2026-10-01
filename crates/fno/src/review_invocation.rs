@@ -3,7 +3,6 @@
 //! confirmed delivery. Pure move out of `mux_cli.rs` (file-budget shrink),
 //! no edits.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn review_invocation_command(bytes: &[u8]) -> Option<(String, String)> {
@@ -38,6 +37,22 @@ fn review_events_path() -> PathBuf {
         }
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // The resolver names the journal the store reads (the project space). A
+    // rev-parse guess is how these rows landed in the checkout journal, a
+    // file the store and every store reader ignore.
+    let mut command = crate::process_admission::std_command("fno-agents");
+    command.args(["state", "path", "events"]);
+    command.current_dir(&cwd);
+    if let Ok(output) = crate::process_admission::std_output(&mut command) {
+        if output.status.success() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                let path = text.trim();
+                if !path.is_empty() {
+                    return PathBuf::from(path);
+                }
+            }
+        }
+    }
     let mut command = crate::process_admission::std_command("git");
     command.args(["-C", &cwd.to_string_lossy(), "rev-parse", "--show-toplevel"]);
     let probe = crate::process_admission::std_output(&mut command);
@@ -147,17 +162,7 @@ fn append_review_invocation_at(
         "source": "daemon",
         "data": data,
     });
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{event}")
-    })();
-    let _ = result;
+    let _ = crate::pane_send_audit::append_agents_event(path, &event);
 }
 
 pub(crate) fn review_invocation_timestamp() -> String {
@@ -193,6 +198,16 @@ pub(crate) fn review_invocation_timestamp() -> String {
 mod tests {
     use super::*;
 
+    fn stored_event(path: &std::path::Path) -> serde_json::Value {
+        let rows = crate::event_store::query_events(
+            path,
+            &crate::event_store::EventQuery::of_types(&["review_invocation"]),
+        )
+        .expect("the store beside the journal opened");
+        let row = rows.last().expect("the row committed");
+        serde_json::from_str(&row.line).unwrap()
+    }
+
     #[test]
     fn review_invocation_records_a_canonical_positive_receipt() {
         let path = std::env::temp_dir().join(format!(
@@ -201,6 +216,7 @@ mod tests {
             line!()
         ));
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db"));
 
         let command = review_invocation_command(b"/review medium --comment");
         let command_plain = command.clone();
@@ -217,8 +233,7 @@ mod tests {
             "text delivered, submission unconfirmed",
         );
 
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let event = stored_event(&path);
         assert_eq!(event["type"], "review_invocation");
         assert_eq!(event["source"], "daemon");
         assert_eq!(event["data"]["stage"], "sent");
@@ -234,9 +249,9 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("ri-"));
-        let _ = std::fs::remove_file(&path);
 
-        // A plain text write with no submit key must not claim one.
+        // A plain text write with no submit key must not claim one. The
+        // store keeps the first row, so the read takes the last.
         append_review_invocation_at(
             &path,
             "mux-session",
@@ -245,11 +260,11 @@ mod tests {
             false,
             "text delivered, no submit requested",
         );
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let event = stored_event(&path);
         assert_eq!(event["data"]["submit_required"], false);
         assert_eq!(event["data"]["submit_key"], "none");
         assert_eq!(event["data"]["submit_confirmed"], false);
+        let _ = std::fs::remove_file(path.with_extension("db"));
         let _ = std::fs::remove_file(path);
     }
 }

@@ -13,6 +13,81 @@ use super::backlog_board::{rule, trunc, BoardView};
 use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
+
+pub(crate) fn resolve_session(
+    view: &View,
+    sid: Option<&str>,
+    harness: Option<&str>,
+    captured: Option<&AgentRow>,
+) -> Option<AgentRow> {
+    let sid = sid.filter(|s| !s.is_empty()).or_else(|| {
+        captured.and_then(|a| a.harness_session_id.as_deref().or(a.attach_id.as_deref()))
+    });
+    let harness = harness.or_else(|| captured.and_then(|a| a.harness.as_deref()));
+    let candidates: Vec<_> =
+        view.layout
+            .agents
+            .iter()
+            .filter(|a| {
+                if harness.is_some_and(|h| a.harness.as_deref() != Some(h)) {
+                    return false;
+                }
+                match sid {
+                    Some(sid) => [a.harness_session_id.as_deref(), a.attach_id.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|id| id == sid || (sid.len() <= 8 && id.starts_with(sid))),
+                    None => captured
+                        .is_some_and(|old| old.pane_id.is_some() && old.pane_id == a.pane_id),
+                }
+            })
+            .collect();
+    if let Some(old) = captured {
+        let seats: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|a| {
+                if let Some(pane) = old.pane_id {
+                    a.pane_id == Some(pane)
+                } else {
+                    old.attach_id.is_some() && old.attach_id == a.attach_id
+                }
+            })
+            .collect();
+        if let [one] = seats.as_slice() {
+            return Some((*one).clone());
+        }
+    }
+    match candidates.as_slice() {
+        [one] => Some((*one).clone()),
+        _ => None,
+    }
+}
+
+pub(crate) async fn press_session(
+    view: &mut View,
+    sid: Option<&str>,
+    harness: Option<&str>,
+    captured: Option<&AgentRow>,
+    sock: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let joined = resolve_session(view, sid, harness, captured);
+    match session_action(joined.as_ref()) {
+        SessionAction::Attach | SessionAction::Resume => {
+            let hit = agent_hit(
+                joined.as_ref().expect("action has a row"),
+                view.layout.active_squad,
+            );
+            view.backlog_board = None;
+            view.org_board = None;
+            view.region_owner = super::region_focus::RegionOwner::Pane;
+            super::backlog_board::set_sideline_view(view, crate::view_store::SidelineView::Agents);
+            apply_hit(view, hit, sock).await?;
+        }
+        SessionAction::Dim(why) => view.set_notice(why),
+    }
+    Ok(())
+}
 #[path = "backlog_md.rs"]
 pub(crate) mod backlog_md;
 /// One selectable row of the drill-down: a link to another node, or a
@@ -551,20 +626,14 @@ async fn activate(
             let Some(s) = nv.sessions.get(*i) else {
                 return Ok(());
             };
-            let joined = view
-                .layout
-                .agents
-                .iter()
-                .find(|a| a.harness_session_id.as_deref() == s.session_id.as_deref());
-            match session_action(joined) {
-                SessionAction::Attach | SessionAction::Resume => {
-                    let a = joined.expect("a derivable action has a row");
-                    let hit = agent_hit(a, view.layout.active_squad);
-                    view.backlog_board = None;
-                    apply_hit(view, hit, sock_w).await?;
-                }
-                SessionAction::Dim(why) => view.set_notice(why),
-            }
+            press_session(
+                view,
+                s.session_id.as_deref(),
+                s.harness.as_deref(),
+                None,
+                sock_w,
+            )
+            .await?;
         }
     }
     Ok(())

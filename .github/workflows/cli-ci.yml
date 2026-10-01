@@ -93,9 +93,8 @@ jobs:
   # packet scales with the diff, so a fixed cap either starves a large rebase
   # (killed at the cap, reported as an unattributable `cancelled`) or idles
   # over a small one. Selection only: `--list` maps and prints, it runs
-  # nothing, so this job needs no smoke-setup and costs seconds. Three outputs:
-  # the raw estimate, the ceiling applied, and whether the packet fits that
-  # ceiling. The estimate and fit output are read by the full-suite selector.
+  # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
+  # the raw estimate and the ceiling applied.
   changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -148,22 +147,15 @@ jobs:
           {
             echo "estimate_minutes=$est"
             echo "timeout_minutes=$timeout_minutes"
-            if [ "$est" -le "$timeout_minutes" ]; then
-              echo "packet_fits=true"
-            else
-              echo "packet_fits=false"
-            fi
           } >> "$GITHUB_OUTPUT"
 
     outputs:
       estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
       timeout_minutes: ${{ steps.estimate.outputs.timeout_minutes }}
-      packet_fits: ${{ steps.estimate.outputs.packet_fits }}
 
-  # The Rust selector owns lane routing. On non-PR events it selects every
-  # full lane; a missing PR diff also fails closed to the full set.
+  # The Rust selector owns lane routing. A PR selects every full lane main
+  # runs; only the PR-only bundle freshness job depends on the diff.
   pr-affected:
-    needs: [changed-packet-size]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -185,10 +177,9 @@ jobs:
         env:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
-          PACKET_FITS: ${{ needs.changed-packet-size.outputs.packet_fits }}
         run: |
           rustc --edition=2021 crates/fno-agents/src/bin/pr-affected.rs -o "$RUNNER_TEMP/pr-affected"
-          "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" "$PACKET_FITS" | tee -a "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" | tee -a "$GITHUB_OUTPUT"
 
   # The freshness check rides the smoke registry, but a PR whose selector
   # keeps the full Python lane off never runs a registry entry: PR 2719
@@ -674,6 +665,13 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+      - name: Build native fno (Python guard rows)
+        # The Python guards commit their guard_decision rows through the
+        # native `fno doctor event emit-envelope` verb. Without this binary
+        # the rows are dropped (best-effort by contract) and the dispatch
+        # fixture sees only the Rust guards' rows. The compiled deps come
+        # from the cached build base, so this pays mostly the final link.
+        run: cargo build --release --manifest-path crates/fno/Cargo.toml --bin fno
       - name: Generated copies match their sources
         run: |
           (cd cli && uv run fno-py doctor harness-matrix --write)
@@ -684,6 +682,7 @@ jobs:
       - name: Run latency budgets
         env:
           FNO_AGENTS_BIN: ${{ github.workspace }}/crates/fno-agents/target/release/fno-agents
+          FNO_BIN: ${{ github.workspace }}/crates/fno/target/release/fno
           FNO_HOOK_LATENCY_OUT: ${{ runner.temp }}/hook-latency
         # The legacy `latency_` fixtures remain quarantined. The Bash hook
         # budget fixture is named separately and measures the consolidated
@@ -729,16 +728,6 @@ jobs:
           # The PROTO_VERSION guard below needs a merge-base between the base
           # tip and the PR head; the default shallow fetch cannot compute one.
           fetch-depth: 0
-
-      - name: Build the fno front for the truth probes
-        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
-        # `cargo test --lib`, where fno_cmd prefers it over every test's
-        # stub binary and the whole stubbed-shellout suite fails for a
-        # provisioning reason. A bare "fno" has no PATH leg here otherwise,
-        # so the probes ENOENT without this.
-        run: |
-          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
-          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Set isolated FNO state roots
         run: |
@@ -830,6 +819,17 @@ jobs:
         # Dependencies remain cached; only this shard's package is rebuilt.
         # The fno mux shard cleans its own package the same way.
         run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build the fno front for the truth probes
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test --lib`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise,
+        # so the probes ENOENT without this.
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
@@ -983,15 +983,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build the fno front for the truth probes
-        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
-        # `cargo test`, where fno_cmd prefers it over every test's
-        # stub binary and the whole stubbed-shellout suite fails for a
-        # provisioning reason. A bare "fno" has no PATH leg here otherwise.
-        run: |
-          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
-          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
-
       - name: Set isolated FNO state roots
         run: |
           echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
@@ -1035,6 +1026,16 @@ jobs:
 
       - name: Clean cached Rust package artifacts
         run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build the fno front for the truth probes
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise.
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Build fno-agents binary
         working-directory: crates/fno-agents

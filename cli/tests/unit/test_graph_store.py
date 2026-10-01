@@ -324,7 +324,7 @@ def test_render_pass_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
     assert "kanban-plugin: board" not in md
 
 
-def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch):
+def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch, native_board_render):
     """Regression: the view pass renders the canonical store it reads, never
     the global ~/.fno targets.
 
@@ -364,7 +364,7 @@ def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch
     assert not (fake_home / "graph.html").exists()
 
 
-def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
+def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch, native_board_render):
     """A write to the canonical graph.json renders to GRAPH_HTML/GRAPH_MD
     (what `fno backlog view` and serve_board.py read), not graph.json's
     siblings.
@@ -401,7 +401,7 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
     assert not (custom_dir / "graph.html").exists()
 
 
-def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
+def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch, native_board_render):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
 

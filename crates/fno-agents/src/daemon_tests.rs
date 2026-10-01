@@ -2000,7 +2000,9 @@ fn late_bind_preserves_a_live_predecessor_and_creates_a_clean_branch_row() {
         .find(|entry| entry.harness_session_id.as_deref() == Some("session-b"))
         .expect("branch session row");
     assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-a"));
-    assert_eq!(branch.fno_id.as_deref(), Some("session-b"));
+    // The branch mints its own id at the write; it never copies the successor.
+    assert!(branch.fno_id.is_some());
+    assert_ne!(branch.fno_id.as_deref(), Some("session-b"));
     assert!(branch.short_id.is_empty());
     assert!(branch.mux.is_none());
     std::fs::remove_dir_all(home.root()).ok();
@@ -3072,6 +3074,11 @@ fn list_row_key_set_matches_shared_contract() {
         e.provider = Some("zai".into());
         e.effort = Some("xhigh".into());
         e.node = Some("x-cafe".into());
+        e.context_used_pct = Some(26);
+        e.context_used_tokens = Some(258_687);
+        e.context_window_tokens = Some(1_000_000);
+        e.context_measured_at = Some("2026-09-30T12:00:00Z".into());
+        e.mail_unread = Some(1);
         // (x-7955) AC9-HP: the recorded lane rides verbatim, so a reader
         // can tell a paneless pane row from a thread row.
         e.substrate = Some("thread".into());
@@ -3083,6 +3090,11 @@ fn list_row_key_set_matches_shared_contract() {
     let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
     let result = response.result().unwrap();
     let row = &result["agents"][0];
+    assert_eq!(row["context_used_pct"], 26);
+    assert_eq!(row["context_used_tokens"], 258_687);
+    assert_eq!(row["context_window_tokens"], 1_000_000);
+    assert_eq!(row["context_measured_at"], "2026-09-30T12:00:00Z");
+    assert_eq!(row["mail_unread"], 1);
 
     let actual: std::collections::BTreeSet<String> =
         row.as_object().unwrap().keys().cloned().collect();

@@ -8,7 +8,6 @@ configured targets from a fresh read, and a failing target never
 blocks the next write.
 """
 
-from pathlib import Path
 
 import pytest
 
@@ -73,7 +72,7 @@ def _seed(graph, title):
     )
 
 
-def test_write_path_renders_the_configured_store_inline(paths, monkeypatch):
+def test_write_path_renders_the_configured_store_inline(paths, monkeypatch, native_board_render):
     """A write against the configured store renders the configured targets
     in the same call, so CLI consumers read a fresh board without waiting
     out the trigger's settle. The trigger exists for the writers that bypass
@@ -92,7 +91,7 @@ def test_write_path_renders_the_configured_store_inline(paths, monkeypatch):
     assert "Render follows write inline" in target.read_text(encoding="utf-8")
 
 
-def test_render_pass_renders_configured_targets(paths, monkeypatch):
+def test_render_pass_renders_configured_targets(paths, monkeypatch, native_board_render):
     """The pass the trigger invokes renders every configured target from a
     fresh store read, so a write's change reaches the target on the next
     settled tick (AC17-HP's budget, asserted without a sleep here)."""
@@ -107,7 +106,7 @@ def test_render_pass_renders_configured_targets(paths, monkeypatch):
     assert "Render follows write" in text
 
 
-def test_failing_target_never_blocks_the_next_write(paths, monkeypatch):
+def test_failing_target_never_blocks_the_next_write(paths, monkeypatch, native_board_render):
     """A render target that fails leaves the writes untouched: the next
     write lands and the pass runs again without raising (AC17-HP)."""
     graph = paths["graph"]

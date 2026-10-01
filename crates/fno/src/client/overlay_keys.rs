@@ -3,7 +3,6 @@
 //! shrink-only ratchet, plus the quiet-window flush that releases a lone
 //! ESC carry to the overlay on top.
 
-use super::backlog_board;
 use super::keys_modal::keys_modal_keys;
 use super::{
     answer_keys, attach_place_keys, confirm_keys, connections_keys, create_keys, is_sideline_verb,
@@ -11,6 +10,7 @@ use super::{
     row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow, View,
 };
 use super::{aux_keys, questions, sideline};
+use super::{backlog_board, org_board};
 
 /// Route one stdin chunk to the overlay that owns the keyboard, in
 /// precedence order. `None` when no overlay owns it: the caller falls
@@ -114,8 +114,7 @@ pub(super) async fn route(
     // both release back to the pane on Esc or a pane click, so the property
     // this slot protects - typing reaches the focused pane - holds by
     // default and is set aside only on request.
-    if view.feed_detail_of.is_some() || view.input_owner() == super::region_focus::RegionOwner::Feed
-    {
+    if view.feed_detail.is_some() || view.input_owner() == super::region_focus::RegionOwner::Feed {
         return Some(super::feed_view::feed_keys(view, bytes, sock_w).await);
     }
     if view.create.is_some() {
@@ -155,6 +154,11 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
+    if view.org_board.is_some()
+        && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
+    {
+        return Some(org_board::route_keys(view, scanner, bytes, sock_w).await);
+    }
     if view.backlog_board.is_some()
         && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
     {
@@ -187,6 +191,12 @@ pub(super) async fn flush_released_chord(
             return super::agent_launcher::launcher_keys(view, chunk, sock_w)
                 .await
                 .map(|_| ());
+        }
+    } else if view.org_board.is_some()
+        && view.input_owner() == super::region_focus::RegionOwner::Board
+    {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return org_board::keys(view, chunk, sock_w).await.map(|_| ());
         }
     } else if view.backlog_board.is_some()
         && view.input_owner() == super::region_focus::RegionOwner::Board

@@ -352,7 +352,12 @@ fn default_true() -> bool {
 /// launch-workdir` before the spawn argv is built; floor stays 58.
 /// v96: `Command::SplitDir(Dir)` replaces `SplitH`/`SplitV` - new variant,
 /// not additive; handshake stops the skew. Floor stays 58.
-pub const PROTO_VERSION: u32 = 96;
+/// v97: `ServerMsg::Layout.proto: Option<u32>` announces the server's wire
+/// version on the first layout a fresh attach receives, so a newer client
+/// can refuse commands an older server cannot parse instead of tripping
+/// the unknown-variant read failure. Floor stays 58.
+/// v98: optional worker context, start time, unread mail and node; floor stays 58.
+pub const PROTO_VERSION: u32 = 98;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1104,7 +1109,7 @@ pub enum Reach {
 /// fact, beats everything) > `badge` (in-TTL inside-leg report) > liveness
 /// (both `None`/`false` - a plain row). `squad` is the squad the row renders
 /// under; `None` is the catch-all for rows whose cwd matches no squad.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRow {
     pub squad: Option<u64>,
     pub name: String,
@@ -1170,6 +1175,19 @@ pub struct AgentRow {
     /// only loses the "last probe" suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_measured_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_unread: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+
     /// (v67) The last title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), from the registry row. The render
     /// joins it into the subline when it differs from the label; `name` is
@@ -2047,7 +2065,7 @@ mod verb_baseline_tests {
     }
 
     #[test]
-    fn every_backlog_verb_leaf_is_in_the_baseline() {
+    fn backlog_verb_rows() {
         let leaves = baseline_leaves();
         // Positive control: the baseline parsed and carries a known leaf, so a
         // miss below is a real missing leaf, not an unread baseline.
@@ -2077,10 +2095,7 @@ mod verb_baseline_tests {
                  a menu item binds it, so the ratchet must list it"
             );
         }
-    }
 
-    #[test]
-    fn all_backlog_verbs_const_covers_every_variant() {
         // Exhaustive match: a new variant fails this to compile until it is in
         // the OR-pattern, and the body then requires it in ALL_BACKLOG_VERBS.
         fn listed(v: BacklogVerb) -> bool {
@@ -2096,10 +2111,7 @@ mod verb_baseline_tests {
                 "ALL_BACKLOG_VERBS lists {v:?} but the sync match does not"
             );
         }
-    }
 
-    #[test]
-    fn args_is_the_leaf_tokens_plus_the_tail() {
         // The argv head is always leaf().split(' '), so the baseline token and
         // the argv cannot disagree.
         assert_eq!(
@@ -2198,6 +2210,12 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
+        /// (v97) The server's wire version, announced on every layout. `None`
+        /// reads on an older server's layout, which the client treats as
+        /// "cannot parse post-announcement commands" - the safe reading when
+        /// the announcer is absent.
+        #[serde(default)]
+        proto: Option<u32>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -3881,7 +3899,7 @@ mod tests {
     }
 
     #[test]
-    fn proto_frame_roundtrips_through_codec() {
+    fn codec_roundtrip_rows() {
         let msg = ServerMsg::Frame {
             pane_id: 7,
             frame: test_frame(),
@@ -3890,17 +3908,11 @@ mod tests {
         let mut cursor = std::io::Cursor::new(bytes);
         let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
         assert_eq!(decoded, msg);
-    }
 
-    #[test]
-    fn proto_accepts_row_detach_command_shape() {
         let raw = serde_json::json!({"DetachPane": {"pane": 7}});
         let decoded = serde_json::from_value::<Command>(raw).unwrap();
         assert_eq!(decoded, Command::DetachPane { pane: 7 });
-    }
 
-    #[test]
-    fn proto_client_msgs_roundtrip() {
         for msg in [
             ClientMsg::Attach {
                 proto: PROTO_VERSION,
@@ -3987,10 +3999,7 @@ mod tests {
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
-    }
 
-    #[test]
-    fn proto_v43_us9_drag_commands_roundtrip() {
         // US9: the two interactive drag verbs are additive Command
         // variants that ride the 43 bump. Externally-tagged, so a v42 server
         // cannot decode them at all - the PROTO_VERSION handshake is what stops
@@ -4013,10 +4022,274 @@ mod tests {
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
+
+        // Every new/changed v3 server message survives the codec (mirrors the
+        // Phase 1/2 roundtrip discipline): Layout carries `area`, TabMeta a
+        // stable `id`, and the pre-Attach `Info` answer parses back exactly.
+        for msg in [
+            ServerMsg::Layout {
+                squads: vec![SquadMeta {
+                    id: 1,
+                    name: "footnote".into(),
+                    canonical_cwd: "/code/footnote/footnote".into(),
+                    tabs: vec![
+                        TabMeta {
+                            id: 7,
+                            name: "1".into(),
+                            named: false,
+                            panes: vec![PaneMeta {
+                                id: 4,
+                                label: "claude".into(),
+                                ..Default::default()
+                            }],
+                        },
+                        TabMeta {
+                            id: 12,
+                            name: "2".into(),
+                            named: false,
+                            panes: vec![],
+                        },
+                    ],
+                    active_tab: 1,
+                    panes: 2,
+                }],
+                active_squad: 1,
+                panes: vec![
+                    (
+                        4,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 24,
+                            cols: 40,
+                        },
+                    ),
+                    (
+                        9,
+                        Rect {
+                            x: 41,
+                            y: 0,
+                            rows: 24,
+                            cols: 39,
+                        },
+                    ),
+                ],
+                focus: 9,
+                area: (24, 80),
+                agents: vec![
+                    AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
+                        harness: None,
+                        model: None,
+                        route: None,
+                        reach: Reach::Locate,
+                        spawned_by_session: None,
+                        lineage_kind: None,
+                        harness_session_id: None,
+                        squad: Some(1),
+                        name: "peer".into(),
+                        pane_id: Some(4),
+                        portal: None,
+                        badge: Some(AgentBadge::Blocked),
+                        reason: Some("permission prompt".into()),
+                        exited: false,
+                        dnd: false,
+                        unmeasured: false,
+                        answerable: Some(AnswerablePrompt {
+                            prompt: "Do you want to proceed?".into(),
+                            options: vec![
+                                AnswerOption {
+                                    idx: "1".into(),
+                                    label: "Yes".into(),
+                                    keystroke: b"1".to_vec(),
+                                },
+                                AnswerOption {
+                                    idx: "2".into(),
+                                    label: "No".into(),
+                                    keystroke: b"2".to_vec(),
+                                },
+                            ],
+                            fingerprint: [7u8; 32],
+                            region_lines: 8,
+                        }),
+                        attach_id: None,
+                        external: false,
+                        seen: false,
+                        cwd_base: None,
+                        tombstone: false,
+                        tab: None,
+                        subline: None,
+                        account: None,
+                        updated_at: None,
+                        pr: None,
+                        tail: None,
+                        crown_level: None,
+                        crown_scope: None,
+                        crown_title: None,
+                        basis: None,
+                        last_activity_age_s: None,
+                        resumable: false,
+                        no_pane_reason: None,
+                        pane_activity: None,
+                        pr_session_short: None,
+                        ..Default::default()
+                    },
+                    AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
+                        harness: None,
+                        model: None,
+                        route: None,
+                        reach: Reach::Locate,
+                        spawned_by_session: None,
+                        lineage_kind: None,
+                        harness_session_id: None,
+                        squad: None,
+                        name: "bg-watch".into(),
+                        pane_id: None,
+                        portal: None,
+                        badge: None,
+                        reason: None,
+                        exited: true,
+                        dnd: false,
+                        unmeasured: false,
+                        answerable: None,
+                        attach_id: None,
+                        external: false,
+                        seen: false,
+                        cwd_base: None,
+                        tombstone: false,
+                        tab: None,
+                        subline: None,
+                        account: None,
+                        updated_at: None,
+                        pr: None,
+                        tail: None,
+                        crown_level: None,
+                        crown_scope: None,
+                        crown_title: None,
+                        basis: None,
+                        last_activity_age_s: None,
+                        resumable: false,
+                        no_pane_reason: None,
+                        pane_activity: None,
+                        pr_session_short: None,
+                        ..Default::default()
+                    },
+                ],
+                focus_node: Some("x-cccc".into()),
+                backlog: vec![
+                    BacklogCard {
+                        id: "x-dddd".into(),
+                        slug: "work-queue-sideline".into(),
+                        priority: "p1".into(),
+                        state: CardState::InFlight,
+                        pane_id: Some(7),
+                        attach_id: None,
+                        where_hint: None,
+                        // (v36) attribution + on-deck ride the same frame.
+                        project: Some("fno".into()),
+                        lane: Some("in-progress".into()),
+                        plan_path: None,
+                        head: false,
+                    },
+                    BacklogCard {
+                        id: "ab-53c0".into(),
+                        slug: "sync-wiki".into(),
+                        priority: "p2".into(),
+                        state: CardState::Ready,
+                        pane_id: None,
+                        attach_id: None,
+                        where_hint: None,
+                        project: None,
+                        lane: None,
+                        plan_path: None,
+                        head: true,
+                    },
+                ],
+                backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
+                backlog_stale: false,
+                sweep_dead_count: 0,
+                proto: Some(PROTO_VERSION),
+            },
+            ServerMsg::ModeSync {
+                bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
+            },
+            ServerMsg::Notice {
+                text: "split refused: pane too small".into(),
+            },
+            ServerMsg::Bye {
+                reason: "session ended".into(),
+            },
+            ServerMsg::Info {
+                session: "work".into(),
+                clients: 2,
+                squads: 1,
+                panes: 3,
+            },
+        ] {
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+
+        let placement = PanePlacement {
+            portal_new: false,
+            view: false,
+            from: None,
+            portal: None,
+            tab: None,
+            at: None,
+            target: PaneTarget::SquadId(42),
+            split: Some(Dir::Up),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+            max_panes: None,
+            thread_pane: false,
+            fit: false,
+        };
+        for msg in [
+            ClientMsg::Control {
+                proto: PROTO_VERSION,
+                build: BUILD_VERSION.into(),
+                verb: ControlVerb::PaneRun {
+                    cwd: "/code/footnote".into(),
+                    argv: vec!["claude".into()],
+                    cols: None,
+                    rows: None,
+                    claim: false,
+                    placement: placement.clone(),
+                    worker: None,
+                },
+            },
+            ClientMsg::Command(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement,
+            }),
+        ] {
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+
+        // v97 back-compat: a pre-97 layout (no key - every older
+        // server) reads `None`, the client's signal that the announcer
+        // is absent and post-announcement commands are refused
+        // client-side. The loop above already round-trips the
+        // announced form; this branch is the shape an older sends.
+        let old_layout =
+            r#"{"Layout":{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[24,80]}}"#;
+        match serde_json::from_str::<ServerMsg>(old_layout).unwrap() {
+            ServerMsg::Layout { proto, .. } => assert_eq!(proto, None),
+            other => panic!("expected a Layout, got {other:?}"),
+        }
     }
 
     #[test]
-    fn agent_row_from_v13_json_defaults_attach_id_none() {
+    fn agent_row_backcompat_rows() {
         // A pre-v14 (v13) AgentRow omits `attach_id` entirely (skip-when-None).
         // A v14 reader must decode it as `None`, never fail - the wire
         // back-compat that lets the version skew window hold.
@@ -4026,10 +4299,7 @@ mod tests {
         assert_eq!(row.attach_id, None);
         assert_eq!(row.answerable, None);
         assert_eq!(row.name, "bg");
-    }
 
-    #[test]
-    fn agent_row_from_pre_external_json_defaults_external_false() {
         // AC3-FR: a pre-external (<=v19) AgentRow omits `external`
         // entirely. A v20 reader must decode it as `false`, never fail - the
         // skew window that lets an older client talk to a v20 server during
@@ -4038,10 +4308,7 @@ mod tests {
                       "badge":null,"reason":null,"exited":false}"#;
         let row: AgentRow = serde_json::from_str(older).unwrap();
         assert!(!row.external, "missing external key => false");
-    }
 
-    #[test]
-    fn agent_row_lane_axes_are_wire_tolerant_both_ways() {
         // (v63) The three lane axes ride additive and
         // skip-when-None. A pre-v63 row (no keys) decodes with all three
         // None; a None row serializes without the keys; a filled row
@@ -4049,11 +4316,30 @@ mod tests {
         let pre = r#"{"squad":null,"name":"old","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
         let row: AgentRow = serde_json::from_str(pre).unwrap();
+        assert_eq!(row.context_used_pct, None);
+        assert_eq!(row.context_tokens, None);
+        assert_eq!(row.context_measured_at, None);
+        assert_eq!(row.started_at, None);
+        assert_eq!(row.mail_unread, None);
+        assert_eq!(row.node, None);
         assert_eq!(row.harness, None);
         assert_eq!(row.model, None);
         assert_eq!(row.route, None);
         let encoded = serde_json::to_string(&row).unwrap();
         assert!(!encoded.contains("harness"), "None axes stay off the wire");
+        for field in [
+            "context_used_pct",
+            "context_tokens",
+            "context_measured_at",
+            "started_at",
+            "mail_unread",
+            "node",
+        ] {
+            assert!(
+                !encoded.contains(field),
+                "absent readings stay off wire: {field}"
+            );
+        }
         assert!(
             !encoded.contains("\"model\""),
             "None model stays off the wire"
@@ -4065,19 +4351,23 @@ mod tests {
         assert_eq!(filled.harness.as_deref(), Some("claude"));
         assert_eq!(filled.model.as_deref(), Some("glm-5.3-flash[1m]"));
         assert_eq!(filled.route.as_deref(), Some("zai"));
+        let mut filled = filled;
+        filled.context_used_pct = Some(26);
+        filled.context_tokens = Some((258687, 1000000));
+        filled.context_measured_at = Some(1700000000);
+        filled.started_at = Some(1699989200);
+        filled.mail_unread = Some(2);
+        filled.node = Some("serialization-node".into());
         let round: AgentRow =
             serde_json::from_str(&serde_json::to_string(&filled).unwrap()).unwrap();
         assert_eq!(round, filled);
-    }
 
-    #[test]
-    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_version_is_pinned() {
         // The per-bump history lives on the PROTO_VERSION const doc; this is
         // the ONE canonical pin. Two sibling roundtrip tests used to
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 96);
+        assert_eq!(PROTO_VERSION, 98);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4134,10 +4424,26 @@ mod tests {
                 .contains("no_pane_reason"),
             "generic row omits the typed reason on the wire"
         );
+
+        // AC1-ERR: a pre-v23 AgentRow omits `seen` entirely. A v23
+        // reader must decode it as `false` - the client then degrades to the
+        // pre-feature `done == unseen`, never a panic.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert!(!row.seen, "missing seen key => false");
+
+        // AC2-EDGE: a pre-v32 AgentRow omits `subline` entirely
+        // (skip-when-None). A v32 reader must decode it as `None` and render
+        // the pre-feature one-line row, never fail - the skew window contract.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert_eq!(row.subline, None, "missing subline key => None");
     }
 
     #[test]
-    fn proto_v44_placement_fallback_and_anchored_spec_roundtrip() {
+    fn placement_backcompat_rows() {
         // the 43 -> 44 bump adds the serde-defaulted placement fallback
         // and the typed anchored-layout spec. A v43 PanePlacement omits
         // `fallback`; a v44 reader decodes it as NewTab (the shipped default),
@@ -4238,10 +4544,7 @@ mod tests {
             serde_json::from_str::<AnchoredLayoutSpec>(&json).unwrap(),
             spec
         );
-    }
 
-    #[test]
-    fn exact_placement_pane_cap_is_additive_and_roundtrips() {
         let legacy: PanePlacement = serde_json::from_str(r#"{"target":"CurrentRoute"}"#).unwrap();
         let legacy_wire = serde_json::to_string(&legacy).unwrap();
         assert!(!legacy_wire.contains("max_panes"));
@@ -4256,32 +4559,27 @@ mod tests {
             serde_json::to_string(&serde_json::from_str::<PanePlacement>(&wire).unwrap()).unwrap(),
             wire
         );
+
+        // AC3-EDGE: a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
+        // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
+        let v30 = r#"{"target":"CurrentRoute","split":null}"#;
+        let p: PanePlacement = serde_json::from_str(v30).unwrap();
+        assert!(!p.here, "missing here key => false");
+        // And a bare `{}` (all defaults) also decodes clean.
+        let empty: PanePlacement = serde_json::from_str("{}").unwrap();
+        assert!(!empty.here && empty.split.is_none());
+        assert!(matches!(empty.target, PaneTarget::CurrentRoute));
+
+        // A v40 PanePlacement omits tab/at; a v41 reader defaults both to None,
+        // preserving the whole-tab placement behavior.
+        let v40 = r#"{"target":"CurrentRoute","split":null,"here":false}"#;
+        let p: PanePlacement = serde_json::from_str(v40).unwrap();
+        assert_eq!(p.tab, None);
+        assert_eq!(p.at, None);
     }
 
     #[test]
-    fn agent_row_from_pre_seen_json_defaults_seen_false() {
-        // AC1-ERR: a pre-v23 AgentRow omits `seen` entirely. A v23
-        // reader must decode it as `false` - the client then degrades to the
-        // pre-feature `done == unseen`, never a panic.
-        let older = r#"{"squad":null,"name":"bg","pane_id":null,
-                      "badge":null,"reason":null,"exited":false}"#;
-        let row: AgentRow = serde_json::from_str(older).unwrap();
-        assert!(!row.seen, "missing seen key => false");
-    }
-
-    #[test]
-    fn agent_row_from_pre_subline_json_defaults_subline_none() {
-        // AC2-EDGE: a pre-v32 AgentRow omits `subline` entirely
-        // (skip-when-None). A v32 reader must decode it as `None` and render
-        // the pre-feature one-line row, never fail - the skew window contract.
-        let older = r#"{"squad":null,"name":"bg","pane_id":null,
-                      "badge":null,"reason":null,"exited":false}"#;
-        let row: AgentRow = serde_json::from_str(older).unwrap();
-        assert_eq!(row.subline, None, "missing subline key => None");
-    }
-
-    #[test]
-    fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
+    fn wire_skew_rows() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
         // fail - same skew contract as the v14 `AgentRow.attach_id` bump.
@@ -4296,276 +4594,22 @@ mod tests {
         // wire minimal) sees exactly the pre-v18 shape.
         let out = serde_json::to_string(&card).unwrap();
         assert!(!out.contains("pane_id") && !out.contains("where_hint"));
-    }
 
-    #[test]
-    fn pane_placement_from_pre_here_json_defaults_here_false() {
-        // AC3-EDGE: a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
-        // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
-        let v30 = r#"{"target":"CurrentRoute","split":null}"#;
-        let p: PanePlacement = serde_json::from_str(v30).unwrap();
-        assert!(!p.here, "missing here key => false");
-        // And a bare `{}` (all defaults) also decodes clean.
-        let empty: PanePlacement = serde_json::from_str("{}").unwrap();
-        assert!(!empty.here && empty.split.is_none());
-        assert!(matches!(empty.target, PaneTarget::CurrentRoute));
-    }
+        // A v40 PaneInfo omits fno_id entirely; a v41 reader defaults it to None
+        // (the skew window contract - Invariants / Locked Decision 7).
+        let v40 = r#"{"pane_id":4,"squad_id":1,"tab_id":7,
+                     "cwd":"/w","child_pid":4242,"title":null}"#;
+        let info: PaneInfo = serde_json::from_str(v40).unwrap();
+        assert_eq!(info.fno_id, None, "missing fno_id => None");
 
-    #[test]
-    fn proto_v3_server_msgs_roundtrip() {
-        // Every new/changed v3 server message survives the codec (mirrors the
-        // Phase 1/2 roundtrip discipline): Layout carries `area`, TabMeta a
-        // stable `id`, and the pre-Attach `Info` answer parses back exactly.
-        for msg in [
-            ServerMsg::Layout {
-                squads: vec![SquadMeta {
-                    id: 1,
-                    name: "footnote".into(),
-                    canonical_cwd: "/code/footnote/footnote".into(),
-                    tabs: vec![
-                        TabMeta {
-                            id: 7,
-                            name: "1".into(),
-                            named: false,
-                            panes: vec![PaneMeta {
-                                id: 4,
-                                label: "claude".into(),
-                                ..Default::default()
-                            }],
-                        },
-                        TabMeta {
-                            id: 12,
-                            name: "2".into(),
-                            named: false,
-                            panes: vec![],
-                        },
-                    ],
-                    active_tab: 1,
-                    panes: 2,
-                }],
-                active_squad: 1,
-                panes: vec![
-                    (
-                        4,
-                        Rect {
-                            x: 0,
-                            y: 0,
-                            rows: 24,
-                            cols: 40,
-                        },
-                    ),
-                    (
-                        9,
-                        Rect {
-                            x: 41,
-                            y: 0,
-                            rows: 24,
-                            cols: 39,
-                        },
-                    ),
-                ],
-                focus: 9,
-                area: (24, 80),
-                agents: vec![
-                    AgentRow {
-                        spawned_by_name: None,
-                        lineage_reason: None,
-                        harness: None,
-                        model: None,
-                        route: None,
-                        reach: Reach::Locate,
-                        spawned_by_session: None,
-                        lineage_kind: None,
-                        harness_session_id: None,
-                        squad: Some(1),
-                        name: "peer".into(),
-                        pane_id: Some(4),
-                        portal: None,
-                        badge: Some(AgentBadge::Blocked),
-                        reason: Some("permission prompt".into()),
-                        exited: false,
-                        dnd: false,
-                        unmeasured: false,
-                        liveness_measured_at: None,
-                        harness_title: None,
-                        answerable: Some(AnswerablePrompt {
-                            prompt: "Do you want to proceed?".into(),
-                            options: vec![
-                                AnswerOption {
-                                    idx: "1".into(),
-                                    label: "Yes".into(),
-                                    keystroke: b"1".to_vec(),
-                                },
-                                AnswerOption {
-                                    idx: "2".into(),
-                                    label: "No".into(),
-                                    keystroke: b"2".to_vec(),
-                                },
-                            ],
-                            fingerprint: [7u8; 32],
-                            region_lines: 8,
-                        }),
-                        attach_id: None,
-                        external: false,
-                        seen: false,
-                        cwd_base: None,
-                        tombstone: false,
-                        tab: None,
-                        subline: None,
-                        account: None,
-                        updated_at: None,
-                        pr: None,
-                        tail: None,
-                        crown_level: None,
-                        crown_scope: None,
-                        crown_title: None,
-                        basis: None,
-                        last_activity_age_s: None,
-                        resumable: false,
-                        no_pane_reason: None,
-                        pane_activity: None,
-                        pr_session_short: None,
-                    },
-                    AgentRow {
-                        spawned_by_name: None,
-                        lineage_reason: None,
-                        harness: None,
-                        model: None,
-                        route: None,
-                        reach: Reach::Locate,
-                        spawned_by_session: None,
-                        lineage_kind: None,
-                        harness_session_id: None,
-                        squad: None,
-                        name: "bg-watch".into(),
-                        pane_id: None,
-                        portal: None,
-                        badge: None,
-                        reason: None,
-                        exited: true,
-                        dnd: false,
-                        unmeasured: false,
-                        liveness_measured_at: None,
-                        harness_title: None,
-                        answerable: None,
-                        attach_id: None,
-                        external: false,
-                        seen: false,
-                        cwd_base: None,
-                        tombstone: false,
-                        tab: None,
-                        subline: None,
-                        account: None,
-                        updated_at: None,
-                        pr: None,
-                        tail: None,
-                        crown_level: None,
-                        crown_scope: None,
-                        crown_title: None,
-                        basis: None,
-                        last_activity_age_s: None,
-                        resumable: false,
-                        no_pane_reason: None,
-                        pane_activity: None,
-                        pr_session_short: None,
-                    },
-                ],
-                focus_node: Some("x-cccc".into()),
-                backlog: vec![
-                    BacklogCard {
-                        id: "x-dddd".into(),
-                        slug: "work-queue-sideline".into(),
-                        priority: "p1".into(),
-                        state: CardState::InFlight,
-                        pane_id: Some(7),
-                        attach_id: None,
-                        where_hint: None,
-                        // (v36) attribution + on-deck ride the same frame.
-                        project: Some("fno".into()),
-                        lane: Some("in-progress".into()),
-                        plan_path: None,
-                        head: false,
-                    },
-                    BacklogCard {
-                        id: "ab-53c0".into(),
-                        slug: "sync-wiki".into(),
-                        priority: "p2".into(),
-                        state: CardState::Ready,
-                        pane_id: None,
-                        attach_id: None,
-                        where_hint: None,
-                        project: None,
-                        lane: None,
-                        plan_path: None,
-                        head: true,
-                    },
-                ],
-                backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
-                backlog_stale: false,
-                sweep_dead_count: 0,
-            },
-            ServerMsg::ModeSync {
-                bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
-            },
-            ServerMsg::Notice {
-                text: "split refused: pane too small".into(),
-            },
-            ServerMsg::Bye {
-                reason: "session ended".into(),
-            },
-            ServerMsg::Info {
-                session: "work".into(),
-                clients: 2,
-                squads: 1,
-                panes: 3,
-            },
-        ] {
-            let bytes = encode(&msg).unwrap();
-            let mut cursor = std::io::Cursor::new(bytes);
-            let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
-            assert_eq!(decoded, msg);
-        }
-    }
-    #[test]
-    fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
-        let placement = PanePlacement {
-            portal_new: false,
-            view: false,
-            from: None,
-            portal: None,
-            tab: None,
-            at: None,
-            target: PaneTarget::SquadId(42),
-            split: Some(Dir::Up),
-            here: false,
-            fallback: PlacementFallback::NewTab,
-            max_panes: None,
-            thread_pane: false,
-            fit: false,
-        };
-        for msg in [
-            ClientMsg::Control {
-                proto: PROTO_VERSION,
-                build: BUILD_VERSION.into(),
-                verb: ControlVerb::PaneRun {
-                    cwd: "/code/footnote".into(),
-                    argv: vec!["claude".into()],
-                    cols: None,
-                    rows: None,
-                    claim: false,
-                    placement: placement.clone(),
-                    worker: None,
-                },
-            },
-            ClientMsg::Command(Command::AttachAgent {
-                id: "c19cd2c3".into(),
-                placement,
-            }),
-        ] {
-            let bytes = encode(&msg).unwrap();
-            let mut cursor = std::io::Cursor::new(bytes);
-            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
-            assert_eq!(decoded, msg);
+        // A raw v41 client that omits no_focus must get the advertised no-steal
+        // behavior (Locked Decision 3), NOT serde's bool default of false.
+        let json = r#"{"PaneSplit":{"pane":4,"direction":"Right"}}"#;
+        match serde_json::from_str::<ControlVerb>(json).unwrap() {
+            ControlVerb::PaneSplit { no_focus, .. } => {
+                assert!(no_focus, "omitted no_focus must default true")
+            }
+            other => panic!("expected PaneSplit, got {other:?}"),
         }
     }
 
@@ -4584,14 +4628,11 @@ mod tests {
     mod pid_zombie_tests;
 
     #[test]
-    fn proto_session_name_cannot_escape_mux_dir() {
+    fn socket_rows() {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
-    }
 
-    #[test]
-    fn state_dir_values_expand_absolute_only() {
         assert_eq!(
             expand_state_dir("/demo/state"),
             Some(PathBuf::from("/demo/state"))
@@ -4632,7 +4673,7 @@ mod tests {
     /// timeout kept the frame alive forever. The budget runs from the first
     /// stall and is never reset, so progress buys no extra time.
     #[test]
-    fn frame_completion_budget_is_not_reset_by_progress() {
+    fn reader_rows() {
         struct Trickle {
             data: Vec<u8>,
             pos: usize,
@@ -4685,6 +4726,62 @@ mod tests {
             took < FRAME_COMPLETION_BUDGET * 3,
             "progress must not extend the bound: took {took:?}"
         );
+
+        let wire = encode(&ClientMsg::Command(Command::NewTab)).unwrap();
+        let mut r = StallAfter {
+            data: wire,
+            pos: 0,
+            give: 6, // length prefix + 2 body bytes, then silence
+        };
+        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
+        match got {
+            Err(ProtoError::Io(e)) => assert!(
+                !is_retryable(&e),
+                "a desynchronised stream must not report a retryable error: {:?}",
+                e.kind()
+            ),
+            other => panic!("expected a fatal io error, got {other:?}"),
+        }
+
+        let mut r = Dribble {
+            data: Vec::new(),
+            pos: 0,
+            chunk: 4,
+            stall: false,
+        };
+        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
+        assert!(
+            matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "idle stream must stay pollable, got {got:?}"
+        );
+
+        let msg = ClientMsg::Command(Command::NewTab);
+        let mut wire = encode(&msg).unwrap();
+        // Two frames back to back, so a desync on the first corrupts the second.
+        wire.extend_from_slice(&encode(&msg).unwrap());
+        let mut r = Dribble {
+            data: wire,
+            pos: 0,
+            chunk: 3, // < 4, so the length prefix itself straddles a read
+            stall: false,
+        };
+        // Poll exactly as a real caller does: WouldBlock means "nothing yet".
+        // The property under test is that polling can never desync the framing.
+        let mut got = 0;
+        for _ in 0..200 {
+            match read_msg_sync::<_, ClientMsg>(&mut r) {
+                Ok(m) => {
+                    assert!(matches!(m, ClientMsg::Command(Command::NewTab)));
+                    got += 1;
+                    if got == 2 {
+                        return;
+                    }
+                }
+                Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("frame {got} failed: {e}"),
+            }
+        }
+        panic!("only decoded {got} of 2 frames");
     }
 
     /// A stream that delivers `give` bytes and then stalls forever.
@@ -4715,24 +4812,6 @@ mod tests {
     /// prefix is already off the stream, but every polling caller reads that
     /// error as "nothing yet" and retries - resuming mid-frame and decoding the
     /// body as a length. The stall exit must therefore be non-retryable.
-    #[test]
-    fn read_msg_sync_stalled_frame_fails_fatally_not_retryably() {
-        let wire = encode(&ClientMsg::Command(Command::NewTab)).unwrap();
-        let mut r = StallAfter {
-            data: wire,
-            pos: 0,
-            give: 6, // length prefix + 2 body bytes, then silence
-        };
-        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
-        match got {
-            Err(ProtoError::Io(e)) => assert!(
-                !is_retryable(&e),
-                "a desynchronised stream must not report a retryable error: {:?}",
-                e.kind()
-            ),
-            other => panic!("expected a fatal io error, got {other:?}"),
-        }
-    }
 
     /// A reader that dribbles bytes out `chunk` at a time and returns
     /// `WouldBlock` between chunks - what a socket with a read timeout does
@@ -4770,53 +4849,9 @@ mod tests {
     /// those bytes are gone. A caller that treats `WouldBlock` as "nothing yet"
     /// and retries would restart mid-frame, decode a garbage length, and trip
     /// the size cap - the `message of N bytes exceeds the cap` desync.
-    #[test]
-    fn read_msg_sync_reassembles_a_frame_split_mid_length_prefix() {
-        let msg = ClientMsg::Command(Command::NewTab);
-        let mut wire = encode(&msg).unwrap();
-        // Two frames back to back, so a desync on the first corrupts the second.
-        wire.extend_from_slice(&encode(&msg).unwrap());
-        let mut r = Dribble {
-            data: wire,
-            pos: 0,
-            chunk: 3, // < 4, so the length prefix itself straddles a read
-            stall: false,
-        };
-        // Poll exactly as a real caller does: WouldBlock means "nothing yet".
-        // The property under test is that polling can never desync the framing.
-        let mut got = 0;
-        for _ in 0..200 {
-            match read_msg_sync::<_, ClientMsg>(&mut r) {
-                Ok(m) => {
-                    assert!(matches!(m, ClientMsg::Command(Command::NewTab)));
-                    got += 1;
-                    if got == 2 {
-                        return;
-                    }
-                }
-                Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => panic!("frame {got} failed: {e}"),
-            }
-        }
-        panic!("only decoded {got} of 2 frames");
-    }
 
     /// An IDLE stream must still report `WouldBlock` rather than blocking, so a
     /// polling caller keeps polling. Only a STARTED frame is seen through.
-    #[test]
-    fn read_msg_sync_still_reports_wouldblock_on_an_idle_stream() {
-        let mut r = Dribble {
-            data: Vec::new(),
-            pos: 0,
-            chunk: 4,
-            stall: false,
-        };
-        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
-        assert!(
-            matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
-            "idle stream must stay pollable, got {got:?}"
-        );
-    }
 
     // ---- v41 wire compatibility -------------------------------
 
@@ -4924,38 +4959,5 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&closed).unwrap();
         assert_eq!(closed, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
-    }
-
-    #[test]
-    fn v40_paneinfo_json_defaults_fno_id_none() {
-        // A v40 PaneInfo omits fno_id entirely; a v41 reader defaults it to None
-        // (the skew window contract - Invariants / Locked Decision 7).
-        let v40 = r#"{"pane_id":4,"squad_id":1,"tab_id":7,
-                     "cwd":"/w","child_pid":4242,"title":null}"#;
-        let info: PaneInfo = serde_json::from_str(v40).unwrap();
-        assert_eq!(info.fno_id, None, "missing fno_id => None");
-    }
-
-    #[test]
-    fn v41_panesplit_omitted_no_focus_defaults_true() {
-        // A raw v41 client that omits no_focus must get the advertised no-steal
-        // behavior (Locked Decision 3), NOT serde's bool default of false.
-        let json = r#"{"PaneSplit":{"pane":4,"direction":"Right"}}"#;
-        match serde_json::from_str::<ControlVerb>(json).unwrap() {
-            ControlVerb::PaneSplit { no_focus, .. } => {
-                assert!(no_focus, "omitted no_focus must default true")
-            }
-            other => panic!("expected PaneSplit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v40_paneplacement_json_defaults_tab_and_at_none() {
-        // A v40 PanePlacement omits tab/at; a v41 reader defaults both to None,
-        // preserving the whole-tab placement behavior.
-        let v40 = r#"{"target":"CurrentRoute","split":null,"here":false}"#;
-        let p: PanePlacement = serde_json::from_str(v40).unwrap();
-        assert_eq!(p.tab, None);
-        assert_eq!(p.at, None);
     }
 }

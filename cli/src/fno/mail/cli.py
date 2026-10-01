@@ -1960,7 +1960,7 @@ def _forced_pane_send(
         )
         raise typer.Exit(code=1)
 
-    if not _mux_pane_send(entry, wrapped, guarded=False):
+    if _mux_pane_send(entry, wrapped, guarded=False) in (False, "unconfirmed"):
         _release_budget(reservation)
         # NOT "nothing was sent". One bool covers two worlds here: a refusal
         # before any bytes moved, and a paste that landed whose submit key then

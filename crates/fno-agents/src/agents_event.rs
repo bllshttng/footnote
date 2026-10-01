@@ -1,56 +1,32 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::Path;
 
-/// Append one event line to `state_dir/events.jsonl` with the Python-agents
-/// envelope (`{...fields, ts, kind}`, compact). Best-effort: on a write error
-/// it warns to stderr and returns, mirroring `agents.events.emit` so a failed
-/// telemetry write never blocks the primary command (AC1-FR).
+/// Commit one event row to the agents journal's store with the Python-agents
+/// envelope (`{ts, type, source, data}`, the unified shape
+/// `agents.events.emit` writes). Best-effort: on a store refusal it warns to
+/// stderr and returns, mirroring `agents.events.emit` so a failed telemetry
+/// write never blocks the primary command (AC1-FR).
 ///
 /// Deliberately a free function (not a `.emit()` method) so the crate's
 /// production-emit-kind scanner (which keys on `.emit(`/`.emit_fields(`) does
 /// not treat these Python-side audit kinds as Rust daemon event kinds.
 pub(crate) fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut parts: Vec<String> = fields
-        .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}:{}",
-                serde_json::to_string(k).unwrap_or_default(),
-                serde_json::to_string(v).unwrap_or_default()
-            )
-        })
-        .collect();
-    if matches!(std::env::var("FNO_CALLER_KIND").as_deref(), Ok("mux"))
-        && !fields.iter().any(|(key, _)| *key == "caller_kind")
-    {
-        parts.push(format!(
-            "\"caller_kind\":{}",
-            serde_json::to_string("mux").unwrap_or_default()
-        ));
+    let mut data = Map::new();
+    for (key, value) in fields {
+        data.insert((*key).to_string(), value.clone());
     }
-    parts.push(format!(
-        "\"ts\":{}",
-        serde_json::to_string(&ts).unwrap_or_default()
-    ));
-    parts.push(format!(
-        "\"kind\":{}",
-        serde_json::to_string(kind).unwrap_or_default()
-    ));
-    let line = format!("{{{}}}\n", parts.join(","));
-
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = events_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        use std::io::Write;
-        let mut fh = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path)?;
-        fh.write_all(line.as_bytes())
-    })();
-    if let Err(exc) = result {
+    if matches!(std::env::var("FNO_CALLER_KIND").as_deref(), Ok("mux"))
+        && !data.contains_key("caller_kind")
+    {
+        data.insert("caller_kind".into(), Value::String("mux".into()));
+    }
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "type": kind,
+        "source": "agents",
+        "data": Value::Object(data),
+    });
+    if let Err(exc) = crate::event_store::append_envelope(events_path, &event.to_string(), None) {
         eprintln!(
             "fno agents: warning: events.emit('{kind}') to {}: {exc}",
             events_path.display()
@@ -98,8 +74,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let events = dir.path().join("events.jsonl");
         append_agents_event(&events, "agent_resumed", fields);
-        let content = std::fs::read_to_string(events).unwrap();
-        (dir, content)
+        let rows = crate::event_store::query_events(
+            &events,
+            &crate::event_store::EventQuery::of_types(&["agent_resumed"]),
+        )
+        .expect("the store beside the journal opened");
+        (
+            dir,
+            rows.into_iter().next().expect("the row committed").line,
+        )
     }
 
     #[test]
@@ -110,10 +93,11 @@ mod tests {
             ("provider", Value::String("codex".into())),
         ]);
         let line = content.trim_end();
-        assert!(line.starts_with(r#"{"name":"worker-A","provider":"codex","ts":"#));
-        assert!(line.ends_with(r#""kind":"agent_resumed"}"#));
         let parsed: Value = serde_json::from_str(line).expect("valid JSON line");
-        assert_eq!(parsed["kind"], "agent_resumed");
+        assert_eq!(parsed["type"], "agent_resumed");
+        assert_eq!(parsed["source"], "agents");
+        assert_eq!(parsed["data"]["name"], "worker-A");
+        assert_eq!(parsed["data"]["provider"], "codex");
     }
 
     #[test]
@@ -126,14 +110,14 @@ mod tests {
         let (_dir, content) = event_line(&fields);
         let line = content.trim_end();
         let parsed: Value = serde_json::from_str(line).expect("valid JSON line");
-        assert_eq!(parsed["caller_kind"], "mux");
+        assert_eq!(parsed["data"]["caller_kind"], "mux");
         assert_eq!(line.matches("\"caller_kind\":").count(), 1);
 
         let (_dir, explicit_content) =
             event_line(&[("caller_kind", Value::String("explicit".into()))]);
         let explicit_line = explicit_content.trim_end();
         let explicit: Value = serde_json::from_str(explicit_line).expect("valid JSON line");
-        assert_eq!(explicit["caller_kind"], "explicit");
+        assert_eq!(explicit["data"]["caller_kind"], "explicit");
         assert_eq!(explicit_line.matches("\"caller_kind\":").count(), 1);
     }
 
@@ -146,13 +130,14 @@ mod tests {
                 ("provider", Value::String("codex".into())),
             ]);
             let parsed: Value = serde_json::from_str(content.trim_end()).unwrap();
-            let ts = parsed["ts"].as_str().unwrap();
-            assert_eq!(
-                content,
-                format!(
-                    "{{\"name\":\"worker-A\",\"provider\":\"codex\",\"ts\":\"{ts}\",\"kind\":\"agent_resumed\"}}\n"
-                )
-            );
+            assert_eq!(parsed["type"], "agent_resumed");
+            assert_eq!(parsed["source"], "agents");
+            assert_eq!(parsed["data"]["name"], "worker-A");
+            assert_eq!(parsed["data"]["provider"], "codex");
+            assert!(parsed
+                .get("data")
+                .and_then(|d| d.get("caller_kind"))
+                .is_none());
         }
     }
 }

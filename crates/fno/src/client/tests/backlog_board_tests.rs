@@ -30,16 +30,12 @@ fn board_with(inputs: backlog_model::Inputs) -> BoardView {
 // AC6-HP: before any gather the body says `reading board...`, never an
 // empty board.
 #[test]
-fn reading_board_line_shows_before_the_first_gather() {
+fn board_render_rows() {
     let b = BoardView::new(0);
     let (lines, follow) = render(&b, 120);
     assert_eq!(lines[0], "reading board...");
     assert!(follow.is_none());
-}
 
-// AC4-HP: the stats line counts every column and renders the flow line.
-#[test]
-fn stats_line_counts_columns_and_names_flow() {
     let b = board_with(board_inputs());
     let (lines, _) = render(&b, 200);
     let stats = &lines[0];
@@ -55,7 +51,62 @@ fn stats_line_counts_columns_and_names_flow() {
     ] {
         assert!(stats.contains(word), "stats line missing {word}: {stats}");
     }
+
+    let mut b = board_with(board_inputs());
+    let before = b.body.as_ref().unwrap().lanes.len();
+    let mut bad = board_inputs();
+    bad.rows_error = Some("the store read failed".into());
+    b.inputs = Some(bad);
+    rederive(&mut b);
+    assert_eq!(
+        b.body.as_ref().unwrap().lanes.len(),
+        before,
+        "last good board kept"
+    );
+    assert!(b.errors.iter().any(|e| e.contains("the store read failed")));
+    let (lines, _) = render(&b, 200);
+    assert!(lines.iter().any(|l| l.starts_with("! ")), "{lines:?}");
+
+    let mut inp = board_inputs();
+    inp.flow = json!({"available": false, "reason": "no usable window start"});
+    let b = board_with(inp);
+    let (lines, _) = render(&b, 200);
+    assert!(
+        lines[0].contains("flow: no usable window start"),
+        "{:?}",
+        lines[0]
+    );
+
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, 80);
+    let stacked = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with("In Progress  ") || l.starts_with("Now  ") || l.starts_with("Next  ")
+        })
+        .count();
+    assert!(stacked >= 3, "expected stacked headers, got {lines:?}");
+
+    let mut b = board_with(board_inputs());
+    b.query.q = Some("zzz-no-such-card".into());
+    rederive(&mut b);
+    let total: usize = b
+        .body
+        .as_ref()
+        .unwrap()
+        .lanes
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
+        .sum();
+    assert_eq!(total, 0, "no cards match");
+    let (lines, _) = render(&b, 120);
+    assert!(
+        lines.iter().any(|l| l.contains("no cards match")),
+        "{lines:?}"
+    );
 }
+
+// AC4-HP: the stats line counts every column and renders the flow line.
 
 // AC5-HP: `L` cycles project -> epic -> none and keeps the cursor on the
 // same card while the new grouping still shows it.
@@ -77,73 +128,12 @@ fn lanes_cycle_keeps_the_cursor_card() {
 }
 
 // AC6-ERR: a failed read never repaints a good board empty.
-#[test]
-fn failed_gather_keeps_the_last_good_board() {
-    let mut b = board_with(board_inputs());
-    let before = b.body.as_ref().unwrap().lanes.len();
-    let mut bad = board_inputs();
-    bad.rows_error = Some("the store read failed".into());
-    b.inputs = Some(bad);
-    rederive(&mut b);
-    assert_eq!(
-        b.body.as_ref().unwrap().lanes.len(),
-        before,
-        "last good board kept"
-    );
-    assert!(b.errors.iter().any(|e| e.contains("the store read failed")));
-    let (lines, _) = render(&b, 200);
-    assert!(lines.iter().any(|l| l.starts_with("! ")), "{lines:?}");
-}
 
 // AC7-EDGE: an unavailable flow renders its reason, never numbers.
-#[test]
-fn flow_unavailable_names_the_reason() {
-    let mut inp = board_inputs();
-    inp.flow = json!({"available": false, "reason": "no usable window start"});
-    let b = board_with(inp);
-    let (lines, _) = render(&b, 200);
-    assert!(
-        lines[0].contains("flow: no usable window start"),
-        "{:?}",
-        lines[0]
-    );
-}
 
 // AC8-EDGE: below WIDE_CELLS_AT the cells stack with `Now  12` headers.
-#[test]
-fn narrow_layout_stacks_the_cells() {
-    let b = board_with(board_inputs());
-    let (lines, _) = render(&b, 80);
-    let stacked = lines
-        .iter()
-        .filter(|l| {
-            l.starts_with("In Progress  ") || l.starts_with("Now  ") || l.starts_with("Next  ")
-        })
-        .count();
-    assert!(stacked >= 3, "expected stacked headers, got {lines:?}");
-}
 
 // AC11-EDGE: a filter matching nothing totals zero and says so.
-#[test]
-fn empty_filter_match_totals_zero_and_names_itself() {
-    let mut b = board_with(board_inputs());
-    b.query.q = Some("zzz-no-such-card".into());
-    rederive(&mut b);
-    let total: usize = b
-        .body
-        .as_ref()
-        .unwrap()
-        .lanes
-        .iter()
-        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
-        .sum();
-    assert_eq!(total, 0, "no cards match");
-    let (lines, _) = render(&b, 120);
-    assert!(
-        lines.iter().any(|l| l.contains("no cards match")),
-        "{lines:?}"
-    );
-}
 
 // The `t` key's view flow: a board wrapped in a live View with a wire
 // buffer standing in for the socket.
@@ -167,7 +157,7 @@ fn target_inputs() -> backlog_model::Inputs {
 // with /fno:target <id> and the node's project, and writes NOTHING to the
 // wire - nothing spawns before the operator's Launch press.
 #[test]
-fn t_key_prefills_the_launcher_from_a_card() {
+fn t_key_rows() {
     let mut b = board_with(target_inputs());
     focus_card(&mut b, Some("x-1"));
     let mut v = key_view(b);
@@ -183,12 +173,7 @@ fn t_key_prefills_the_launcher_from_a_card() {
     let idx = l.draft.project_idx;
     assert_eq!(l.draft.projects[idx], "/r/footnote");
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
-}
 
-// AC11-ERR: a claimed card refuses BEFORE the dock opens; the board stays
-// open and the notice names the in-flight case (the plan-refusal wording).
-#[test]
-fn t_key_refuses_a_card_already_being_worked() {
     let mut b = board_with(board_inputs());
     focus_card(&mut b, Some("x-2")); // status in_progress -> claimed
     let mut v = key_view(b);
@@ -207,12 +192,7 @@ fn t_key_refuses_a_card_already_being_worked() {
         notice,
         "x-2 is already being worked; open its session instead"
     );
-}
 
-// AC12-HP: `t` inside the drill-down targets the drill-down's node, the
-// same prefill as a card press.
-#[test]
-fn t_key_inside_the_drilldown_targets_its_node() {
     let mut b = board_with(target_inputs());
     focus_card(&mut b, Some("x-1"));
     let mut v = key_view(b);
@@ -227,12 +207,7 @@ fn t_key_inside_the_drilldown_targets_its_node() {
     assert!(v.backlog_board.is_none(), "the board closes");
     let l = v.launcher.as_ref().expect("the dock is open");
     assert_eq!(l.draft.message, "/fno:target x-1");
-}
 
-// AC13-EDGE: a kept non-empty draft is never overwritten; the dock shows
-// it and the notice names the way out.
-#[test]
-fn t_key_keeps_a_held_draft_and_says_so() {
     let mut b = board_with(target_inputs());
     focus_card(&mut b, Some("x-1"));
     let mut v = key_view(b);
@@ -252,12 +227,21 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     let notice = v.notice.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
     assert!(notice.contains("holds a draft"), "notice: {notice}");
 }
+
+// AC11-ERR: a claimed card refuses BEFORE the dock opens; the board stays
+// open and the notice names the in-flight case (the plan-refusal wording).
+
+// AC12-HP: `t` inside the drill-down targets the drill-down's node, the
+// same prefill as a card press.
+
+// AC13-EDGE: a kept non-empty draft is never overwritten; the dock shows
+// it and the notice names the way out.
 // ----: the sideline backlog view + full screen ----
 
 // The narrow render is the stacked one-column shape: each column header
 // carries its count, card rows beneath - never the six-wide cells.
 #[test]
-fn render_at_column_width_groups_by_column_with_counts() {
+fn board_wide_rows() {
     let b = board_with(board_inputs());
     let text_w = 34;
     assert!(text_w < WIDE_CELLS_AT, "the column renders stacked");
@@ -268,13 +252,54 @@ fn render_at_column_width_groups_by_column_with_counts() {
         "column group headers: {lines:?}"
     );
     assert!(lines.iter().any(|l| l.contains("First card")));
+
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, 200);
+    // The stats and flow lines also name every column but carry `·`; the
+    // merged wide header row does not.
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide row merges the cell headers onto one line");
+    for word in ["In Progress", "Now", "Next", "Later", "Triage"] {
+        let at = header.find(word).expect(word);
+        let roles = &header.roles[at..at + word.len()];
+        assert!(
+            roles.iter().all(|&r| r == roles[0]),
+            "{word} must carry one style, got {roles:?}"
+        );
+    }
+
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, WIDE_CELLS_AT);
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide header row renders at the threshold");
+    assert!(
+        header.contains("Done"),
+        "last column survives the cut: {header}"
+    );
+
+    assert_eq!(
+        elide_words(
+            "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
+            26
+        ),
+        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
+    );
+    assert_eq!(elide_words("short", 26), "short");
+    // One long word: no boundary exists, so the ellipsis follows a hard cut.
+    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
 }
 
 // `V` cycles the sideline view and the board rides with it: to backlog
 // opens the board, back to agents closes it. `x` no longer does anything
 // on the board (the dock is gone).
 #[test]
-fn v_key_cycles_the_sideline_view() {
+fn sideline_toggle_rows() {
     let mut v = key_view(board_with(board_inputs()));
     v.backlog_board = None;
     v.experimental_backlog = true;
@@ -291,17 +316,285 @@ fn v_key_cycles_the_sideline_view() {
     rt.block_on(async {
         cycle_sideline_view(&mut v);
     });
+    assert_eq!(
+        serde_json::to_value(v.sideline_view).unwrap(),
+        serde_json::json!("org")
+    );
+    rt.block_on(async {
+        cycle_sideline_view(&mut v);
+    });
     assert!(matches!(
         v.sideline_view,
         crate::view_store::SidelineView::Agents
     ));
     assert!(v.backlog_board.is_none(), "agents view closes the board");
-}
+    crate::client::org_board::check_fixture(&mut v);
+    let mut sock: Vec<u8> = Vec::new();
+    rt.block_on(async {
+        crate::client::org_board::keys(&mut v, b"\t\t\tF", &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(v.board_full);
+    assert_eq!(
+        v.org_board.as_ref().unwrap().mode,
+        crate::view_store::OrgMode::Tree
+    );
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Board
+    );
+    let selected_session = |agent: Option<crate::proto::AgentRow>| {
+        crate::client::org_board::Selected::Session(crate::org_model::OrgSession {
+            view: backlog_model::SessionView {
+                phase: Some("execute".into()),
+                harness: Some("claude".into()),
+                session_id: Some("session-live-full".into()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                agent: Some("worker".into()),
+                action: "attach".into(),
+                reason: None,
+            },
+            agent,
+        })
+    };
+    let agent = crate::proto::AgentRow {
+        name: "worker".into(),
+        harness: Some("claude".into()),
+        harness_session_id: Some("session-live-full".into()),
+        pane_id: Some(44),
+        context_used_pct: Some(26),
+        context_tokens: Some((258687, 1000000)),
+        node: Some("x-1".into()),
+        model: Some("requested-model".into()),
+        started_at: Some(crate::digest_overlay::now_secs() - 10800),
+        ..Default::default()
+    };
+    let mut second_seat = agent.clone();
+    second_seat.pane_id = Some(45);
+    v.layout.agents = vec![agent.clone(), second_seat.clone()];
+    assert_eq!(
+        crate::client::node_detail::resolve_session(
+            &v,
+            Some("session-live-full"),
+            Some("claude"),
+            Some(&second_seat)
+        )
+        .unwrap()
+        .pane_id,
+        Some(45)
+    );
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("session-live-full"),
+        Some("claude"),
+        None
+    )
+    .is_none());
+    let old_bare = crate::proto::AgentRow {
+        name: "before rename".into(),
+        pane_id: Some(66),
+        ..Default::default()
+    };
+    v.layout.agents = vec![crate::proto::AgentRow {
+        name: "after rename".into(),
+        pane_id: Some(66),
+        ..Default::default()
+    }];
+    assert_eq!(
+        crate::client::node_detail::resolve_session(&v, None, None, Some(&old_bare))
+            .unwrap()
+            .pane_id,
+        Some(66)
+    );
+    v.layout.agents = vec![agent.clone()];
+    sock.clear();
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            selected_session(Some(agent.clone())),
+            b'\r',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    let mut expected = Vec::new();
+    rt.block_on(async {
+        crate::proto::write_msg(
+            &mut expected,
+            &crate::proto::ClientMsg::Command(crate::proto::Command::FocusPane(44)),
+        )
+        .await
+        .unwrap();
+    });
+    assert_eq!(sock, expected, "Org Enter uses the existing focus command");
+    assert!(v.org_board.is_none());
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane
+    );
+    crate::client::org_board::open(&mut v);
+    v.layout.agents[0].harness_session_id = Some("successor-full-session".into());
+    sock.clear();
+    rt.block_on(async {
+        crate::client::org_board::dispatch(&mut v, selected_session(None), b'\r', &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(
+        sock.is_empty(),
+        "former identity never selects a same-name successor"
+    );
+    assert_eq!(
+        v.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("no registry row")
+    );
+    v.layout.agents = vec![agent.clone()];
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            selected_session(Some(agent.clone())),
+            b'd',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    let detail = v.org_board.as_ref().unwrap().detail.as_ref().unwrap();
+    let request = detail.request;
+    let identity = detail.identity.clone();
+    let gen = v.org_generation;
+    let message = format!("{} END-FULL-ROSTER-MESSAGE", "full text ".repeat(35));
+    let roster = serde_json::to_vec(&json!({"agents":[{
+        "name":"worker", "harness":"claude", "harness_session_id":"session-live-full",
+        "observed_model":{"model":"actual-model", "kind":"transcript"},
+        "model":"requested-model", "model_basis":"spawn", "effort":"high", "effort_basis":"spawn",
+        "status":"working", "status_basis":"transcript", "progress":"awaiting-operator", "progress_basis":"assistant",
+        "last_message":message,
+        "last_event_at":"2026-09-30T12:34:56Z", "last_activity_basis":"transcript",
+    }]})).unwrap();
+    let payload = crate::client::org_detail::select_roster(&roster, &agent).unwrap();
+    let changed = |request, identity, result| crate::client::org_detail::OrgMsg::Detail {
+        request,
+        identity,
+        result,
+    };
+    crate::client::org_detail::apply(
+        &mut v,
+        gen.wrapping_sub(1),
+        changed(request, identity.clone(), Ok(payload.clone())),
+    );
+    let rendered = |v: &View| {
+        v.org_board
+            .as_ref()
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .lines(200)
+            .into_iter()
+            .map(|l| l.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "stale view generation ignored"
+    );
+    crate::client::org_detail::apply(
+        &mut v,
+        gen,
+        changed(request, "other identity".into(), Ok(payload.clone())),
+    );
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "changed selection ignored"
+    );
+    crate::client::org_detail::apply(
+        &mut v,
+        gen,
+        changed(request + 1, identity.clone(), Ok(payload.clone())),
+    );
+    assert!(
+        !rendered(&v).contains("actual-model"),
+        "different request ignored"
+    );
+    crate::client::org_detail::apply(&mut v, gen, changed(request, identity, Ok(payload)));
+    let text = rendered(&v);
+    for expected in [
+        "26% used",
+        "258,687 of 1,000,000",
+        "actual-model (transcript)",
+        "requested-model (spawn)",
+        "3h",
+        "x-1",
+        "END-FULL-ROSTER-MESSAGE",
+        "Last activity: 2026-09-30T12:34:56Z (transcript)",
+        "Needs-you:",
+    ] {
+        assert!(text.contains(expected), "detail omitted {expected}: {text}");
+    }
+    assert!(crate::client::org_detail::select_roster(b"{}", &agent).is_err());
+    let ambiguous = serde_json::to_vec(&json!([{"harness":"claude","session_id":"session-live-full"},{"harness":"claude","session_id":"session-live-full"}])).unwrap();
+    assert!(crate::client::org_detail::select_roster(&ambiguous, &agent)
+        .unwrap_err()
+        .contains("ambiguous"));
+    rt.block_on(async {
+        crate::client::org_board::keys(&mut v, &[27], &mut sock)
+            .await
+            .unwrap();
+    });
+    assert!(v.org_board.as_ref().unwrap().detail.is_none());
+    let mut short = agent.clone();
+    short.harness_session_id = Some("abcdef01-first".into());
+    v.layout.agents = vec![short.clone()];
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("abcdef01"),
+        Some("claude"),
+        None
+    )
+    .is_some());
+    short.harness_session_id = Some("abcdef01-second".into());
+    v.layout.agents.push(short);
+    assert!(crate::client::node_detail::resolve_session(
+        &v,
+        Some("abcdef01"),
+        Some("claude"),
+        None
+    )
+    .is_none());
+    assert!(crate::client::node_detail::resolve_session(&v, None, None, None).is_none());
+    let inputs = board_inputs();
+    let node = backlog_model::node(&inputs, "x-1").unwrap();
+    v.org_board.as_mut().unwrap().inputs = Some(inputs);
+    v.experimental_backlog = false;
+    rt.block_on(async {
+        crate::client::org_board::dispatch(
+            &mut v,
+            crate::client::org_board::Selected::Node(node),
+            b'\r',
+            &mut sock,
+        )
+        .await
+        .unwrap();
+    });
+    assert!(v.org_board.is_none());
+    assert_eq!(
+        v.backlog_board
+            .as_ref()
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "x-1"
+    );
+    assert_eq!(v.sideline_view, crate::view_store::SidelineView::Backlog);
 
-// `F` toggles the full-screen board and back; the first Esc folds the
-// full screen back to the column, the second closes the board.
-#[test]
-fn f_key_toggles_full_screen() {
     let mut v = key_view(board_with(board_inputs()));
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -327,6 +620,9 @@ fn f_key_toggles_full_screen() {
     );
 }
 
+// `F` toggles the full-screen board and back; the first Esc folds the
+// full screen back to the column, the second closes the board.
+
 // The docked board's column owns no agents rows. A press anywhere in it
 // resolves no sideline row, no drag source, and no chrome hit - the board is
 // keyboard-driven, and a click must never act on a phantom agent row.
@@ -345,7 +641,7 @@ fn board_column_resolves_no_agents_rows_or_chrome_hits() {
 // prefix byte fell into the board's byte catch-all: `^B C` toggled nothing
 // and `^B ?` opened the board's own keys overlay instead of the keybinds.
 #[test]
-fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
+fn chord_rows() {
     let mut v = key_view(board_with(board_inputs()));
     // "Holds the keyboard" is now explicit: a windowed board owns the input
     // only after the operator opened or clicked it, which in the real flow
@@ -385,13 +681,7 @@ fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
             .unwrap_or(false),
         "the board's keys overlay did not arm behind the chord"
     );
-}
 
-// a chord that opens a lower-priority modal over the docked board hands the
-// keyboard to that modal: `^B i` opens the composer, and a Tab then cycles
-// the composer's tab - it never falls through to the board's folder.
-#[test]
-fn a_modal_opened_over_the_board_owns_the_keyboard() {
     let mut v = key_view(board_with(board_inputs()));
     // The board holds the keyboard until the composer chord hands it over;
     // the sideline rides the backlog view as every real open does.
@@ -424,11 +714,15 @@ fn a_modal_opened_over_the_board_owns_the_keyboard() {
     assert!(v.backlog_board.is_some(), "the board stays docked");
 }
 
+// a chord that opens a lower-priority modal over the docked board hands the
+// keyboard to that modal: `^B i` opens the composer, and a Tab then cycles
+// the composer's tab - it never falls through to the board's folder.
+
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
 // content, region-framed, with the card rows visible.
 #[test]
-fn compose_paints_the_backlog_inside_the_sideline_column() {
+fn compose_rows() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
@@ -436,12 +730,7 @@ fn compose_paints_the_backlog_inside_the_sideline_column() {
     assert!(text.contains("filters"), "filter bar frame: {text}");
     assert!(text.contains("In Progress"), "column header: {text}");
     assert!(text.contains("mux card"), "card row: {text}");
-}
 
-// Full screen paints the filter bar, the board pane and the two-row hint;
-// the hint carries the edit keys (the footer's replacement).
-#[test]
-fn compose_full_screen_board_fills_the_terminal() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
@@ -464,6 +753,9 @@ fn compose_full_screen_board_fills_the_terminal() {
         "hint carries the edit keys: {text}"
     );
 }
+
+// Full screen paints the filter bar, the board pane and the two-row hint;
+// the hint carries the edit keys (the footer's replacement).
 
 // ----: D1/D2 proof - distinct attributes, no INVERSE, real frames ----
 
@@ -517,7 +809,7 @@ fn cell_at(frame: &crate::proto::Frame, r: usize, c: usize, cols: usize) -> crat
 // cell, a card-id cell, a meta cell and the cursor band carry DISTINCT
 // attribute sets, and no cell carries INVERSE.
 #[test]
-fn backlog_panel_cells_carry_distinct_attributes() {
+fn board_cells_rows() {
     let mut view = sideline_backlog_view();
     view.board_full = true;
     let frame = view.compose();
@@ -594,11 +886,7 @@ fn backlog_panel_cells_carry_distinct_attributes() {
             );
         }
     }
-}
 
-// The full-screen board keeps the hierarchy on the terminal's own bg.
-#[test]
-fn full_board_panel_cells_match_the_theme_bg() {
     let mut view = sideline_backlog_view();
     view.board_full = true;
     let frame = view.compose();
@@ -611,10 +899,12 @@ fn full_board_panel_cells_match_the_theme_bg() {
     assert!(text.contains("In Progress"), "{text}");
 }
 
+// The full-screen board keeps the hierarchy on the terminal's own bg.
+
 // Evidence shots (FNO_UX_SHOTS): the sideline column, the full board and
 // the node detail, each composed for real.
 #[test]
-fn ux_shot_backlog_sideline_column() {
+fn ux_shot_rows() {
     use crate::frame_html::write_shot;
     let view = sideline_backlog_view();
     let frame = view.compose();
@@ -623,11 +913,7 @@ fn ux_shot_backlog_sideline_column() {
         "ux-shot-backlog-sideline",
         "the backlog as a sideline view",
     );
-}
 
-#[test]
-fn ux_shot_backlog_full_board() {
-    use crate::frame_html::write_shot;
     let mut view = sideline_backlog_view();
     view.board_full = true;
     let frame = view.compose();
@@ -636,11 +922,7 @@ fn ux_shot_backlog_full_board() {
         "ux-shot-backlog-full-board",
         "the full-screen backlog board",
     );
-}
 
-#[test]
-fn ux_shot_backlog_node_detail() {
-    use crate::frame_html::write_shot;
     let mut view = sideline_backlog_view();
     if let Some(b) = view.backlog_board.as_mut() {
         b.detail = Some(node_detail::NodeDetailOverlay {
@@ -703,14 +985,11 @@ fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
 }
 
 #[test]
-fn board_edit_keys_open_their_inputs() {
+fn edit_key_rows() {
     edit_key_opens_input(b"e", BoardInputKind::Title, false);
     edit_key_opens_input(b"D", BoardInputKind::Append, false);
     edit_key_opens_input(b"N", BoardInputKind::Note, false);
-}
 
-#[test]
-fn detail_edit_keys_open_their_inputs() {
     edit_key_opens_input(b"e", BoardInputKind::Title, true);
     edit_key_opens_input(b"D", BoardInputKind::Append, true);
     edit_key_opens_input(b"N", BoardInputKind::Note, true);
@@ -719,7 +998,7 @@ fn detail_edit_keys_open_their_inputs() {
 // p/s/S open their pickers from both surfaces; the target follows the
 // detail's node when it is open.
 #[test]
-fn field_pickers_open_from_board_and_detail() {
+fn board_picker_rows() {
     for (key, from_detail) in [
         (b'p', false),
         (b's', false),
@@ -752,12 +1031,7 @@ fn field_pickers_open_from_board_and_detail() {
             "{key} from detail={from_detail} opens the picker"
         );
     }
-}
 
-// The `c` column picker: opening, hiding the focus column, and the focus
-// width clamp (25..=75), each persisted.
-#[test]
-fn colpick_hides_and_rewides_the_focus_column() {
     let mut v = key_view(board_with(board_inputs()));
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -786,63 +1060,19 @@ fn colpick_hides_and_rewides_the_focus_column() {
     assert_eq!(b.layout.focus_pct, 75, "focus clamps at 75");
 }
 
+// The `c` column picker: opening, hiding the focus column, and the focus
+// width clamp (25..=75), each persisted.
+
 // The crown's finding: a wide row merged its columns' role walks out of
 // lockstep, so a header's style landed mid-word (`No|w`). Each header word
 // carries exactly one style.
-#[test]
-fn wide_cell_headers_carry_one_style_per_header() {
-    let b = board_with(board_inputs());
-    let (lines, _) = render(&b, 200);
-    // The stats and flow lines also name every column but carry `·`; the
-    // merged wide header row does not.
-    let header = lines
-        .iter()
-        .filter(|l| !l.contains('\u{b7}'))
-        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
-        .expect("the wide row merges the cell headers onto one line");
-    for word in ["In Progress", "Now", "Next", "Later", "Triage"] {
-        let at = header.find(word).expect(word);
-        let roles = &header.roles[at..at + word.len()];
-        assert!(
-            roles.iter().all(|&r| r == roles[0]),
-            "{word} must carry one style, got {roles:?}"
-        );
-    }
-}
 
 // The wide layout keeps every shown column inside the row width: at the
 // WIDE_CELLS_AT threshold with the six default columns, the last column's
 // header still paints (the 12-column floors never overrun `w`).
-#[test]
-fn wide_layout_fits_every_shown_column_at_the_threshold() {
-    let b = board_with(board_inputs());
-    let (lines, _) = render(&b, WIDE_CELLS_AT);
-    let header = lines
-        .iter()
-        .filter(|l| !l.contains('\u{b7}'))
-        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
-        .expect("the wide header row renders at the threshold");
-    assert!(
-        header.contains("Done"),
-        "last column survives the cut: {header}"
-    );
-}
 
 // The crown's finding: a summary cut mid-word (`Nex`) reads as a broken
 // word; the cut lands after a whole word and carries an ellipsis.
-#[test]
-fn summary_lines_elide_at_a_word_with_an_ellipsis() {
-    assert_eq!(
-        elide_words(
-            "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
-            26
-        ),
-        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
-    );
-    assert_eq!(elide_words("short", 26), "short");
-    // One long word: no boundary exists, so the ellipsis follows a hard cut.
-    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
-}
 
 // D5: a detail field's label reads dim and its value stays normal.
 #[test]
@@ -869,7 +1099,7 @@ fn detail_field_labels_go_dim_and_values_stay_normal() {
 // AC4-HP: Space on value rows builds a multi-select set; the board keeps
 // cards in either status; `any` clears the set.
 #[test]
-fn space_toggle_multi_select_and_any_clears() {
+fn facet_rows() {
     let mut inp = board_inputs();
     if let Some(r) = inp.rows.get_mut(2) {
         r["status"] = json!("done");
@@ -934,11 +1164,7 @@ fn space_toggle_multi_select_and_any_clears() {
     facet_toggle(&mut v);
     let b = v.backlog_board.as_ref().expect("board open");
     assert!(b.query.sets.get("status").is_none(), "any clears the set");
-}
 
-// AC3-EDGE bar half: with no tags anywhere, the bar names the hidden facet.
-#[test]
-fn filter_bar_says_labels_hidden_while_no_node_carries_a_tag() {
     let b = board_with(board_inputs());
     let board = b.body.as_ref().unwrap();
     let lines = filter_bar_lines(&b, board, 120);
@@ -948,12 +1174,7 @@ fn filter_bar_says_labels_hidden_while_no_node_carries_a_tag() {
             .any(|l| l.text.contains("Labels: none on any node")),
         "{lines:?}"
     );
-}
 
-// AC3-EDGE picker half: the tag facet hides while empty and shows once a
-// row carries one.
-#[test]
-fn tag_facet_hides_while_empty_and_shows_with_values() {
     let b = board_with(board_inputs());
     let names: Vec<&str> = visible_facets(b.body.as_ref().unwrap())
         .into_iter()
@@ -972,6 +1193,11 @@ fn tag_facet_hides_while_empty_and_shows_with_values() {
         .collect();
     assert!(names.contains(&"tag"), "a tagged row reveals the facet");
 }
+
+// AC3-EDGE bar half: with no tags anywhere, the bar names the hidden facet.
+
+// AC3-EDGE picker half: the tag facet hides while empty and shows once a
+// row carries one.
 
 // The paint memos must rebuild only when their key moves. A build
 // counter makes the contract mechanical: same key, one build; any key

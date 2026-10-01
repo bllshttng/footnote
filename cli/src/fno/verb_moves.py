@@ -90,7 +90,9 @@ VERB_MOVES: dict[str, Move] = {
     ),
     "pr-watch": Move(kind="deprecated", to="do pr watch"),
     "research": Move(kind="deprecated", to="do research"),
-    "restart": Move(kind="deprecated", to="agents restart"),
+    # restart stays a permanent alias (2026-09-30 operator ruling): it is the
+    # muscle-memory spelling, so it forwards silently, no move notice.
+    "restart": Move(kind="alias", to="agents restart"),
     "resume": Move(kind="deprecated", to="do resume"),
     "retro": Move(kind="deprecated", to="backlog retro"),
     "review": Move(kind="deprecated", to="do review"),

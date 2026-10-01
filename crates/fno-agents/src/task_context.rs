@@ -713,52 +713,37 @@ mod tests {
     }
 
     #[test]
-    fn prepare_validates_and_stamps_a_digest() {
+    fn prepare_rows() {
         let b = binding(vec![source("PLAN.md", "plan bytes\n")]);
         b.validate().expect("valid");
         let digest = b.digest().expect("digest");
         assert_eq!(digest.len(), 64);
         // Deterministic: same binding, same digest.
         assert_eq!(digest, b.digest().expect("digest"));
-    }
 
-    #[test]
-    fn byte_measures_stay_separate() {
         let body = "plan bytes\n";
         let b = binding(vec![source("PLAN.md", body)]);
         assert_eq!(b.source_bytes, body.len() as u64);
         assert_eq!(b.payload_bytes, 512);
         assert_ne!(b.source_bytes, b.payload_bytes);
-    }
 
-    #[test]
-    fn source_bytes_must_match_references() {
         let mut b = binding(vec![source("PLAN.md", "plan bytes\n")]);
         b.source_bytes = 999;
         assert_eq!(
             b.validate().unwrap_err(),
             "source_bytes_mismatch: 11 != declared 999"
         );
-    }
 
-    #[test]
-    fn corrupt_declared_binding_refuses_by_name() {
         let b = binding(vec![source("PLAN.md", "plan bytes\n")]);
         let mut value = serde_json::to_value(&b).expect("serialize");
         value["binding_digest"] = json!(format!("{:0>64}", "0"));
         let err = BoundBinding::load(&value).unwrap_err();
         assert_eq!(err, "binding_digest_mismatch");
-    }
 
-    #[test]
-    fn unsupported_version_refuses_by_name() {
         let mut b = binding(vec![]);
         b.version = 99;
         assert!(b.validate().unwrap_err().starts_with("unsupported_version"));
-    }
 
-    #[test]
-    fn source_paths_must_stay_inside_the_worktree() {
         for path in ["/etc/passwd", "../outside/PLAN.md", "docs/../../escape"] {
             let mut b = binding(vec![source(path, "x\n")]);
             b.source_bytes = 2;
@@ -775,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_moves_forward_only_and_restamps() {
+    fn stage_rows() {
         let b = binding(vec![]);
         let submitted = b.advance_stage(&Stage::Submitted).expect("advance");
         assert_eq!(submitted.stage, Stage::Submitted);
@@ -796,10 +781,7 @@ mod tests {
             .advance_stage(&Stage::Observed)
             .unwrap_err()
             .starts_with("stage_transition_invalid"));
-    }
 
-    #[test]
-    fn stage_graph_rejects_skips_and_post_terminal_edges() {
         // The declared transition graph, not a rank order: no skipping the
         // submitted stage, and no edge leaves a terminal stage.
         let b = binding(vec![]);
@@ -816,10 +798,7 @@ mod tests {
             .advance_stage(&Stage::Unavailable)
             .unwrap_err()
             .starts_with("stage_transition_invalid"));
-    }
 
-    #[test]
-    fn stage_advance_cannot_silent_change_the_core() {
         let mut b = binding(vec![]);
         b.payload_bytes = 1;
         let mut tampered = b.clone();
@@ -845,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn revalidate_ok_when_sources_unchanged_regardless_of_head() {
+    fn revalidate_rows() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path().to_string_lossy().to_string();
         write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
@@ -859,10 +838,7 @@ mod tests {
         }));
         assert_eq!(verdict["ok"], json!(true), "{verdict}");
         assert_eq!(verdict["checked_sources"], json!(1));
-    }
 
-    #[test]
-    fn revalidate_names_missing_and_stale_sources() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path().to_string_lossy().to_string();
         write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
@@ -886,10 +862,7 @@ mod tests {
                 ["reason"],
             json!("stale_source: docs/PLAN.md")
         );
-    }
 
-    #[test]
-    fn revalidate_names_wrong_attempt_and_foreign_session() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path().to_string_lossy().to_string();
         let mut b = binding(vec![]);
@@ -912,10 +885,7 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("foreign_session"));
-    }
 
-    #[test]
-    fn revalidate_refuses_a_foreign_worktree() {
         let dir = tempfile::tempdir().expect("tmp");
         let other = tempfile::tempdir().expect("tmp");
         write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
@@ -935,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_block_is_bounded_and_names_identity() {
+    fn payload_rows() {
         let mut b = binding(vec![]);
         b.required_constraints = vec![];
         for i in 0..14 {
@@ -948,10 +918,7 @@ mod tests {
         assert_eq!(block.matches("- constraint ").count(), 10, "{block}");
         assert!(!block.contains("constraint 10"), "cap at 10: {block}");
         assert!(block.contains("not a read"));
-    }
 
-    #[test]
-    fn payload_from_file_degrades_to_none_on_missing_or_corrupt() {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("binding.json");
         let payload_of = |p: &std::path::Path| {
@@ -986,14 +953,11 @@ mod tests {
     }
 
     #[test]
-    fn gate_absent_when_nothing_declared() {
+    fn gate_rows() {
         let verdict = gate_request(&json!({"node": "x-aaaa", "root": "/wt", "env": {}}));
         assert_eq!(verdict["ok"], json!(true));
         assert_eq!(verdict["declared"], json!(false));
-    }
 
-    #[test]
-    fn gate_names_unreadable_by_context_prefix() {
         let verdict = gate_request(&json!({
             "node": "x-aaaa",
             "root": "/wt",
@@ -1001,10 +965,7 @@ mod tests {
         }));
         assert_eq!(verdict["ok"], json!(false));
         assert_eq!(verdict["reason"], json!("context_binding_unreadable"));
-    }
 
-    #[test]
-    fn gate_absorbs_revalidate_refusals_with_the_context_prefix() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path().to_string_lossy().to_string();
         write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
@@ -1038,10 +999,7 @@ mod tests {
         // A wrong node refuses by name; the detail carries the full answer.
         let wrong = gate_on("x-other");
         assert_eq!(wrong["reason"], json!("context_wrong_node"));
-    }
 
-    #[test]
-    fn prepare_writes_the_bound_file_to_out() {
         let dir = tempfile::tempdir().expect("tmp");
         let b = binding(vec![source("PLAN.md", "plan bytes\n")]);
         let mut b = serde_json::to_value(&b).expect("serialize");

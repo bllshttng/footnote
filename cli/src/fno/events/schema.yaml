@@ -3248,6 +3248,19 @@ event_types:
         detail:
           type: string
 
+  - name: agent_spawn_refused
+    description: "A pre-birth refusal of `fno agents spawn`: a gate stopped the launch before any worker existed (substrate, seed, node read, permissions), with the argv and the door's fatal stderr line, so the feed shows every refused launch."
+    sources: [daemon]
+    data:
+      required: [argv, exit_code, reason]
+      properties:
+        argv:
+          type: array
+        exit_code:
+          type: integer
+        reason:
+          type: string
+
   - name: codex_thread_resumed_without_state_grant
     description: "A codex thread was auto-resumed with no reconstructible state-root grant. The roots reach a spawn as an RPC param from the Python seam, and daemon-side recovery has no such param, so this worker may be unable to claim or mail. Emitted so the loss is readable instead of silent; bounded threads only, since a full-access thread needs no grant."
     sources: [daemon]
@@ -3554,6 +3567,29 @@ event_types:
           type: string
           enum: [no_claim, gone, held_by_other, stale, contended, write_failed, harness, not_async]
           description: "Optional. Set ONLY when the fire carried a watching intent and the idle was refused: why the watch lease or the idle posture refused. 'no_claim' = the manifest recorded no claim pair at init; 'gone'/'held_by_other'/'stale' are permanent for the session (arming another watcher cannot help); 'contended'/'write_failed' can succeed on retry; 'harness'/'not_async' = the idle posture itself refused before any lease read."
+    consumers: [operator]
+
+  - name: pr_watch_draft_flip
+    description: "The pr-watch sweep flipped an open fno-bound draft PR back to ready (config.pr.open_ready's second enforcement point, decided by crates/fno-agents/src/pr_draft_ready.rs through the graph-get door)."
+    sources: [daemon, test]
+    data:
+      required: [pr, repo, node, outcome]
+      properties:
+        pr:
+          type: integer
+          description: "The flipped PR's number."
+        repo:
+          type: string
+          description: "The owner/repo slug the flip was pinned to (--repo); unknown-repo when unresolvable."
+        node:
+          type: string
+          description: "The backlog node the watched PR belongs to; empty when unbound."
+        outcome:
+          type: string
+          enum: [flipped, error]
+        error:
+          type: string
+          description: "Optional. gh's refusal text on an error outcome, bounded at 200 chars."
     consumers: [operator]
 
   - name: control_plane_tick
@@ -4472,6 +4508,54 @@ event_types:
         panes:
           type: integer
           description: "How many panes the server held at exit."
+    consumers: [operator]
+
+  - name: composer_shell_ran
+    retention: durable
+    description: "The composer's bang mode ran one shell line: a leading ! turned the input into a shell prompt and Enter sent the line through PaneRun. One row per run, naming the project cwd, the resolved login shell, the line and the pane that hosts it."
+    sources: [cli, test]
+    data:
+      required: [mux_session, cwd, shell, line, pane]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the line was sent to."
+        cwd:
+          type: string
+          description: "The project cwd the pane was spawned in (the composer's Project chip)."
+        shell:
+          type: string
+          description: "The resolved login shell the line runs under."
+        line:
+          type: string
+          description: "The shell line verbatim, cut to 512 chars."
+        pane:
+          type: integer
+          description: "The pane id PaneSpawned returned for the new pane."
+    consumers: [operator]
+
+  - name: composer_shell_refused
+    retention: durable
+    description: "The composer's bang mode refused to run a shell line: no project chosen, the control socket refused, or the reply never arrived. One row per refusal with the reason; the composer keeps the line and shell mode so the user can retry."
+    sources: [cli, test]
+    data:
+      required: [mux_session, cwd, line, reason, outcome]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the line was meant for."
+        cwd:
+          type: string
+          description: "The project cwd at the attempt (empty when no project was chosen)."
+        line:
+          type: string
+          description: "The shell line verbatim, cut to 512 chars."
+        reason:
+          type: string
+          description: "The refusal reason verbatim."
+        outcome:
+          enum: [refused, unanswered]
+          description: "refused: the run never started. unanswered: the verb reached the server and no reply came back inside the deadline; the server's side is unknown."
     consumers: [operator]
 
   - name: mail_origin_classified

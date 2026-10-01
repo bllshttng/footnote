@@ -13,7 +13,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
-from fno.rust_binary import VerbUnavailable, verb_call
+from fno.rust_binary import VerbUnavailable
 from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_LINE
 
 GRAPHQL_RESERVE = 200
@@ -340,6 +340,10 @@ def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = F
 def _gh_budget(payload: dict) -> dict:
     # The budget ops ride the existing fleet-incident action as an argument
     # (law d-fe66560a allows no new client action); the door is unchanged.
+    # Call-time import: a module-top capture can permanently hold a test's
+    # monkeypatched verb_call stub, leaking it into every later reader.
+    from fno.rust_binary import verb_call
+
     return verb_call("fleet-incident", payload, timeout=5)
 
 

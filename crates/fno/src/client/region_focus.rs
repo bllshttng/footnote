@@ -26,14 +26,16 @@ impl View {
     /// A full-screen board owns unconditionally: it covers every cell, so no
     /// pane is reachable to hold the keyboard under it.
     pub(crate) fn input_owner(&self) -> RegionOwner {
-        if self.board_full && self.backlog_board.is_some() {
+        if self.board_full && (self.backlog_board.is_some() || self.org_board.is_some()) {
             return RegionOwner::Board;
         }
         match self.region_owner {
             RegionOwner::Feed if self.feed.is_some() => RegionOwner::Feed,
             RegionOwner::Board
-                if self.backlog_board.is_some()
-                    && self.sideline_view == crate::view_store::SidelineView::Backlog =>
+                if (self.backlog_board.is_some()
+                    && self.sideline_view == crate::view_store::SidelineView::Backlog)
+                    || (self.org_board.is_some()
+                        && self.sideline_view == crate::view_store::SidelineView::Org) =>
             {
                 RegionOwner::Board
             }
@@ -114,6 +116,12 @@ pub(super) async fn mouse_pre_pass(
         {
             view.link_hover.clear();
         }
+        // The feed's provenance modal, the top surface, owns the pointer:
+        // hover selects, a click runs the row's action, off-popup dismisses.
+        if view.feed_detail.is_some() {
+            feed_detail::mouse(view, rep, sock_w).await?;
+            continue;
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
@@ -142,7 +150,19 @@ pub(super) async fn mouse_pre_pass(
         // report routes to the sideline's own handlers - the dock first,
         // then the hit path a normal-mode sideline click runs (clamped into
         // the panel's column space) - and no byte ever reaches a pane.
-        if view.sideline_full {
+        if view.org_board.is_some() && view.board_full {
+            if view.launcher.is_some() && agent_launcher::launcher_mouse(view, rep, sock_w).await? {
+                continue;
+            }
+            if modal_mouse(view, rep) {
+                continue;
+            }
+            view.hover_pending = None;
+            view.hover_row = None;
+            org_board::mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        if view.sideline_full && view.sideline_view == crate::view_store::SidelineView::Agents {
             sideline::route_mouse(view, rep, sock_w).await?;
             continue;
         }
@@ -507,6 +527,17 @@ pub(super) async fn mouse_pre_pass(
         // focus-follows-mouse settle target, and swallow it - a Move is never
         // forwarded to a pane. The actual FocusPane is committed by the select
         // loop's settle timer (a rested pointer emits no further motion event).
+        if view.org_board.is_some()
+            && !view.board_full
+            && view.sideline_view == crate::view_store::SidelineView::Org
+            && (rep.col as usize) + 1 < view.panel_w() as usize
+            && !(rep.row as usize == view.term.0 as usize - 1 && view.bottom_row_is_chrome())
+        {
+            view.hover_pending = None;
+            view.hover_row = None;
+            org_board::mouse(view, rep, sock_w).await?;
+            continue;
+        }
         if matches!(rep.kind, MouseKind::Move) {
             view.on_hover(rep.row, rep.col, Instant::now());
             continue;

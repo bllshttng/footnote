@@ -22,6 +22,8 @@ use crate::clipboard::on_path;
 use crate::popup::{Anchor, NavDir, Popup, PopupRow};
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
 
+mod bang;
+
 /// Ceiling on an open bracketed paste's carried bytes. The submit gate
 /// refuses an over-cap message anyway; this only stops a close-marker-less
 /// paste from growing the carry forever.
@@ -136,6 +138,23 @@ pub(crate) enum Focus {
 }
 
 impl Focus {
+    /// The chip's spoken name, for the keybar's Enter hint: the hint names
+    /// the chip Enter opens instead of a generic "open/launch".
+    fn name(self) -> &'static str {
+        match self {
+            Self::Where => "where",
+            Self::Project => "project",
+            Self::Branch => "branch",
+            Self::Worktree => "worktree",
+            Self::Message => "message",
+            Self::Plus => "flags",
+            Self::Permission => "permission",
+            Self::Harness => "harness",
+            Self::Model => "model",
+            Self::Effort => "effort",
+        }
+    }
+
     /// The chip-row cycle, in paint order. The Branch chip and worktree box
     /// join only when the draft project's facts admit branching (a non-git
     /// project has neither); the effort chip joins only when the catalog
@@ -227,6 +246,11 @@ pub(crate) struct Launcher {
     /// The request id this sheet's launch armed, if a launch is owned.
     pub armed: Option<u64>,
     pub next_request_id: u64,
+    /// Shell mode: a leading `!` on an empty input turned the composer
+    /// into a one-line shell prompt (`bang`); Backspace on an empty line
+    /// leaves it again. Not a draft field: shell mode never rides a
+    /// retained draft across an Esc.
+    pub shell: bool,
     /// The mouse rests on the Project chip: the cwd facts line shows.
     pub project_hover: bool,
     /// A chip-owned pill (`--model`) awaiting its value: the flag rides the
@@ -380,6 +404,9 @@ pub(crate) struct LaunchDraft {
     pub model: String,
     /// The configured routing row picked on the model chip.
     pub model_row: Option<String>,
+    /// The picked row's `vendor/model` route, riding alone at submit: a
+    /// route owns the model, so the request never pairs it with `model`.
+    pub route: String,
     /// The provider of the selected configured route, when present.
     pub provider: String,
     pub effort: String,
@@ -465,17 +492,28 @@ impl LaunchDraft {
                 }
                 Placement::PaneActiveTab => ("pane", Some("active"), None, None),
             };
+        // A routing-row pick rides its ROUTE pin: a route owns the model, so
+        // model and provider never join it. codex and opencode are the
+        // carve-outs: their rows are slugs/ids their own CLI consumes, so the
+        // id rides as --model (a derived openai/... route is claude-only at
+        // the door).
+        let native_model_pin = matches!(self.harness().as_str(), "codex" | "opencode");
         AgentLaunchRequest {
             request_id,
             revision: self.revision,
             cwd: self.cwd(),
             harness: self.harness(),
             substrate: substrate.to_string(),
-            model: non_empty(&self.model),
-            provider: if self.harness() == "opencode" && self.model_row.is_some() {
+            model: if !self.route.is_empty() && !native_model_pin {
                 None
             } else {
-                non_empty(&self.provider)
+                non_empty(&self.model)
+            },
+            provider: None,
+            route: if native_model_pin {
+                None
+            } else {
+                non_empty(&self.route)
             },
             // The composer owns all three axes; keep the selected harness on
             // the request even when a model row also names a provider.
@@ -609,6 +647,7 @@ fn apply_chip_pin(l: &mut Launcher, flag: &str, value: &str) {
         "--model" => {
             l.draft.model = value.to_string();
             l.draft.model_row = None;
+            l.draft.route.clear();
         }
         "--effort" => l.draft.effort = value.to_string(),
         "--harness" => {
@@ -672,6 +711,7 @@ pub(crate) fn open(view: &mut View) {
             phase: Phase::Editing,
             armed: None,
             next_request_id: 1,
+            shell: false,
             project_hover: false,
             pending_chip_pin: None,
             picker: None,
@@ -871,6 +911,7 @@ fn fresh_draft(view: &View) -> LaunchDraft {
         node: None,
         model: String::new(),
         model_row: None,
+        route: String::new(),
         provider: String::new(),
         effort: String::new(),
         permission: String::new(),
@@ -1089,7 +1130,7 @@ async fn submit(
     request.extra_flags = extra_flags;
     request.worktree = worktree;
     request.branch = branch;
-    if (request.provider.is_some() || !request.extra_flags.is_empty())
+    if (request.provider.is_some() || request.route.is_some() || !request.extra_flags.is_empty())
         && !supports_launch_extra_axes(&view.session)
     {
         l.phase = Phase::Refused {
@@ -1565,6 +1606,12 @@ pub(crate) async fn launcher_keys(
             LKey::Backspace => {
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        // Shell mode with an empty line: Backspace leaves
+                        // shell mode, back to the plain composer (AC2).
+                        Focus::Message if l.shell && l.draft.message.is_empty() => {
+                            l.shell = false;
+                            l.draft.bump();
+                        }
                         Focus::Message => {
                             if l.draft.pill_value_capture {
                                 if l.draft.pill_value_draft.pop().is_none() {
@@ -1616,12 +1663,20 @@ pub(crate) async fn launcher_keys(
                 if pending {
                     // Esc is the explicit cancel while an attempt pends.
                 } else if focus == Focus::Message {
-                    // A value capture finalizes before the launch: the
-                    // captured word lands on its pill or chip first.
-                    if let Some(l) = view.launcher.as_mut() {
-                        finalize_pill_value(l);
+                    let shell = view.launcher.as_ref().is_some_and(|l| l.shell);
+                    if shell {
+                        // A shell line runs through the bang path, never
+                        // the launch path: no harness, model or pill rides
+                        // it.
+                        bang::run(view, sock_w).await?;
+                    } else {
+                        // A value capture finalizes before the launch: the
+                        // captured word lands on its pill or chip first.
+                        if let Some(l) = view.launcher.as_mut() {
+                            finalize_pill_value(l);
+                        }
+                        submit(view, sock_w).await?;
                     }
-                    submit(view, sock_w).await?;
                 } else if focus == Focus::Worktree {
                     if let Some(l) = view.launcher.as_mut() {
                         toggle_worktree(l, &view.launcher_catalog);
@@ -1663,6 +1718,23 @@ pub(crate) async fn launcher_keys(
                 };
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        // Shell mode: every character is command text; the
+                        // launch gestures (@, --, space) stay literal (AC3).
+                        Focus::Message if l.shell && !l.draft.pill_value_capture => {
+                            insert_char(&mut l.draft, c);
+                        }
+                        // A `!` on an empty plain input is the mode switch:
+                        // consumed, never text (AC1).
+                        Focus::Message
+                            if c == '!'
+                                && !l.shell
+                                && l.draft.message.is_empty()
+                                && l.draft.pills.is_empty()
+                                && !l.draft.pill_value_capture =>
+                        {
+                            l.shell = true;
+                            l.draft.bump();
+                        }
                         Focus::Message if c == '@' && !l.draft.pill_value_capture => {
                             open_picker_at(
                                 l,
@@ -1827,6 +1899,7 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         if !offered {
             draft.model.clear();
             draft.model_row = None;
+            draft.route.clear();
             draft.bump();
         }
     }
@@ -3183,6 +3256,7 @@ pub(crate) fn apply_picker_action(
             }
             l.draft.model = model;
             l.draft.model_row = Some(name.clone());
+            l.draft.route = route.clone();
             l.draft.provider = provider.unwrap_or_default();
             let recent_model = ModelChoice {
                 name: name.clone(),
@@ -3209,6 +3283,7 @@ pub(crate) fn apply_picker_action(
         PickerAction::ClearModel => {
             l.draft.model.clear();
             l.draft.model_row = None;
+            l.draft.route.clear();
             l.draft.provider.clear();
             l.draft.bump();
         }
@@ -3220,6 +3295,7 @@ pub(crate) fn apply_picker_action(
                 // cannot name; its own effort/permission judgment follows.
                 l.draft.model.clear();
                 l.draft.model_row = None;
+                l.draft.route.clear();
                 clear_unoffered_pins(&mut l.draft, catalog);
             }
         }
@@ -3790,17 +3866,29 @@ impl Launcher {
             }
         }
         if sl.editor_rows > 0 {
+            // Shell mode paints its own glyph in the accent role so the
+            // mode is visible before the first keystroke lands.
+            let (glyph, glyph_role) = if self.shell {
+                ("! ", Role::BodyAccent)
+            } else {
+                ("\u{276f} ", Role::BodyDim)
+            };
             buf.set_string(
                 sl.message.x,
                 sl.message.y,
-                "\u{276f} ",
-                role_style(Role::BodyDim, &view.theme),
+                glyph,
+                role_style(glyph_role, &view.theme),
             );
             if self.draft.message.is_empty() {
+                let placeholder = if self.shell {
+                    format!("shell command in {}", self.draft.cwd())
+                } else {
+                    "What do you want to work on?".to_string()
+                };
                 buf.set_string(
                     sl.message.x + PROMPT_GUTTER as u16,
                     sl.message.y,
-                    "What do you want to work on?",
+                    placeholder,
                     role_style(Role::PanelMeta, &view.theme),
                 );
             }
@@ -3886,12 +3974,24 @@ impl Launcher {
                 RtStyle::new(),
             );
         }
-        buf.set_string(
-            0,
-            (keybar_y + 1).min((body_h as u16).saturating_sub(1)),
-            self.footer(),
-            RtStyle::new().add_modifier(Modifier::DIM),
-        );
+        // The lifecycle line wraps inside the sheet instead of clipping at
+        // the width: a refusal reason cut mid-sentence hid its own remedy.
+        // One row is the floor: a too-short terminal still shows the line's
+        // head, as the single clipped row always did.
+        let footer_y = usize::from(keybar_y + 1);
+        let footer_rows = body_h.saturating_sub(footer_y).max(1);
+        for (i, (_, line)) in wrap_message(&self.footer(), inner_w)
+            .into_iter()
+            .take(footer_rows)
+            .enumerate()
+        {
+            buf.set_string(
+                0,
+                u16::try_from(footer_y + i).unwrap_or(u16::MAX),
+                line,
+                RtStyle::new().add_modifier(Modifier::DIM),
+            );
+        }
         crate::ratatui_blit::blit_area(&buf, oy, ox, cells, cols);
     }
 }
@@ -3903,16 +4003,29 @@ impl Launcher {
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             return "esc cancel".to_string();
         }
-        // One grammar for the whole chip row: Tab moves, Enter opens a
-        // picker (or launches from the input). ^j is a newline in the input
-        // and the launch-from-anywhere key from a chip, so the hint names
-        // the behavior the focused control actually has.
+        // Shell mode runs instead of launching: the bar names its own keys.
+        if self.shell {
+            return "\u{21b5} run \u{b7} \u{232b} back to \u{276f} \u{b7} ^j newline \u{b7} esc close"
+                .to_string();
+        }
+        // One grammar for the whole chip row: Tab moves, Enter opens the
+        // focused chip's picker or launches from the input - the hint names
+        // which, so the footer never advertises a generic "open/launch".
+        // ^j is a newline in the input and the launch-from-anywhere key from
+        // a chip.
+        let enter = if self.focus == Focus::Message {
+            "\u{21b5} launch".to_string()
+        } else if self.focus == Focus::Worktree {
+            "\u{21b5} toggle worktree".to_string()
+        } else {
+            format!("\u{21b5} open {}", self.focus.name())
+        };
         let ctrl_j = if self.focus == Focus::Message {
             "^j newline"
         } else {
             "^j launch"
         };
-        format!("\u{21b5} open/launch \u{b7} tab next \u{b7} {ctrl_j} \u{b7} esc close")
+        format!("{enter} \u{b7} tab next \u{b7} {ctrl_j} \u{b7} esc close")
     }
 }
 

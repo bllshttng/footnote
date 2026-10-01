@@ -30,7 +30,7 @@ use std::path::PathBuf;
 pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
-    /// `node_created` | `node_started` | `pr_created` | `node_ended` |
+    /// `node_created` | `node_started` | `node_shipped` | `node_ended` |
     /// `session_spawned` | `session_reaped` | `crown_granted` |
     /// `crown_vacated` | `day_boundary`
     pub kind: String,
@@ -78,6 +78,9 @@ pub struct FeedRow {
     /// The session that spawned this row's session, from the birth event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The PR URL, on a ship row. The mux's provenance action opens it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Rows plus what the projection had to skip. Malformed question lines and
@@ -315,6 +318,10 @@ pub fn project(
         // on every entry the graph holds. The creating session rides the
         // entry's source fields when the graph recorded them.
         if let Some(created) = s_field(entry, "created_at") {
+            // Model, effort, parent session and crown ride the entry's
+            // write-time source stamps (the creating session's registry row
+            // at birth). An entry from before the stamps reads them as
+            // absent, never as a current lookup.
             rows.push(FeedRow {
                 ts: created,
                 kind: "node_created".into(),
@@ -322,6 +329,10 @@ pub fn project(
                 cwd: s_field(entry, "cwd"),
                 session_id: s_field(entry, "source_session_id").filter(|s| is_session_handle(s)),
                 harness: s_field(entry, "source_harness"),
+                model: s_field(entry, "source_model"),
+                effort: s_field(entry, "source_effort"),
+                parent: s_field(entry, "source_parent_session"),
+                crown: s_field(entry, "source_crown"),
                 title: node_title.clone(),
                 ..FeedRow::default()
             });
@@ -369,7 +380,7 @@ pub fn project(
                     let url = graph_store::s_str(entry, "pr_url").unwrap_or(node_id);
                     rows.push(FeedRow {
                         ts: started.to_string(),
-                        kind: "pr_created".into(),
+                        kind: "node_shipped".into(),
                         node: Some(node_id.to_string()),
                         session_id: sid.clone(),
                         harness: harness.clone(),
@@ -378,6 +389,7 @@ pub fn project(
                         model: model.clone(),
                         effort: effort.clone(),
                         phase: Some(phase.to_string()),
+                        url: Some(url.to_string()),
                         ..FeedRow::default()
                     });
                 }
@@ -458,15 +470,21 @@ pub fn project(
     }
 
     // Close rows: every pane close and server stop the mux
-    // recorded. The reason rides verbatim; cause is the enum's word, so the
-    // row tells the operator WHO closed it (operator vs the death path) and
-    // WHY in one line.
+    // recorded, plus the composer's bang-mode shell rows (one run or
+    // refusal each). The reason rides verbatim; cause is the enum's word,
+    // so the row tells the operator WHO closed it (operator vs the death
+    // path) and WHY in one line.
     for line in closes_raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         let kind = match v.get("type").and_then(Value::as_str) {
-            Some(k @ ("pane_closed" | "server_stopped")) => k,
+            Some(
+                k @ ("pane_closed"
+                | "server_stopped"
+                | "composer_shell_ran"
+                | "composer_shell_refused"),
+            ) => k,
             _ => continue,
         };
         let Some(data) = v.get("data") else { continue };
@@ -483,6 +501,30 @@ pub fn project(
             });
             continue;
         }
+        if kind == "composer_shell_ran" {
+            let cwd = s_field(data, "cwd").unwrap_or_default();
+            let line = s_field(data, "line").unwrap_or_default();
+            let pane = data.get("pane").and_then(Value::as_u64).unwrap_or(0);
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_ran".into(),
+                title: format!("shell in {cwd}: {line} (pane {pane})"),
+                ..FeedRow::default()
+            });
+            continue;
+        }
+        if kind == "composer_shell_refused" {
+            let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "composer_shell_refused".into(),
+                title: format!("shell refused: {reason}"),
+                reason: Some(reason),
+                ..FeedRow::default()
+            });
+            continue;
+        }
+
         let name = s_field(data, "name").unwrap_or_default();
         let pane = data
             .get("pane")
@@ -513,6 +555,25 @@ pub fn project(
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
+        if v.get("type").and_then(Value::as_str) == Some("agent_spawn_refused") {
+            // A pre-birth refusal: the feed shows the launch the operator
+            // watched refuse, carrying the door's own fatal line.
+            let Some(data) = v.get("data") else { continue };
+            let Some(ts) = s_field(&v, "ts") else {
+                continue;
+            };
+            rows.push(FeedRow {
+                ts,
+                kind: "session_spawn_refused".into(),
+                harness: s_field(data, "harness"),
+                title: format!(
+                    "spawn refused: {}",
+                    s_field(data, "reason").unwrap_or_else(|| "unknown reason".into())
+                ),
+                ..FeedRow::default()
+            });
+            continue;
+        }
         if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
             continue;
         }
@@ -983,9 +1044,22 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     for note in &removal_notes {
         eprintln!("fno-agents feed: {note}");
     }
-    let spawns_raw = agents_journal(home, &["agent_spawned"], args.since_epoch);
+    let spawns_raw = agents_journal(
+        home,
+        &["agent_spawned", "agent_spawn_refused"],
+        args.since_epoch,
+    );
     let crown_raw = crown_journals(home);
-    let closes_raw = agents_journal(home, &["pane_closed", "server_stopped"], args.since_epoch);
+    let closes_raw = agents_journal(
+        home,
+        &[
+            "pane_closed",
+            "server_stopped",
+            "composer_shell_ran",
+            "composer_shell_refused",
+        ],
+        args.since_epoch,
+    );
 
     let Projection {
         rows,
@@ -1059,6 +1133,12 @@ mod tests {
             "pr_url": "https://github.com/bllshttng/footnote/pull/1395",
             "created_at": "2026-09-01T08:00:00Z",
             "cwd": "/workspace/node-project",
+            "source_session_id": "s-do",
+            "source_harness": "claude",
+            "source_model": "claude-opus-5",
+            "source_effort": "high",
+            "source_parent_session": "s-parent",
+            "source_crown": "L2 e-0001",
             "completed_at": "2026-09-05T16:41:25Z",
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
@@ -1087,11 +1167,11 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_rows_come_from_the_graph() {
+    fn life_rows() {
         let p = project("", &graph_fixture(), &[], "", "", "");
         assert_eq!(
             kinds(&p.rows),
-            ["node_created", "node_started", "pr_created", "node_ended"]
+            ["node_created", "node_started", "node_shipped", "node_ended"]
         );
         let started = &p.rows[1];
         assert_eq!(started.node.as_deref(), Some("x-aaaa"));
@@ -1102,10 +1182,7 @@ mod tests {
         let ended = &p.rows[3];
         assert_eq!(ended.session_id.as_deref(), Some("s-ship"));
         assert_eq!(ended.title, "done");
-    }
 
-    #[test]
-    fn empty_graph_slice_yields_zero_lifecycle_rows() {
         // The marker: a projection fed only an events-style stream yields none
         // of the three lifecycle rows - they derive from the graph and nowhere
         // else.
@@ -1114,20 +1191,14 @@ mod tests {
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
         );
-    }
 
-    #[test]
-    fn day_boundary_rows_are_projected_without_being_skipped() {
         let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
         let p = project(questions, &[], &[], "", "", "");
         assert_eq!(p.skipped_lines, 0);
         assert_eq!(kinds(&p.rows), ["day_boundary"]);
         assert_eq!(p.rows[0].title, "day start");
         assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
-    }
 
-    #[test]
-    fn question_rows_carry_ids_and_asker_session() {
         let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
@@ -1149,10 +1220,7 @@ mod tests {
             .unwrap();
         assert_eq!(decision.r#ref.as_deref(), Some("d-1"));
         assert_eq!(decision.title, "revert-dispute: strict equality stands");
-    }
 
-    #[test]
-    fn rows_interleave_by_ts_ascending() {
         let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
         assert_eq!(
             kinds(&p.rows),
@@ -1160,16 +1228,13 @@ mod tests {
                 "node_created",      // 09-01 08:00
                 "question_asked",    // 09-02 17:00
                 "node_started",      // 09-02 17:12
-                "pr_created",        // 09-02 18:27
+                "node_shipped",      // 09-02 18:27
                 "question_closed",   // 09-02 19:00
                 "decision_recorded", // 09-03 09:00
                 "node_ended",        // 09-05 16:41
             ]
         );
-    }
 
-    #[test]
-    fn malformed_lines_and_non_object_entries_are_counted() {
         let questions =
             "not json\n{\"ts\":\"2026-09-02T17:00:00Z\",\"type\":\"other\",\"data\":{}}\n"
                 .to_string()
@@ -1186,14 +1251,11 @@ mod tests {
                 | "decision_recorded"
                 | "node_created"
                 | "node_started"
-                | "pr_created"
+                | "node_shipped"
                 | "node_ended"
                 | "session_reaped"
         )));
-    }
 
-    #[test]
-    fn unparseable_ts_sorts_first_and_survives_since() {
         let questions = r#"{"ts":"yesterday-ish","type":"operator_question","source":"t","data":{"question_id":"q-0","question":"odd stamp","session_id":"s-x"}}"#.to_string();
         let p = project(&questions, &[], &[], "", "", "");
         assert_eq!(kinds(&p.rows)[0], "question_asked");
@@ -1203,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_node_session_and_limit_from_newest_end() {
+    fn filter_gate_rows() {
         let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
         let node_rows = filter_rows(p.rows.clone(), Some("x-aaaa"), None, None, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
@@ -1215,19 +1277,22 @@ mod tests {
                 "node_created",
                 "question_asked",
                 "node_started",
-                "pr_created",
+                "node_shipped",
                 "question_closed",
                 "node_ended"
             ]
         );
         let ship_rows = filter_rows(p.rows.clone(), None, Some("s-ship"), None, None, None);
-        assert_eq!(kinds(&ship_rows), ["pr_created", "node_ended"]);
+        assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
+        let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
+        assert_eq!(
+            shipped.url.as_deref(),
+            Some("https://github.com/bllshttng/footnote/pull/1395"),
+            "the ship row carries the PR URL the provenance action opens"
+        );
         let newest_two = filter_rows(p.rows, None, None, None, None, Some(2));
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
-    }
 
-    #[test]
-    fn an_actor_that_is_not_a_session_never_becomes_an_attach_target() {
         // The live shape: `decided_by` is the literal verb on every decision
         // row, and `closed_by` is a mechanism name on most closure rows.
         let questions = [
@@ -1249,10 +1314,7 @@ mod tests {
         assert_eq!(decided.session_id, None);
         assert_eq!(decided.actor.as_deref(), Some("fno agents stale-escalate"));
         assert_eq!(decided.node.as_deref(), Some("x-1111"));
-    }
 
-    #[test]
-    fn a_closer_that_is_a_session_handle_stays_a_session() {
         let questions = [
             r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-1","question":"ask"}}"#,
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"d","data":{"question_id":"q-1","answer":"yes","closed_by":"20260904T151442Z-cl54345-58af0c"}}"#,
@@ -1290,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receipt_becomes_one_reaped_row_carrying_its_resume_line() {
+    fn reap_rows() {
         let r = removal_fixture();
         let p = project("", &[], std::slice::from_ref(&r), "", "", "");
         let row = p
@@ -1314,13 +1376,7 @@ mod tests {
         );
         let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
         assert_eq!(only_reaped.len(), 1);
-    }
 
-    // A pre-stamp receipt carries no writer. The feed once invented the
-    // word `reap` for it; now the title says what happened and the actor
-    // stays empty rather than naming a door nobody named.
-    #[test]
-    fn a_pre_stamp_receipt_reads_unknown_never_reap() {
         let mut r = removal_fixture();
         r.removed_by.clear();
         r.trigger = None;
@@ -1339,13 +1395,7 @@ mod tests {
             "detail was {:?}",
             row.detail
         );
-    }
 
-    // The receipt outlives the registry row, so it is the only surviving
-    // record of the lane. A provenance view that drops it reports NOT
-    // RECORDED for a model the store is holding.
-    #[test]
-    fn a_reaped_row_keeps_the_model_its_receipt_recorded() {
         let mut r = removal_fixture();
         r.model = Some("glm-5.3-flash[1m]".into());
         let p = project("", &[], std::slice::from_ref(&r), "", "", "");
@@ -1370,10 +1420,7 @@ mod tests {
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
         assert_eq!(bare.model, None);
-    }
 
-    #[test]
-    fn an_absent_receipts_directory_yields_no_rows_and_a_note() {
         let home = AgentsHome::at(std::path::PathBuf::from(
             "/nonexistent/fno-feed-test/agents",
         ));
@@ -1387,8 +1434,16 @@ mod tests {
         );
     }
 
+    // A pre-stamp receipt carries no writer. The feed once invented the
+    // word `reap` for it; now the title says what happened and the actor
+    // stays empty rather than naming a door nobody named.
+
+    // The receipt outlives the registry row, so it is the only surviving
+    // record of the lane. A provenance view that drops it reports NOT
+    // RECORDED for a model the store is holding.
+
     #[test]
-    fn every_graph_entry_yields_a_node_created_row_and_the_lane_it_ran() {
+    fn proj_rows() {
         let p = project("", &graph_fixture(), &[], "", "", "");
         let created = p
             .rows
@@ -1396,6 +1451,12 @@ mod tests {
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
         assert_eq!(created.node.as_deref(), Some("x-aaaa"));
+        // The birth stamps: the creating session's registry lane facts,
+        // taken at write time.
+        assert_eq!(created.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(created.effort.as_deref(), Some("high"));
+        assert_eq!(created.parent.as_deref(), Some("s-parent"));
+        assert_eq!(created.crown.as_deref(), Some("L2 e-0001"));
         let wire = serde_json::to_value(created).unwrap();
         assert_eq!(
             wire.get("cwd").and_then(Value::as_str),
@@ -1418,10 +1479,7 @@ mod tests {
         assert_eq!(started.phase.as_deref(), Some("execute"));
         let ended = p.rows.iter().find(|r| r.kind == "node_ended").unwrap();
         assert_eq!(ended.harness.as_deref(), Some("claude"));
-    }
 
-    #[test]
-    fn node_without_pr_number_gets_no_pr_row() {
         let mut entry = graph_fixture().remove(0);
         entry
             .as_object_mut()
@@ -1433,10 +1491,7 @@ mod tests {
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
         );
-    }
 
-    #[test]
-    fn the_feed_reads_a_store_committed_question() {
         // AC12-FEED: a store-only operator_question reaches the questions leg.
         let dir = tempfile::tempdir().unwrap();
         let questions = dir.path().join("questions.jsonl");
@@ -1451,10 +1506,7 @@ mod tests {
         )
         .unwrap();
         assert!(raw.contains("q-feed-1"), "{raw}");
-    }
 
-    #[test]
-    fn a_crowned_never_bound_removal_projects_with_reason_and_crown() {
         // AC1: the jolly-finch shape, projected. The removal is recovered from
         // its registry_row_removed event; the feed row carries the deeper
         // uncaptured reason, the crown it held, and no detail (a recovered
@@ -1488,10 +1540,7 @@ mod tests {
         // the title.
         assert_eq!(row.crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(row.detail, None);
-    }
 
-    #[test]
-    fn a_spawn_event_projects_a_session_spawned_row() {
         // AC4: agent_spawned carries provider (not harness), so the fallback
         // is load-bearing.
         let spawns = r#"{"ts":"2026-09-28T16:48:35Z","type":"agent_spawned","source":"python","data":{"cwd":"/repo","model":"gpt-6-sol","name":"jolly-finch","provider":"codex","spawned_by_session":"49a80492-388e-44a3-bd91-017be26bcaa0","substrate":"pane"}}"#;
@@ -1508,10 +1557,19 @@ mod tests {
             row.parent.as_deref(),
             Some("49a80492-388e-44a3-bd91-017be26bcaa0")
         );
-    }
+        // A pre-birth refusal used to write nothing, so the feed showed
+        // nothing for a launch the operator watched refuse.
+        let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"daemon","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
+        let p = project("", &[], &[], refused, "", "");
+        let row = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "session_spawn_refused")
+            .expect("one refused row");
+        assert!(row
+            .title
+            .starts_with("spawn refused: --mux-session is pane-only"));
 
-    #[test]
-    fn crown_rows_project_from_both_journals_and_dedupe() {
         // AC5: the same crown pair landing in both journals yields exactly
         // one granted and one vacated row.
         let crown = [
@@ -1539,10 +1597,7 @@ mod tests {
             vacated[0].title,
             "warden left L2 x-eeee: succession -> jolly-finch"
         );
-    }
 
-    #[test]
-    fn owners_come_from_held_crowns_then_graph_parents() {
         // AC6: a node in a held crown's scope rolls up to the king; a node
         // whose only tie is a graph parent rolls up to the epic; the crown
         // kinds get no owner at all.
@@ -1590,19 +1645,20 @@ mod tests {
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
         assert_eq!(epic.owner, None);
-    }
 
-    /// Close rows: a pane_closed row renders its reason verbatim
-    /// with the bound session, a server_stopped row names its cause, and
-    /// both order by ts with the rest.
-    #[test]
-    fn close_rows_render_reason_and_cause() {
+        // Close rows: a pane_closed row renders its reason verbatim
+        // with the bound session, a server_stopped row names its cause, and
+        // both order by ts with the rest.
         let closes = concat!(
             r#"{"ts":"2026-09-30T10:00:05Z","type":"pane_closed","source":"daemon","data":{"mux_session":"main","pane":7,"squad":1,"cause":"operator","reason":"closed by operator","name":null,"harness_session":"sess-a","harness":"codex"}}"#,
             "\n",
             r#"{"ts":"2026-09-30T10:00:02Z","type":"pane_closed","source":"daemon","data":{"mux_session":"main","pane":9,"squad":1,"cause":"viewer_died","reason":"child exited","name":"w1","harness_session":null,"harness":null}}"#,
             "\n",
             r#"{"ts":"2026-09-30T10:00:09Z","type":"server_stopped","source":"daemon","data":{"mux_session":"main","cause":"shutdown","panes":0}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:00:07Z","type":"composer_shell_ran","source":"cli","data":{"mux_session":"main","cwd":"/tmp/p","shell":"/bin/zsh","line":"git status","pane":3}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:00:08Z","type":"composer_shell_refused","source":"cli","data":{"mux_session":"main","cwd":"","line":"git status","reason":"no project chosen; pick one on the Project chip","outcome":"refused"}}"#,
             "\n",
             "{not json",
         );
@@ -1631,5 +1687,24 @@ mod tests {
             .find(|r| r.kind == "server_stopped")
             .expect("the stop row renders");
         assert_eq!(stopped.title, "mux server stopped: shutdown");
+        let ran = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_ran")
+            .expect("the composer ran row renders");
+        assert_eq!(ran.title, "shell in /tmp/p: git status (pane 3)");
+        let refused = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "composer_shell_refused")
+            .expect("the composer refused row renders");
+        assert_eq!(
+            refused.title,
+            "shell refused: no project chosen; pick one on the Project chip"
+        );
+        assert_eq!(
+            refused.reason.as_deref(),
+            Some("no project chosen; pick one on the Project chip")
+        );
     }
 }

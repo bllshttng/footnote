@@ -102,7 +102,7 @@ When the node has a live epic parent, the scope is that epic. Peers and anchors 
 
 `render_html._load_wip_caps()` reads `config.kanban.wip_caps` directly from the
 **global** settings file (`_global_settings_path()`), the same rationale as
-`_load_obsidian_vault` (graph.html is a global artifact; reading via the
+`_load_obsidian_vault` (the board pages are global artifacts; reading via the
 project-local-first loader would let a project's settings shadow the global
 config on auto-render). It is fully defensive because it runs inside
 `locked_mutate_graph`:

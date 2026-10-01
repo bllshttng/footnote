@@ -226,7 +226,7 @@ def _seed_node(graph: list[dict], *, id_: str, plan_path: str, created_at: str =
     node = {
         "id": id_,
         "parent": None,
-        "title": f"Node {id_}",
+        "title": "seed node",
         "type": "feature",
         "project": "fno",
         "cwd": "/repo",

@@ -1030,7 +1030,10 @@ mod tests {
         write_event_at(home, &chrono::Utc::now().to_rfc3339(), data);
     }
 
+    // events-discipline:allow: a #[cfg(test)] fixture writer building the
+    // legacy raw layout the gc sweep reads, never a production journal leg.
     fn write_event_at(home: &AgentsHome, ts: &str, data: &serde_json::Value) {
+        // events-discipline:allow
         use std::io::Write;
         let line = serde_json::json!({
             "ts": ts,

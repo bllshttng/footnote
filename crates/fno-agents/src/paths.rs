@@ -305,6 +305,12 @@ impl AgentsHome {
         self.root.join("fleet-stop.json")
     }
 
+    /// The running tests a `tests` hold paused, as `(pid, birth)` pairs, so
+    /// the lift resumes exactly them; see [`crate::test_hold`].
+    pub fn test_pause_json(&self) -> PathBuf {
+        self.root.join("test-pause.json")
+    }
+
     /// Durable roster-progress sidecar (SECOND HALF): per-row git
     /// evidence (last commit sha/age, branch-ahead, PR number) keyed by row
     /// name, refreshed by the reconcile sweep alongside `registry.json`. A

@@ -53,7 +53,7 @@ fn store_path_strips_generation_suffix() {
     let _guard = crate::claims::test_env_lock().lock().unwrap();
     let prior = std::env::var_os("FNO_AGENTS_HOME");
     std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
-    let root = dir.path().to_path_buf();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::create_dir_all(root.join("db")).unwrap();
     std::fs::write(root.join("db").join("events.db"), b"SQLite format 3\0").unwrap();
     let routed = store_path(&root.join("events.jsonl"));
@@ -61,6 +61,13 @@ fn store_path_strips_generation_suffix() {
         routed,
         root.join("db").join("events.db"),
         "a migrated root answers the db/ store"
+    );
+    let alias = root.join("state-alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    assert_eq!(
+        store_path(&alias.join("events.jsonl")),
+        root.join("db").join("events.db"),
+        "a virtual journal under a symlinked root keeps the migrated store"
     );
     let space = root.join("spaces").join("proj");
     std::fs::create_dir_all(&space).unwrap();
@@ -722,37 +729,39 @@ fn journal_text_reads_history_then_live_with_the_type_filter() {
 }
 
 #[test]
-fn journal_text_preserves_append_order_for_equal_timestamps() {
+fn journal_text_checked_without_store_reads_a_rotation_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "first");
-    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "second");
-    append(&live, &[a, b]);
-    sync(&live).unwrap();
-    let text = journal_text(&live, &["reign_checkin"]);
-    assert!(
-        text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap(),
-        "same-second rows must retain append order: {text}"
+    let rotated = dir.path().join("events.jsonl.1");
+    // No store beside the journal: the rotation must yield its own bytes,
+    // never the live file live_journal folds it into.
+    std::fs::write(&live, "{\"n\":1}\n").unwrap();
+    std::fs::write(&rotated, "{\"n\":2}\n").unwrap();
+    let text = journal_text_checked(&rotated, &EventQuery::of_types(&[])).unwrap();
+    assert_eq!(
+        text, "{\"n\":2}\n",
+        "the rotation's own bytes, not the live file"
     );
-}
-
-#[test]
-fn journal_text_creates_no_store_for_an_absent_journal() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    assert_eq!(journal_text(&live, &["reign_checkin"]), "");
-    assert!(!store_path(&live).exists());
+    // Same branch, absent base journal: the read is empty and creates no
+    // store.
+    let absent = dir.path().join("absent.jsonl");
+    assert_eq!(
+        journal_text_checked(&absent, &EventQuery::of_types(&[])).unwrap(),
+        ""
+    );
+    assert!(!store_path(&absent).exists());
 }
 
 #[test]
 fn journal_text_reads_committed_rows_in_commit_order() {
-    // AC1-HP: an imported row stays ahead of a store-only commit.
+    // AC1-HP: an imported row stays ahead of a store-only commit, and the
+    // two rows share one second so equal timestamps must keep append order.
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
     let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "imported");
     append(&live, &[a]);
     sync(&live).unwrap();
-    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "store-only");
+    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "store-only");
     append_envelope(&live, &b.to_string(), None).unwrap();
     let text = journal_text(&live, &["reign_checkin"]);
     assert!(

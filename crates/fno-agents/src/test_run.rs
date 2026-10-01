@@ -49,7 +49,7 @@ const BUILD_SLOT_LOST: i32 = 3;
 /// Where cargo's own arguments start, when `argv` is a cargo test run:
 /// `test`/`t`, or `nextest run`/`r`, past any `+toolchain` pins. Any other
 /// program reads `None`.
-fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
+pub(crate) fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
     let is_cargo = argv
         .first()
         .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));
@@ -1586,6 +1586,27 @@ pub fn build_hold_message(cwd: &Path) -> Option<String> {
     build_hold_message_in(&crate::claims::build_waiters_dir()?, cwd)
 }
 
+/// The burn arm's read: how long the checkout that holds `cwd` has waited at
+/// the cargo build door, from a live `build-admit` marker's `since_ms`.
+pub(crate) fn build_wait_since_ms(cwd: &Path) -> Option<i64> {
+    build_wait_since_ms_in(&crate::claims::build_waiters_dir()?, cwd)
+}
+
+/// Testable form: the marker's `since_ms` for the first live hold on `cwd`
+/// or an ancestor checkout. Same walk `build_hold_message_in` does.
+fn build_wait_since_ms_in(dir: &Path, cwd: &Path) -> Option<i64> {
+    let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    for path in start.ancestors() {
+        if let Some((_, since_ms)) = live_waiter(dir, path) {
+            return Some(since_ms);
+        }
+        if path.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
 fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     for path in start.ancestors() {
@@ -1599,7 +1620,7 @@ fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     None
 }
 
-fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+fn live_waiter(dir: &Path, checkout: &Path) -> Option<(String, i64)> {
     let marker = dir.join(format!(
         "{}.json",
         crate::claims::encode_key(&checkout.to_string_lossy())
@@ -1619,6 +1640,11 @@ fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
         return None;
     }
     let holder = value["holder"].as_str().unwrap_or("another cargo");
+    Some((holder.to_string(), since_ms))
+}
+
+fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+    let (holder, _) = live_waiter(dir, checkout)?;
     Some(format!(
         "held for cargo build admission: {holder} is building"
     ))
@@ -2431,6 +2457,18 @@ mod tests {
         marker_for(&dir, &worktree, std::process::id());
         let message = build_hold_message_in(&dir, &nested).expect("a live waiter holds");
         assert!(message.contains("cargo:/other:42"), "{message}");
+        let marker = dir.join(format!(
+            "{}.json",
+            crate::claims::encode_key(&worktree.to_string_lossy())
+        ));
+        let written =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&marker).unwrap())
+                .unwrap();
+        assert_eq!(
+            build_wait_since_ms_in(&dir, &nested),
+            Some(written["since_ms"].as_i64().unwrap()),
+            "the burn counter reads the marker's since_ms from the nested path"
+        );
     }
 
     #[test]

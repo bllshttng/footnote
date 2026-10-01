@@ -333,8 +333,6 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -364,6 +362,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         } else {
             None
         },
+        ..Default::default()
     }
 }
 
@@ -432,6 +431,7 @@ pub(super) fn two_pane_view() -> View {
     // accent (`Indexed(3)`), which is the theme whose byte-identity the
     // lattice structure protects.
     view.theme = crate::theme::Theme::from_name("terminal").0;
+    view.server_proto = Some(crate::proto::PROTO_VERSION);
     view
 }
 
@@ -550,8 +550,6 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -573,6 +571,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }
 }
 
@@ -2043,8 +2042,6 @@ fn chrome_hit_rows() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -2066,6 +2063,7 @@ fn chrome_hit_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     // A watch-only bg row with a claude jobId: a click reaches the
     // dedicated thread pane (x-07c2); a row with no attach id reaches
@@ -2089,8 +2087,6 @@ fn chrome_hit_rows() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: Some("c19cd2c3".into()),
         external: false,
@@ -2112,6 +2108,7 @@ fn chrome_hit_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     // A watch-only row with no attach target: its reach opens the
     // dedicated pane by name (Follow tails it, Locate explains it).
@@ -2134,8 +2131,6 @@ fn chrome_hit_rows() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -2157,6 +2152,7 @@ fn chrome_hit_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -2218,8 +2214,6 @@ fn chrome_hit_rows() {
             exited: false,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -2241,6 +2235,7 @@ fn chrome_hit_rows() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         })
         .collect();
     let view = view_with_agents(agents);
@@ -2415,8 +2410,6 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -2445,6 +2438,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         } else {
             None
         },
+        ..Default::default()
     }
 }
 
@@ -2568,8 +2562,6 @@ fn pull_rows() {
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -2591,6 +2583,7 @@ fn pull_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut view = view_with_agents(vec![
         orphan("stray-live", false),
@@ -3017,8 +3010,6 @@ fn view_with_dead_interleaved() -> View {
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -3040,6 +3031,7 @@ fn view_with_dead_interleaved() -> View {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     view_with_agents(vec![
         row("live-a", false),
@@ -3189,8 +3181,6 @@ fn caret_rows() {
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -3212,6 +3202,7 @@ fn caret_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -3265,8 +3256,6 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -3288,6 +3277,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }]);
     let hdr = view
         .display_rows()
@@ -4031,8 +4021,6 @@ fn row_menu_rows() {
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: attach.map(Into::into),
         external: false,
@@ -4054,6 +4042,7 @@ fn row_menu_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
     assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -5080,8 +5069,6 @@ async fn row_menu_disambiguates_same_named_agents() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -5103,6 +5090,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
     // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -6588,8 +6576,7 @@ async fn tab_menu_join_and_split_target_the_viewed_tab() {
         Command::SplitDir(Dir::Left) => {}
         other => panic!("expected SplitDir(Left) from the viewed tab's menu, got {other:?}"),
     }
-    // Stale: the view flips while a menu is open; executing a Split cell
-    // refuses instead of splitting whatever is viewed NOW.
+    // Stale: a view flip while a menu is open refuses the Split cell.
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
     v.layout.squads[0].active_tab = 1;
     let sel = v
@@ -6722,8 +6709,6 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -6745,6 +6730,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }
 }
 
@@ -6856,7 +6842,7 @@ fn menu_labels(menu: &RowMenu) -> Vec<String> {
             PopupRow::Grid(cells) => cells[*ci].label.clone(),
             PopupRow::Entry { label, .. } | PopupRow::SwatchEntry { label, .. } => label.clone(),
             PopupRow::FullWidth(l) => l.clone(),
-            PopupRow::Header(_) | PopupRow::Rule => unreachable!("not a target"),
+            other => unreachable!("not a target: {other:?}"),
         })
         .collect()
 }
@@ -7693,8 +7679,6 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -7716,6 +7700,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
             AgentRow {
                 spawned_by_name: None,
@@ -7736,8 +7721,6 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: true,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -7759,6 +7742,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
             AgentRow {
                 spawned_by_name: None,
@@ -7779,8 +7763,6 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -7802,6 +7784,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
         ],
         focus_node: None,
@@ -7912,8 +7895,6 @@ fn band_rows() {
             exited,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -7935,6 +7916,7 @@ fn band_rows() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         }
     }
     let mut view = two_pane_view();
@@ -8316,8 +8298,6 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: true,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -8339,6 +8319,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
             AgentRow {
                 spawned_by_name: None,
@@ -8359,8 +8340,6 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: Some("ab12cd34".into()),
                 external: true,
@@ -8382,6 +8361,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
             AgentRow {
                 spawned_by_name: None,
@@ -8402,8 +8382,6 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -8425,6 +8403,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
             // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
             // load-bearing "attention is never dimmed" branch. The accent
@@ -8448,8 +8427,6 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
-                liveness_measured_at: None,
-                harness_title: None,
                 answerable: None,
                 attach_id: Some("ff99ff99".into()),
                 external: true,
@@ -8471,6 +8448,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 resumable: false,
                 no_pane_reason: None,
                 pane_activity: None,
+                ..Default::default()
             },
         ],
         focus_node: None,
@@ -8932,8 +8910,6 @@ fn unified_rows_view() -> View {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: attach_id.map(Into::into),
         external: false,
@@ -8955,6 +8931,7 @@ fn unified_rows_view() -> View {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut v = view_with_agents(vec![
         agent(Some(1), "worker", Some(10), None),
@@ -9321,8 +9298,6 @@ fn peek_rows() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
         attach_id: None,
         external: false,
@@ -9344,6 +9319,7 @@ fn peek_rows() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let loading = PeekView {
         cursor: 0,
@@ -9781,8 +9757,6 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         exited: true,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: Some("deadbeef".into()),
         external: false,
@@ -9804,6 +9778,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut v = view_with_agents(vec![tomb]);
     v.set_squad_view(1, SectionView::Expanded);
@@ -9845,8 +9820,6 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         exited,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external,
@@ -9868,6 +9841,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }
 }
 
@@ -10578,8 +10552,6 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             exited: false,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -10601,6 +10573,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         },
         AgentRow {
             spawned_by_name: None,
@@ -10621,8 +10594,6 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             exited: false,
             dnd: false,
             unmeasured: false,
-            liveness_measured_at: None,
-            harness_title: None,
             answerable: None,
             attach_id: Some("deadbee1".into()),
             external: false,
@@ -10644,6 +10615,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             resumable: false,
             no_pane_reason: None,
             pane_activity: None,
+            ..Default::default()
         },
     ];
     let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -10703,8 +10675,6 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -10726,6 +10696,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let bare = AgentRow {
         portal: None,
@@ -10867,8 +10838,6 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -10890,6 +10859,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -11299,8 +11269,6 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -11322,6 +11290,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }];
     let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
     assert!(
@@ -11517,8 +11486,6 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: ans,
         attach_id: None,
         external: false,
@@ -11540,15 +11507,16 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }
 }
 
 // ---- x-b186: density toggle + extended agent table ----
 
-/// A view whose terminal is wide enough for the full extended table.
+/// A terminal satisfying the sideline's 60% cap and the work pane's minimum.
 fn wide_view(agents: Vec<AgentRow>) -> View {
     let mut v = view_with_agents(agents);
-    v.term = (24, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10);
+    v.term = (24, (EXTENDED_PANEL_W * 5).div_ceil(3) + MIN_CONTENT_COLS);
     v
 }
 
@@ -12069,7 +12037,7 @@ fn table_header_click_sets_one_column_and_toggles_direction() {
         false,
     )]);
     set_density(&mut v, Density::Extended);
-    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
     assert!(matches!(
         v.chrome_hit(0, rects[1].x),
         Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
