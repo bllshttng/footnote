@@ -1,12 +1,13 @@
 //! The write-time title leak gate.
 //!
-//! The public roadmap render refuses leaky titles (`roadmap_public.LEAK_PATTERNS`
-//! on the Python side), but that gate fires at PUBLISH time: the push to the
-//! live page dies and the site quietly serves stale content until a human
-//! notices. This gate runs at the publication seam instead, so a leaking
+//! The public roadmap render omits rows whose titles carry a leak class
+//! (`roadmap_public.LEAK_PATTERNS` on the Python side), but that gate fires
+//! at PUBLISH time: the page silently loses a row until a human reads the
+//! warning. This gate runs at the publication seam instead, so a leaking
 //! title never enters the graph. The render gate stays as the backstop; the
 //! two must never disagree about what counts as a leak, so the patterns below
-//! are a byte-for-byte port of `LEAK_PATTERNS`.
+//! are a byte-for-byte port of `LEAK_PATTERNS`. Node ids and PR numbers are
+//! ruled public; home paths and session ids are not.
 
 use regex::Regex;
 use serde_json::Value;
@@ -20,14 +21,6 @@ pub const TITLE_MAX_CHARS: usize = 200;
 /// `(class, pattern)` pairs in the same order.
 static LEAK_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     vec![
-        (
-            "pr-reference",
-            Regex::new(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)").expect("static regex"),
-        ),
-        (
-            "node-id",
-            Regex::new(r"(?i)\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b").expect("static regex"),
-        ),
         (
             "home-path",
             Regex::new(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)").expect("static regex"),
@@ -80,7 +73,7 @@ pub fn refusal_message(row_id: &str, title: &str) -> Option<String> {
         let token = offending_token(title);
         return Some(format!(
             "public title gate refused {row_id}: title carries a {class} (\"{token}\"). \
-Titles publish to the public roadmap; put node ids, PR references, paths and session ids in --details."
+Titles publish to the public roadmap; put paths and session ids in --details."
         ));
     }
     let len = title.chars().count();
@@ -134,19 +127,17 @@ mod tests {
     }
 
     #[test]
-    fn a_new_node_id_title_is_refused_and_the_message_names_the_rule() {
-        let err = enforce_title_gate(&[], &[node("x-new", "fix the bug in x-aaaa")])
-            .expect_err("node id in title must refuse");
-        let text = err.to_string();
-        assert!(text.contains("node-id"), "{text}");
-        assert!(text.contains("x-aaaa"), "{text}");
-        assert!(text.contains("--details"), "{text}");
+    fn a_title_naming_a_node_id_or_pr_number_passes() {
+        // Ruled public: node ids and PR numbers name already-public work.
+        enforce_title_gate(&[], &[node("x-new", "fix the bug in x-aaaa")])
+            .expect("a node id in a title must pass");
+        enforce_title_gate(&[], &[node("x-new", "ship PR #2612 today")])
+            .expect("a PR number in a title must pass");
     }
 
     #[test]
     fn every_leak_class_refuses() {
         for (title, class) in [
-            ("ship PR #2612 today", "pr-reference"),
             ("see https://x/~/notes/secrets.md", "home-path"),
             (
                 "crashed for session 0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
@@ -180,8 +171,8 @@ mod tests {
 
     #[test]
     fn an_unchanged_legacy_leaky_title_passes_an_unrelated_update() {
-        let pre = [node("x-old", "legacy title about x-aaaa PR #12")];
-        let mut updated = node("x-old", "legacy title about x-aaaa PR #12");
+        let pre = [node("x-old", "legacy title about /Users/bb16/notes")];
+        let mut updated = node("x-old", "legacy title about /Users/bb16/notes");
         updated["status"] = json!("in_progress");
         enforce_title_gate(&pre, &[updated]).expect("unchanged stored title must pass");
     }
@@ -209,8 +200,8 @@ mod tests {
     fn the_vocabulary_matches_the_render_gate() {
         // Byte-for-byte with cli/src/fno/graph/roadmap_public.py LEAK_PATTERNS:
         // the probe and the gate can never disagree about what a leak is.
-        assert_eq!(title_leak_classes("PR #2612"), vec!["pr-reference"]);
-        assert_eq!(title_leak_classes("x-aaaa epic"), vec!["node-id"]);
+        assert!(title_leak_classes("PR #2612").is_empty());
+        assert!(title_leak_classes("x-aaaa epic").is_empty());
         assert_eq!(title_leak_classes("~/x"), vec!["home-path"]);
         assert_eq!(title_leak_classes("ses-kv3H_z1"), vec!["session-id"]);
         assert!(title_leak_classes("plain words only").is_empty());

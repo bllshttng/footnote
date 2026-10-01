@@ -57,13 +57,12 @@ def load_render_entries(entries: list[dict] | None = None) -> list[dict]:
     return read_graph_with_archive() if entries is None else entries_with_archive(entries)
 
 
-# The one leak vocabulary. The gate below scans titles with it; a test scans
-# a whole rendered public document with the same list, so the probe and the
-# gate can never drift into disagreeing about what counts as a leak.
+# The one leak vocabulary: only classes that reveal the operator's machine
+# or agent runs. Node ids and PR numbers are ruled public and stay in
+# titles. The Rust write-time title gate (crates/fno-agents title_gate.rs)
+# is a byte-for-byte port, so the probe and the gate can never drift into
+# disagreeing about what counts as a leak.
 LEAK_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
-    # Generic compact prefixes can resemble CSS hex colors; legacy compact x ids cannot.
-    ("node-id", re.compile(r"\b(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})\b", re.I)),
     ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
     (
         "session-id",
@@ -88,36 +87,24 @@ def public_title_leaks(entries: list[dict]) -> list[tuple[str, str, tuple[str, .
     return offenders
 
 
-def leak_offender_lines(offenders: list[tuple[str, str, tuple[str, ...]]]) -> list[str]:
-    """One refusal line per offender, shared by the manual roadmap verb and
-    the auto-render so the two leak-gate reports cannot drift apart."""
-    return [
-        f"  {node_id}: {','.join(classes)}: {title}"
-        for node_id, title, classes in offenders
-    ]
-
-
-def leak_refusal_report(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
-    """The audible refusal, shared by the manual roadmap verb and
-    the auto-render so the two leak-gate reports cannot drift apart: one stderr
-    line per offender, then a best-effort OS alert. A bare exit under
-    launchd is invisible and the live page can sit stale with no reader, so
-    the alert rides the same `fno inbox notify` lane the push script fires.
-    An alert failure never masks the refusal."""
-    print(f"Error: public title leak gate refused {subject}:", file=sys.stderr)
-    for line in leak_offender_lines(offenders):
-        print(line, file=sys.stderr)
-    try:
-        from fno.notify._impl import send_notification
-
-        detail = "; ".join(f"{i} {'+'.join(c)}" for i, _, c in offenders[:3])
-        code, err = send_notification(
-            "roadmap render refused", f"{subject}: leak gate refused ({detail})"
-        )
-        if err:
-            print(f"warning: render alert degraded ({code}): {err}", file=sys.stderr)
-    except Exception:  # noqa: BLE001 - an alert must never mask the refusal
-        pass
+def omit_leaky_rows(
+    entries: list[dict], project: str
+) -> tuple[list[dict], list[tuple[str, str, tuple[str, ...]]]]:
+    """Drop rows whose public title matches a leak class, warn once with the
+    count, and return the publishable rest with the omitted offenders. One
+    leaky row costs its own row only; the page still publishes."""
+    offenders = public_title_leaks(public_projection_entries(entries, project))
+    if not offenders:
+        return entries, []
+    dropped = {node_id for node_id, _, _ in offenders}
+    classes = sorted({cls for _, _, found in offenders for cls in found})
+    print(
+        f"Warning: omitted {len(offenders)} public row(s) from the "
+        f"{project} roadmap render: title matched {', '.join(classes)}; "
+        "the rest published.",
+        file=sys.stderr,
+    )
+    return [e for e in entries if str(e.get("id") or "?") not in dropped], offenders
 
 
 def atomic_write_documents(documents: dict[Path, str]) -> None:
