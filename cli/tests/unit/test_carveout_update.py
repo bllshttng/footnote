@@ -113,7 +113,7 @@ def test_truncation_clears_when_the_new_text_is_short(ledger_root):
 
 
 def test_an_absent_id_is_refused_not_created(ledger_root):
-    """Create-on-miss would resurrect a row /pr merged already consumed."""
+    """Create-on-miss would resurrect a row /fno:ship pr merged already consumed."""
     _seed(ledger_root)
     with pytest.raises(CarveoutNotFound):
         update_carveout(ledger_root, "cv-deadbeef", description="new")
@@ -252,7 +252,7 @@ def test_crossing_the_backfill_boundary_warns_and_still_applies(ledger_root):
     cid = _seed(ledger_root, kind="deferred")
     res = runner.invoke(app, ["carveout", "update", cid, "-k", "backfill"])
     assert res.exit_code == 0, res.output
-    assert "/fno:pr merged" in res.output
+    assert "/fno:ship pr merged" in res.output
     assert _rows(ledger_root)[0]["kind"] == "backfill"
 
 

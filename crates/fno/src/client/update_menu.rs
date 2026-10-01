@@ -225,7 +225,7 @@ pub(crate) fn build_sideline_menu(
             enabled: true,
         });
     }
-    rows.push(entry("⌨", "keybinds"));
+    rows.push(entry("⌨", "Keybindings"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
@@ -294,9 +294,14 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     }
     match outcome {
         Some(UpdateOutcome::Ok(r)) => {
-            let installed = r.installed_rev.as_deref().unwrap_or("unknown");
-            let source = r.source_rev.as_deref().unwrap_or("unknown");
-            rows.push(PopupRow::Header(format!("{installed} -> {source}")));
+            let short = |rev: Option<&str>| -> String {
+                rev.unwrap_or("unknown").chars().take(10).collect()
+            };
+            rows.push(PopupRow::Header(format!(
+                "{} -> {}",
+                short(r.installed_rev.as_deref()),
+                short(r.source_rev.as_deref())
+            )));
             if !r.changelog.is_empty() {
                 rows.push(PopupRow::Rule);
                 for subject in &r.changelog {
@@ -315,11 +320,23 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                 .collect();
             if !stale.is_empty() {
                 rows.push(PopupRow::Rule);
-                for row in &stale {
+                // Pane keepers fold into one count line: one row per keeper
+                // flooded the modal on a busy machine.
+                let keepers = stale
+                    .iter()
+                    .filter(|r| r.component == "pane-keeper")
+                    .count();
+                for row in stale.iter().filter(|r| r.component != "pane-keeper") {
                     let name = row.name.as_deref().unwrap_or("unnamed");
                     rows.push(PopupRow::Header(format!(
                         "{} {}: {}; keeps {}",
                         row.component, name, row.on_restart, row.survives
+                    )));
+                }
+                if keepers > 0 {
+                    rows.push(PopupRow::Header(format!(
+                        "{keepers} pane keeper{} on the old build",
+                        if keepers == 1 { "" } else { "s" }
                     )));
                 }
                 rows.push(PopupRow::Header(
@@ -357,8 +374,22 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     AuxPopup {
         popup: Popup::new(rows, Anchor::Center)
             .title("update")
-            .footer("esc close"),
+            .footer("esc close")
+            .width_cap(usize::MAX),
         actions,
+    }
+}
+
+impl AuxPopup {
+    /// Fit the update modal to a terminal `cols` wide: it grows to its widest
+    /// row up to the screen, and a row wider than the screen wraps instead of
+    /// ending in an ellipsis. Wrapped continuations are Headers, so the
+    /// selectable entries keep their order and their actions.
+    pub(crate) fn fit(mut self, cols: u16) -> Self {
+        let w = (cols as usize).saturating_sub(chrome::Chrome::FRAME_COLS * 2);
+        let rows = std::mem::take(&mut self.popup.rows);
+        self.popup.rows = crate::popup::wrap_rows(rows, w).0;
+        self
     }
 }
 

@@ -104,6 +104,42 @@ impl View {
                 }
             }
         }
+        if let Some(id) = self.card_node_hit(i, col) {
+            return Some(ChromeHit::OpenNode(id));
+        }
         self.row_action(i)
+    }
+
+    /// The node on card line 1, when `col` falls on it: the tap that opens
+    /// the node's plan. Reads the same layout the paint drew.
+    fn card_node_hit(&self, i: usize, col: u16) -> Option<String> {
+        if self.sideline_layout != sideline_color::SidelineLayout::Card {
+            return None;
+        }
+        let rows = self.painted_rows();
+        let DisplayRow::Agent(a) = rows.get(i)? else {
+            return None;
+        };
+        let text_w = self.sideline_paint_w().checked_sub(1)?;
+        let rect = self.worker_column_rects(text_w as u16)[2];
+        let span = card_line::meter_node(a, rect.width as usize).node?;
+        let at = (col as usize).checked_sub(rect.x as usize)?;
+        span.contains(&at).then(|| a.node.clone()).flatten()
+    }
+
+    fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
+        if (self.density != Density::Extended && !self.sideline_full)
+            || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
+        {
+            return None;
+        }
+        let text_w = self.sideline_paint_w().checked_sub(1)?;
+        let rects = self.worker_column_rects(text_w as u16);
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
+        let i = rects
+            .iter()
+            .take(5)
+            .position(|r| col >= r.x && col < r.x + r.width)?;
+        sideline::head_sorts(card)[i].map(ChromeHit::SortColumn)
     }
 }

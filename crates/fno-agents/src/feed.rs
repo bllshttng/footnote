@@ -44,6 +44,10 @@ pub struct FeedRow {
     pub title: String,
     #[serde(rename = "ref")]
     pub r#ref: Option<String>,
+    /// The registry row's worker name, set on a removal: the handle the
+    /// resume gesture and the copied `fno agents resume` command address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Who took the action, when that is a mechanism rather than a session:
     /// `stale-escalate`, `fno agents stale-escalate`. It is provenance, never
     /// an attach target.
@@ -448,6 +452,7 @@ pub fn project(
             // NOT RECORDED.
             model: r.model.clone(),
             title: format!("{} removed", r.name),
+            name: Some(r.name.clone()),
             actor: removed_by,
             reason: r.reason.clone(),
             crown: r.crown.clone(),
@@ -1363,6 +1368,7 @@ mod tests {
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
         // The remover moved to the actor field; the title says what happened.
         assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
+        assert_eq!(row.name.as_deref(), Some("t-d145"));
         assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
         assert_eq!(row.reason.as_deref(), Some("every named node done: x-aaaa"));
         assert_eq!(

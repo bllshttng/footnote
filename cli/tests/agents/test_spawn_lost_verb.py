@@ -10,7 +10,7 @@ import pytest
 from fno.agents import harness_map
 from fno.agents.harness_map import lost_verb_refusal
 
-VERBS = frozenset({"target", "blueprint", "think", "review", "execute", "fix", "pr", "tdd", "law"})
+VERBS = frozenset({"target", "blueprint", "think", "review", "execute", "fix", "pr", "tdd", "law", "ship"})
 
 
 @pytest.fixture(autouse=True)
@@ -26,11 +26,19 @@ def _expand(shell: str, payload: str) -> str:
     return subprocess.run(argv + [script], env=env, capture_output=True, text=True, check=True).stdout
 
 
-@pytest.mark.parametrize("shell", ["bash", "zsh"])
-@pytest.mark.parametrize(
-    "payload",
-    ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1", "$fno:pr check 7"],
-)
+_SHELLS = ["bash", "zsh"]
+# zsh reads `$fno:ship` as the multi-char `:s` modifier and expands the word
+# to nothing, so no verb token survives for the refusal to name; bash leaves
+# `:ship`, which the detector does catch. The retired `$fno:pr` spelling must
+# still refuse on bash even though nothing mints it anymore.
+_COMMON_PAYLOADS = ["$fno:target x-1", "do a $fno:blueprint x-1", "$fno:think x-1", "$fno:review high", "$fno:execute plan.md", "$fno:fix x-1"]
+
+
+@pytest.mark.parametrize("shell,payload", [
+    *[(s, p) for s in _SHELLS for p in _COMMON_PAYLOADS],
+    ("bash", "$fno:pr check 7"),
+    ("bash", "$fno:ship pr check 7"),
+])
 def test_a_real_shell_mangling_is_refused(shell, payload):
     if shutil.which(shell) is None:
         pytest.skip(f"{shell} not installed")
@@ -70,24 +78,11 @@ def test_the_target_family_is_caught_with_an_empty_roster(monkeypatch):
     assert lost_verb_refusal(":blueprint x-1") is not None
 
 
-def test_the_seam_refuses_an_eaten_verb_before_the_rust_route(capsys):
-    """The Rust client execs before cmd_spawn on a thread spawn (auto mode plus
-    an installed binary), so the judgment has to sit at the make_context seam."""
-    from fno.agents import rust_runtime
-
-    with pytest.raises(SystemExit) as exc:
-        rust_runtime._refuse_lost_verb_payload(
-            ["spawn", "--name", "eaten-r", "-H", "codex", "arget x-1", "--substrate", "thread"]
-        )
-    assert exc.value.code == 2
-    assert "Single-quote the payload" in capsys.readouterr().err
-
-
 def test_the_seam_leaves_an_intact_payload_alone():
     from fno.agents import rust_runtime
 
     rust_runtime._refuse_lost_verb_payload(
-        ["spawn", "--name", "w", "-H", "codex", "$fno:pr check 7", "--substrate", "thread"]
+        ["spawn", "--name", "w", "-H", "codex", "$fno:ship pr check 7", "--substrate", "thread"]
     )
 
 

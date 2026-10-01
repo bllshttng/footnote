@@ -153,10 +153,10 @@ For EACH plan (01-*, 02-*, ...):
      If fails → fix → re-validate
 
   6. PUSH & CREATE PR
-     git push → /pr create (captures pr_number)
+     git push → /fno:ship pr create (captures pr_number)
 
   7. EXTERNAL REVIEW
-     /pr check {pr_number}
+     /fno:ship pr check {pr_number}
      Implement Critical/High feedback → push fixes
 
   8. BROWSER TESTING (if has_ui)

@@ -98,8 +98,8 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Which task next?" | `fno backlog next` / `ready` |
 | "Lead a territory" | `/fno:lead <scope>` |
 | "Rename (Codex has no /rename)" | `fno agents rename <you> --name <new>` |
-| "Open a PR" | `/fno:pr create` |
-| "Wait for external review" | `/fno:pr check` |
+| "Open a PR" | `/fno:ship pr create` |
+| "Wait for external review" | `/fno:ship pr check` |
 | "Is this PR ready to merge?" | `fno do pr status <n>` |
 | "Merge an approved PR" | `fno do pr merge` |
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |

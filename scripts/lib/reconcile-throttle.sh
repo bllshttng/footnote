@@ -109,7 +109,7 @@ reconcile_maybe_fire() {
     # reconcile: reconcile closes drifted nodes and writes their retro-pending
     # sentinels, then `retro run` consumes those (plus any older pending ones) so
     # a GitHub web-UI merge - which drops no local event and never triggers a
-    # human `/pr merged` - still gets its carveout/retro harvest within one
+    # human `/fno:ship pr merged` - still gets its carveout/retro harvest within one
     # SessionStart+throttle window. retro run is the UNIVERSAL sentinel consumer;
     # it scopes each sentinel's review harvest to that sentinel's own pr_url repo
     # (foreign-repo sentinels file project=None, never mis-harvested against this

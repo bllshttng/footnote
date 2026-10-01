@@ -75,7 +75,8 @@ Both shapes accumulate silently, and condition D no longer wedges unrelated node
 
 `fno backlog retro sweep-carveouts` closes that gap by reading the ledger itself, keyed off nothing.
 It is a DRY RUN by default; `--apply` is the only path that writes.
-Bare `fno backlog retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
+
+Bare `fno backlog retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:ship pr check`, `/fno:ship pr merged`, direct CLI) but never applies. Neither does `fno backlog groom`.
 
 **The harvest is manual by design, and that is the trade, not an oversight.**
 This paragraph used to rest on a false claim: "there is no `fno backlog delete`, so every filed node is permanent".
@@ -137,8 +138,9 @@ Filing assigns the content hash that `land` writes into the node's dedup trailer
 No row is ever consumed without a node id attached to it.
 A failed mint leaves the row in the ledger; clearing it to turn the gate green with the work tracked nowhere is exactly what the gate exists to prevent.
 
-`deferred` and `oos-bug` are both swept and stay distinct: `deferred` is declared scope that did not ship and blocks a close, `oos-bug` is discovery and never blocks.
-`backfill` is skipped here as it is everywhere else, since it belongs to `/fno:pr merged`'s backfill slot.
+`deferred` and `oos-bug` are both swept and stay distinct. `deferred` is declared scope that did not ship and blocks a close. `oos-bug` is discovery and never blocks.
+
+`backfill` is skipped here as it is everywhere else. It belongs to `/fno:ship pr merged`'s backfill slot.
 
 ### Classification is deterministic by design
 

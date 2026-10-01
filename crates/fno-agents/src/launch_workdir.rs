@@ -118,6 +118,18 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
             if stdout.is_empty() {
                 return (json!({ "hold": "worktree ensure printed no path" }), None);
             }
+            // The venv guard runs before any worker lands: a tree whose venv
+            // aliases the canonical checkout rewrites the canonical venv's
+            // scripts on its first install, and those scripts die with this
+            // tree. Holding is the refusal the accident never gets past.
+            let worktree = PathBuf::from(&stdout);
+            if let Some(risk) = canonical_venv_risk(
+                &worktree,
+                crate::paths::canonical_repo_root(&worktree).as_deref(),
+                std::env::var_os("UV_PROJECT_ENVIRONMENT").as_deref(),
+            ) {
+                return (json!({ "hold": risk }), None);
+            }
             let receipt = if stderr.contains("created=false") {
                 Some(format!(
                     "fno agents spawn: resuming {node} in its existing worktree {stdout}"
@@ -127,6 +139,89 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
             };
             (json!({ "workdir": stdout }), receipt)
         }
+    }
+}
+
+/// The worktree-venv guard: a worktree session must never install into the
+/// CANONICAL checkout's `cli/.venv`. Two aliasing mechanisms are known:
+/// the worktree's `cli/.venv` is a symlink resolving into the canonical
+/// checkout, or `UV_PROJECT_ENVIRONMENT` points there - an `uv sync` under
+/// either rewrites the canonical venv's console scripts with this worktree's
+/// interpreter, and every deployed script dies when the worktree is pruned.
+/// `canonical` is the main checkout behind `worktree` (None when `worktree`
+/// sits outside a repo); a canonical `worktree` passes, since an install
+/// there belongs there. `Some` is the hold reason. The guard covers the
+/// spawn door only: a manual install in an already-open session is what the
+/// mux doctor's canonical-venv check catches after the fact.
+fn canonical_venv_risk(
+    worktree: &Path,
+    canonical: Option<&Path>,
+    uv_env: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    let canonical = canonical?;
+    if same_root(worktree, canonical) {
+        return None;
+    }
+    if let Ok(target) = std::fs::read_link(worktree.join("cli/.venv")) {
+        if path_inside(&target, canonical) {
+            return Some(format!(
+                "worktree {} symlinks cli/.venv into the canonical checkout \
+                 ({}); an install here rewrites the canonical venv's scripts \
+                 with this worktree's python, and they break when this \
+                 worktree is pruned. Give the worktree its own cli/.venv.",
+                worktree.display(),
+                target.display()
+            ));
+        }
+    }
+    if let Some(env) = uv_env.filter(|v| !v.is_empty()) {
+        if path_inside(&uv_env_path(env), canonical) {
+            return Some(format!(
+                "UV_PROJECT_ENVIRONMENT points into the canonical checkout; \
+                 an install from worktree {} would rewrite the canonical cli \
+                 venv's scripts with this worktree's python. Unset it or \
+                 repoint it inside the worktree.",
+                worktree.display()
+            ));
+        }
+    }
+    None
+}
+
+/// Equal lexically or through symlinks: a worktree and its canonical root may
+/// be spelled on either side of a `/tmp` vs `/private/tmp` alias.
+fn same_root(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// `p` sits under `root`, lexically first, then through symlinks. A path that
+/// cannot canonicalize is judged lexically only.
+fn path_inside(p: &Path, root: &Path) -> bool {
+    if p.starts_with(root) {
+        return true;
+    }
+    match (std::fs::canonicalize(p), std::fs::canonicalize(root)) {
+        (Ok(p), Ok(root)) => p.starts_with(root),
+        _ => false,
+    }
+}
+
+/// `~/...` in an env var expands against `$HOME` like every sibling reader;
+/// anything else passes through verbatim.
+fn uv_env_path(env: &std::ffi::OsStr) -> PathBuf {
+    let text = env.to_string_lossy();
+    match text.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(text.into_owned()),
+        },
+        None => PathBuf::from(text.into_owned()),
     }
 }
 
@@ -228,6 +323,42 @@ mod tests {
         assert_eq!(
             receipt.as_deref(),
             Some("fno agents spawn: resuming x-eeee in its existing worktree /wt/x-eeee")
+        );
+        // The venv guard rides the same success contract: a clean tree (or the
+        // canonical checkout itself) answers the path, a tree aliasing the
+        // canonical venv holds instead.
+        let canon = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        let venv = wt.path().join("cli/.venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        assert_eq!(
+            canonical_venv_risk(wt.path(), Some(canon.path()), None),
+            None
+        );
+        assert_eq!(
+            canonical_venv_risk(canon.path(), Some(canon.path()), None),
+            None
+        );
+        std::fs::remove_dir(&venv).unwrap();
+        std::os::unix::fs::symlink(canon.path().join("cli/.venv"), &venv).unwrap();
+        let risk = canonical_venv_risk(wt.path(), Some(canon.path()), None);
+        assert!(
+            risk.as_deref()
+                .is_some_and(|r| r.contains("symlinks cli/.venv")),
+            "{risk:?}"
+        );
+        std::fs::remove_file(&venv).unwrap();
+        let env_canon: std::ffi::OsString = canon.path().join("cli/.venv").into();
+        let risk = canonical_venv_risk(wt.path(), Some(canon.path()), Some(&env_canon));
+        assert!(
+            risk.as_deref()
+                .is_some_and(|r| r.contains("UV_PROJECT_ENVIRONMENT")),
+            "{risk:?}"
+        );
+        let env_elsewhere: std::ffi::OsString = "~/no-such-venv".into();
+        assert_eq!(
+            canonical_venv_risk(wt.path(), Some(canon.path()), Some(&env_elsewhere)),
+            None
         );
     }
 

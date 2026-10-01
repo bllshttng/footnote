@@ -21,7 +21,7 @@ Installation, setup, and multi-CLI deployment for the footnote plugin.
 | Python 3 | 3.9+ | Orchestrator CLI, agent sync scripts, roadmap tasks |
 | jq | 1.6+ | JSON processing in hook scripts |
 | yq | 4.x | YAML processing for settings and capabilities |
-| gh | 2.x | GitHub CLI for PR creation (`/pr create` skill) |
+| gh | 2.x | GitHub CLI for PR creation (`/fno:ship pr create` skill) |
 | Node.js | 18+ | Spend / model-drift hook (`spend-drift-monitor.js`) |
 
 ### Optional (per workflow)
@@ -372,7 +372,7 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 
 - **Stop hook is blocking** - the hook can prevent session exit. If you need to force-quit, the stop hook respects `<promise>` tags in output.
 - **Subagent dispatch** - parallel wave tasks spawn as native subagents. High parallelism can hit API rate limits.
-- **Context forking** - skills like `/pr create` run on cheaper models (Haiku) in isolated context. This is automatic and transparent.
+- **Context forking** - skills like `/fno:ship pr create` run on cheaper models (Haiku) in isolated context. This is automatic and transparent.
 
 ### Gemini CLI
 

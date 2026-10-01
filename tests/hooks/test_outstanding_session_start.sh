@@ -96,7 +96,8 @@ check "a fresh cache shows this session's own ready question" \
     "## Outstanding for you
 
 - question: Which reading?
-3 open across the fleet." \
+3 open across the fleet.
+Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead." \
     "$out"
 
 # A missing cache: the full fold answers.
@@ -125,7 +126,8 @@ out="$(run_hook)"
 check "an unreadable store says so, loudly" \
     "## Outstanding for you
 
-could not be read (fno inbox outstanding exit 1). Run it directly." \
+could not be read (fno inbox outstanding exit 1). Run it directly.
+Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead." \
     "$out"
 
 rm_cache

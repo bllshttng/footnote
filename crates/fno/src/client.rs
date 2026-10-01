@@ -47,12 +47,12 @@ use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, Swee
 use self::rename_overlay::RenameTarget;
 use row_menu::{build_row_menu, build_tab_menu};
 
-// The placement pickers (attach `p`, portal `P`) and the launch moment
-// (terminal guard + splash) live in their own modules; client.rs is
-// shrink-only under the file-budget gate.
+// Pickers, the launch moment and the snapshot action live in their own
+// modules: client.rs is shrink-only under the file-budget gate.
 pub(crate) mod attach_handshake;
 mod launch;
 mod placement_pickers;
+pub mod snapshot;
 
 use self::placement_pickers::{
     attach_place_keys, portal_pick_keys, AttachPlace, PortalPick, PortalPickDecision,
@@ -89,8 +89,7 @@ pub(crate) use overlay_paint::family_b_origin;
 use sideline::sideline_column_rects;
 
 mod row_stamp;
-// (v75) The sideline's density width rules, moved out under the file-budget
-// ratchet while the SessionRetired arms landed.
+// The sideline's density width rules.
 mod density_width;
 mod name_fit;
 use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};
@@ -976,6 +975,7 @@ struct View {
     /// question answer and a MINE write are independent, so one in flight
     /// never blocks the other).
     question_action: Option<(String, crate::needs_overlay::AnswerPick)>,
+    question_archive: Option<Vec<String>>,
     question_acting: bool,
     /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
@@ -1127,6 +1127,9 @@ struct View {
     /// A left-button release paired with a click on a modal's close chip must
     /// stay swallowed after that click closes the modal.
     modal_release_swallow: bool,
+    /// The esc-close spans the last compose painted: the one list a tap
+    /// checks, whichever overlay drew them.
+    close_chips: std::cell::RefCell<Vec<chrome::CloseSpan>>,
     /// The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -1156,7 +1159,8 @@ struct View {
     /// The theme file importer, active only inside Settings > Theme.
     theme_import: theme_import_ui::ThemeImportUi,
     theme_import_gen: u64,
-    theme_import_esc: Vec<u8>,
+    /// The Keybindings tab's open "press the new key" capture.
+    key_capture: Option<keys_settings::KeyCapture>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1424,6 +1428,7 @@ mod frame_tick;
 mod pane_paint;
 // Region input ownership + the mouse pre-pass, moved out of handle_stdin
 // under the file-budget ratchet.
+mod esc_close;
 mod region_focus;
 pub(crate) use needs_view::needs_overlay_lines;
 
@@ -1873,8 +1878,14 @@ pub(crate) enum AuxAction {
     ThemeImportOpen,
     ThemeImportSave,
     ThemeImportCancel,
-    /// Apply a validated mux prefix change now, then persist it through the CLI.
-    ApplyPrefix(String),
+    /// Step the settings modal back one drill level.
+    SettingsBack,
+    /// Open the macOS file picker for a theme file.
+    ThemePick,
+    /// Open the "press the new key" capture for an action id, or "prefix".
+    KeyCapture(String),
+    /// Open the key config in `$EDITOR`, then reload the keymap.
+    EditKeysFile,
     /// Open the color picker for one `[sideline.colors]` axis key
     /// (existing or just typed). The axis names its table
     /// (`harness` / `route` / `model` / `row`).
@@ -1894,6 +1905,9 @@ mod chrome_hit;
 mod config_set;
 mod lane_entry;
 mod node_detail;
+pub(crate) use node_detail::wrap_line;
+mod editor;
+mod keys_settings;
 mod org_board;
 mod org_detail;
 mod org_graph;
@@ -1913,6 +1927,7 @@ use settings_modal::SettingsTab;
 // branches; the peek mail adapter moved to its own module for the
 // shrink-only ratchet.
 mod agent_launcher;
+pub(crate) mod input_field;
 mod input_folds;
 mod mail_input;
 mod overlay_keys;
@@ -2074,6 +2089,7 @@ impl View {
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
+            question_archive: None,
             question_acting: false,
             needs_want: false,
             needs_inflight: false,
@@ -2110,7 +2126,7 @@ impl View {
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
-            theme_import_esc: Vec::new(),
+            key_capture: None,
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -2125,6 +2141,7 @@ impl View {
             press_hold: None,
             confirm: None,
             modal_release_swallow: false,
+            close_chips: Default::default(),
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -2669,7 +2686,7 @@ impl View {
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
-        self.keys_modal = Some(keys_modal::build_keys_modal());
+        self.keys_modal = Some(keys_modal::build_keys_modal().fit(self.term.1));
         self.keys_modal_esc.clear();
     }
 
@@ -2682,19 +2699,7 @@ impl View {
     /// walks the visible line's hit spans; `None` off the popup.
     fn keys_modal_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.keys_modal.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     /// Keep the selected modal row inside the scrolled viewport after an arrow
@@ -3026,19 +3031,7 @@ impl View {
     /// mouse hover/click; `None` off the popup.
     fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.row_menu.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     /// Open the sideline MENU popup anchored at `anchor` (US4). Also
@@ -3084,19 +3077,7 @@ impl View {
     /// The flat popup target under a screen cell while an aux popup is open.
     fn aux_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.aux.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     // In-block guards for the three popup click routers. A click that
@@ -3121,29 +3102,6 @@ impl View {
             .as_ref()
             .map(|m| m.popup.render(self.term).contains(row, col))
             .unwrap_or(false)
-    }
-
-    /// True when `(row, col)` lands on any of a popup's `esc`-close hit spans:
-    /// the footer's `esc close` words, the Full title bar's ` esc ` chip, or a
-    /// Bare menu's inline bottom-border chip - every one of them is
-    /// `ESC_CLOSE_HIT`-tagged by `chrome::frame`/`top_border`/`bottom_border`,
-    /// so one generic scan over the rendered line's hits covers all three.
-    /// Checked BEFORE the entry hit routers so a close target is never
-    /// mistaken for a row index.
-    fn chrome_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
-        let r = popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let (Some(li), Some(cc)) = (
-            (row as usize).checked_sub(r0),
-            (col as usize).checked_sub(c0),
-        ) else {
-            return false;
-        };
-        r.lines.get(li).is_some_and(|line| {
-            line.hits.iter().any(|(t, off, len)| {
-                *t == crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-        })
     }
 
     fn active_overlay_layout(&self) -> Option<OverlayLayout> {
@@ -3187,30 +3145,6 @@ impl View {
             return Some(self.peek_overlay_layout(rows, peek));
         }
         None
-    }
-
-    fn cancel_active_overlay(&mut self) {
-        if self.confirm.take().is_some() {
-            return;
-        }
-        if self.create.take().is_some() {
-            self.create_esc.clear();
-            return;
-        }
-        if self.rename.take().is_some() {
-            self.rename_esc.clear();
-            return;
-        }
-        if self.recruit.take().is_some() {
-            self.recruit_esc.clear();
-            return;
-        }
-        if self.connections.take().is_some() {
-            return;
-        }
-        if self.peek.is_some() {
-            self.clear_peek();
-        }
     }
 
     /// Apply a `PeekBody` under the seq guard (AC1-FR): store `lines`
@@ -4194,30 +4128,6 @@ impl View {
         (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
     }
 
-    fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
-        if (self.density != Density::Extended && !self.sideline_full)
-            || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
-        {
-            return None;
-        }
-        let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = self.worker_column_rects(text_w as u16);
-        let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
-        if hit(rects[0]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Status))
-        } else if hit(rects[1]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
-        } else if hit(rects[2]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::LastMessage))
-        } else if hit(rects[3]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Pr))
-        } else if hit(rects[4]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Age))
-        } else {
-            None
-        }
-    }
-
     /// What acting on sideline display row `i` does - the single resolver both
     /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
     /// route through, so the two inputs can never diverge. `None` only
@@ -5187,6 +5097,7 @@ impl View {
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
+        chrome::close_chips_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5490,6 +5401,7 @@ impl View {
                 }
             }
         }
+        *self.close_chips.borrow_mut() = chrome::close_chips_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,
@@ -6805,6 +6717,8 @@ enum ChromeHit {
     OpenQuestionDetail(String),
     /// Open the questions view on the list (the `+N more` row's click).
     OpenQuestionsList,
+    /// A card's node tap: the plan in Obsidian, else the node details pane.
+    OpenNode(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -7804,6 +7718,12 @@ fn peek_overlay_lines(
     if let Some(pr) = a.pr {
         header.push_str(&format!(" · PR #{pr}"));
     }
+    if a.started_at.is_some() {
+        header.push_str(&format!(
+            " · up {}",
+            row_meter::up_cell(a.started_at, now_secs)
+        ));
+    }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
         for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
@@ -8266,13 +8186,7 @@ async fn attach_and_run(
         // The questions block's kick: one fold every 10 s while the sideline
         // is shown, single-flight like the feed fold.
         questions::maybe_kick(&mut view, &questions_tx);
-        if let Some((qid, pick)) = view.question_action.take() {
-            let tx = question_act_tx.clone();
-            tokio::spawn(async move {
-                let result = crate::needs_overlay::answer(&qid, pick).await;
-                let _ = tx.send(result);
-            });
-        }
+        questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
             view.yard_want = false;
             view.yard_inflight = true;
@@ -9311,30 +9225,16 @@ fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
 }
 
 /// Family-B name and confirmation overlays own every pointer event while open.
-/// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
-/// cannot dismiss the modal or reach a pane underneath it. The Connections
-/// modal joins them. Peek does NOT: it is deliberately click-through (a
-/// right-press under it still opens the row's menu), so only its footer's
-/// close words are intercepted and every other event falls through.
+/// The pre-pass's esc-chip tap cancels them; outside clicks are swallowed so
+/// they cannot dismiss the modal or reach a pane underneath it. The
+/// Connections modal joins them. Peek does NOT: it is deliberately
+/// click-through (a right-press under it still opens the row's menu).
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
     let peek_open = view.peek.is_some();
     if !peek_open && consume_modal_close_gesture(view, rep.kind) {
         return true;
     }
-    let Some(layout) = view.active_overlay_layout() else {
-        return false;
-    };
-    if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
-        && layout.hit_at(rep.row, rep.col) == Some(crate::chrome::ESC_CLOSE_HIT)
-    {
-        view.cancel_active_overlay();
-        view.modal_release_swallow = true;
-        return true;
-    }
-    if peek_open {
-        return false;
-    }
-    true
+    view.active_overlay_layout().is_some() && !peek_open
 }
 
 /// Route one stdin chunk: the selector consumes keys while open (AC6-FR
@@ -9907,6 +9807,7 @@ async fn apply_hit(
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
+        ChromeHit::OpenNode(id) => node_link::open(view, id).await,
     }
     Ok(())
 }
@@ -10123,17 +10024,6 @@ async fn row_menu_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, bottom-border chip
-            // on a Bare menu) closes the popup; checked before the entry
-            // routers.
-            if view
-                .row_menu
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.row_menu = None;
-                return Ok(());
-            }
             match view.row_menu_hit(rep.row, rep.col) {
                 Some(t) => {
                     if let Some(m) = view.row_menu.as_mut() {
@@ -10228,11 +10118,12 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => {
             view.lane.reset();
             theme_import_ui::reset(view);
+            view.key_capture = None;
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
-            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()).fit(view.term.1));
             view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {
@@ -10281,63 +10172,23 @@ async fn execute_aux_action(
             view.aux = None;
             View::open(view);
         }
-        AuxAction::ToggleHoverFocus => {
-            view.hover_focus = !view.hover_focus;
-            let enabled = if view.hover_focus { "true" } else { "false" };
-            let notice = match spawn_config_set("mux.hover_focus", enabled).await {
-                Ok(()) => format!("focus follows mouse: {enabled}"),
-                Err(_) => "focus follows mouse applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleStatus
+        AuxAction::ToggleHoverFocus
+        | AuxAction::ToggleStatus
         | AuxAction::ToggleConfirmLifecycle
         | AuxAction::ToggleResourceMeter
-        | AuxAction::ToggleSidelineLayout => {
-            settings_modal::run_toggle(view, action, sock_w).await?;
-        }
-        AuxAction::ApplyTheme(name) => {
-            theme_ground::apply(view, &name).await?;
-        }
-        AuxAction::ThemeImportOpen => theme_import_ui::open(view),
-        AuxAction::ThemeImportSave => theme_import_ui::save(view).await?,
-        AuxAction::ThemeImportCancel => theme_import_ui::cancel(view),
-        AuxAction::ApplyPrefix(spec) => {
-            let notice = match crate::keys::resolve_prefix_change(&spec) {
-                Err(refusal) => refusal,
-                Ok(map) => {
-                    crate::keys::reinstall(map);
-                    match spawn_config_set("mux.prefix", &spec).await {
-                        Ok(()) => format!("prefix: {spec}"),
-                        Err(_) => format!("prefix {spec} applied this session; save failed"),
-                    }
-                }
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorEdit(axis, key) => {
-            view.lane.axis = Some(axis.clone());
-            view.lane.pick = Some((axis, key));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorAdd(axis) => {
-            view.lane.axis = Some(axis.clone());
-            view.lane.entry_esc.clear();
-            view.lane.key_entry = Some((axis, String::new()));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorCustom(axis, key) => {
-            view.lane.pick = Some((axis.clone(), key.clone()));
-            view.lane.entry_esc.clear();
-            view.lane.custom_entry = Some(String::new());
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorSet(axis, key, color) => {
-            view.lane.pick = None;
-            lane_entry::lane_color_save(view, &axis, &key, &color).await?;
-        }
+        | AuxAction::ToggleSidelineLayout
+        | AuxAction::ApplyTheme(_)
+        | AuxAction::ThemeImportOpen
+        | AuxAction::ThemeImportSave
+        | AuxAction::ThemeImportCancel
+        | AuxAction::ThemePick
+        | AuxAction::SettingsBack
+        | AuxAction::KeyCapture(_)
+        | AuxAction::EditKeysFile
+        | AuxAction::LaneColorEdit(..)
+        | AuxAction::LaneColorAdd(_)
+        | AuxAction::LaneColorCustom(..)
+        | AuxAction::LaneColorSet(..) => settings_modal::run_action(view, action, sock_w).await?,
     }
     Ok(DispatchFlow::Continue)
 }
@@ -10369,13 +10220,9 @@ async fn aux_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // A lane-colors text entry (naming a key / typing a free-form
-    // color) consumes the chunk, same precedence shape as create_keys.
-    if theme_import_ui::is_entry(&view.theme_import) {
-        return theme_import_ui::entry_keys(view, bytes).await;
-    }
-    if view.lane.is_entry() {
-        return lane_entry::lane_entry_keys(view, bytes, sock_w).await;
+    // An open settings text field or key capture consumes the chunk.
+    if let Some(flow) = settings_modal::field_keys(view, bytes, sock_w).await? {
+        return Ok(flow);
     }
     let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
@@ -10387,8 +10234,10 @@ async fn aux_keys(
         }
         match tok {
             ModalKey::Esc => {
-                theme_import_ui::reset(view);
-                view.aux = None;
+                if !settings_modal::back(view) {
+                    theme_import_ui::reset(view);
+                    view.aux = None;
+                }
             }
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
@@ -10441,12 +10290,7 @@ async fn aux_keys(
                     .map(|m| !m.popup.chrome.tabs.is_empty())
                     .unwrap_or(false);
                 if has_tabs {
-                    view.settings_tab = settings_modal::SettingsTab::next(view.settings_tab);
-                    // A section switch drops the colors drill so a
-                    // return to Colors always opens at the top level.
-                    view.lane.reset();
-                    theme_import_ui::reset(view);
-                    view.reopen_settings_keeping_sel();
+                    settings_modal::switch_tab(view, view.settings_tab.next());
                 } else {
                     theme_import_ui::reset(view);
                     view.aux = None;
@@ -10462,12 +10306,6 @@ async fn aux_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Keys while a lane-colors text entry is open: printable/Backspace
-/// edit the buffer, Enter submits, Esc cancels back to the underlying drill
-/// level. Modeled on [`create_keys`] (`fold_search_input` + per-key re-check),
-/// with the settings modal staying open underneath. Enter on an EMPTY buffer
-/// keeps the entry open; Enter on a custom entry validates through
-/// `parse_color` and saves or refuses with a notice.
 /// One mouse report while an aux popup is open (US4/US5): hover selects, a left
 /// click runs the entry (propagating detach), a click off the popup dismisses.
 async fn aux_mouse(
@@ -10484,26 +10322,12 @@ async fn aux_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the popup; checked before the entry routers. A dismiss
-            // while a lane text entry is armed drops the buffer with it, so
-            // the entry can never outlive the modal and capture keys later.
-            if view
-                .aux
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.lane.clear_entry();
-                theme_import_ui::reset(view);
-                view.aux = None;
+            if settings_modal::tap_tab(view, rep.row, rep.col) {
                 return Ok(StdinFlow::Continue);
             }
             match view.aux_hit(rep.row, rep.col) {
                 Some(t) => {
-                    // While a lane text entry owns the keyboard, row
-                    // clicks are inert: acting on a picker row mid-typing
-                    // would leave the buffer armed under a changed view.
-                    if view.lane.is_entry() || theme_import_ui::is_entry(&view.theme_import) {
+                    if !settings_modal::row_tap_allowed(view, t) {
                         return Ok(StdinFlow::Continue);
                     }
                     if let Some(m) = view.aux.as_mut() {
@@ -10521,6 +10345,7 @@ async fn aux_mouse(
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
                         theme_import_ui::reset(view);
+                        view.key_capture = None;
                         view.aux = None;
                     }
                 }
@@ -10871,6 +10696,9 @@ async fn selector_keys(
         let Some(cur) = view.selector else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
+        if questions::selector_key(view, k, cur) {
+            continue;
+        }
         // Any key other than a J/K reorder drops the cursor-follow intent, so a
         // later Layout re-anchors normally instead of chasing a stale squad.
         if k != b'J' && k != b'K' {
@@ -12265,6 +12093,8 @@ mod court_block;
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
 
+mod card_line;
+mod node_link;
 mod row_meter;
 #[path = "client/sideline.rs"]
 mod sideline;

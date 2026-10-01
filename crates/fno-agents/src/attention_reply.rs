@@ -60,6 +60,10 @@ pub struct ReplyState {
     pub session_id: Option<String>,
     #[serde(default)]
     pub updated_at: u64,
+    /// The user handed the question to the agents: the crown over the
+    /// asker's node decides it, so the ladder mails the crown, never the asker.
+    #[serde(default)]
+    pub delegate: bool,
 }
 
 impl ReplyState {
@@ -103,10 +107,17 @@ pub struct Facts<'a> {
     pub session: Option<(&'a str, &'a str)>,
     pub confirmed: bool,
     pub now: u64,
+    /// The asker holds the crown over its own node (delegate states only).
+    pub asker_is_crown: bool,
 }
 
 /// The pure decision. Total over all inputs; never shells out.
 pub fn step(state: &ReplyState, facts: &Facts) -> Step {
+    // A delegated question goes to the crown: the clear's mail already told
+    // the asker, so only an asker that IS the crown is done at the mail rung.
+    if state.delegate && !(facts.mail_landed && facts.asker_is_crown) {
+        return Step::CrownNeeded;
+    }
     if facts.mail_landed {
         return Step::Deliver(Delivery {
             rung: "mail",
@@ -171,7 +182,7 @@ pub fn tick_answers(
     states.retain(|id, _| !delivered.contains(id));
     let mut acted: u64 = 0;
     let mut detail: Vec<String> = Vec::new();
-    for (item_id, sink, answer) in &answers {
+    for (item_id, sink, answer, delegate) in &answers {
         if delivered.contains(item_id) {
             // The terminal delivery row exists; a re-walk appends a fresh
             // delivery row every beat (the live store held 5,343 rows for
@@ -186,6 +197,7 @@ pub fn tick_answers(
             item_id: item_id.clone(),
             answer: answer.clone(),
             sink: sink.clone(),
+            delegate: *delegate,
             ..Default::default()
         });
         if state.terminal() {
@@ -240,7 +252,7 @@ pub fn tick_answers(
         }
         // The ladder phase: effects through the injected runner, one delivery
         // row per item.
-        let step = step_of(state, items, now);
+        let step = step_of(state, items, now, cwd);
         match step {
             Step::Idle => {}
             Step::Fail { evidence } => {
@@ -274,9 +286,14 @@ pub fn tick_answers(
             }
             Step::CrownNeeded => {
                 let item = items.iter().find(|i| i.id == *item_id);
-                match item.and_then(|i| crown_holder(i, cwd)) {
-                    Some(holder) => {
-                        mail_crown(state, &holder, runner);
+                match item.and_then(|i| crown_holder(i, cwd).map(|h| (i, h))) {
+                    Some((item, holder)) => {
+                        let message = if state.delegate {
+                            delegate_message(state, item)
+                        } else {
+                            resume_message(state)
+                        };
+                        mail_crown(state, &holder, message, runner);
                     }
                     None => {
                         state.rung = "none".into();
@@ -305,7 +322,7 @@ fn now_secs() -> u64 {
 /// mail verdict, and (resume phase) the transcript confirm. `confirmed` is
 /// only computed in the resume phase - a transcript scan per beat per item
 /// is the one cost the ladder refuses to pay before it must.
-fn step_of(state: &ReplyState, items: &[AttentionItem], now: u64) -> Step {
+fn step_of(state: &ReplyState, items: &[AttentionItem], now: u64, cwd: &Path) -> Step {
     let item = items.iter().find(|i| i.id == state.item_id);
     let session: Option<(String, String)> = item.and_then(|i| {
         i.asker.as_ref().and_then(|a| {
@@ -324,12 +341,20 @@ fn step_of(state: &ReplyState, items: &[AttentionItem], now: u64) -> Step {
         // confirmed this beat.
         false
     };
+    let asker_is_crown = state.delegate
+        && item.is_some_and(|i| {
+            let asker = i.asker.as_ref();
+            crown_holder(i, cwd).is_some_and(|h| {
+                asker.is_some_and(|a| a.handle == h || a.session_id.as_deref() == Some(&h))
+            })
+        });
     let facts = Facts {
         mail_landed: state.receipt.contains("delivered (hosted)"),
         is_note: state.item_id.starts_with("note-"),
         session: session.as_ref().map(|(s, h)| (s.as_str(), h.as_str())),
         confirmed,
         now,
+        asker_is_crown,
     };
     step(state, &facts)
 }
@@ -385,6 +410,29 @@ fn resume_message(state: &ReplyState) -> String {
     )
 }
 
+/// The crown's mail for a delegated question: decide a reversible call and
+/// record it, or ask the user again with the same options, naming the old id
+/// (the original closed when the delegation recorded).
+fn delegate_message(state: &ReplyState, item: &AttentionItem) -> String {
+    let asker = item.asker.as_ref().map_or("?", |a| a.handle.as_str());
+    let node = item
+        .node
+        .as_deref()
+        .filter(|n| !n.is_empty() && *n != "none")
+        .or_else(|| item.blocks.first().map(String::as_str))
+        .unwrap_or("<node>");
+    format!(
+        "The user handed question {id} ({title}), asked by {asker}, to you. Reversible: {rev}. \
+         Decide it yourself and record it with fno backlog decide {node} if it is reversible \
+         (yes or costly); if you judge it irreversible after all, ask the user again with \
+         fno inbox outstanding ask --question-file, carrying the same options and naming {id} \
+         in the question.",
+        id = state.item_id,
+        title = item.title,
+        rev = item.reversible.as_deref().unwrap_or("not recorded"),
+    )
+}
+
 /// The note path's one explicit answer mail (a note has no clear, so no mail
 /// leg runs for it). Sent once; the receipt judged like any other mail rung.
 fn mail_note(
@@ -421,6 +469,7 @@ fn mail_note(
 fn mail_crown(
     state: &mut ReplyState,
     holder: &str,
+    message: String,
     runner: &dyn Fn(&[String]) -> (i32, String, String),
 ) {
     let argv = vec![
@@ -429,7 +478,7 @@ fn mail_crown(
         "mail".into(),
         "send".into(),
         holder.to_string(),
-        resume_message(state),
+        message,
         "--style-exception".into(),
         "attention delivery: quoted answer text, not authored prose".into(),
     ];
@@ -451,7 +500,7 @@ fn mail_crown(
 /// The crown resolver: the live crown whose compiled territory names the
 /// asker's node (or its first block). Reuses the one resolver the drain
 /// and the court read: territory's node_owners over live_crowns.
-fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
+pub(crate) fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
     // A literal `none` node is the projection's "no node"; fall through to
     // the blocks, which still name what the answer unblocks.
     let node = item
@@ -484,21 +533,21 @@ fn transcript_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Fold the unsuperseded `attention_answer` rows: id -> (sink, answer text).
-/// The answer text maps the row's option onto the item's option text when the
-/// projection has the item; words and done stand alone.
+/// Fold the unsuperseded `attention_answer` rows: id -> (sink, answer text,
+/// delegate). The answer text maps the row's option onto the item's option
+/// text when the projection has the item; words and done stand alone.
 fn fold_answer_rows(
     items: &[AttentionItem],
 ) -> Result<
     (
-        Vec<(String, String, String)>,
+        Vec<(String, String, String, bool)>,
         std::collections::HashSet<String>,
     ),
     String,
 > {
     let home = crate::paths::AgentsHome::from_env();
     let path = crate::provider_cap::questions_path(&home);
-    let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut out: Vec<(String, String, String, bool)> = Vec::new();
     let mut delivered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut won: std::collections::HashSet<String> = std::collections::HashSet::new();
     let raw = crate::event_store::journal_text_checked(
@@ -559,7 +608,8 @@ fn fold_answer_rows(
             (_, _, Some(true)) => "done".to_string(),
             _ => String::new(),
         };
-        out.push((id.to_string(), sink, text));
+        let delegate = data.get("delegate").and_then(Value::as_bool) == Some(true);
+        out.push((id.to_string(), sink, text, delegate));
     }
     Ok((out, delivered))
 }
@@ -833,6 +883,43 @@ mod tests {
         assert!(j.contains("\"rung\":\"mail\""), "{j}");
         assert!(j.contains("\"outcome\":\"landed\""), "{j}");
         assert!(j.contains("\"sink\":\"mux\""), "the answer row: {j}");
+
+        // A delegated answer skips the asker: the crown decides, unless the
+        // asker is the crown and the clear's mail already reached it.
+        let delegated = ReplyState {
+            item_id: "q-hp".into(),
+            delegate: true,
+            ..Default::default()
+        };
+        let facts = |mail_landed, asker_is_crown| Facts {
+            mail_landed,
+            is_note: false,
+            session: Some(("s1", "claude")),
+            confirmed: false,
+            now: 0,
+            asker_is_crown,
+        };
+        assert!(matches!(
+            step(&delegated, &facts(true, false)),
+            Step::CrownNeeded
+        ));
+        assert!(matches!(
+            step(&delegated, &facts(false, true)),
+            Step::CrownNeeded
+        ));
+        assert!(matches!(
+            step(&delegated, &facts(true, true)),
+            Step::Deliver(Delivery {
+                rung: "mail",
+                outcome: "landed",
+                ..
+            })
+        ));
+        let msg = delegate_message(&delegated, &items[0]);
+        assert!(
+            msg.contains("q-hp") && msg.contains("fno backlog decide x-1"),
+            "{msg}"
+        );
     }
 
     #[test]

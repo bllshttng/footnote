@@ -323,8 +323,8 @@ _code_default_phase() {
         execute)  echo "fno:execute waves" ;;
         review)   echo "fno:review" ;;
         validate) echo "" ;;  # detected from project (npm run build, pytest, etc.)
-        ship)     echo "fno:pr create" ;;
-        external) echo "fno:pr check" ;;
+        ship)     echo "fno:ship pr create" ;;
+        external) echo "fno:ship pr check" ;;
         docs)     echo "fno:ship-docs" ;;
         *)        echo "" ;;
     esac

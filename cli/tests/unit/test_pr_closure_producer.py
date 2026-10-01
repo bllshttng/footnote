@@ -257,7 +257,7 @@ def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_pa
 # branch fallback and ship provenance, which is how a created PR ended up
 # unbound from its own node three times in one day.
 
-CREATE_REFERENCE = REPO / "skills" / "pr" / "references" / "create.md"
+CREATE_REFERENCE = REPO / "skills" / "ship" / "references" / "create.md"
 
 
 def _bind_section(path: Path) -> str:
@@ -696,7 +696,7 @@ def test_hook_never_denies_on_a_body_file_it_cannot_judge(node_branch_repo, tmp_
     # A stale file must NOT deny. This hook runs BEFORE the command, so a
     # fixed, never-cleaned path like .fno/pr-body.md holds the PREVIOUS PR's
     # body while the very same command is about to overwrite it. Judging that
-    # content denied the compose-then-pass flow skills/pr/references/create.md
+    # content denied the compose-then-pass flow skills/ship/references/create.md
     # prescribes. The no-trailer case on a real file is now decided (and
     # denied) elsewhere; a STALE file that still carries a trailer remains a
     # known false ALLOW, the failure mode this hook's contract accepts while

@@ -37,6 +37,12 @@ const CODEX_BLOCK_MARK: &str = "# Added by `fno config setup cli-hooks`";
 const PURGE_WORD: &str = "purge";
 /// The uv tool name the wheel installs under (a directory in `uv tool dir`).
 const UV_TOOL: &str = "fno";
+/// The crontab block `scripts/install-autocorrect-cron.sh` writes on Linux.
+const CRON_BEGIN: &str = "# BEGIN autocorrect-managed";
+const CRON_END: &str = "# END autocorrect-managed";
+/// The plugin name agy knows: the repo plugin.json "name", the same name
+/// `scripts/install/agy-plugin.sh` installs and `agy plugin uninstall` takes.
+const AGY_PLUGIN: &str = "footnote";
 
 enum Action {
     Run(Vec<String>),
@@ -44,6 +50,7 @@ enum Action {
     StripJson(PathBuf),
     StripCodexToml(PathBuf),
     StripRc(PathBuf),
+    StripCrontab,
     RemovePath(PathBuf),
     StopDaemon(Vec<u32>),
     KillMux,
@@ -67,6 +74,7 @@ impl Item {
             Action::StripJson(p) | Action::StripCodexToml(p) | Action::StripRc(p) => {
                 format!("edit {}", p.display())
             }
+            Action::StripCrontab => "edit crontab (drop the managed block)".into(),
             Action::RemovePath(p) => format!("rm -r {}", p.display()),
             Action::StopDaemon(pids) => format!("SIGTERM pid {pids:?}"),
             Action::KillMux => "fno mux kill-server --all".into(),
@@ -124,6 +132,62 @@ fn run(argv: &[String]) -> Result<String, String> {
 
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
+}
+
+/// Run a command to completion with `input` on its stdin, output captured.
+fn run_stdin(argv: &[String], input: &str) -> Result<String, String> {
+    let mut cmd = std_command(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let failed = |e: std::io::Error| format!("{}: {e}", argv[0]);
+    let mut child = std_spawn_for_human(&mut cmd).map_err(failed)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{}: no stdin handle", argv[0]))?
+        .write_all(input.as_bytes())
+        .map_err(failed)?;
+    let out = child.wait_with_output().map_err(failed)?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let mut detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if detail.is_empty() {
+        detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    }
+    Err(format!(
+        "`{}` exited {}: {detail}",
+        argv.join(" "),
+        out.status.code().unwrap_or(-1)
+    ))
+}
+
+/// The user's crontab body, or `None` when cron has none for this user. Any
+/// other failure is `Err`: an unreadable crontab is never clobbered.
+fn crontab_list() -> Result<Option<String>, String> {
+    match run(&argv(&["crontab", "-l"])) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.contains("no crontab") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The agy plugin is in when a staged copy exists (the config path agy 1.1.16
+/// measured, or the `AGY_PLUGIN_HOME` override `scripts/install/agy-plugin.sh`
+/// also writes) or the import manifest names it. Shared by discover and
+/// residue so the two can never disagree.
+fn agy_plugin_in() -> bool {
+    let home = home();
+    [
+        home.join(".gemini/config/plugins").join(AGY_PLUGIN),
+        env_dir("AGY_PLUGIN_HOME", ".gemini/antigravity-cli/plugins").join(AGY_PLUGIN),
+    ]
+    .iter()
+    .any(|path| path.is_dir())
+        || read(&home.join(".gemini/config/import_manifest.json"))
+            .contains(&format!("\"{AGY_PLUGIN}\""))
 }
 
 fn uid() -> u32 {
@@ -296,6 +360,24 @@ pub(crate) fn strip_rc(text: &str) -> Option<String> {
     (out.len() != text.lines().count()).then(|| join_lines(&out))
 }
 
+/// Drop the managed autocorrect block from a crontab body: the lines between
+/// the sentinels and the sentinels themselves. A lost END sentinel strips to
+/// the last line, matching the installer's awk. `None` when no block present.
+fn strip_crontab(text: &str) -> Option<String> {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in text.lines() {
+        if line == CRON_BEGIN {
+            skip = true;
+        } else if line == CRON_END {
+            skip = false;
+        } else if !skip {
+            out.push(line);
+        }
+    }
+    (out.len() != text.lines().count()).then(|| join_lines(&out))
+}
+
 fn json_has_ours(path: &Path) -> bool {
     serde_json::from_str::<Value>(&read(path))
         .map(|mut doc| strip_json(&mut doc) > 0)
@@ -315,6 +397,16 @@ fn discover() -> Vec<Item> {
             format!("launchd agent {label}"),
             Action::Launchd { label, plist },
         );
+    }
+
+    // A scheduler, so it goes with launchd before anything it could respawn.
+    // An unreadable crontab stays untouched: the action re-reads and refuses.
+    // The probe is the strip itself, so an item is discovered only when the
+    // action can actually remove it.
+    if let Ok(Some(text)) = crontab_list() {
+        if strip_crontab(&text).is_some() {
+            add("autocorrect crontab block".into(), Action::StripCrontab);
+        }
     }
 
     let claude = env_dir("CLAUDE_CONFIG_DIR", ".claude");
@@ -361,6 +453,13 @@ fn discover() -> Vec<Item> {
                 ])),
             );
         }
+    }
+
+    if on_path("agy").is_some() && agy_plugin_in() {
+        add(
+            format!("agy plugin {AGY_PLUGIN}"),
+            Action::Run(argv(&["agy", "plugin", "uninstall", AGY_PLUGIN])),
+        );
     }
 
     let opencode_manifest = std::fs::read_dir(home.join(".fno"))
@@ -544,6 +643,22 @@ fn execute(action: &Action) -> Result<String, String> {
             Some(text) => rewrite(path, text),
             None => Ok("already clean".into()),
         },
+        Action::StripCrontab => {
+            let Some(text) = crontab_list()? else {
+                return Ok("already clean".into());
+            };
+            let Some(stripped) = strip_crontab(&text) else {
+                return Ok("already clean".into());
+            };
+            // A crontab holding only our block is removed outright, like the
+            // installer's own --uninstall; anything left is written back.
+            if stripped.trim().is_empty() {
+                let _ = run(&argv(&["crontab", "-r"]));
+            } else {
+                run_stdin(&argv(&["crontab", "-"]), &stripped)?;
+            }
+            Ok("removed".into())
+        }
         Action::RemovePath(path) => {
             let gone = if path.is_dir() {
                 std::fs::remove_dir_all(path)
@@ -591,6 +706,16 @@ fn residue() -> Vec<String> {
             "codex hook without its marker block in {}: remove the [[hooks.SessionStart]] entry running session-start.sh by hand",
             codex_config.display()
         ));
+    }
+    if agy_plugin_in() {
+        left.push(format!(
+            "agy plugin {AGY_PLUGIN}: agy plugin uninstall {AGY_PLUGIN}"
+        ));
+    }
+    if let Ok(Some(text)) = crontab_list() {
+        if strip_crontab(&text).is_some() {
+            left.push(format!("crontab: {} block still present", CRON_BEGIN));
+        }
     }
     left
 }
@@ -765,6 +890,15 @@ mod tests {
             strip_rc(rc).as_deref(),
             Some("alias ll=ls\nexport KEEP=1\n")
         );
+
+        let cron = "MAILTO=x\n# BEGIN autocorrect-managed\n*/15 * * * * /r/autocorrect-watcher.sh\n# END autocorrect-managed\nKEEP=1\n";
+        assert_eq!(strip_crontab(cron).as_deref(), Some("MAILTO=x\nKEEP=1\n"));
+        // A lost END sentinel strips to the last line, like the installer's awk.
+        assert_eq!(
+            strip_crontab("A\n# BEGIN autocorrect-managed\njob").as_deref(),
+            Some("A\n")
+        );
+        assert_eq!(strip_crontab("MAILTO=x\n"), None);
 
         assert_eq!(
             launch_agent_label("sh.fno.groom.plist", "").as_deref(),
