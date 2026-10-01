@@ -56,7 +56,7 @@ from fno.agents.codex_rollout import (  # noqa: F401 - re-export: dispatch and t
     _codex_session_id_for_pid,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
-from fno.agents.spawn_defaults import is_verb_seed
+from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,

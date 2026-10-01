@@ -455,7 +455,15 @@ pub fn compose(inputs: &Inputs) -> Answer {
         .flat_map(|line| line.split('\n').map(str::to_string))
         .collect();
     Answer {
-        argv: seam.argv.take().unwrap_or_default(),
+        // A refused spawn never hands the caller an argv: Python's seam
+        // raised SystemExit inside, so the transport kept the argv it was
+        // given. The answer carries the input argv unchanged on any
+        // nonzero exit, injected or not.
+        argv: if seam.exit.unwrap_or(0) != 0 {
+            inputs.argv.clone()
+        } else {
+            seam.argv.take().unwrap_or_default()
+        },
         stderr,
         exit: seam.exit.unwrap_or(0),
         stdout: seam.stdout.take(),

@@ -34,7 +34,7 @@ def test_claim_store_writable_is_tri_state(provider, computed_dirs, expected, mo
 def test_is_verb_seed_is_the_first_token_fire_test_over_both_sigils():
     """x-413d: the fire test accepts both sigils at index 0 and still reads a
     verb inside prose as a conversation."""
-    from fno.agents.spawn_defaults import is_verb_seed
+    from fno.config._dispatch_verbs import is_verb_seed
 
     assert is_verb_seed("$fno:target x-caf8") is True
     assert is_verb_seed("/fno:target x-caf8") is True
