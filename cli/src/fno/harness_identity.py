@@ -10,8 +10,6 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional
 
-from fno.harness_names import KNOWN_HARNESSES
-
 
 # --- FNO_AGENT_HARNESS env resolution (with pre-cutover compat window) -------
 # Spawn injects FNO_AGENT_HARNESS (the CLI binary). A worker spawned before the
@@ -567,6 +565,10 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
 # subprocess on every import, which broke the binary-less CI lints.
 @lru_cache(maxsize=1)
 def _legacy_handle_re() -> "re.Pattern[str]":
+    # In-function, never module level: a from-import of the served attr
+    # resolves it at import time, which is the subprocess the laziness hides.
+    from fno.harness_names import KNOWN_HARNESSES
+
     return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
 
 

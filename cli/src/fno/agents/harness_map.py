@@ -45,7 +45,6 @@ from typing import Mapping, Optional
 
 from fno.config._dispatch_verbs import canonical_verb_key, is_verb_seed, parse_verb_token
 from fno.config_io import _global_settings_path
-from fno.harness_names import KNOWN_HARNESSES
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
@@ -531,6 +530,10 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     # and a roster entry with no capability row is legal (hermes, openclaw).
     # A capability row naming a harness the roster does not carry is not - it
     # would advertise a dispatch lane for a harness no evidence supports.
+    # In-function import: a from-import of the served attr resolves it at
+    # import time, which is the subprocess the door's laziness hides.
+    from fno.harness_names import KNOWN_HARNESSES
+
     absent = set(harnesses) - set(KNOWN_HARNESSES)
     if absent:
         raise DispatchResolveError(
@@ -908,6 +911,8 @@ def _apply_capability_overrides() -> None:
         table = doc.get("harness")
         if not isinstance(table, dict):
             continue
+        from fno.harness_names import KNOWN_HARNESSES
+
         for name, override in table.items():
             if name in overridden or not isinstance(override, dict):
                 continue
