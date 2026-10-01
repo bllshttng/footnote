@@ -341,19 +341,20 @@ fn click_rows() {
         matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
         "the click names the event the top row painted"
     );
-    // And THAT modal's session row carries the same deep link the click used
-    // to fire, resolved against the roster at open.
+    // And THAT modal's session row offers the resume command the session id
+    // answers: the feed id is a session handle, never an attach jobId, so
+    // the row copies `fno agents resume <sid>` instead of a doomed attach.
     v.feed_detail = Some(feed_detail::modal(&v, feed_item(Some("x-c"), Some("s-3"))));
     let m = v.feed_detail.as_ref().unwrap();
-    assert!(m
-        .actions
-        .iter()
-        .any(|a| matches!(a, feed_detail::FeedAction::Session(
-            ChromeHit::Cmds(c)
-        ) if *c == vec![Command::AttachAgent {
-            id: "s-3".into(),
-            placement: PanePlacement { portal: Some(0), ..Default::default() },
-        }])));
+    assert!(m.actions.iter().any(
+        |a| matches!(a, feed_detail::FeedAction::Resume { line, name: None }
+            if line == "fno agents resume s-3")
+    ));
+    assert!(
+        m.values.iter().any(|v| v == "fno agents resume s-3"),
+        "y copies the resume command: {:?}",
+        m.values
+    );
     // Header and footer rows are chrome, not rows: they never deep-link.
     assert!(v.chrome_hit(0, col).is_none());
     assert!(v.chrome_hit((v.term.0 - 1) as u16, col).is_none());

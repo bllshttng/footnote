@@ -115,11 +115,12 @@ pub(crate) enum FeedAction {
     Node(String),
     /// Open the PR in the browser.
     Pr(String),
-    /// The removal's recovery row. `name` carries the registry handle when
-    /// the roster still holds the row: Enter then resumes through
+    /// A recovery row: the session is not reachable as a live seat. `name`
+    /// carries the registry handle when the roster still holds the row
+    /// (a removal's worker): Enter then resumes through
     /// `Command::ResumeAgent` (the fno-owned door) instead of only talking.
-    /// Without it the row is the retirement receipt's revival line, and
-    /// Enter repeats that line as a notice.
+    /// Without it `line` is the command or revival form to copy, and Enter
+    /// repeats that line as a notice.
     Resume { line: String, name: Option<String> },
 }
 
@@ -233,16 +234,17 @@ pub(crate) fn build(
                 hint: String::new(),
                 enabled: true,
             });
-            actions.push(FeedAction::Session(ChromeHit::Cmds(vec![
-                Command::AttachAgent {
-                    id: (*sid).to_string(),
-                    placement: PanePlacement {
-                        portal: Some(0),
-                        ..PanePlacement::default()
-                    },
-                },
-            ])));
-            values.push((*sid).to_string());
+            // The feed's session id is a session handle (an fno id or a
+            // harness uuid), never the 8-hex jobId the AttachAgent door
+            // resolves, so an attach here is a guaranteed refusal. The
+            // resume verb takes the full session id directly; Enter repeats
+            // the command and `y` copies it.
+            let cmd = format!("fno agents resume {sid}");
+            actions.push(FeedAction::Resume {
+                line: cmd.clone(),
+                name: None,
+            });
+            values.push(cmd);
             info(
                 "pane",
                 Some("not in the live roster".to_string()),
