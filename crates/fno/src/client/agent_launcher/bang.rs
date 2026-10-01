@@ -223,11 +223,12 @@ mod tests {
         v
     }
 
-    /// The AC5 trampoline: the line runs under the login shell, the exit
-    /// is printed, and the pane hands off to an interactive shell instead
-    /// of closing.
+    /// AC5 + the full run_with story on injected round-trips: the
+    /// trampoline, the verified birth (AC4), the fatal refusal with the
+    /// draft kept (AC6), the empty project, the empty-line no-op (AC8),
+    /// and the unanswered attempt that blocks a second send (AC7).
     #[test]
-    fn trampoline_runs_the_line_and_reports_the_exit() {
+    fn run_covers_the_trampoline_and_every_roundtrip_outcome() {
         let dir = tmp_dir("argv");
         let argv = shell_argv("/bin/sh", "printf hi; pwd; exit 3");
         let out = std::process::Command::new(&argv[0])
@@ -243,15 +244,7 @@ mod tests {
             "pwd names the cwd: {stdout:?}"
         );
         assert!(stdout.contains("[exit 3]"), "exit printed: {stdout:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    /// The full run_with story on injected round-trips: the verified birth
-    /// (AC4), the fatal refusal with the draft kept (AC6), the empty
-    /// project, the empty-line no-op (AC8), and the unanswered attempt
-    /// that blocks a second send until dismissed (AC7).
-    #[test]
-    fn run_with_injected_roundtrips() {
         let dir = tmp_dir("run");
         let events = dir.join("events.jsonl");
         let mut sock = Vec::new();
@@ -259,9 +252,8 @@ mod tests {
 
         // AC4: the exact PaneRun, one ran row, the composer closed and
         // reset, the focus frame on the socket.
-        let seen: std::sync::Arc<
-            std::sync::Mutex<Option<ControlVerb>>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen: std::sync::Arc<std::sync::Mutex<Option<ControlVerb>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
         let seen2 = seen.clone();
         let mut v = shell_view("bang-run", "printf hi; pwd", Some("/tmp/proj-a"));
         rt.block_on(async {
@@ -276,8 +268,9 @@ mod tests {
             .unwrap();
         });
         {
-            let ControlVerb::PaneRun { cwd, argv, claim, .. } =
-                seen.lock().unwrap().take().unwrap()
+            let ControlVerb::PaneRun {
+                cwd, argv, claim, ..
+            } = seen.lock().unwrap().take().unwrap()
             else {
                 panic!("expected PaneRun");
             };
@@ -289,8 +282,7 @@ mod tests {
         }
         let journal = std::fs::read_to_string(&events).unwrap();
         assert_eq!(journal.lines().count(), 1);
-        let row: serde_json::Value =
-            serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
         assert_eq!(row["type"], "composer_shell_ran");
         assert_eq!(row["data"]["cwd"], "/tmp/proj-a");
         assert_eq!(row["data"]["line"], "printf hi; pwd");
@@ -305,12 +297,9 @@ mod tests {
         // and writes one refused row.
         let mut v = shell_view("bang-run", "git status", Some("/tmp/proj-b"));
         rt.block_on(async {
-            run_with(
-                &mut v,
-                &mut sock,
-                &events,
-                |_| Err(ControlError::Fatal("cannot reach session".into())),
-            )
+            run_with(&mut v, &mut sock, &events, |_| {
+                Err(ControlError::Fatal("cannot reach session".into()))
+            })
             .await
             .unwrap();
         });
@@ -322,38 +311,30 @@ mod tests {
         }
         let journal = std::fs::read_to_string(&events).unwrap();
         assert_eq!(journal.lines().count(), 2);
-        let row: serde_json::Value =
-            serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
         assert_eq!(row["type"], "composer_shell_refused");
         assert_eq!(row["data"]["outcome"], "refused");
 
         // The empty project refuses without building a verb.
         let mut v = shell_view("bang-run", "git status", None);
         rt.block_on(async {
-            run_with(
-                &mut v,
-                &mut sock,
-                &events,
-                |_| panic!("no verb may be sent for an empty project"),
-            )
+            run_with(&mut v, &mut sock, &events, |_| {
+                panic!("no verb may be sent for an empty project")
+            })
             .await
             .unwrap();
         });
         let journal = std::fs::read_to_string(&events).unwrap();
         assert_eq!(journal.lines().count(), 3);
-        let row: serde_json::Value =
-            serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
         assert_eq!(row["data"]["cwd"], "");
 
         // AC8: an empty line sends and writes nothing.
         let mut v = shell_view("bang-run", "   ", Some("/tmp/proj-c"));
         rt.block_on(async {
-            run_with(
-                &mut v,
-                &mut sock,
-                &events,
-                |_| panic!("an empty line sends nothing"),
-            )
+            run_with(&mut v, &mut sock, &events, |_| {
+                panic!("an empty line sends nothing")
+            })
             .await
             .unwrap();
         });
@@ -364,12 +345,9 @@ mod tests {
         // blocks a second send until the operator dismisses it.
         let mut v = shell_view("bang-run", "sleep 1", Some("/tmp/proj-d"));
         rt.block_on(async {
-            run_with(
-                &mut v,
-                &mut sock,
-                &events,
-                |_| Err(ControlError::Unanswered("the reply never arrived".into())),
-            )
+            run_with(&mut v, &mut sock, &events, |_| {
+                Err(ControlError::Unanswered("the reply never arrived".into()))
+            })
             .await
             .unwrap();
         });
@@ -379,21 +357,15 @@ mod tests {
         }
         let journal = std::fs::read_to_string(&events).unwrap();
         assert_eq!(journal.lines().count(), 4);
-        let row: serde_json::Value =
-            serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
         assert_eq!(row["data"]["outcome"], "unanswered");
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called2 = called.clone();
         rt.block_on(async {
-            run_with(
-                &mut v,
-                &mut sock,
-                &events,
-                move |_| {
-                    called2.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(ServerMsg::Ok)
-                },
-            )
+            run_with(&mut v, &mut sock, &events, move |_| {
+                called2.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ServerMsg::Ok)
+            })
             .await
             .unwrap();
         });

@@ -1606,6 +1606,12 @@ pub(crate) async fn launcher_keys(
             LKey::Backspace => {
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        // Shell mode with an empty line: Backspace leaves
+                        // shell mode, back to the plain composer (AC2).
+                        Focus::Message if l.shell && l.draft.message.is_empty() => {
+                            l.shell = false;
+                            l.draft.bump();
+                        }
                         Focus::Message => {
                             if l.draft.pill_value_capture {
                                 if l.draft.pill_value_draft.pop().is_none() {
@@ -1657,12 +1663,20 @@ pub(crate) async fn launcher_keys(
                 if pending {
                     // Esc is the explicit cancel while an attempt pends.
                 } else if focus == Focus::Message {
-                    // A value capture finalizes before the launch: the
-                    // captured word lands on its pill or chip first.
-                    if let Some(l) = view.launcher.as_mut() {
-                        finalize_pill_value(l);
+                    let shell = view.launcher.as_ref().is_some_and(|l| l.shell);
+                    if shell {
+                        // A shell line runs through the bang path, never
+                        // the launch path: no harness, model or pill rides
+                        // it.
+                        bang::run(view, sock_w).await?;
+                    } else {
+                        // A value capture finalizes before the launch: the
+                        // captured word lands on its pill or chip first.
+                        if let Some(l) = view.launcher.as_mut() {
+                            finalize_pill_value(l);
+                        }
+                        submit(view, sock_w).await?;
                     }
-                    submit(view, sock_w).await?;
                 } else if focus == Focus::Worktree {
                     if let Some(l) = view.launcher.as_mut() {
                         toggle_worktree(l, &view.launcher_catalog);
@@ -1704,6 +1718,23 @@ pub(crate) async fn launcher_keys(
                 };
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        // Shell mode: every character is command text; the
+                        // launch gestures (@, --, space) stay literal (AC3).
+                        Focus::Message if l.shell && !l.draft.pill_value_capture => {
+                            insert_char(&mut l.draft, c);
+                        }
+                        // A `!` on an empty plain input is the mode switch:
+                        // consumed, never text (AC1).
+                        Focus::Message
+                            if c == '!'
+                                && !l.shell
+                                && l.draft.message.is_empty()
+                                && l.draft.pills.is_empty()
+                                && !l.draft.pill_value_capture =>
+                        {
+                            l.shell = true;
+                            l.draft.bump();
+                        }
                         Focus::Message if c == '@' && !l.draft.pill_value_capture => {
                             open_picker_at(
                                 l,
@@ -3835,17 +3866,29 @@ impl Launcher {
             }
         }
         if sl.editor_rows > 0 {
+            // Shell mode paints its own glyph in the accent role so the
+            // mode is visible before the first keystroke lands.
+            let (glyph, glyph_role) = if self.shell {
+                ("! ", Role::BodyAccent)
+            } else {
+                ("\u{276f} ", Role::BodyDim)
+            };
             buf.set_string(
                 sl.message.x,
                 sl.message.y,
-                "\u{276f} ",
-                role_style(Role::BodyDim, &view.theme),
+                glyph,
+                role_style(glyph_role, &view.theme),
             );
             if self.draft.message.is_empty() {
+                let placeholder = if self.shell {
+                    format!("shell command in {}", self.draft.cwd())
+                } else {
+                    "What do you want to work on?".to_string()
+                };
                 buf.set_string(
                     sl.message.x + PROMPT_GUTTER as u16,
                     sl.message.y,
-                    "What do you want to work on?",
+                    placeholder,
                     role_style(Role::PanelMeta, &view.theme),
                 );
             }
@@ -3959,6 +4002,11 @@ impl Launcher {
     fn keybar(&self) -> String {
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             return "esc cancel".to_string();
+        }
+        // Shell mode runs instead of launching: the bar names its own keys.
+        if self.shell {
+            return "\u{21b5} run \u{b7} \u{232b} back to \u{276f} \u{b7} ^j newline \u{b7} esc close"
+                .to_string();
         }
         // One grammar for the whole chip row: Tab moves, Enter opens the
         // focused chip's picker or launches from the input - the hint names
