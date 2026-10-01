@@ -1549,8 +1549,6 @@ mod tests {
             json!({"type":"compacted","timestamp":"2026-01-01T01:00:00Z",
                    "payload":{"message":"window 1 summary"}}),
             tok(250, 2000, "2026-01-01T01:05:00Z"),
-            json!({"type":"event_msg","timestamp":"2026-01-01T01:06:00Z",
-                   "payload":{"type":"token_count","info":null}}),
             json!({"type":"response_item","timestamp":"2026-01-01T01:07:00Z",
                    "payload":{"type":"function_call","name":"spawn_agent",
                               "arguments":"{\"agent\":\"worker\"}"}}),
@@ -1562,6 +1560,10 @@ mod tests {
                               "content":[{"type":"text",
                               "text":"<fno_mail from=\"p\" to=\"s\">run the sweep</fno_mail>"}]}}),
             tok(300, 3000, "2026-01-01T01:15:00Z"),
+            // Last row of the window on purpose: if a null info ever won,
+            // the window total zeroes and the 200-token delta below fails.
+            json!({"type":"event_msg","timestamp":"2026-01-01T01:16:00Z",
+                   "payload":{"type":"token_count","info":null}}),
         ];
         for row in rows {
             writeln!(file, "{row}").unwrap();
