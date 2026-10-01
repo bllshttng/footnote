@@ -227,20 +227,28 @@ pub fn file_outside_question(
     req.journal_path = Some(crate::paths::space_dir(cwd).join("events.jsonl"));
     req.index_path = Some(crate::provider_cap::questions_path(home));
     let answer = crate::question_intake::run_intake(&req, home);
-    let wrote = answer.qid.is_some();
-    if wrote {
-        let pending = PendingAsk {
-            qid: answer.qid.clone(),
-            kind: "outside-load".to_string(),
-            groups,
-            paused_pids: Vec::new(),
-            asked_at: now_secs(),
-            applied: Vec::new(),
-            declined: None,
-        };
-        write_pending(&pending);
+    // A dedup names the still-open question: adopt its id so the file
+    // tracks the live ask instead of dropping it.
+    let qid = answer.qid.clone().or(answer.open_id.clone());
+    match qid {
+        Some(qid) => {
+            let paused = pending_ask()
+                .filter(|p| p.kind == "outside-load")
+                .map(|p| p.paused_pids)
+                .unwrap_or_default();
+            write_pending(&PendingAsk {
+                qid: Some(qid),
+                kind: "outside-load".to_string(),
+                groups,
+                paused_pids: paused,
+                asked_at: now_secs(),
+                applied: Vec::new(),
+                declined: None,
+            });
+            true
+        }
+        None => false,
     }
-    wrote
 }
 /// The pids a group name holds NOW, from a fresh table. A recorded pid
 /// whose start time changed is a recycled pid: skipped, never signalled.
@@ -348,7 +356,16 @@ pub fn poll_answers(home: &crate::paths::AgentsHome, cwd: &std::path::Path) -> O
         if pending.applied.iter().any(|ap| ap == &a.at) {
             continue;
         }
-        let line = apply_answer(&a.answer, &mut pending);
+        let line = if pending.kind == "budget" {
+            let value = a
+                .answer
+                .rsplit(' ')
+                .next()
+                .and_then(|word| word.parse::<u32>().ok());
+            apply_budget_answer(&a.answer, value, &mut pending)
+        } else {
+            apply_answer(&a.answer, &mut pending)
+        };
         pending.applied.push(a.at.clone());
         if !outcome.is_empty() {
             outcome.push_str("; ");
@@ -483,8 +500,13 @@ pub fn file_budget_question(
         return false;
     }
     let b = budget(sample.cores, sample.total_mem_gb, sample.sessions.as_ref());
-    if let Some(pending) = pending_ask() {
-        if pending.declined == Some(b.max_live as u64) {
+    if let Some(existing) = pending_ask() {
+        if existing.declined == Some(b.max_live as u64) {
+            return false;
+        }
+        // One pending-file slot: a live ask of either kind owns it, and a
+        // dedup would only drop this one's qid.
+        if existing.qid.is_some() {
             return false;
         }
     }
@@ -521,10 +543,12 @@ pub fn file_budget_question(
         render_cap: None,
     };
     let answer = crate::question_intake::run_intake(&req, home);
-    let wrote = answer.qid.is_some();
-    if wrote {
+    // A dedup names the still-open question: adopt its id so the answer
+    // the user already gave can still be applied.
+    let qid = answer.qid.clone().or(answer.open_id.clone());
+    if let Some(qid) = qid {
         let pending = PendingAsk {
-            qid: answer.qid.clone(),
+            qid: Some(qid),
             kind: "budget".to_string(),
             groups: Vec::new(),
             paused_pids: Vec::new(),
@@ -533,16 +557,20 @@ pub fn file_budget_question(
             declined: None,
         };
         write_pending(&pending);
+        return true;
     }
-    wrote
+    false
 }
 
 /// The `yes` half of the budget ask: write the cap once through the same
 /// binary the fleet configures with. The `no` half records the decline so
 /// this value never asks again.
-pub fn apply_budget_answer(answer: &str, value: u32, pending: &mut PendingAsk) -> String {
+pub fn apply_budget_answer(answer: &str, value: Option<u32>, pending: &mut PendingAsk) -> String {
     let text = answer.trim();
     if text.starts_with("yes") {
+        let Some(value) = value else {
+            return "could not read the cap from the answer; the question stays open".into();
+        };
         let bin = crate::scrape::fno_bin();
         let status = std::process::Command::new(&bin)
             .args(["config", "set", "agents.max_live", &value.to_string()])
@@ -558,7 +586,7 @@ pub fn apply_budget_answer(answer: &str, value: u32, pending: &mut PendingAsk) -
         }
     }
     if text.starts_with("no") {
-        pending.declined = Some(value as u64);
+        pending.declined = value.map(|v| v as u64);
         pending.kind = "budget-declined".to_string();
         return "keeping the default cap".to_string();
     }
