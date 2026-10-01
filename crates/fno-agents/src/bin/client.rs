@@ -196,6 +196,11 @@ fn main() {
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
+    // `harness-roster`: the one-roster JSON read; Python's
+    // fno.harness_names transports here through resolve_binary.
+    if args.first().map(String::as_str) == Some("harness-roster") {
+        std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }

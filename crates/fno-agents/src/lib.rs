@@ -190,6 +190,7 @@ pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod harness_matrix;
 pub mod harness_reader;
+pub mod harness_roster;
 pub mod harness_verbs;
 pub mod heal;
 pub mod heal_pid;

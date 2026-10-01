@@ -376,6 +376,14 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     fno_agents.write_text(
         '#!/usr/bin/env bash\n'
         'cat >/dev/null\n'
+        '# The hold reader also asks the one roster (the self-review floor\n'
+        '# enumerates the verbless harnesses through it); serve it beside the\n'
+        '# claim door the way the real binary does.\n'
+        'if [[ "$1" == "harness-roster" ]]; then\n'
+        '  printf \'{"known":["claude","codex","gemini","agy","opencode","pi",'
+        '"hermes","openclaw","cursor-agent","grok","zcode"]}\\n\'\n'
+        '  exit 0\n'
+        'fi\n'
         'printf \'{"worktree":"%s"}\\n\' "$PWD"\n'
     )
     fno_agents.chmod(0o755)

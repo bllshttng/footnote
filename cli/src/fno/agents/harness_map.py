@@ -45,7 +45,6 @@ from typing import Mapping, Optional
 
 from fno.config._dispatch_verbs import canonical_verb_key, is_verb_seed, parse_verb_token
 from fno.config_io import _global_settings_path
-from fno.harness_names import KNOWN_HARNESSES
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
@@ -527,16 +526,9 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         raise DispatchResolveError(
             "harness capability contract harness set is empty or not a table"
         )
-    # Subset, not equality: KNOWN_HARNESSES is the COMPLETE supported roster
-    # and a roster entry with no capability row is legal (hermes, openclaw).
-    # A capability row naming a harness the roster does not carry is not - it
-    # would advertise a dispatch lane for a harness no evidence supports.
-    absent = set(harnesses) - set(KNOWN_HARNESSES)
-    if absent:
-        raise DispatchResolveError(
-            "harness capability contract harness set contains names absent "
-            f"from KNOWN_HARNESSES: {', '.join(sorted(absent))}"
-        )
+    # The rows-stay-a-subset-of-the-roster pin lives on the Rust side (the
+    # provider round-trip test reads this table's source): a roster read
+    # here would fire on the module-level parse below, which is an import.
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
     return version, harnesses
@@ -823,9 +815,10 @@ _PACKAGED_CONTRACT_TEXT = (
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
 MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
-# Non-empty subset of the complete roster, mirroring parse_capability_contract:
-# the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
-assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
+# The bundled table's harness rows stay a non-empty subset of the complete
+# roster; the subset pin lives on the Rust side (the provider round-trip
+# test reads the table's source), since an import-time assert here paid a
+# roster subprocess on every import.
 
 #: Fail-open report of every override block a reader declined, naming the
 #: config file and the reason (AC1-ERR). A warning never un-configures a
@@ -907,6 +900,8 @@ def _apply_capability_overrides() -> None:
         table = doc.get("harness")
         if not isinstance(table, dict):
             continue
+        from fno.harness_names import KNOWN_HARNESSES
+
         for name, override in table.items():
             if name in overridden or not isinstance(override, dict):
                 continue
@@ -942,8 +937,8 @@ _apply_capability_overrides()
 def known_harnesses() -> list[str]:
     """Sorted names of the harnesses that carry a capability row: the
     loud-error candidate list and the dispatch-capable roster. The COMPLETE
-    supported-harness roster is ``fno.harness_names.KNOWN_HARNESSES``, which
-    is wider - hermes and openclaw sit on it with no row here."""
+    roster is ``fno.harness_names.KNOWN_HARNESSES`` (the Rust list, served
+    through that door); hermes and openclaw sit on it with no row here."""
     return sorted(_HARNESS_CAPS)
 
 

@@ -208,7 +208,7 @@ All eight are shared-vocabulary. None is a port candidate. The reasons differ en
 | Script | Compares | Verdict |
 |---|---|---|
 | `check-coverage-context-parity.sh` | two commit-status context strings and one label, across the Python publisher, the operator ruleset data, the Rust publisher, and the refresher workflow | shared-vocabulary |
-| `check-harness-roster-parity.py` | `KNOWN_HARNESSES` against three evidence surfaces: `docs/SETUP-<name>.md` filenames, the `for_name()` match arms in `provider.rs`, and the `_register()` calls in the Python adapter registry | shared-vocabulary |
+| `check-harness-roster-parity.py` | the `KNOWN_HARNESSES` const in `provider.rs` (the one roster) against three evidence surfaces it must supersede: `docs/SETUP-<name>.md` filenames, the `for_name()` match arms, and the `_register()` calls in the Python adapter registry, each held as a subset | shared-vocabulary |
 | `check-provider-vocabulary-parity.sh` | provider vocabulary across four Rust files and two Python files | shared-vocabulary |
 | `check-review-app-parity.sh` | review-App logins across `BOT_PROFILES` in Rust and two Python declarations, plus a `usage_markers` field per profile | shared-vocabulary |
 | `check-reviewer-descriptor-parity.sh` | `_RESOLVABLE_REVIEWERS` against `REVIEWER_INVOCATIONS`: invocation string, self-cert flag, per-harness verb overrides | shared-vocabulary |
