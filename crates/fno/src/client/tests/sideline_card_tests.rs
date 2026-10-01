@@ -189,6 +189,11 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_l
     let text = frame_text(&frame);
     assert!(text.contains("[26%|###     ]  x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
+    let head = text.lines().next().unwrap_or_default();
+    assert!(
+        head.contains("ctx \u{b7} node") && !head.contains("last msg"),
+        "the card head names the card's own cells: {head:?}"
+    );
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
     let red = over_frame.cells.iter();

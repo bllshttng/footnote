@@ -135,19 +135,11 @@ impl View {
         }
         let text_w = self.sideline_paint_w().checked_sub(1)?;
         let rects = self.worker_column_rects(text_w as u16);
-        let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
-        if hit(rects[0]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Status))
-        } else if hit(rects[1]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
-        } else if hit(rects[2]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::LastMessage))
-        } else if hit(rects[3]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Pr))
-        } else if hit(rects[4]) {
-            Some(ChromeHit::SortColumn(AgentSortColumn::Age))
-        } else {
-            None
-        }
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
+        let i = rects
+            .iter()
+            .take(5)
+            .position(|r| col >= r.x && col < r.x + r.width)?;
+        sideline::head_sorts(card)[i].map(ChromeHit::SortColumn)
     }
 }

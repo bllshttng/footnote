@@ -40,6 +40,34 @@ pub(super) const SIDELINE_COLUMNS: [Constraint; 7] = [
     Constraint::Length(4),
 ];
 
+/// The sort column under each head cell. A card's third cell is the bar
+/// and node, which sort nothing; its PR rides the last slot, so `age` takes
+/// the empty fourth. Read by the head paint and the head click alike.
+pub(super) fn head_sorts(card: bool) -> [Option<AgentSortColumn>; 5] {
+    use AgentSortColumn::*;
+    if card {
+        [Some(Status), Some(Agent), None, Some(Age), Some(Pr)]
+    } else {
+        [
+            Some(Status),
+            Some(Agent),
+            Some(LastMessage),
+            Some(Pr),
+            Some(Age),
+        ]
+    }
+}
+
+fn head_label(column: AgentSortColumn) -> &'static str {
+    match column {
+        AgentSortColumn::Status => "st",
+        AgentSortColumn::Agent => "agent",
+        AgentSortColumn::LastMessage => "last msg",
+        AgentSortColumn::Pr => "pr",
+        AgentSortColumn::Age => "age",
+    }
+}
+
 /// The solver's column rects for a text width: the same call the Table makes
 /// internally (same constraints, same spacing, same flex), so a caller that
 /// must know a column's width reads the SAME answer the paint uses.
@@ -767,62 +795,25 @@ impl View {
                 )
             }
             DisplayRow::TableHead => {
-                let marker = |column: AgentSortColumn| {
-                    if self.agent_sort.column == column {
-                        match self.agent_sort.direction {
-                            SortDirection::Ascending => " \u{2191}",
-                            SortDirection::Descending => " \u{2193}",
-                        }
-                    } else {
-                        ""
-                    }
+                let arrow = |column: AgentSortColumn| match self.agent_sort {
+                    sort if sort.column != column => "",
+                    sort if sort.direction == SortDirection::Ascending => "\u{2191}",
+                    _ => "\u{2193}",
                 };
-                let age_marker = if self.agent_sort.column == AgentSortColumn::Age {
-                    match self.agent_sort.direction {
-                        SortDirection::Ascending => "\u{2191}",
-                        SortDirection::Descending => "\u{2193}",
-                    }
-                } else {
-                    ""
-                };
-                (
-                    vec![
-                        rt_cell(
-                            format!("st{}", marker(AgentSortColumn::Status)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            true,
-                        ),
-                        rt_cell(
-                            format!("agent{}", marker(AgentSortColumn::Agent)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        rt_cell(
-                            format!("last msg{}", marker(AgentSortColumn::LastMessage)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        rt_cell(
-                            format!("pr{}", marker(AgentSortColumn::Pr)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        // Left-aligned like every head label: right-aligned,
-                        // the arrow sits under the density button's two
+                let cells = head_sorts(card).map(|sort| {
+                    let text = match sort {
+                        None => "ctx \u{b7} node".to_string(),
+                        // No space before the age arrow: right-aligned or
+                        // spaced, it sits under the density button's two
                         // overlay columns and the toggle reads dead.
-                        rt_cell(
-                            format!("age{age_marker}"),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                    ],
-                    0,
-                )
+                        Some(AgentSortColumn::Age) => format!("age{}", arrow(AgentSortColumn::Age)),
+                        Some(c) if arrow(c).is_empty() => head_label(c).to_string(),
+                        Some(c) => format!("{} {}", head_label(c), arrow(c)),
+                    };
+                    let right = sort == Some(AgentSortColumn::Status);
+                    rt_cell(text, Color::Default, cell_flags::DIM, right)
+                });
+                (cells.to_vec(), 0)
             }
         };
         if self
