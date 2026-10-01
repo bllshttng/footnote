@@ -2360,6 +2360,25 @@ console.log("evictedRowCount: 18 cases ok");
                 "the filter state must read {key} or filterParams throws at boot"
             );
         }
+        // The recent-search store: one guarded localStorage key, recorded on
+        // every executed search, with the dropdown element present.
+        assert!(
+            BACKLOG_PAGE.contains("const RECENT_KEY = \"fno-backlog-recent-searches\";"),
+            "the recent-search key exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("recordRecent(state.q);"),
+            "every executed search is recorded"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="recent""#),
+            "the recent-search dropdown exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("function lsGet(k)")
+                && BACKLOG_PAGE.contains("function lsSet(k, v)"),
+            "localStorage access stays guarded by lsGet/lsSet"
+        );
     }
 
     /// The three pure helpers must hold their contracts when run for real,
@@ -2433,9 +2452,10 @@ console.log("backlog page helpers: 12 cases ok");
         }
     }
 
-    /// The snapshot engine's pure half and the board's shortcut resolver
-    /// hold their contracts when run for real: lift cardKeeps / laneKeyOf /
-    /// voteText and shortcutAction / isTypingTarget / copiedToast from the
+    /// The snapshot engine's pure half, the board's shortcut resolver and
+    /// the recent-search store hold their contracts when run for real:
+    /// lift cardKeeps / laneKeyOf / voteText, shortcutAction /
+    /// isTypingTarget / copiedToast and pushRecent / loadRecent from the
     /// shipped page and run every case under node, the same rule as the
     /// board helpers.
     #[test]
@@ -2516,9 +2536,27 @@ eq(isTypingTarget(null), false, "no target is no target");
 // the toast names what landed on the clipboard.
 eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
 console.log("backlog shortcuts: 35 cases ok");
+// The recent-search store: a capped, newest-first, string-only list under
+// one localStorage key.
+eq(pushRecent([], "a"), ["a"], "empty list grows one");
+const dup = pushRecent(["b", "a"], "a");
+eq(dup.length, 2, "rerun dedupes");
+eq(dup[0], "a", "rerun moves to front");
+const full = pushRecent(["a","b","c","d","e","f","g","h","i","j"], "k");
+eq(full.length, 10, "the list caps at ten");
+eq(full[0], "k", "the newest leads");
+eq(full[9], "i", "the eleventh query dropped off the end");
+eq(loadRecent(null), [], "no stored value loads empty");
+eq(loadRecent("junk"), [], "corrupt storage loads empty");
+const mixed = loadRecent('[\"a\", 1, \"b\"]');
+eq(mixed.length, 2, "non-strings drop");
+eq(mixed[0], "a", "strings keep order");
+eq(loadRecent('{\"a\":1}'), [], "a non-array payload loads empty");
+eq(loadRecent('[\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\",\"s10\",\"s11\"]').length, 10, "a long stored list caps at ten");
+console.log("recent searches: 12 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
             lift_js_fn(BACKLOG_PAGE, "nestChildren"),
             lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
@@ -2526,6 +2564,8 @@ console.log("backlog shortcuts: 35 cases ok");
             lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
             lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
             lift_js_fn(BACKLOG_PAGE, "copiedToast"),
+            lift_js_fn(BACKLOG_PAGE, "pushRecent"),
+            lift_js_fn(BACKLOG_PAGE, "loadRecent"),
             asserts
         );
         let path =
@@ -2554,6 +2594,10 @@ console.log("backlog shortcuts: 35 cases ok");
                 assert!(
                     stdout.contains("backlog shortcuts: 35 cases ok"),
                     "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
+                );
+                assert!(
+                    stdout.contains("recent searches: 12 cases ok"),
+                    "the shipped recent-search store did not clear every case:\n{stdout}{stderr}"
                 );
             }
         }
