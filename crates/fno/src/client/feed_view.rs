@@ -300,7 +300,7 @@ pub(crate) fn feed_panel_rows(
     }
     let footer = if let Some(e) = &o.error {
         // The typed reason renders verbatim: a timeout names its
-        // budget, an admission refusal its slot count. pad_to truncates a
+        // budget, an admission refusal its slot count. The panel clips a
         // long stderr tail; the cause still leads the line.
         pad_to(&format!("   {e}"), w)
     } else if o.inflight && o.items.is_empty() {

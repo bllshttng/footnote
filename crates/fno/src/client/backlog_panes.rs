@@ -304,7 +304,6 @@ pub(crate) fn framed_region(
     if h == 0 || w == 0 {
         return;
     }
-    let inner_w = w.saturating_sub(chrome::Chrome::FRAME_COLS);
     let layout = overlay_paint::layout_body_overlay(
         (top, left),
         (h, w),
@@ -331,7 +330,6 @@ pub(crate) fn framed_region(
             );
         }
     }
-    let _ = inner_w;
 }
 
 use super::overlay_paint;

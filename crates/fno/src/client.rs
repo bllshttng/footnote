@@ -5432,28 +5432,13 @@ impl View {
         // The footer widens the frame to fit, so on a narrow viewport it has to
         // be clamped or the right border leaves the screen.
         chrome = chrome.fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
-        // A name longer than the body scrolls, keeping the CURSOR end visible.
-        // Stamping the head instead cuts the `_` off the right edge, so on a
-        // narrow terminal the operator types a name they cannot see - the one
-        // thing a name prompt has to get right. The shared framer truncates from
-        // the head, so the tail-keeping happens HERE, before it is handed over.
+        // A name longer than the body wraps onto more lines, so the whole name
+        // and its `_` cursor stay on screen.
         // Body width: the chrome minimum or the wider input floor, capped to
         // the viewport so a narrow terminal still fits the frame.
         let viewport_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS);
         let body_w = chrome.min_inner_w().max(40).min(viewport_w).max(1);
-        // The framer paints the two pad cells inside `body_w` and sizes the
-        // frame to the widest line, so the line arrives pre-padded to `body_w`
-        // and the text capacity is that width minus the pad.
-        let capacity = body_w.saturating_sub(2).max(1);
         let text = format!("{name}_");
-        let text = if text.chars().count() > capacity {
-            let keep = capacity.saturating_sub(1);
-            let drop = text.chars().count() - keep;
-            let kept: String = text.chars().skip(drop).collect();
-            format!("…{kept}")
-        } else {
-            text
-        };
         let line = format!("{text:<body_w$}");
         layout_lines_overlay(origin, dims, &chrome, &[line], None, OverlayAnchor::Center)
     }
@@ -7482,7 +7467,7 @@ fn header_band_flags(_active: bool) -> u8 {
 /// the panel width `w` (the caller paints it as one INVERSE band). Counts are
 /// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
 /// from the least-severe (`✗`) end - a glyph never renders without its count
-/// (AC11) - and the label truncates (via `pad_to`) only after every pair is
+/// (AC11) - and the label truncates (via `fit_ellipsis`) only after every pair is
 /// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
 /// painter), so a double-width char in a squad name aligns the band instead of
 /// overflowing it.
@@ -7513,7 +7498,7 @@ fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> 
             let label_w: usize = label.chars().map(glyph_cols).sum();
             return match w.checked_sub(label_w) {
                 Some(gap) => format!("{label}{}", section_rule(gap)),
-                None => pad_to(label, w),
+                None => crate::chrome::fit_ellipsis(label, w),
             };
         }
         let counts = pairs.join(" ");
