@@ -11513,10 +11513,10 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
 
 // ---- x-b186: density toggle + extended agent table ----
 
-/// A view whose terminal is wide enough for the full extended table.
+/// A terminal satisfying the sideline's 60% cap and the work pane's minimum.
 fn wide_view(agents: Vec<AgentRow>) -> View {
     let mut v = view_with_agents(agents);
-    v.term = (24, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10);
+    v.term = (24, (EXTENDED_PANEL_W * 5).div_ceil(3) + MIN_CONTENT_COLS);
     v
 }
 
