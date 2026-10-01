@@ -352,9 +352,8 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     fno_agents.chmod(0o755)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["FNO_AGENTS_BIN"] = str(fno_agents)
-    # FNO_HOME alone does NOT isolate the in-process hold reader: graph_json()
-    # resolves through load_settings(), which ignores FNO_HOME. $FNO_CONFIG
-    # makes one temp settings file the only candidate.
+    # $FNO_CONFIG makes one temp settings file the only candidate, so any
+    # settings read inside the hook resolves in the sandbox, not the machine.
     config = Path(fno_home).parent / "hook-settings.yaml"
     config.write_text(f"state_dir: {fno_home}\n")
     env["FNO_CONFIG"] = str(config)
