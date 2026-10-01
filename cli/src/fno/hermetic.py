@@ -206,6 +206,10 @@ _ENVIRONMENT: tuple[str, ...] = (
     "XDG_CACHE_HOME",  # a cache, preserved at its real value
     "CARGO_HOME",  # ditto
     "UV_CACHE_DIR",  # ditto: resolved at its real value by the cache pins
+    # The venv path an uv sync would write. A developer's value would
+    # redirect a test's install into their own checkout; the spawn-door
+    # venv guard sets it explicitly in its own tests.
+    "UV_PROJECT_ENVIRONMENT",
     # The toolchain binary itself (rustup shims set it); the cargo_build_dirs
     # lane reads it first, before PATH and ~/.cargo/bin/cargo. A developer's
     # value names the same toolchain the caches above resolve, so a test
