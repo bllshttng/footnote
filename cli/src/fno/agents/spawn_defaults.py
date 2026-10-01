@@ -909,7 +909,7 @@ def compose_spawn_argv(
     tail = out[1:]
 
     scan = _scan_projection(tail)
-    facts = {"role_resolves": None, "role_protected": None}
+    facts: dict = {"role_resolves": None, "role_protected": None}
     if scan["role"]:
         try:
             from fno.agents.model_routing import PROTECTED_ROLES

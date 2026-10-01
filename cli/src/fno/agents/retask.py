@@ -265,6 +265,11 @@ def run_retask(
         )
     except DispatchResolveError as exc:
         return _refused("dispatch_verb_unresolved", detail=str(exc))
+    except RetaskTransportError as exc:
+        # The compose probe rides the same transport as the transaction; a
+        # pane that went away mid-probe is the same refused receipt.
+        detail = exc.detail if exc.detail is not None else str(exc)
+        return _refused(exc.args[0] if exc.args else "retask_transport", detail=detail)
     try:
         if entry.substrate == "thread":
             resolved_session, resolved_pane_id = resolve_thread_viewport(entry)
