@@ -42,8 +42,8 @@ def restart_command(
         raise typer.Exit(1)
     if proc.stderr:
         typer.echo(proc.stderr, err=True)
-    if json_out and proc.stdout:
+    # stdout stays stdout in both modes: the Rust receipts are the parser
+    # surface, and relaying them to stderr starves every stdout reader.
+    if proc.stdout:
         sys.stdout.write(proc.stdout)
-    elif proc.stdout:
-        typer.echo(proc.stdout, err=True)
     raise typer.Exit(proc.returncode)

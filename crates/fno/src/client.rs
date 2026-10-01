@@ -1276,10 +1276,12 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
-    /// A queued update verb (restart or release upgrade) and its
-    /// one-in-flight bound, mirroring the sweep pair.
-    update_verb_want: Option<UpdateVerb>,
+    /// A queued release upgrade and its one-in-flight bound, mirroring the
+    /// sweep pair. (The restart is not queued: its tap unwinds the run loop.)
+    update_verb_want: Option<release_check::Channel>,
     update_verb_inflight: bool,
+    /// The update modal's restart tap detached the client; the detach exit reads this.
+    restart_pending: bool,
     /// The open new-agent popup, or the RETAINED draft after Esc
     /// (hidden but alive). Both live through `launcher_closed`.
     launcher: Option<agent_launcher::Launcher>,
@@ -1938,9 +1940,7 @@ use input_folds::{
 };
 
 use mail_input::peek_input_keys;
-use update_menu::{
-    build_sideline_menu, build_update_modal, probe_update, run_update_verb, UpdateProbe, UpdateVerb,
-};
+use update_menu::{build_sideline_menu, build_update_modal, probe_update, UpdateProbe};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -2175,6 +2175,7 @@ impl View {
             sweep_action: None,
             update_verb_want: None,
             update_verb_inflight: false,
+            restart_pending: false,
             sweep_inflight: false,
             launcher: None,
             launcher_closed: None,
@@ -8207,14 +8208,8 @@ async fn attach_and_run(
             });
         }
         // Kick a wanted update verb off the UI loop, at most one in flight.
-        if let (false, Some(verb)) = (view.update_verb_inflight, view.update_verb_want) {
-            view.update_verb_want = None;
-            view.update_verb_inflight = true;
-            let tx = restart_tx.clone();
-            tokio::spawn(async move {
-                let verdict = run_update_verb(verb).await;
-                let _ = tx.send(verdict);
-            });
+        if let (false, Some(channel)) = (view.update_verb_inflight, view.update_verb_want) {
+            update_menu::kick_upgrade(&mut view, restart_tx.clone(), channel);
         }
         // Kick a wanted harness-catalog probe, same one-in-flight
         // discipline as the update probe.
@@ -8587,7 +8582,7 @@ async fn attach_and_run(
                             // gate the catch-up digest on how long we were away.
                             crate::digest_overlay::record_detach(&view.session);
                             let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                            break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                            break Ok(update_menu::detach_exit(&view));
                         }
                         Err(e) => break Err(e),
                     }
@@ -8953,7 +8948,7 @@ async fn attach_and_run(
                         // gate the catch-up digest on how long we were away.
                         crate::digest_overlay::record_detach(&view.session);
                         let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                        break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                        break Ok(update_menu::detach_exit(&view));
                     }
                     Err(e) => break Err(e),
                 }
@@ -9173,6 +9168,10 @@ async fn attach_and_run(
         Ok(code) => {
             if let Some(n) = NOTICE.with(|n| n.borrow_mut().take()) {
                 eprintln!("fno: {n}");
+            }
+            // The update modal's restart unwinds here: run the verb in the foreground, exec the fresh client.
+            if let Some(err) = update_menu::maybe_reattach(code, &view.session).await {
+                return Err(err);
             }
             Ok(code)
         }
@@ -10109,15 +10108,15 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
-        AuxAction::RestartAgents | AuxAction::UpgradeRelease(_) => {
-            // The modal named every effect; the tap is the confirmation.
-            view.aux = None;
-            if view.update_verb_inflight || view.update_verb_want.is_some() {
-                view.set_notice("an update action is already running".into());
-            } else if let AuxAction::UpgradeRelease(c) = action {
-                view.update_verb_want = Some(UpdateVerb::Upgrade(c));
-            } else {
-                view.update_verb_want = Some(UpdateVerb::RestartAgents);
+        AuxAction::UpgradeRelease(c) => {
+            if update_menu::update_tap(view) {
+                view.update_verb_want = Some(c);
+            }
+        }
+        AuxAction::RestartAgents => {
+            // Never queues: the restart kills this server; the tap detaches.
+            if update_menu::restart_tap(view) {
+                return Ok(DispatchFlow::Detach);
             }
         }
         AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
