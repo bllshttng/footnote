@@ -86,6 +86,7 @@ crossing	crates/fno/src/client/agent_launcher.rs	let bin = crate::server::fno_bi
 crossing	crates/fno/src/client/config_set.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+crossing	crates/fno/src/client/update_menu.rs	let err = std::process::Command::new(crate::server::fno_bin())
 crossing	crates/fno/src/connections_view.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/connections_view.rs	let mut cmd = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/court_overlay.rs	fn fno_bin() -> PathBuf {

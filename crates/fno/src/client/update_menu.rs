@@ -377,11 +377,9 @@ impl View {
 /// live and are their own verdict - a captured run cannot carry them (the
 /// mux leg kills this client's server out from under the TUI). Never
 /// --force. Returns the verb's exit code.
-pub(crate) fn run_restart_foreground() -> i32 {
-    let status = std::process::Command::new(crate::server::fno_bin())
-        .args(["agents", "restart", "--mux"])
-        .status();
-    match status {
+pub(crate) async fn run_restart_foreground() -> i32 {
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    match command.status().await {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
             eprintln!("fno: restart spawn failed: {e}");
@@ -436,11 +434,11 @@ pub(crate) fn detach_exit(view: &View) -> i32 {
 /// stdin thread holds a blocking stdin lock a second reader would deadlock
 /// on. Some(failure) when the reattach itself failed; on success exec never
 /// returns.
-pub(crate) fn maybe_reattach(code: i32, session: &str) -> Option<String> {
+pub(crate) async fn maybe_reattach(code: i32, session: &str) -> Option<String> {
     if code != RESTART_REATTACH_EXIT {
         return None;
     }
-    run_restart_foreground();
+    run_restart_foreground().await;
     use std::os::unix::process::CommandExt as _;
     let err = std::process::Command::new(crate::server::fno_bin())
         .arg("--session")
