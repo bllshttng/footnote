@@ -54,21 +54,21 @@ STUB
 chmod +x "$TMP/bin/fno"
 
 # A jq+bash PATH with NEITHER fno binary, for the degrade tests.
+mk_path() {
+    mkdir -p "$1"
+    for b in bash jq dirname cat printf head env; do
+        s="$(command -v "$b" 2>/dev/null)" && ln -sf "$s" "$1/$b"
+    done
+}
 NOBIN="$TMP/nobin"
-mkdir -p "$NOBIN"
-for b in bash jq dirname cat printf head env; do
-    s="$(command -v "$b" 2>/dev/null)" && ln -sf "$s" "$NOBIN/$b"
-done
+mk_path "$NOBIN"
 
 # The `fno` stub alone (no fno-agents anywhere on PATH): the crown read
 # still works. The ambient PATH carries a real fno-agents, so absence must
 # be constructed, not assumed.
 NOAGENTS="$TMP/bin-noagents"
-mkdir -p "$NOAGENTS"
+mk_path "$NOAGENTS"
 ln -sf "$TMP/bin/fno" "$NOAGENTS/fno"
-for b in bash jq dirname cat printf head env; do
-    s="$(command -v "$b" 2>/dev/null)" && ln -sf "$s" "$NOAGENTS/$b"
-done
 
 run_hook() { PATH="$TMP/bin:$PATH" bash "$HOOK"; }
 
@@ -87,6 +87,8 @@ RC=$?
   || fail "invocation 3: step mismatch: $(step "$OUT" 0)"
 grep -q -- "--session-id conv-1" "$ARGS_LOG" 2>/dev/null \
   && pass "argv: session id from conversationId" || fail "argv: $(cat "$ARGS_LOG" 2>/dev/null)"
+grep -q "announce read" "$ARGS_LOG" 2>/dev/null \
+  && pass "argv: invokes the reader verb" || fail "argv: wrong verb: $(cat "$ARGS_LOG" 2>/dev/null)"
 grep -q -- "--harness agy" "$ARGS_LOG" 2>/dev/null \
   && pass "argv: harness agy" || fail "argv: no harness: $(cat "$ARGS_LOG" 2>/dev/null)"
 grep -q -- "--boundary prompt" "$ARGS_LOG" 2>/dev/null \
