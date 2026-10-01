@@ -2290,6 +2290,76 @@ console.log("evictedRowCount: 18 cases ok");
             BACKLOG_PAGE.contains(r#"class="controls""#),
             "the filter bar keeps the controls class the nav offset targets"
         );
+        // The copied-id surface: the three render sites bind the one copy
+        // handler, and no fourth site appeared unbound.
+        assert!(
+            BACKLOG_PAGE.contains("function bindIdCopy(el, id)"),
+            "the one copy handler exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(cidEl, card.id)"),
+            "kanban card ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(lidEl, card.id)"),
+            "list row ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(idSpan, card.id)"),
+            "the panel id copies"
+        );
+        assert_eq!(
+            BACKLOG_PAGE.matches("bindIdCopy(").count(),
+            4,
+            "the handler binds at exactly the three render sites plus its definition"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("ev.stopPropagation()"),
+            "an id tap must not open the row behind it"
+        );
+        // The search bar is the first control on the page and holds the one
+        // find input, its clear button and the focus key.
+        let bar = BACKLOG_PAGE
+            .find(r#"id="searchbar""#)
+            .expect("the search bar exists");
+        let controls = BACKLOG_PAGE
+            .find(r#"id="controls""#)
+            .expect("controls exist");
+        assert!(bar < controls, "the search bar leads the page");
+        assert!(
+            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            "the placeholder names what search covers"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="f-q-clear""#),
+            "the clear button exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="searchkey""#),
+            "the focus key shows in the box"
+        );
+        assert!(
+            !BACKLOG_PAGE.contains(r#"size="14""#),
+            "the old hidden find input is gone"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("b.dataset.id = card.id;"),
+            "board rows carry their id for the j/k selection"
+        );
+        // The filter state reads every key FILTER_KEYS iterates: one missing
+        // key made filterParams throw "state[k] is not iterable" on every
+        // fresh served board, and the route drew no cards at all (the
+        // snapshot copy tolerates the undefined, which is why only the
+        // bridge showed it). Found live on the deployed binary 2026-10-01.
+        for key in [
+            "project", "epic", "status", "priority", "size", "king", "kind",
+        ] {
+            let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
+            assert!(
+                BACKLOG_PAGE.contains(&line),
+                "the filter state must read {key} or filterParams throws at boot"
+            );
+        }
     }
 
     /// The three pure helpers must hold their contracts when run for real,
@@ -2363,9 +2433,11 @@ console.log("backlog page helpers: 12 cases ok");
         }
     }
 
-    /// The snapshot engine's pure half holds its contracts when run for
-    /// real: lift cardKeeps / laneKeyOf / voteText from the shipped page and
-    /// run the cases under node, the same rule as the board helpers.
+    /// The snapshot engine's pure half and the board's shortcut resolver
+    /// hold their contracts when run for real: lift cardKeeps / laneKeyOf /
+    /// voteText and shortcutAction / isTypingTarget / copiedToast from the
+    /// shipped page and run every case under node, the same rule as the
+    /// board helpers.
     #[test]
     fn snapshot_page_helpers_hold_under_node() {
         let asserts = r#"
@@ -2401,131 +2473,8 @@ eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent
 eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
 eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
 console.log("snapshot page helpers: 16 cases ok");
-"#;
-        let src = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
-            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
-            lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
-            lift_js_fn(BACKLOG_PAGE, "voteText"),
-            asserts
-        );
-        let path =
-            std::env::temp_dir().join(format!("fno-snapshot-helpers-{}.mjs", std::process::id()));
-        std::fs::write(&path, src).expect("temp dir writable");
-        let out = std::process::Command::new("node").arg(&path).output();
-        let _ = std::fs::remove_file(&path);
-        match out {
-            Err(e) => {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "node is required on CI to exercise the shipped snapshot helpers: {e}"
-                );
-                println!(
-                    "SKIPPED snapshot_page_helpers_hold_under_node: node not runnable ({e}); \
-                     nothing was asserted"
-                );
-            }
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                assert!(
-                    stdout.contains("snapshot page helpers: 16 cases ok"),
-                    "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
-                );
-            }
-        }
-    }
-
-    /// Every node id on the page copies itself when tapped: the three render
-    /// sites (kanban card, list row, panel title) bind the one copy handler,
-    /// the search bar leads the page with its clear button and focus key,
-    /// and every board row carries its id for the j/k selection.
-    #[test]
-    fn every_node_id_binds_the_copy_handler() {
-        assert!(
-            BACKLOG_PAGE.contains("function bindIdCopy(el, id)"),
-            "the one copy handler exists"
-        );
-        assert!(
-            BACKLOG_PAGE.contains("bindIdCopy(cidEl, card.id)"),
-            "kanban card ids copy"
-        );
-        assert!(
-            BACKLOG_PAGE.contains("bindIdCopy(lidEl, card.id)"),
-            "list row ids copy"
-        );
-        assert!(
-            BACKLOG_PAGE.contains("bindIdCopy(idSpan, card.id)"),
-            "the panel id copies"
-        );
-        assert_eq!(
-            BACKLOG_PAGE.matches("bindIdCopy(").count(),
-            4,
-            "the handler binds at exactly the three render sites plus its definition"
-        );
-        assert!(
-            BACKLOG_PAGE.contains("ev.stopPropagation()"),
-            "an id tap must not open the row behind it"
-        );
-        // The search bar is the first control on the page and holds the one
-        // find input, its clear button and the focus key.
-        let bar = BACKLOG_PAGE
-            .find(r#"id="searchbar""#)
-            .expect("the search bar exists");
-        let controls = BACKLOG_PAGE
-            .find(r#"id="controls""#)
-            .expect("controls exist");
-        assert!(bar < controls, "the search bar leads the page");
-        assert!(
-            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
-            "the placeholder names what search covers"
-        );
-        assert!(
-            BACKLOG_PAGE.contains(r#"id="f-q-clear""#),
-            "the clear button exists"
-        );
-        assert!(
-            BACKLOG_PAGE.contains(r#"id="searchkey""#),
-            "the focus key shows in the box"
-        );
-        assert!(
-            !BACKLOG_PAGE.contains(r#"size="14""#),
-            "the old hidden find input is gone"
-        );
-        assert!(
-            BACKLOG_PAGE.contains("b.dataset.id = card.id;"),
-            "board rows carry their id for the j/k selection"
-        );
-    }
-
-    /// The page's filter state reads every key FILTER_KEYS iterates: one
-    /// missing key made filterParams throw "state[k] is not iterable" on
-    /// every fresh served board, and the served route drew no cards at all
-    /// (the snapshot copy tolerates the undefined, which is why only the
-    /// bridge showed it). Found live on the deployed binary on 2026-10-01.
-    #[test]
-    fn the_filter_state_reads_every_filter_key() {
-        for key in [
-            "project", "epic", "status", "priority", "size", "king", "kind",
-        ] {
-            let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
-            assert!(
-                BACKLOG_PAGE.contains(&line),
-                "the filter state must read {key} or filterParams throws at boot"
-            );
-        }
-    }
-
-    /// Every board shortcut answers, and the typing guard holds: lift
-    /// shortcutAction / isTypingTarget / copiedToast from the shipped page
-    /// and drive each key the ? sheet advertises, under node.
-    #[test]
-    fn every_board_shortcut_answers_under_node() {
-        let asserts = r#"
-const eq = (got, want, what) => {
-  if (got !== want) { console.error("FAIL " + what + ": got " + got + ", want " + want); process.exit(1); }
-};
+// The board shortcuts: every key the ? sheet advertises, the typing guard,
+// the Escape unwind order, and the copied-id toast line.
 const M = { meta: false, ctrl: false };
 // focus search: the slash, and ctrl/cmd K (plain k is the selection move).
 eq(shortcutAction("/", M, {}), "focus-search", "/ focuses search");
@@ -2569,14 +2518,18 @@ eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
 console.log("backlog shortcuts: 35 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
+            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
+            lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
+            lift_js_fn(BACKLOG_PAGE, "voteText"),
             lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
             lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
             lift_js_fn(BACKLOG_PAGE, "copiedToast"),
             asserts
         );
         let path =
-            std::env::temp_dir().join(format!("fno-backlog-shortcuts-{}.mjs", std::process::id()));
+            std::env::temp_dir().join(format!("fno-snapshot-helpers-{}.mjs", std::process::id()));
         std::fs::write(&path, src).expect("temp dir writable");
         let out = std::process::Command::new("node").arg(&path).output();
         let _ = std::fs::remove_file(&path);
@@ -2584,16 +2537,20 @@ console.log("backlog shortcuts: 35 cases ok");
             Err(e) => {
                 assert!(
                     std::env::var_os("CI").is_none(),
-                    "node is required on CI to exercise the shipped board shortcuts: {e}"
+                    "node is required on CI to exercise the shipped snapshot helpers: {e}"
                 );
                 println!(
-                    "SKIPPED every_board_shortcut_answers_under_node: node not runnable ({e}); \
+                    "SKIPPED snapshot_page_helpers_hold_under_node: node not runnable ({e}); \
                      nothing was asserted"
                 );
             }
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let stderr = String::from_utf8_lossy(&o.stderr);
+                assert!(
+                    stdout.contains("snapshot page helpers: 16 cases ok"),
+                    "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
+                );
                 assert!(
                     stdout.contains("backlog shortcuts: 35 cases ok"),
                     "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
