@@ -297,7 +297,7 @@ fn cfg_str(table: Option<&toml::Table>, key: &str) -> String {
 /// One field's effective value + source rung: lane > profile > defaults,
 /// harness-blind (the two harness rungs live in the overlay answer).
 #[derive(Clone, Debug, PartialEq)]
-struct Field(pub String, pub Option<String>);
+pub(crate) struct Field(pub String, pub Option<String>);
 
 fn field_read(
     lane: Option<&Value>,
@@ -1007,6 +1007,11 @@ fn grid_inject(stage: &mut Stage, seam: &mut Seam) {
         }
     }
     seam.inject.extend(inject);
+    // Python pre-seeds the resolved-harness cache with the candidate's
+    // harness, so the effort/substrate/permission checks read the grid's
+    // coordinate, never the ambient default.
+    stage.harness = Some(harness);
+    stage.harness_done = true;
 }
 
 /// The harness rung: the config `provider` fills the HARNESS axis only when
