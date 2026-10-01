@@ -654,6 +654,7 @@ fn worktree_paths(cwd: &Path) -> Vec<PathBuf> {
 /// inside a spilled `input` scalar from minting a merge posture. A live
 /// manifest outranks the supported archived/terminal forms; the newest of
 /// those is consulted only when no live manifest exists.
+#[derive(Debug)]
 pub(crate) struct BoundManifestRead {
     pub node_id: Option<String>,
     pub approved: Option<bool>,
@@ -827,6 +828,7 @@ pub(crate) fn bound_node_posture(
 }
 
 /// What the node's bound manifest does to a merge authority.
+#[derive(Debug)]
 enum ManifestFold {
     /// No worktree binds the node: legacy receipts-and-config behavior.
     Unbound,
@@ -951,6 +953,11 @@ manifest: {path}, {live_word} manifest)",
     out.to_string()
 }
 
+/// The queued row's node id, empty when absent.
+fn row_node_id(row: &Value) -> &str {
+    row.get("node_id").and_then(Value::as_str).unwrap_or("")
+}
+
 /// One `grant-queue` answer over already-read rows. An `Err` rows read is an
 /// error receipt - the caller refuses its tick's merge work, it never
 /// guesses a queue. The receipt carries `elapsed_ms` so the caller can see
@@ -976,8 +983,6 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
                 &live_config,
                 rotate,
             );
-            let node_of =
-                |row: &Value| -> &str { row.get("node_id").and_then(Value::as_str).unwrap_or("") };
             let root_of = |row: &Value| {
                 row.get("cwd")
                     .and_then(Value::as_str)
@@ -987,7 +992,7 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
             let mut refused_drops = 0usize;
             let mut unknown_drops = 0usize;
             if let Some(rows) = out["queue"].as_array_mut() {
-                rows.retain_mut(|row| match bound_fold(&root_of(row), node_of(row)) {
+                rows.retain_mut(|row| match bound_fold(&root_of(row), row_node_id(row)) {
                     ManifestFold::Unbound => true,
                     ManifestFold::Permit(bound) => {
                         write_provenance(row, &bound);
