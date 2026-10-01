@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Test suite for the C14 picker signal in hooks/inside-leg-report.sh:
-# a PreToolUse carrying tool_name AskUserQuestion or ExitPlanMode reports
-# state=blocked reason "asking the user" (the session is asking the operator,
-# so mail waits); any other tool_name on PreToolUse keeps state=working, and
-# the next PreToolUse or Stop clears the blocked state.
+# a PreToolUse carrying tool_name AskUserQuestion reports state=blocked with
+# the QUESTION TEXT (or the "asking the user" fallback when the payload
+# carried none), and ExitPlanMode reports "plan approval requested" (the
+# session is asking the operator, so mail waits); any other tool_name on
+# PreToolUse keeps state=working, and the next PreToolUse or Stop clears the
+# blocked state.
 #
 # Companion to tests/hooks/test_inside_leg_report_blocked.sh (the RPC side)
 # and tests/hooks/test_inside_leg_report_markers.sh (the marker gate).
 #
 # Tests:
-#   T1  PreToolUse + AskUserQuestion -> --state blocked --reason "asking the user"
-#   T2  PreToolUse + ExitPlanMode    -> --state blocked --reason "asking the user"
+#   T1  PreToolUse + AskUserQuestion -> --state blocked --reason "asking the user" (fallback)
+#   T2  PreToolUse + ExitPlanMode    -> --state blocked --reason "plan approval requested"
 #   T3  PreToolUse + Bash            -> --state working (no reclassification)
 #   T4  picker blocked, then a Bash PreToolUse -> working again (clears)
 #   T5  a picker blocked report writes no OSC 133 byte (blocked stays silent)
@@ -90,10 +92,10 @@ CALLS2="$TMP/calls2"; : >"$CALLS2"
 RT2="$TMP/rt2"; mkdir -p "$RT2"
 run_hook working sess-p2 "$CALLS2" "$RT2" "ExitPlanMode" >/dev/null
 if call_str "$CALLS2" 1 | grep -qF -- '--state blocked' \
-    && call_str "$CALLS2" 1 | grep -qF -- '--reason asking the user'; then
-  pass "T2 ExitPlanMode reclassified blocked/asking the user"
+    && call_str "$CALLS2" 1 | grep -qF -- '--reason plan approval requested'; then
+  pass "T2 ExitPlanMode reclassified blocked/plan approval requested"
 else
-  fail "T2 expected blocked/asking the user, got: $(call_str "$CALLS2" 1)"
+  fail "T2 expected blocked/plan approval requested, got: $(call_str "$CALLS2" 1)"
 fi
 
 # T3

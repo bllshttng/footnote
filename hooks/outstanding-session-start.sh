@@ -47,6 +47,7 @@ if [[ $have_jq -eq 1 && -s "$cache" ]]; then
             printf 'No open questions from this session.\n'
         fi
         printf '%s open across the fleet.\n' "${total:-0}"
+        printf 'Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead.\n'
         exit 0
     fi
 fi
@@ -69,4 +70,5 @@ body=$(with_timeout 3 fno inbox outstanding 2>/dev/null) || rc=$?
 [[ $rc -eq 2 ]] && exit 0
 
 printf '## Outstanding for you\n\ncould not be read (fno inbox outstanding exit %s). Run it directly.\n' "$rc"
+printf 'Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead.\n'
 exit 0
