@@ -505,37 +505,23 @@ def _resolve_dispatch_node(
     return matches[0] if len(matches) == 1 else None
 
 
-def _target_binding(
-    input_: Optional[str], node_id: Optional[str], plan_path: Optional[str], phase: str
-) -> Optional[dict]:
-    """Ask the native binding owner which node this run binds.
-
-    Transport only: ``fno backlog target-binding`` decides continue, adopt,
-    forked or refused. A refused or forked receipt exits here, before any
-    worktree, claim or manifest. None means the verb could not answer; the
-    init hook then asks it again and names the gap.
-    """
+def _target_binding(input_, node_id, plan_path, phase: str, *, exit_on_fork: bool) -> dict:
+    """Transport to the native binding owner; refused exits 1, a fork may exit 3."""
     from fno.rust_binary import VerbUnavailable, verb_call
-
-    payload = {
-        "input": input_ or "",
-        "node": node_id or "",
-        "plan_path": plan_path or "",
-        "phase": phase,
-        "allow_in_review": os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1",
-    }
+    payload = {"input": input_ or "", "node": node_id or "", "plan_path": plan_path or "",
+               "phase": phase, "allow_in_review": os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1"}
     try:
         receipt = verb_call(["backlog", "target-binding", "--stdin"], payload, timeout=120)
     except VerbUnavailable as exc:
         typer.echo(f"fno do target {phase}: target binding unavailable: {exc}", err=True)
-        return None
+        return {}
     verdict = receipt.get("verdict")
-    if verdict in ("refused", "forked") or (verdict == "adopt" and receipt.get("message")):
-        typer.echo(receipt.get("message") or "", err=True)
-    if verdict == "refused":
+    if receipt.get("message"):
+        typer.echo(receipt["message"], err=True)
+    if verdict == "refused" or (verdict == "forked" and exit_on_fork):
         if receipt.get("next"):
             typer.echo(f"next: {receipt['next']}", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1 if verdict == "refused" else 3)
     return receipt
 
 
@@ -1714,18 +1700,10 @@ def init(
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (task 1.3b).
     _redirect_if_contained(_dispatch_node)
-
-    # A node whose own PR already shipped binds only its open PR's author or
-    # a follow-up child; a fork exits with the child's start command and
-    # writes no state in this tree.
-    _binding = (
-        _target_binding(input_, _dispatch_node.get("id"), plan_path, "init")
-        if isinstance(_dispatch_node, dict)
-        else None
-    )
-    if _binding and _binding.get("verdict") == "forked":
-        typer.echo(f"next: {_binding.get('next')}", err=True)
-        raise typer.Exit(code=3)
+    # A node whose own PR shipped binds that PR's author or a follow-up child.
+    _binding = _target_binding(
+        input_, _dispatch_node.get("id"), plan_path, "init", exit_on_fork=True
+    ) if isinstance(_dispatch_node, dict) else {}
 
     from fno.review_capability import env_marks_unattended
 
@@ -1887,12 +1865,8 @@ def init(
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
-    env.pop("FNO_TARGET_BINDING", None)
-    env.pop("TARGET_ADOPTED_PR", None)
-    if _binding:
-        env["FNO_TARGET_BINDING"] = str(_binding.get("verdict") or "")
-        if _binding.get("verdict") == "adopt":
-            env["TARGET_ADOPTED_PR"] = str(_binding.get("pr") or "")
+    env["FNO_TARGET_BINDING"] = str(_binding.get("verdict") or "")
+    env["TARGET_ADOPTED_PR"] = str(_binding.get("pr") or "")
     # Change D: resolve `attended` from the substrate before the bash
     # manifest writer runs. Marking the run unattended makes init stamp
     # `attended: false`, so the skill surfaces offers as non-blocking lines
@@ -3679,17 +3653,10 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
-
-    # Follow-up scope on a node whose PR already shipped binds a child before
-    # any worktree or claim. Inside a linked worktree there is no fresh base
-    # to branch from, so the child's own start is handed back instead.
-    binding = _target_binding(node, None, plan_path, "start")
-    if binding and binding.get("verdict") == "forked":
-        if _is_linked_worktree(cwd):
-            typer.echo(f"next: {binding.get('next')}", err=True)
-            raise typer.Exit(code=3)
-        node = str(binding.get("effective_node"))
-        plan_path = binding.get("effective_plan") or None
+    # Follow-up scope on a shipped node starts its child, before any worktree.
+    binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
+    if binding.get("verdict") == "forked":
+        node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None
 
     # Boundary: already isolated -> no-op, create nothing (case). But
     # first refuse if a DIFFERENT live session holds this node's claim: this cwd

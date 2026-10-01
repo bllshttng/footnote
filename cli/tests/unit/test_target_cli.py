@@ -26,7 +26,7 @@ _REAL_BINDING = target_cli._target_binding
 @pytest.fixture(autouse=True)
 def _no_native_binding(monkeypatch):
     """The binding verdict is native; tests that read it opt back in."""
-    monkeypatch.setattr(target_cli, "_target_binding", lambda *a, **k: None)
+    monkeypatch.setattr(target_cli, "_target_binding", lambda *a, **k: {})
 
 
 def _binding_answers(monkeypatch, receipt):
