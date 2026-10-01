@@ -220,7 +220,14 @@ pub(crate) fn paint(
             );
         }
         let sel = b.detail.as_ref().map(|d| d.sel);
-        let (ls, f) = node_detail::pane_lines(b, &node, sel, detail_inner_w);
+        // The frame spends two body columns on side pad: wrap the text to
+        // the columns it paints, so no line loses its tail.
+        let text_w = if framed {
+            detail_inner_w.saturating_sub(2)
+        } else {
+            detail_inner_w
+        };
+        let (ls, f) = node_detail::pane_lines(b, &node, sel, text_w);
         let body = ls
             .iter()
             .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_inner_w)))
@@ -304,7 +311,6 @@ pub(crate) fn framed_region(
     if h == 0 || w == 0 {
         return;
     }
-    let inner_w = w.saturating_sub(chrome::Chrome::FRAME_COLS);
     let layout = overlay_paint::layout_body_overlay(
         (top, left),
         (h, w),
@@ -331,7 +337,6 @@ pub(crate) fn framed_region(
             );
         }
     }
-    let _ = inner_w;
 }
 
 use super::overlay_paint;

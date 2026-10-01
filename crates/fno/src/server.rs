@@ -7680,7 +7680,7 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(", ");
             if done_worker_names.len() > 6 {
-                names.push_str(", ...");
+                names.push_str(&format!(" and {} more", done_worker_names.len() - 6));
             }
             self.notice_all(format!(
                 "restore: skipped {done_workers_total} done worker pane(s) and {skipped_done_tabs} done tab(s): {names}"

@@ -1,21 +1,10 @@
 //! The detail pane's markdown renderer. Pure, line-oriented, no
 //! dependency: one markdown doc in, styled `BLine`s out.
 
-use super::backlog_board::trunc;
 use super::backlog_style::BLine;
 use super::node_detail::wrap_line;
 
-pub(crate) fn md_lines(text: &str, w: usize, cap: usize) -> Vec<BLine> {
-    let mut all = render(text, w);
-    if all.len() > cap {
-        let more = all.len() - cap;
-        all.truncate(cap);
-        all.push(BLine::meta(format!("\u{2026} {more} more lines")));
-    }
-    all
-}
-
-fn render(text: &str, w: usize) -> Vec<BLine> {
+pub(crate) fn md_lines(text: &str, w: usize) -> Vec<BLine> {
     let mut out: Vec<BLine> = Vec::new();
     let src: Vec<&str> = text.lines().collect();
     let mut i = 0usize;
@@ -44,7 +33,7 @@ fn render(text: &str, w: usize) -> Vec<BLine> {
             if line.trim_start().starts_with("```") {
                 fence = false;
             } else {
-                out.push(BLine::meta(trunc(line, w)));
+                out.extend(BLine::meta(line).wrap(w));
             }
             continue;
         }
@@ -64,17 +53,14 @@ fn render(text: &str, w: usize) -> Vec<BLine> {
             out.push(BLine::head(inline(line[hash_run..].trim_start())));
             continue;
         }
-        // Tables and blockquotes: dim, truncated, never wrapped.
+        // Tables and blockquotes: dim, and a long row wraps whole.
         let t = line.trim_start();
         if t.starts_with('|') || t == ">" || t.starts_with("> ") {
             flush(&mut para, &mut out, w);
             if t.starts_with('|') {
-                out.push(BLine::meta(trunc(line, w)));
+                out.extend(BLine::meta(line).wrap(w));
             } else {
-                out.push(BLine::meta(trunc(
-                    &format!("\u{2502} {}", t.trim_start_matches('>')),
-                    w,
-                )));
+                out.extend(BLine::meta(format!("\u{2502} {}", t.trim_start_matches('>'))).wrap(w));
             }
             continue;
         }
@@ -180,18 +166,17 @@ mod tests {
     use super::*;
 
     const W: usize = 60;
-    const CAP: usize = 400;
 
     #[test]
     fn empty_and_whitespace_render_zero_lines() {
-        assert!(md_lines("", W, CAP).is_empty());
-        assert!(md_lines("   \n  \n", W, CAP).is_empty());
+        assert!(md_lines("", W).is_empty());
+        assert!(md_lines("   \n  \n", W).is_empty());
     }
 
     #[test]
     fn frontmatter_folds_to_one_meta_line() {
         let doc = "---\nstatus: ready\nsize: L\n---\n\n# Plan\n\nbody text";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         assert_eq!(lines[0].text, "frontmatter: 2 lines");
         let heads = lines
             .iter()
@@ -205,7 +190,7 @@ mod tests {
     #[test]
     fn headings_strip_hashes_and_get_a_blank_line_before() {
         let doc = "intro text\n## Step one\nmore";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         let at = lines
             .iter()
             .position(|l| l.text == "Step one")
@@ -219,7 +204,7 @@ mod tests {
     #[test]
     fn fenced_code_drops_the_fences_and_dims_the_inner_lines() {
         let doc = "before\n```rust\nlet x = 1;\nlet y = 2;\n```\nafter";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         assert!(!lines.iter().any(|l| l.text.contains("```")));
         assert!(lines.iter().any(|l| l.text == "let x = 1;"));
         assert!(lines.iter().any(|l| l.text == "let y = 2;"));
@@ -227,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn tables_and_blockquotes_render_dim_and_truncated() {
+    fn tables_and_blockquotes_render_dim() {
         let doc = "| col | col |\n|---|---|\n| a | b |\n> quoted words\nplain";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         let table = lines
             .iter()
             .find(|l| l.text.contains("| col | col |"))
@@ -245,7 +230,7 @@ mod tests {
     #[test]
     fn bullets_keep_their_indent_and_wrap_with_a_hanging_indent() {
         let long = format!("- {}end", "a word ".repeat(30));
-        let lines = md_lines(&long, 40, CAP);
+        let lines = md_lines(&long, 40);
         assert!(
             lines[0].text.starts_with("\u{2022} a word"),
             "first item line: {:?}",
@@ -259,7 +244,7 @@ mod tests {
     #[test]
     fn numbered_items_keep_their_numbers() {
         let doc = "3. third thing\n4. fourth";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         assert_eq!(lines[0].text, "3. third thing");
         assert_eq!(lines[1].text, "4. fourth");
     }
@@ -267,7 +252,7 @@ mod tests {
     #[test]
     fn inline_marks_strip_and_links_keep_their_text() {
         let doc = "see **bold** and __ul__ and `code` and [the doc](http://x/y.md) end";
-        let text = md_lines(doc, W, CAP)[0].text.clone();
+        let text = md_lines(doc, W)[0].text.clone();
         assert!(
             text.contains("see bold and ul and code and the doc end"),
             "{text}"
@@ -280,7 +265,7 @@ mod tests {
     #[test]
     fn paragraphs_wrap_to_the_width() {
         let para = "word ".repeat(60);
-        let lines = md_lines(para.trim(), 30, CAP);
+        let lines = md_lines(para.trim(), 30);
         assert!(lines.len() >= 5, "long paragraph wraps: {lines:?}");
         for l in &lines {
             assert!(l.text.chars().count() <= 30, "row width held: {:?}", l.text);
@@ -288,21 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_ends_with_a_true_remaining_count() {
-        let para = (0..30)
-            .map(|i| format!("line{i}"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let lines = md_lines(&para, W, 10);
-        assert_eq!(lines.len(), 11, "cap plus one ellipsis line");
-        assert_eq!(lines[10].text, "\u{2026} 20 more lines");
-        assert_eq!(lines[9].text, "line9");
-    }
-
-    #[test]
     fn an_unterminated_fence_still_terminates() {
         let doc = "a\n```\nleft open\nforever";
-        let lines = md_lines(doc, W, CAP);
+        let lines = md_lines(doc, W);
         assert!(lines.iter().any(|l| l.text == "left open"));
         assert!(lines.iter().any(|l| l.text == "forever"));
     }

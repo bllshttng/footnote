@@ -47,6 +47,48 @@ fn push_seg(text: &mut String, roles: &mut Vec<BRole>, seg: &BSeg) {
 }
 
 impl BLine {
+    /// Split into lines of at most `w` display columns, breaking after the
+    /// last space that fits, or mid-word when none does. Each char keeps its
+    /// role.
+    pub(crate) fn wrap(self, w: usize) -> Vec<BLine> {
+        let w = w.max(1);
+        let chars: Vec<char> = self.text.chars().collect();
+        if chars.iter().map(|c| char_w(*c)).sum::<usize>() <= w {
+            return vec![self];
+        }
+        let piece = |from: usize, to: usize| BLine {
+            text: chars[from..to].iter().collect(),
+            roles: self
+                .roles
+                .get(from..to.min(self.roles.len()))
+                .unwrap_or_default()
+                .to_vec(),
+            default_role: self.default_role,
+            band: self.band,
+        };
+        let mut out = Vec::new();
+        let (mut start, mut used, mut space) = (0usize, 0usize, None);
+        let mut i = 0usize;
+        while i < chars.len() {
+            let cw = char_w(chars[i]);
+            if used + cw > w && i > start {
+                let cut = space.filter(|&s| s > start).unwrap_or(i);
+                out.push(piece(start, cut));
+                start = cut;
+                used = chars[start..i].iter().map(|c| char_w(*c)).sum();
+                space = None;
+                continue;
+            }
+            if chars[i] == ' ' {
+                space = Some(i + 1);
+            }
+            used += cw;
+            i += 1;
+        }
+        out.push(piece(start, chars.len()));
+        out
+    }
+
     /// Build from segments.
     pub(crate) fn of(segs: &[BSeg]) -> BLine {
         let mut text = String::new();
