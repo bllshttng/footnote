@@ -54,7 +54,7 @@ and is not softened anywhere: the close gate keeps refusing until a human runs
 ``deferred`` and ``oos-bug`` are both swept, and the sweep does NOT flatten
 them: ``deferred`` is declared scope that did not ship (it blocks a close via
 condition D in :mod:`fno.graph._reconcile`), ``oos-bug`` is discovery and never
-blocks. ``backfill`` is skipped entirely - it belongs to ``/fno:pr merged``'s
+blocks. ``backfill`` is skipped entirely - it belongs to ``/fno:ship pr merged``'s
 backfill slot, the same carve-out the PR-scoped harvest steps around.
 """
 from __future__ import annotations

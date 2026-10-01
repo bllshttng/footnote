@@ -74,7 +74,7 @@ def _resolve_pr_session_ids(
 ) -> list[str]:
     """Session id(s) whose ledger entry owns this PR, scoped to ``repo_slug``.
 
-    Mirrors the post-merge Step 4b ledger scan (skills/pr/references/merged.md). Because
+    Mirrors the post-merge Step 4b ledger scan (skills/ship/references/merged.md). Because
     ``ledger.json`` is GLOBAL and GitHub PR numbers collide across repos, a known
     ``repo_slug`` is REQUIRED to attribute any entry: an entry matches when its
     ``pr_url`` ends in ``/<slug>/pull/<pr>``. A url-less entry names no repo, so
@@ -554,7 +554,7 @@ def sweep_carveouts_cmd(
         "--kind",
         "-k",
         help="Narrow to one carve-out kind (deferred | oos-bug). Dispositions "
-        "are unchanged; `backfill` is never swept (it belongs to /fno:pr merged).",
+        "are unchanged; `backfill` is never swept (it belongs to /fno:ship pr merged).",
     ),
     autonomous: bool = typer.Option(
         False,
@@ -587,7 +587,7 @@ def sweep_carveouts_cmd(
         # it through validation reported "0 unharvested" for rows that exist and
         # are simply owned by another verb, which reads as "nothing to do".
         detail = (
-            " (backfill belongs to /fno:pr merged's backfill slot and is never swept)"
+            " (backfill belongs to /fno:ship pr merged's backfill slot and is never swept)"
             if kind == BACKFILL_KIND
             else ""
         )
@@ -679,7 +679,7 @@ def run(
             "run so the engine classifies surviving carve-outs and dispatches "
             "follow-up /think or /target work under the firehose ceiling. A no-op "
             "unless config.keep_going.enabled is set. Passed by the autonomous "
-            "/fno:pr merged ritual; a real autonomous-mode sentinel triggers the "
+            "/fno:ship pr merged ritual; a real autonomous-mode sentinel triggers the "
             "engine without it."
         ),
     ),
@@ -803,7 +803,7 @@ def run(
         ledger filled up, and the close gate then refused every node with no
         verb that could clear it.
 
-        Counted at the END, on every run including --pr-number (how /fno:pr
+        Counted at the END, on every run including --pr-number (how /fno:ship pr
         merged calls this). Counting up front announced the rows this very run
         was about to harvest as "no trigger covers them", which is false while
         it is being printed and stale by the time the run finishes. Reporting
@@ -872,7 +872,7 @@ def run(
                 payload["carveouts_readonly"] = True
         if slug:
             payload["pr_url"] = f"https://github.com/{slug}/pull/{pr}"
-        # an autonomous keep-going harvest (the /fno:pr merged ritual
+        # an autonomous keep-going harvest (the /fno:ship pr merged ritual
         # passes --keep-going) has no sentinel, so mark the synthetic payload
         # autonomous so nodes land active AND the keep-going engine fires. Gated
         # by config so a stray flag on a keep_going-off install stays a plain run.

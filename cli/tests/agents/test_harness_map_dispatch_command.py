@@ -221,7 +221,7 @@ def test_normalize_command_gemini_refused():
     "verb_cmd,expected",
     [
         ("/blueprint {id}", "$fno:blueprint {id}"),
-        ("/pr create", "$fno:pr create"),
+        ("/fno:ship pr create", "$fno:ship pr create"),
         ("/think {id}", "$fno:think {id}"),
     ],
 )

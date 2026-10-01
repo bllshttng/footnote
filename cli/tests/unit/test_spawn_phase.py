@@ -15,7 +15,7 @@ def test_table_maps_every_shipped_work_verb_in_all_three_spellings():
         ("/think q", "think"), ("$fno:think q", "think"),
         ("/fix", "execute"), ("/fno:fix t", "execute"), ("$fno:tdd x", "execute"),
         ("/execute p.md", "execute"), ("/fno:execute waves p.md", "execute"), ("/do x", "execute"),
-        ("/pr create", "ship"), ("/fno:pr check 12", "ship"), ("/ship pr", "ship"),
+        ("/fno:ship pr create", "ship"), ("/fno:ship pr check 12", "ship"), ("/ship pr", "ship"),
         ("/target", "execute"), ("/fno:target", "execute"), ("$fno:target", "execute"),
         ("/review", "review"), ("/fno:review", "review"), ("/code-review", "review"),
     ]

@@ -31,10 +31,6 @@ pub(crate) struct OverlayLayout {
 }
 
 impl OverlayLayout {
-    pub(crate) fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
-        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
-    }
-
     /// A layout built from parts a test already holds (no window, no body
     /// offset): the literal shape the click-router tests assert against.
     #[cfg(test)]

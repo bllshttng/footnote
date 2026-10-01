@@ -32,7 +32,7 @@ resolve node  →  fno do target start <node>   worktree off origin/main + claim
               →  validate                    fno doctor test <changed test files>  (real exit code; not bare pytest; never the whole suite - CI runs it)
               →  review                      /fno:review <size> --comment on local HEAD, in this session (held; posts when the PR opens)
               →  fix + re-review             only when the round raised findings; one clean round is enough
-              →  /pr create                  runs inline in this session; the body carries the reviewed-at line
+              →  /fno:ship pr create                  runs inline in this session; the body carries the reviewed-at line
               →  <promise>MISSION COMPLETE...  PR green + reviewed = done; merge if config.auto_merge.enabled
 ```
 
@@ -58,7 +58,7 @@ That is the whole job when a backlog node or plan is already bound. `fno do targ
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved (attended): [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md).
-- Before the PR exists, run the fno review lane in this session, on the final HEAD. After validate, run `/fno:review <size> --comment` (Codex `$fno:review`) on the final local HEAD, before `/fno:pr create`. Size by the diff: `medium` under 300 changed lines, `high` above. Use `xhigh` for a risky surface (merge, claims, graph writes, hooks, auth). No mail, no paste, no turn boundary. The review runs in this context and emits the head-pinned attestation itself. With no PR yet, `--comment` holds the findings on branch and HEAD. Once the PR opens, the publish-review step posts them as one PR comment. Fix P1/P2 findings, then review the new HEAD, while `review.max_rounds` (default 2) permits. A rebase with an unchanged code delta carries the attestation. When `fno do pr status <n>` reads `rounds_exhausted: true`, the review phase is complete. Request no review or attestation, and merge on green CI. The promise waits for the stop gate to read review coverage `covered` ([references/ship-and-promise.md](references/ship-and-promise.md)).
+- Before the PR exists, run the fno review lane in this session, on the final HEAD. After validate, run `/fno:review <size> --comment` (Codex `$fno:review`) on the final local HEAD, before `/fno:ship pr create`. Size by the diff: `medium` under 300 changed lines, `high` above. Use `xhigh` for a risky surface (merge, claims, graph writes, hooks, auth). No mail, no paste, no turn boundary. The review runs in this context and emits the head-pinned attestation itself. With no PR yet, `--comment` holds the findings on branch and HEAD. Once the PR opens, the publish-review step posts them as one PR comment. Fix P1/P2 findings, then review the new HEAD, while `review.max_rounds` (default 2) permits. A rebase with an unchanged code delta carries the attestation. When `fno do pr status <n>` reads `rounds_exhausted: true`, the review phase is complete. Request no review or attestation, and merge on green CI. The promise waits for the stop gate to read review coverage `covered` ([references/ship-and-promise.md](references/ship-and-promise.md)).
 
 ---
 
@@ -348,7 +348,7 @@ When a plan task touches a secondary repo (e.g., a frontend plan with a backend 
 
 #### Auto-Merge Mechanics
 
-If `auto_merge_approved: true` in target-state.md, Phase 6a runs `rebase-resolve.sh` before `/pr create`, and Phase 8a runs `pr-merge.sh` after `external_review_passed` succeeds. See [references/auto-merge-mechanics.md](references/auto-merge-mechanics.md) and the cross-skill protocol in [references/auto-merge.md](references/auto-merge.md).
+If `auto_merge_approved: true` in target-state.md, Phase 6a runs `rebase-resolve.sh` before `/fno:ship pr create`, and Phase 8a runs `pr-merge.sh` after `external_review_passed` succeeds. See [references/auto-merge-mechanics.md](references/auto-merge-mechanics.md) and the cross-skill protocol in [references/auto-merge.md](references/auto-merge.md).
 
 ### 5. Log Metrics
 

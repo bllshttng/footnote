@@ -99,7 +99,7 @@ def _advance_status(project_root: Optional[Path]) -> SpawnerStatus:
 
     armed, rank = _auto_continue_resolve(project_root)
     return SpawnerStatus(
-        "advance (node-walk)", "PR merge (reconcile / /pr merged)",
+        "advance (node-walk)", "PR merge (reconcile / /fno:ship pr merged)",
         "config.auto_continue.enabled", armed, rank,
     )
 

@@ -216,7 +216,7 @@ def test_cli_ledger_climbs_to_canonical_root(tmp_path: Path, monkeypatch):
 # -- ab-4a1a4fea Group 3: backfill carve-out kind + list/resolve surface --
 #
 # A `backfill` carve-out declares a data backfill the merged PR enables; --need
-# carries its PRECONDITION (not an open question). /pr merged's backfill slot
+# carries its PRECONDITION (not an open question). /fno:ship pr merged's backfill slot
 # reads surviving backfill entries (`list`) and removes handled ones (`resolve`).
 
 
@@ -352,7 +352,7 @@ def test_carveout_resolve_dedupes_no_false_shortfall(_repo: Path):
 
 
 def test_carveout_list_filters_by_session(_repo: Path):
-    """--session-id scopes the listing so /pr merged only sees ITS PR's backfills."""
+    """--session-id scopes the listing so /fno:ship pr merged only sees ITS PR's backfills."""
     ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(

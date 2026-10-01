@@ -4198,9 +4198,8 @@ pub(crate) async fn launcher_mouse(
             return Ok(over);
         }
         let portal = next_free_portal(view);
-        // Field-disjoint snapshots for the commit and step-down paths.
+        // A field-disjoint snapshot for the commit path.
         let catalog = view.launcher_catalog.clone();
-        let backlog = view.backlog.clone();
         if let Some(l) = view.launcher.as_mut() {
             let Some(mut picker) = l.picker.take() else {
                 unreachable!("checked Some above");
@@ -4210,14 +4209,6 @@ pub(crate) async fn launcher_mouse(
                 return Ok(true);
             }
             match hit {
-                Some(crate::chrome::ESC_CLOSE_HIT) => {
-                    // The esc chip click reads exactly as pressing Esc: a
-                    // drilled picker steps down its ladder, the main list
-                    // closes (the taken picker is never restored).
-                    if picker.mode != PickerMode::Main {
-                        picker_step_down(l, &catalog, &backlog, picker);
-                    }
-                }
                 Some(target) => {
                     let field = picker.field;
                     picker.popup.select(target);
