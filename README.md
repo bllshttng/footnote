@@ -41,7 +41,7 @@ npx skills add bllshttng/footnote --skill tdd
 
 Other harnesses (opencode, agy, gemini, pi): see [docs/HARNESSES.md](docs/HARNESSES.md). Then run `/fno:setup` (or `fno config setup wizard`), and point `/fno:target` at a feature.
 
-### Uninstall
+## Uninstall
 
 ```
 fno uninstall --dry-run

@@ -35,6 +35,8 @@ const RC_MARK: &str = "# fno: cargo build-dir";
 /// The first line of the block `fno config setup cli-hooks` appends to codex.
 const CODEX_BLOCK_MARK: &str = "# Added by `fno config setup cli-hooks`";
 const PURGE_WORD: &str = "purge";
+/// The uv tool name the wheel installs under (a directory in `uv tool dir`).
+const UV_TOOL: &str = "fno";
 
 enum Action {
     Run(Vec<String>),
@@ -414,10 +416,10 @@ fn discover() -> Vec<Item> {
     if on_path("uv").is_some() {
         // FORCE_COLOR in the user's env would wrap the path in ANSI escapes.
         let tools = run(&argv(&["uv", "--color", "never", "tool", "dir"])).unwrap_or_default();
-        if !tools.trim().is_empty() && Path::new(tools.trim()).join("fno").is_dir() {
+        if !tools.trim().is_empty() && Path::new(tools.trim()).join(UV_TOOL).is_dir() {
             add(
                 "Python CLI (uv tool fno)".into(),
-                Action::Run(argv(&["uv", "tool", "uninstall", "fno"])),
+                Action::Run(argv(&["uv", "tool", "uninstall", UV_TOOL])),
             );
         }
     }
