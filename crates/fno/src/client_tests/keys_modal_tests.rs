@@ -48,36 +48,20 @@ fn which_key_lists_the_dead_row_removal_verbs() {
         let at = labels.iter().position(|l| l == head).expect(head);
         assert_eq!(labels[at - 1], "", "a blank line before {head}");
     }
-    // Fit to the screen: no row ellipsizes at 160 columns or at 50; at 50 the
-    // widest rows wrap into inert continuations, and every binding row keeps
-    // its own chord.
+    // Render to the screen: no row ellipsizes at 160 columns or at 50, and at
+    // 50 the widest rows wrap onto more lines while the rows and their chords
+    // stay as built.
+    let mut drawn = Vec::new();
     for cols in [160u16, 50] {
-        let fitted = build_keys_modal().fit(cols);
-        assert_eq!(fitted.popup.rows.len(), fitted.row_events.len());
-        let r = fitted.popup.render((200, cols));
+        let r = modal.popup.render((400, cols));
         assert!(
             r.lines.iter().all(|l| !l.text.contains('\u{2026}')),
             "no ellipsis at {cols} columns"
         );
-        let bound = |m: &KeysModal| {
-            m.popup
-                .rows
-                .iter()
-                .zip(&m.row_events)
-                .filter_map(|(row, ev)| match (row, ev) {
-                    (PopupRow::Entry { glyph, .. }, Some(ev)) => Some((glyph.clone(), ev.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(bound(&fitted), bound(&modal), "chords follow at {cols}");
-        if cols == 50 {
-            assert!(
-                fitted.popup.rows.len() > modal.popup.rows.len(),
-                "rows wrap"
-            );
-        }
+        assert!(r.width <= cols as usize, "fits the screen at {cols}");
+        drawn.push(r.lines.len());
     }
+    assert!(drawn[1] > drawn[0], "rows wrap at 50: {drawn:?}");
 }
 
 #[test]

@@ -249,33 +249,6 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         headers.contains(&"20 pane keepers on the old build"),
         "{headers:?}"
     );
-    // The modal grows to its widest row up to the screen, then wraps: no
-    // rendered row ends in an ellipsis on a wide screen or a narrow one, and
-    // the restart entry keeps its action.
-    for cols in [200u16, 50] {
-        let fitted = AuxPopup {
-            popup: wide.popup.clone(),
-            actions: wide.actions.clone(),
-        }
-        .fit(cols);
-        let r = fitted.popup.render((80, cols));
-        for line in &r.lines {
-            assert!(
-                !line.text.contains('\u{2026}'),
-                "no ellipsis at {cols} columns: {:?}",
-                line.text
-            );
-        }
-        assert!(r.width <= cols as usize, "fits the screen at {cols}");
-        if cols == 200 {
-            assert!(
-                r.width > crate::popup::WIDTH_CAP + 4,
-                "grows past the old cap"
-            );
-        }
-        assert_eq!(fitted.actions, wide.actions, "actions follow at {cols}");
-    }
-
     let modal = build_update_modal(Some(&outcome.clone().into()));
     let text: Vec<String> = modal
         .popup
@@ -324,6 +297,134 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         })
         .find(|l| *l == "restart now (keeps panes)");
     assert!(entry_label.is_some(), "the action row is present");
+}
+
+/// The guard: no overlay cuts its text with an ellipsis. Each overlay opens
+/// with long text over a sideline of short names, renders at 200 columns and
+/// at 50, and every screen line must hold no `…` and fit the screen. The long
+/// text must still be all there once the wrapped lines are joined.
+#[test]
+fn no_overlay_cuts_text_with_an_ellipsis() {
+    use super::tests::{agent_row, agent_row_at, named_meta, shot_view};
+    let long = format!(
+        "{}see https://example.com/{}end",
+        "a long subject ".repeat(8),
+        "path/".repeat(20)
+    );
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: false,
+        installed_rev: Some("a".repeat(40)),
+        source_rev: Some("b".repeat(40)),
+        changelog: vec![format!("feat: {long}")],
+        guidance: long.clone(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let name = "n".repeat(120);
+    type Open = Box<dyn Fn(&mut View)>;
+    let opens: Vec<(&str, &str, Open)> = vec![
+        (
+            "update modal",
+            "https://example.com/",
+            Box::new({
+                let outcome = outcome.clone();
+                move |v| v.aux = Some(build_update_modal(Some(&outcome.clone().into())))
+            }),
+        ),
+        (
+            "rename",
+            name.as_str(),
+            Box::new({
+                let name = name.clone();
+                move |v| v.rename = Some((RenameTarget::Squad(1), name.clone()))
+            }),
+        ),
+        (
+            "peek",
+            "https://example.com/",
+            Box::new({
+                let long = long.clone();
+                move |v| {
+                    v.peek = Some(PeekView {
+                        cursor: agent_row_at(v, |a| a.name == "w"),
+                        seq: 1,
+                        body: Some(vec![long.clone()]),
+                        name: "w".into(),
+                        last_fetch: std::time::Instant::now(),
+                        refresh_pending: false,
+                        squad: None,
+                    })
+                }
+            }),
+        ),
+        (
+            "confirm",
+            "https://example.com/",
+            Box::new({
+                let long = long.clone();
+                move |v| {
+                    v.confirm = Some(ConfirmAction {
+                        action: ConfirmKind::StopAgent {
+                            sid: None,
+                            name: "w".into(),
+                            pane_id: None,
+                        },
+                        label: long.clone(),
+                    })
+                }
+            }),
+        ),
+    ];
+    for cols in [200u16, 50] {
+        for (label, whole, open) in &opens {
+            let mut v = shot_view(
+                (40, cols),
+                vec![named_meta(1, "footnote", &["main"], 0)],
+                vec![agent_row("w", 10, None, false)],
+            );
+            open(&mut v);
+            let text = crate::vt::frame_text(&v.compose());
+            for line in text.lines() {
+                assert!(
+                    !line.contains('\u{2026}'),
+                    "{label} cut text at {cols} columns: {line:?}"
+                );
+                assert!(
+                    crate::chrome::str_cols(line) <= cols as usize,
+                    "{label} runs past {cols} columns: {line:?}"
+                );
+            }
+            // The overlay's own lines, joined with the frame and the wrap
+            // spaces squeezed out, still hold the long text whole.
+            let body: String = match v.active_overlay_layout() {
+                Some(l) => l.framed.lines.iter().map(|l| l.text.as_str()).collect(),
+                None => v.aux.as_ref().map_or(String::new(), |a| {
+                    a.popup
+                        .render(v.term)
+                        .lines
+                        .iter()
+                        .map(|l| l.text.as_str())
+                        .collect()
+                }),
+            };
+            let squeeze = |s: &str| -> String {
+                s.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '│')
+                    .collect()
+            };
+            assert!(
+                squeeze(&body).contains(&squeeze(whole)),
+                "{label} lost text at {cols} columns: {text}"
+            );
+        }
+    }
+    let wide = build_update_modal(Some(&outcome.clone().into()));
+    assert!(
+        wide.popup.render((80, 200)).width > crate::popup::WIDTH_CAP + 4,
+        "the update modal grows past the old cap"
+    );
 }
 
 /// x-f188 AC7-EDGE: a readiness payload from an older fno with no `running`

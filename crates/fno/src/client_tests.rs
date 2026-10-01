@@ -11885,7 +11885,7 @@ fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
 
 // A roster row with an arbitrary badge/seen (x-feec): a join target for a
 // fold item, or a done-unseen leg-1 row.
-fn agent_row(name: &str, pane: u64, badge: Option<AgentBadge>, seen: bool) -> AgentRow {
+pub(super) fn agent_row(name: &str, pane: u64, badge: Option<AgentBadge>, seen: bool) -> AgentRow {
     let mut r = blocked_row(name, pane, None);
     r.badge = badge;
     r.seen = seen;
@@ -12077,10 +12077,10 @@ fn same_project_or_absent_cwd_emits_no_sub_row() {
 }
 
 #[test]
-fn xc929_pad_to_truncates_and_pads() {
+fn xc929_pad_to_pads_and_never_cuts() {
     assert_eq!(pad_to("hi", 5), "hi   ");
     assert_eq!(pad_to("hello", 5), "hello");
-    assert_eq!(pad_to("hello world", 5), "hell…");
+    assert_eq!(pad_to("hello world", 5), "hello world");
 }
 
 // AC1-HP + AC1-EDGE (x-feec): the selected row is marked, an answerable row
@@ -14424,9 +14424,10 @@ fn the_name_modal_never_bisects_a_double_width_glyph() {
 }
 
 #[test]
-fn a_long_name_scrolls_so_the_cursor_stays_visible() {
-    // Stamping the head of the prompt cut the `_` off the right edge: the
-    // payload sits at the end, and the end is what a narrow render drops.
+fn a_long_name_wraps_so_the_whole_name_and_cursor_show() {
+    // The name sits at the end of the prompt, and a narrow render used to
+    // drop its head behind an ellipsis. It wraps now: every character and
+    // the `_` cursor stay on screen.
     let view = shot_view(
         (24, 40),
         vec![named_meta(1, "footnote", &["main"], 0)],
@@ -14450,16 +14451,14 @@ fn a_long_name_scrolls_so_the_cursor_stays_visible() {
         })
     };
     let shot = screen(&cells);
-    // The contract is the CURSOR: the kept tail ends in the `_` the operator
-    // types at.
-    let body_line = shot
+    assert!(!shot.contains('…'), "a name never elides: {shot}");
+    let joined: String = shot
         .lines()
-        .find(|l| l.contains('…'))
-        .expect("the scroll has to be visible as a scroll");
-    let inner = body_line.trim_matches(|c| c == '│' || c == ' ');
+        .map(|l| l.trim_matches(|c| c == '│' || c == ' '))
+        .collect();
     assert!(
-        inner.ends_with('_'),
-        "the cursor and the tail of what was typed must be visible: {shot}"
+        joined.contains(&format!("{long}_")),
+        "the whole name and the cursor must be visible: {shot}"
     );
     // A name that fits is untouched: no ellipsis, target still named.
     let mut cells = vec![Cell::default(); rows * cols];
@@ -14793,7 +14792,7 @@ fn probe_bottom_rim_band() {
 
 /// A squad whose tabs carry real names, so a strip fixture reads like a
 /// working operator's rather than `1 2 3`.
-fn named_meta(id: u64, name: &str, tabs: &[&str], active_tab: usize) -> SquadMeta {
+pub(super) fn named_meta(id: u64, name: &str, tabs: &[&str], active_tab: usize) -> SquadMeta {
     SquadMeta {
         id,
         name: name.into(),
@@ -14813,7 +14812,7 @@ fn named_meta(id: u64, name: &str, tabs: &[&str], active_tab: usize) -> SquadMet
     }
 }
 
-fn shot_view(term: (u16, u16), squads: Vec<SquadMeta>, agents: Vec<AgentRow>) -> View {
+pub(super) fn shot_view(term: (u16, u16), squads: Vec<SquadMeta>, agents: Vec<AgentRow>) -> View {
     let (rows, cols) = term;
     let active = squads[0].id;
     let mut view = View::new(
