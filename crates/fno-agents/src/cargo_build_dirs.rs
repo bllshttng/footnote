@@ -552,7 +552,7 @@ fn remove_empty_shard(dir: &Path) -> bool {
 /// `lsof` binary): a normal "no matching process right now" read is
 /// `Ok(vec![])`, never an error.
 pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
-    if let Some(command) = command {
+    if command.is_some() {
         if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
             return Ok(raw
                 .split(':')
@@ -572,9 +572,13 @@ pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
                 .map(|pid| pid.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            read_lsof_cwds(|cmd| cmd.args(["-a", "-p", &list, "-d", "cwd"]))
+            read_lsof_cwds(|cmd| {
+                cmd.args(["-a", "-p", &list, "-d", "cwd"]);
+            })
         }
-        None => read_lsof_cwds(|cmd| cmd.args(["-a", "-d", "cwd"])),
+        None => read_lsof_cwds(|cmd| {
+            cmd.args(["-a", "-d", "cwd"]);
+        }),
     }
 }
 
