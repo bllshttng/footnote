@@ -1,84 +1,27 @@
 use super::*;
 
-/// Keys while a lane-colors text entry is open: printable/Backspace
-/// edit the buffer, Enter submits, Esc cancels back to the underlying drill
-/// level. Modeled on [`create_keys`] (`fold_search_input` + per-key re-check),
-/// with the settings modal staying open underneath. Enter on an EMPTY buffer
-/// keeps the entry open; Enter on a custom entry validates through
-/// `parse_color` and saves or refuses with a notice.
-pub(super) async fn lane_entry_keys(
-    view: &mut View,
-    bytes: &[u8],
-    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.lane.entry_esc);
-    let keys = fold_search_input(&mut esc, bytes);
-    view.lane.entry_esc = esc;
-    for key in keys {
-        // Re-read the mode each key: a submit or Esc mid-chunk closes it, and
-        // the rest of the chunk must be swallowed, never forwarded.
-        if !view.lane.is_entry() {
-            break;
-        }
-        match key {
-            SearchKey::Esc => {
-                view.lane.clear_entry();
-                view.reopen_settings_keeping_sel();
-                break;
-            }
-            SearchKey::Byte(b'\r' | b'\n') => {
-                if let Some((axis, buf)) = view.lane.key_entry.clone() {
-                    // Naming a NEW key: an empty buffer keeps the entry
-                    // open (the create_keys shape); a typed name opens the
-                    // picker for it.
-                    let name = buf.trim().to_string();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    view.lane.clear_entry();
-                    view.lane.pick = Some((axis, name));
-                    view.reopen_settings_keeping_sel();
-                } else if let Some(buf) = view.lane.custom_entry.clone() {
-                    // Free-form color: validate, then save through the
-                    // same path the picker rows use.
-                    let text = buf.trim().to_string();
-                    if let Some((axis, key)) = view.lane.pick.clone() {
-                        view.lane.clear_entry();
-                        if crate::sideline_color::parse_color(&text).is_some() {
-                            lane_color_save(view, &axis, &key, &text).await?;
-                        } else {
-                            view.set_notice(format!(
-                                "{axis}.{key}: invalid color (name, indexed(n), #rrggbb)"
-                            ));
-                            view.reopen_settings_keeping_sel();
-                        }
-                    }
-                }
-            }
-            SearchKey::Byte(0x7f | 0x08) => {
-                if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                    buf.pop();
-                } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                    buf.pop();
-                }
-            }
-            SearchKey::Byte(b @ 0x20..=0x7e) => {
-                // Same bound as the create overlay: a key name or color
-                // string never needs to grow without limit.
-                if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                    if buf.len() < MAX_SEARCH_QUERY {
-                        buf.push(b as char);
-                    }
-                } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                    if buf.len() < MAX_SEARCH_QUERY {
-                        buf.push(b as char);
-                    }
-                }
-            }
-            SearchKey::Byte(_) => {}
-        }
+/// Enter on an open lane-colors field; true ends the chunk. An empty submit
+/// keeps the field open; a key name opens the picker for it; a custom color
+/// is validated through `parse_color`, then saved, or refused with a notice
+/// and the field kept open for a fix.
+pub(super) async fn submit(view: &mut View, text: String) -> Result<bool, String> {
+    if text.is_empty() {
+        return Ok(false);
     }
-    Ok(StdinFlow::Continue)
+    if let Some((axis, _)) = view.lane.key_entry.take() {
+        view.lane.pick = Some((axis, text));
+    } else if let Some((axis, key)) = view.lane.pick.clone() {
+        if crate::sideline_color::parse_color(&text).is_none() {
+            view.set_notice(format!(
+                "{axis}.{key}: invalid color (name, indexed(n), #rrggbb)"
+            ));
+            return Ok(true);
+        }
+        view.lane.custom_entry = None;
+        view.lane.pick = None;
+        lane_color_save(view, &axis, &key, &text).await?;
+    }
+    Ok(true)
 }
 
 /// Persist one lane color through the CLI block-replace form and
