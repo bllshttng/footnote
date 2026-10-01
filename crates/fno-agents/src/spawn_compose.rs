@@ -1134,15 +1134,16 @@ fn vendor_check(stage: &Stage, seam: &mut Seam, model_source: Option<&str>) {
 /// The billing axes (route/account/model, ruling 4) through the one Rust
 /// owner, in process; the model-target pre-read runs here first.
 fn billing_axes(stage: &mut Stage, seam: &mut Seam) {
+    // Python's prov here is resolved_harness(): explicit -H, the grid's
+    // seeded pick, the config field rung, then ambient - the cached chain,
+    // never the ambient default directly. Resolved before `fields` borrows
+    // the stage immutably.
+    let prov = resolved_harness(stage).unwrap_or_default();
     let fields = stage.fields();
     if fields.route.0.is_empty() && fields.account.0.is_empty() && fields.model.0.is_empty() {
         return;
     }
     let role = stage.scan.role.clone();
-    // Python's prov here is resolved_harness(): explicit -H, the grid's
-    // seeded pick, the config field rung, then ambient - the cached chain,
-    // never the ambient default directly.
-    let prov = resolved_harness(stage).unwrap_or_default();
     let mut role_resolves = false;
     if !fields.model.0.is_empty() && !stage.has_model && role.is_some() {
         role_resolves = stage
