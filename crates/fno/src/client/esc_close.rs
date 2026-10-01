@@ -134,7 +134,7 @@ mod tests {
             (
                 "move to",
                 Box::new(|v| v.open_move_to(1)),
-                Box::new(|v| v.move_pick.is_none()),
+                Box::new(|v| v.move_to.is_none()),
             ),
             (
                 "attach",

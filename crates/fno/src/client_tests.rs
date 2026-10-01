@@ -3747,12 +3747,14 @@ async fn keys_modal_esc_click_and_escape_both_close() {
 async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
     use crate::mouse::MouseReport;
     let mut v = two_pane_view();
-    v.term = (8, 80); // short: the binding list overflows and scrolls
+    // Short: the binding list overflows and scrolls. Wide: the modal grows to
+    // its content, so the top-left corner stays off it.
+    v.term = (8, 240);
     v.open_keys_modal();
     let mut buf: Vec<u8> = Vec::new();
     let wheel = MouseReport {
         row: 4,
-        col: 40,
+        col: 120,
         kind: MouseKind::WheelDown,
         shift: false,
     };
@@ -7018,6 +7020,20 @@ fn overlay_footer_cell(layout: &OverlayLayout) -> (u16, u16) {
     panic!("no esc close hit span anywhere in the overlay frame");
 }
 
+/// Compose, then left-press and release `(row, col)` through `handle_stdin`,
+/// the path a real click on a painted close span takes.
+async fn click_close(v: &mut View, (row, col): (u16, u16)) {
+    v.compose();
+    let (mut scanner, mut carry, mut buf) = (Scanner::default(), Vec::new(), Vec::new());
+    for end in ['M', 'm'] {
+        let report = format!("\x1b[<0;{};{}{end}", col + 1, row + 1);
+        handle_stdin(v, &mut scanner, &mut carry, report.as_bytes(), &mut buf)
+            .await
+            .unwrap();
+    }
+    assert!(buf.is_empty(), "a close click sends nothing to a pane");
+}
+
 fn left_click(row: u16, col: u16) -> crate::mouse::MouseReport {
     crate::mouse::MouseReport {
         row,
@@ -7050,10 +7066,7 @@ async fn update_modal_footer_esc_close_click_closes() {
             width: r.width,
         },
     ));
-    let mut buf: Vec<u8> = Vec::new();
-    aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
-        .await
-        .unwrap();
+    click_close(&mut v, footer).await;
     assert!(v.aux.is_none(), "the footer's close words closed the modal");
 }
 
@@ -7065,11 +7078,7 @@ async fn connections_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.connections = Some(crate::connections_view::ConnectionsView::new());
     let layout = v.active_overlay_layout().expect("connections hit layout");
-    let footer = overlay_footer_cell(&layout);
-    assert!(
-        modal_mouse(&mut v, left_click(footer.0, footer.1)),
-        "the modal owns the pointer"
-    );
+    click_close(&mut v, overlay_footer_cell(&layout)).await;
     assert!(
         v.connections.is_none(),
         "the footer's close words closed the modal"
@@ -7103,8 +7112,7 @@ async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
         squad: None,
     });
     let layout = v.active_overlay_layout().expect("peek hit layout");
-    let footer = overlay_footer_cell(&layout);
-    assert!(modal_mouse(&mut v, left_click(footer.0, footer.1)));
+    click_close(&mut v, overlay_footer_cell(&layout)).await;
     assert!(v.peek.is_none(), "the footer's close words closed the peek");
 
     // A non-close event falls through: modal_mouse returns false, so the

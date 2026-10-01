@@ -114,8 +114,8 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         // One line per terminal family, settings named not values: which value
         // restores forwarding is untested here, and a config line this text
         // cannot vouch for is the kind of confident wrong answer that cost a
-        // whole diagnosis round already. Lines stay short: WIDTH_CAP is 60 and
-        // a setting name past it truncates into a wrong hint.
+        // whole diagnosis round already. Lines stay short, so a setting name
+        // stays on one line instead of wrapping mid-name.
         rows.push(PopupRow::Header(
             "Terminal.app never · iTerm2: report mouse · tmux: mouse off".into(),
         ));
