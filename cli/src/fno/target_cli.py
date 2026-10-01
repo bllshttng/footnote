@@ -515,13 +515,12 @@ def _target_binding(input_, node_id, plan_path, phase: str, *, exit_on_fork: boo
     except VerbUnavailable as exc:
         typer.echo(f"fno do target {phase}: target binding unavailable: {exc}", err=True)
         return {}
-    verdict = receipt.get("verdict")
     if receipt.get("message"):
         typer.echo(receipt["message"], err=True)
-    if verdict == "refused" or (verdict == "forked" and exit_on_fork):
+    if receipt.get("verdict") == "refused" or (receipt.get("verdict") == "forked" and exit_on_fork):
         if receipt.get("next"):
             typer.echo(f"next: {receipt['next']}", err=True)
-        raise typer.Exit(code=1 if verdict == "refused" else 3)
+        raise typer.Exit(code=1 if receipt["verdict"] == "refused" else 3)
     return receipt
 
 
@@ -3652,8 +3651,9 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
-    # A held parent refuses before its follow-up child is born and started.
-    _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
+    # Scope (words beside the id) can fork a child; a held parent refuses first.
+    if len(node.split()) > 1:
+        _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
     binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
     if binding.get("verdict") == "forked":
         node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None

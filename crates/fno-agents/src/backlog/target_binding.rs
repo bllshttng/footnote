@@ -196,19 +196,32 @@ fn linked_branch(cwd: &Path) -> Option<String> {
     }
 }
 
-/// `fno do pr info <n>` under a wall-clock bound, read as typed JSON.
-fn read_pr(cwd: &Path, number: i64) -> Option<PrFact> {
-    let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
-    cmd.current_dir(cwd)
-        .args(["do", "pr", "info", &number.to_string()]);
-    let out = crate::bounded_cmd::output_with_timeout(cmd, 60)?;
-    if !out.status.success() {
+/// One bounded REST read of the PR through the status door's gh probe. The
+/// repo comes from the node's `pr_url`, else this checkout's origin. A
+/// merged PR reads MERGED, never OPEN.
+fn read_pr(cwd: &Path, number: i64, pr_url: Option<&str>) -> Option<PrFact> {
+    use crate::pr_status_facts::GhProbe;
+    let slug = super::pr_link::repo_slug_from_url(pr_url)
+        .or_else(|| crate::finalize::slug_from_git_remote(cwd))?;
+    let args = vec!["api".to_string(), format!("repos/{slug}/pulls/{number}")];
+    let (ok, stdout, _) = crate::pr_status_facts::RealGhProbe
+        .run_gh(cwd, &args)
+        .ok()?;
+    if !ok {
         return None;
     }
-    let info: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let pull: Value = serde_json::from_str(&stdout).ok()?;
+    let state = if set(&pull, "merged_at") {
+        "MERGED".to_string()
+    } else {
+        str_field(&pull, "state")?.to_uppercase()
+    };
     Some(PrFact {
-        state: str_field(&info, "state")?.to_uppercase(),
-        head_ref: str_field(&info, "head_ref")?.to_string(),
+        state,
+        head_ref: pull
+            .pointer("/head/ref")
+            .and_then(Value::as_str)?
+            .to_string(),
     })
 }
 
@@ -271,7 +284,7 @@ pub fn prepare(req: &Request, cwd: &Path) -> Receipt {
     // a new delivery; only the explicit allowance forks from there.
     if !req.allow_in_review && req.phase == Phase::Init {
         if let (Some(n), Some(b)) = (pr, branch()) {
-            if adoption_proven(read_pr(cwd, n).as_ref(), Some(&b)) {
+            if adoption_proven(read_pr(cwd, n, str_field(source, "pr_url")).as_ref(), Some(&b)) {
                 return adopted(&id, n, &b);
             }
         }
@@ -292,7 +305,7 @@ fn adopted(id: &str, pr: i64, branch: &str) -> Receipt {
 fn adopt_or_refuse(source: &Value, pr: Option<i64>, cwd: &Path, branch: Option<&str>) -> Receipt {
     let id = id_of(source);
     if let (Some(n), Some(b)) = (pr, branch) {
-        if adoption_proven(read_pr(cwd, n).as_ref(), Some(b)) {
+        if adoption_proven(read_pr(cwd, n, str_field(source, "pr_url")).as_ref(), Some(b)) {
             return adopted(&id, n, b);
         }
     }
@@ -398,7 +411,7 @@ fn fork(req: &Request, parent: &Value, scope: &str, cwd: &Path) -> Receipt {
         }
         if let Some(n) = row.get("pr_number").and_then(Value::as_i64) {
             if let Some(b) = linked_branch(cwd) {
-                if adoption_proven(read_pr(cwd, n).as_ref(), Some(&b)) {
+                if adoption_proven(read_pr(cwd, n, str_field(row, "pr_url")).as_ref(), Some(&b)) {
                     return adopted(&born.id, n, &b);
                 }
             }

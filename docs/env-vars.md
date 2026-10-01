@@ -256,6 +256,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `STARSHIP_CONFIG` | py | unclear: cli/src/fno/setup/starship.py:47 |
 | `STATE_FILE` | rs | unclear: crates/fno-agents/src/kill_criteria.rs:57 |
 | `TARGET_ABORT_REASON` | py | unclear: cli/src/fno/cost/_register.py:480 |
+| `TARGET_ALLOW_IN_REVIEW` | py | Set to 1, it lets follow-up scope on a node that has a PR fork a child node. It never re-runs the parent. |
 | `TARGET_CLAIM_TTL` | py | unclear: cli/src/fno/target_cli.py:3239 |
 | `TARGET_INPUT` | py | unclear: cli/src/fno/target_cli.py:1369 |
 | `TARGET_MISSION_ID` | py | Presence marks the post-merge ritual as an autonomous run. |
