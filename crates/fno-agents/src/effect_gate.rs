@@ -340,10 +340,11 @@ pub fn open_db(path: &Path) -> Result<Connection, String> {
 }
 
 /// The approvals db a hook fire uses: the payload's explicit `db` when the
-/// Python store forwards one, else the state root's `approvals.db`.
+/// Python store forwards one, else the state-layout resolver's
+/// `approvals.db` (legacy root file until the migration moves it).
 pub fn default_db_path(cwd: &Path) -> Result<PathBuf, String> {
     crate::agents_config::state_dir(cwd)
-        .map(|root| root.join("approvals.db"))
+        .map(|root| crate::state_layout::place(&root, "approvals.db"))
         .ok_or_else(|| "no resolvable state root (set FNO_STATE_DIR or HOME)".to_string())
 }
 

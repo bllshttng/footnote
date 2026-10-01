@@ -18,7 +18,7 @@ const WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_EVENTS: u32 = 10_000;
 const MAX_LIVE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const WATCH_IDLE: &str = "loop_check_watch_idle";
-const WAKE_EVENT: &str = "loop_check_watch_expiry_wake";
+pub(crate) const WAKE_EVENT: &str = "loop_check_watch_expiry_wake";
 const ACTIVITY_AND_TERMINAL: &[&str] = &[
     "loop_check",
     "termination",
@@ -137,12 +137,27 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
             "watch expiry event window exceeds {MAX_EVENTS} rows"
         ));
     }
+    // Recovery provenance re-serializes store rows, but a wake receipt names
+    // the hash of the stored line, so identity hashes that line instead.
+    let stored_lines: std::collections::HashMap<i64, String> = if text.contains("\"_store_seq\"") {
+        crate::event_store::query_events(&global_events, &query)?
+            .into_iter()
+            .map(|row| (row.seq, row.line))
+            .collect()
+    } else {
+        Default::default()
+    };
     lines
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
             let value: Value = serde_json::from_str(line)
                 .map_err(|error| format!("watch expiry event row is invalid: {error}"))?;
+            // A row known only through the recovered store replay is copied
+            // history, not a live declaration; it must never arm a wake.
+            if value["_history_only"] == true {
+                return Ok(None);
+            }
             let data = value.get("data").cloned().unwrap_or(Value::Null);
             let kind = value
                 .get("type")
@@ -158,18 +173,23 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
             if ts_ms > now_ms {
                 return Err("watch expiry event has a future timestamp".to_string());
             }
-            Ok(Evidence {
-                event_id: event_id(line),
+            let stored_line = value
+                .get("_store_seq")
+                .and_then(Value::as_i64)
+                .and_then(|seq| stored_lines.get(&seq))
+                .map_or(line, String::as_str);
+            Ok(Some(Evidence {
+                event_id: event_id(stored_line),
                 seq: index as i64,
                 ts_ms,
                 kind,
                 session_id,
                 data,
-            })
+            }))
         })
         .filter_map(|row| match row {
-            Ok(row) if row.ts_ms >= now_ms.saturating_sub(WINDOW_MS) => Some(Ok(row)),
-            Ok(_) => None,
+            Ok(Some(row)) if row.ts_ms >= now_ms.saturating_sub(WINDOW_MS) => Some(Ok(row)),
+            Ok(Some(_)) | Ok(None) => None,
             Err(error) => Some(Err(error)),
         })
         .collect()
@@ -356,6 +376,15 @@ pub(crate) fn message(watch: &Watch) -> String {
 }
 
 pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
+    run_pass_with(home, &mut crate::burn_watch::run_command)
+}
+
+/// `runner` is injected so replay tests record wakes instead of sending them.
+pub(crate) fn run_pass_with(
+    home: &AgentsHome,
+    runner: crate::burn_watch::Runner<'_>,
+) -> Result<(), String> {
+    let mut runner = runner;
     let now_ms = millis_now();
     let evidence = read_evidence(home, now_ms)?;
     let due = watches(&evidence)
@@ -368,7 +397,6 @@ pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
     let claims = current_node_claims(home)?;
     let emitter =
         crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon");
-    let mut runner: crate::burn_watch::Runner = &mut crate::burn_watch::run_command;
     let mut delivery_failures = 0usize;
     let mut eligibility_failures = 0usize;
     let mut receipt_failures = 0usize;
