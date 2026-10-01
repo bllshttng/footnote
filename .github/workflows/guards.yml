@@ -208,6 +208,33 @@ jobs:
           python3 scripts/ci/check_env_registry.py --selftest
           python3 scripts/ci/check_env_registry.py
 
+  # The workflow-contract script pins that every main head carries the full
+  # lane set (unfiltered guards + rust-ci pushes, full lanes on the non-PR
+  # selector) - the input the PR merge gate's CI-freshness read depends on -
+  # plus the release.yml publish routing. It guards no PR-only context, so it
+  # rides the push+PR group; unwired it rotted silently on main.
+  workflow-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Python + uv
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/guards-setup
+
+      - name: Workflow contract (main head + release routing)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 -m pip install --quiet pyyaml
+          bash tests/ci/test_main_exact_head_correctness.sh
+
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push
