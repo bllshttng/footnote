@@ -1808,8 +1808,12 @@ mod tests {
             (0, 0),
             (rows, cols)
         ));
-        // Row 1 is the banded cursor; q-b, q-c, q-d titles sit at rows 3, 5, 7.
-        let title = |r: usize| cells[r * cols + 3];
+        // Row 1 is the banded cursor; q-b, q-c, q-d titles sit at rows 3, 5, 7,
+        // each starting at the first `t` past the frame's pad and the mark.
+        let title = |r: usize| {
+            let row = &cells[r * cols..(r + 1) * cols];
+            *row.iter().find(|c| c.c == 't').expect("a title on the row")
+        };
         assert_eq!(title(3).fg, Color::Default);
         assert_ne!(title(3).flags & cell_flags::BOLD, 0, "ready reads bright");
         assert_eq!(title(5).fg, Color::Default);

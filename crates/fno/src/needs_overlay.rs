@@ -430,11 +430,14 @@ pub async fn answer(item_id: &str, pick: AnswerPick) -> Result<String, String> {
     run_door(args)
         .await
         .map(|_| "recorded, delivering".to_string())
+        .map_err(|(_, msg)| msg)
 }
 
 /// Withdraw open questions with no answer through the door - `fno-agents
 /// needs --archive <id>... --sink mux`. The same bounded shape as
-/// [`answer`]; `Ok` reads the door's receipt as "archived N".
+/// [`answer`]; `Ok` reads the door's receipt as "archived N". A partial
+/// archive (some ids refused) is still `Ok`, the refusal appended, so the
+/// view refolds over the questions that did close.
 pub async fn archive(ids: Vec<String>) -> Result<String, String> {
     let mut args: Vec<String> = vec!["needs".into()];
     for id in ids {
@@ -443,17 +446,25 @@ pub async fn archive(ids: Vec<String>) -> Result<String, String> {
     }
     args.push("--sink".into());
     args.push("mux".into());
-    let stdout = run_door(args).await?;
-    let n = serde_json::from_str::<serde_json::Value>(&stdout)
-        .ok()
-        .and_then(|v| v.get("archived").and_then(serde_json::Value::as_u64))
-        .unwrap_or(0);
-    Ok(format!("archived {n}"))
+    let archived = |stdout: &str| {
+        serde_json::from_str::<serde_json::Value>(stdout)
+            .ok()
+            .and_then(|v| v.get("archived").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0)
+    };
+    match run_door(args).await {
+        Ok(stdout) => Ok(format!("archived {}", archived(&stdout))),
+        Err((stdout, msg)) => match archived(&stdout) {
+            0 => Err(msg),
+            n => Ok(format!("archived {n}; {msg}")),
+        },
+    }
 }
 
-/// One bounded door call: stdout on success, stderr (or the exit) on a
-/// timeout, a spawn failure, or a nonzero exit.
-async fn run_door(args: Vec<String>) -> Result<String, String> {
+/// One bounded door call: stdout on success; on a timeout, a spawn
+/// failure, or a nonzero exit, whatever stdout the door printed and the
+/// reason (stderr, else the exit).
+async fn run_door(args: Vec<String>) -> Result<String, (String, String)> {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
@@ -463,17 +474,21 @@ async fn run_door(args: Vec<String>) -> Result<String, String> {
     let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(WRITE_TIMEOUT, fut)
         .await
-        .map_err(|_| ANSWER_TIMEOUT_MESSAGE.to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| (String::new(), ANSWER_TIMEOUT_MESSAGE.to_string()))?
+        .map_err(|e| (String::new(), e.to_string()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(stdout)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!("exit {}", output.status)
-        } else {
-            stderr
-        })
+        Err((
+            stdout,
+            if stderr.is_empty() {
+                format!("exit {}", output.status)
+            } else {
+                stderr
+            },
+        ))
     }
 }
 
