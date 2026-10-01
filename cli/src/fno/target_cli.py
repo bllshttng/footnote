@@ -1700,7 +1700,6 @@ def init(
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (task 1.3b).
     _redirect_if_contained(_dispatch_node)
-    # A node whose own PR shipped binds that PR's author or a follow-up child.
     _binding = _target_binding(
         input_, _dispatch_node.get("id"), plan_path, "init", exit_on_fork=True
     ) if isinstance(_dispatch_node, dict) else {}
@@ -3653,7 +3652,8 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
-    # Follow-up scope on a shipped node starts its child, before any worktree.
+    # A held parent refuses before its follow-up child is born and started.
+    _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
     binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
     if binding.get("verdict") == "forked":
         node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None

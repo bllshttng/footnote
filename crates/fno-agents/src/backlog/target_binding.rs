@@ -567,25 +567,25 @@ mod tests {
     fn follow_up_binding_reads_scope_delivery_and_adoption_proof() {
         let rows = vec![
             row(
-                "x-4fb6",
+                "x-aaaa",
                 json!({"pr_number": 2868, "plan_path": "/p/plan.md"}),
             ),
-            row("x-c0de", json!({})),
+            row("x-bbbb", json!({})),
         ];
         // Scope is the prose beside the node, modifiers and spellings dropped.
         assert_eq!(
             scope_of(
-                "beast mode x-4fb6 watch-expiry recovery only",
-                "x-4fb6",
+                "beast mode x-aaaa watch-expiry recovery only",
+                "x-aaaa",
                 &rows
             ),
             Some("watch-expiry recovery only".into())
         );
-        assert_eq!(scope_of("x4fb6", "x-4fb6", &rows), None);
-        assert_eq!(scope_of("L --no-merge x-4fb6 \"\"", "x-4fb6", &rows), None);
+        assert_eq!(scope_of("xaaaa", "x-aaaa", &rows), None);
+        assert_eq!(scope_of("L --no-merge x-aaaa \"\"", "x-aaaa", &rows), None);
         // A modifier word inside the prose is scope, not a modifier.
         assert_eq!(
-            scope_of("x-4fb6 clean up roots", "x-4fb6", &rows),
+            scope_of("x-aaaa clean up roots", "x-aaaa", &rows),
             Some("clean up roots".into())
         );
 
@@ -615,33 +615,33 @@ mod tests {
         // Retry dedupe: same parent, source and normalized scope; a set-aside
         // child or a different scope stays distinct.
         let child = row(
-            "x-c1d1",
-            json!({"parent": "x-4fb6", "source_node_id": "x-4fb6",
+            "x-cccc",
+            json!({"parent": "x-aaaa", "source_node_id": "x-aaaa",
             "details": "watch-expiry  recovery only"}),
         );
         assert!(is_follow_up_of(
             &child,
-            "x-4fb6",
+            "x-aaaa",
             "watch-expiry recovery only"
         ));
-        assert!(!is_follow_up_of(&child, "x-4fb6", "another scope"));
+        assert!(!is_follow_up_of(&child, "x-aaaa", "another scope"));
         let shelved = row(
-            "x-c1d2",
-            json!({"parent": "x-4fb6", "source_node_id": "x-4fb6",
+            "x-dddd",
+            json!({"parent": "x-aaaa", "source_node_id": "x-aaaa",
             "details": "watch-expiry recovery only", "superseded_by": "x-9"}),
         );
         assert!(!is_follow_up_of(
             &shelved,
-            "x-4fb6",
+            "x-aaaa",
             "watch-expiry recovery only"
         ));
 
         // The child copies identity fields, never the parent's plan or PR.
         let args = child_args(&rows[0], "watch-expiry recovery only");
-        assert_eq!(args.parent.as_deref(), Some("x-4fb6"));
-        assert_eq!(args.source_node.as_deref(), Some("x-4fb6"));
+        assert_eq!(args.parent.as_deref(), Some("x-aaaa"));
+        assert_eq!(args.source_node.as_deref(), Some("x-aaaa"));
         assert_eq!(args.details.as_deref(), Some("watch-expiry recovery only"));
-        assert!(args.title.starts_with("Follow-up to x-4fb6: "));
+        assert!(args.title.starts_with("Follow-up to x-aaaa: "));
 
         // Source resolution: exactly one confirmed id, else no node.
         let req = |input: &str| Request {
@@ -652,14 +652,14 @@ mod tests {
             allow_in_review: false,
         };
         assert_eq!(
-            resolve_source(&req("x-4fb6 more"), &rows).map(id_of),
-            Some("x-4fb6".into())
+            resolve_source(&req("x-aaaa more"), &rows).map(id_of),
+            Some("x-aaaa".into())
         );
-        assert!(resolve_source(&req("x-4fb6 x-c0de"), &rows).is_none());
+        assert!(resolve_source(&req("x-aaaa x-bbbb"), &rows).is_none());
         assert!(resolve_source(&req("fix the login bug"), &rows).is_none());
 
         // Exit codes the hook reads.
-        let mut r = receipt("forked", "new_child", Some("x-4fb6"));
+        let mut r = receipt("forked", "new_child", Some("x-aaaa"));
         assert_eq!(r.exit_code(), 3);
         r.verdict = "refused";
         assert_eq!(r.exit_code(), 1);
