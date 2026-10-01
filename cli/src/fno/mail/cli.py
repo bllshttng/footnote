@@ -2609,6 +2609,41 @@ def _name_lane_send(
         ):
             print(f"escalated to human ({recipient}) [{esc_reason}]", file=sys.stderr)
 
+    # Post-send verify: a durable receipt is not a landing. After a short
+    # settle window the send verb re-reads the recipient itself - the bus
+    # claim and cursor (an `unread` poll claims without rendering the id as
+    # its own record) and the transcript, where the raw id inside a tool
+    # output counts - and appends the verdict, so the sender never has to
+    # remember how to recover an unconfirmed send. NOT LANDED exits non-zero
+    # so a last-line reader cannot record it as delivered; the block names
+    # the substrate-correct recovery. A bus-only queue and a self-send are
+    # designed lanes, not misses, and keep their designed receipts.
+    if not bus_only and not self_send:
+        from fno.mail.landed import post_send_landed, post_send_settle_seconds
+        from fno.mail.receipts import (
+            NOT_LANDED_EXIT,
+            _live_pane_for,
+            not_landed_receipt,
+        )
+
+        settle_s = post_send_settle_seconds()
+        if settle_s > 0:
+            time.sleep(settle_s)
+        landed, how = post_send_landed(
+            msg_id, to=recipient, to_harness=to_harness, to_session=to_session
+        )
+        if landed:
+            print(f"{msg_id} landed ({how})")
+        else:
+            print(not_landed_receipt(
+                msg_id,
+                _live_pane_for(recipient, to_session),
+                target=recipient,
+                harness=to_harness or provider,
+                session_id=to_session,
+            ))
+            raise typer.Exit(code=NOT_LANDED_EXIT)
+
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
 # re-nudges every window rather than once forever (marker refreshed only on an
@@ -4287,6 +4322,40 @@ def cmd_send(
             result.msg_id, reason=result.reason, owner=result.durable_owner,
             age_target=name,
         ))
+        # Post-send verify : a durable receipt is not a landing. After
+        # a short settle window the send verb re-reads the recipient itself -
+        # bus claim and cursor (an `unread` poll claims without rendering the
+        # id as its own record) and the transcript - and appends the verdict,
+        # so the sender never has to remember how to recover an unconfirmed
+        # send. NOT LANDED exits non-zero so a last-line reader cannot record
+        # it as delivered; the block names the substrate-correct recovery.
+        from fno.mail.landed import post_send_landed, post_send_settle_seconds
+        from fno.mail.receipts import (
+            NOT_LANDED_EXIT,
+            _live_pane_for,
+            not_landed_receipt,
+        )
+
+        settle_s = post_send_settle_seconds()
+        if settle_s > 0:
+            time.sleep(settle_s)
+        landed, how = post_send_landed(
+            result.msg_id,
+            to=result.to,
+            to_harness=result.to_harness,
+            to_session=result.to_session,
+        )
+        if landed:
+            print(f"{result.msg_id} landed ({how})")
+        else:
+            print(not_landed_receipt(
+                result.msg_id,
+                _live_pane_for(name, result.to_session),
+                target=name,
+                harness=result.to_harness,
+                session_id=result.to_session,
+            ))
+            raise typer.Exit(code=NOT_LANDED_EXIT)
 
 
 def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:

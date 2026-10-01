@@ -8,8 +8,16 @@ vocabulary, and the transcript-age suffix a bare live-miss carries.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from typing import Optional
+
+# The exit a NOT LANDED receipt leaves `mail send` with : a last-line
+# reader must never record an unconfirmed send as delivered. Distinct from the
+# usage (2), lock (11), durable-address (12) and unknown-agent (16) refusals:
+# the send itself succeeded and is recoverable, the LANDING is what is missing.
+NOT_LANDED_EXIT = 14
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
@@ -124,6 +132,80 @@ def demotion_receipt(
     if project:
         where += f" [project {project}]"
     return f"{msg_id} queued (durable){where} [{token}]" + durable_window_clause(owner)
+
+
+def not_landed_receipt(
+    msg_id: str,
+    pane: Optional[int],
+    *,
+    target: str,
+    harness: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """The NOT LANDED verdict block for a durable-floor send the post-send
+    verify could not confirm .
+
+    ``pane`` comes from the LIVE pane list via :func:`_live_pane_for`, never
+    the registry row: a row can carry no mux ref while the pane list still
+    shows the recipient's pane (measured: mux=None, pane alive). A codex
+    thread with no pane cannot be injected by fno at all - the session's own
+    surface has to receive it - and the verify names that.
+    """
+    lines = [
+        f"{msg_id} NOT LANDED - not claimed on the bus, not in the recipient "
+        "transcript"
+    ]
+    if pane is not None:
+        lines += [
+            f"  read the frame:         fno mux pane read {pane}",
+            f"  envelope in composer?   fno mux pane send {pane} --raw --submit   # presses Enter",
+            f"  then verify:            fno agents peek {target} --grep {msg_id}",
+        ]
+    elif harness == "codex" and session_id:
+        lines += [
+            "  fno cannot inject a codex thread with no pane; the session's own",
+            "  surface (the user's Codex window) must receive it. The durable copy",
+            "  drains on the recipient's next `fno agents mail unread` poll.",
+            f"  verify later:           fno agents peek {target} --grep {msg_id}",
+        ]
+    else:
+        lines += [
+            f"  verify:                 fno agents peek {target} --grep {msg_id}",
+        ]
+    return "\n".join(lines)
+
+
+def _live_pane_for(target: str, session_id: Optional[str]) -> Optional[int]:
+    """The recipient's pane id from the LIVE pane list, or None.
+
+    Matches on harness session id (the stable join) or the pane's label,
+    in one ``pane ls --json`` read. Any failure - mux down, unreadable
+    JSON - answers None: a recovery hint that guesses a pane number is
+    worse than a generic verify line.
+    """
+    from fno.agents.mux_spawn import DispatchAskError, _run_mux
+
+    try:
+        proc = _run_mux(["mux", "pane", "ls", "--json"], subprocess.run)
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "[]")
+    except (DispatchAskError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if (
+            (session_id and row.get("fno_id") == session_id)
+            or (session_id and row.get("harness_session_id") == session_id)
+            or (target and row.get("name") == target)
+        ):
+            pane = row.get("pane_id")
+            if isinstance(pane, int):
+                return pane
+    return None
 
 
 def print_project_demotion(result, to_project: str) -> None:

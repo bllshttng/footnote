@@ -7996,6 +7996,9 @@ def dispatch_send(
             return DispatchSendResult(
                 msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 durable_owner=durable_owner if delivery == "durable" else None,
+                to=durable_recipient or existing.short_id or None,
+                to_harness=existing.harness,
+                to_session=existing.harness_session_id or None,
             )
 
     except AgentLockTimeout as exc:
@@ -8260,6 +8263,9 @@ def dispatch_send(
             msg_id=msg_id,
             delivery="durable",
             reason=queue_reason,
+            to=timeout_recipient or timeout_entry.short_id or None,
+            to_harness=timeout_entry.harness,
+            to_session=timeout_entry.harness_session_id or None,
         )
 
 
