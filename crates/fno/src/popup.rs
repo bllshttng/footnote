@@ -99,6 +99,67 @@ impl PopupRow {
     }
 }
 
+/// Wrap rows wider than `w` content columns instead of ellipsizing them. A
+/// Header splits at word bounds into several Headers; a plain-body Entry keeps
+/// its key and the label's first line, and the rest of the label follows as
+/// inert continuation Headers indented under the label column. Returns each
+/// output row's source index, so a caller with a parallel vector (a modal's
+/// row events) can follow the rows.
+pub fn wrap_rows(rows: Vec<PopupRow>, w: usize) -> (Vec<PopupRow>, Vec<usize>) {
+    let kw = rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { glyph, .. } => Some(chrome::str_cols(glyph)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let wrap = |text: &str, width: usize| {
+        let mut out = Vec::new();
+        crate::client::wrap_line(text, width.max(1), &mut out);
+        out
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    let mut src = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        match row {
+            // A Header renders as " {s}" with two cells of air after it.
+            PopupRow::Header(s) if chrome::str_cols(&s) + 2 > w => {
+                for line in wrap(&s, w.saturating_sub(2)) {
+                    out.push(PopupRow::Header(line));
+                    src.push(i);
+                }
+            }
+            // A plain-body Entry: pad + key column + gap + label + air.
+            PopupRow::Entry {
+                glyph,
+                label,
+                hint,
+                enabled,
+            } if 1 + kw + 1 + chrome::str_cols(&label) + 2 > w => {
+                let label_w = w.saturating_sub(kw + 4);
+                let mut lines = wrap(&label, label_w).into_iter();
+                out.push(PopupRow::Entry {
+                    glyph,
+                    label: lines.next().unwrap_or_default(),
+                    hint,
+                    enabled,
+                });
+                src.push(i);
+                for line in lines {
+                    out.push(PopupRow::Header(format!("{}{line}", " ".repeat(kw + 1))));
+                    src.push(i);
+                }
+            }
+            row => {
+                out.push(row);
+                src.push(i);
+            }
+        }
+    }
+    (out, src)
+}
+
 /// Menu glyphs must stay in the BMP. Astral symbols render as tofu on
 /// terminals whose fonts lack the supplemental-plane glyph, which makes a
 /// destructive action look absent rather than visibly unsupported.
@@ -178,6 +239,9 @@ pub struct Popup {
     /// action id); a picker whose hint is a prose error needs the opposite:
     /// the diagnosis label must never ellipsize.
     pub label_first: bool,
+    /// The content width ceiling, [`WIDTH_CAP`] by default. The screen still
+    /// caps it in [`Popup::render`].
+    pub width_cap: usize,
 }
 
 /// One laid-out line ready to draw, plus its style and the selected sub-span
@@ -249,7 +313,14 @@ impl Popup {
             plain_body: false,
             body_cap_pct: 0,
             label_first: false,
+            width_cap: WIDTH_CAP,
         }
+    }
+
+    /// Raise (or lower) the content width ceiling (see the field doc).
+    pub fn width_cap(mut self, w: usize) -> Self {
+        self.width_cap = w;
+        self
     }
 
     /// Set the chrome title (the modal's heading).
@@ -523,7 +594,9 @@ impl Popup {
         // framed block spans `width + 4`: cap the builder width to the
         // terminal minus the borders and the pad, or the right border leaves
         // a full-width screen.
-        let cap = WIDTH_CAP.min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
+        let cap = self
+            .width_cap
+            .min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
         let width = if self.full_width_selection {
             content_w
                 .min(cap)
@@ -936,6 +1009,7 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &
             &line.roles,
             theme,
         );
+        chrome::record_close_spans((rows, cols), (r0 + i, c0), r.width, &line.hits);
     }
 }
 

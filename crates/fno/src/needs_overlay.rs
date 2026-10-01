@@ -392,12 +392,13 @@ fn parse_questions(stdout: &[u8]) -> Option<QuestionsFold> {
 }
 
 /// The pick the overlay sends through the door: an option number (1-based),
-/// free-text words, or a pin's done.
+/// free-text words, a pin's done, or a hand-off to the crown over the node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnswerPick {
     Option(u32),
     Words(String),
     Done,
+    Delegate,
 }
 
 /// Answer one open question through the door - `fno-agents needs
@@ -420,15 +421,42 @@ pub async fn answer(item_id: &str, pick: AnswerPick) -> Result<String, String> {
         AnswerPick::Done => {
             args.push("--done".into());
         }
+        AnswerPick::Delegate => {
+            args.push("--delegate".into());
+        }
     }
     args.push("--sink".into());
     args.push("mux".into());
+    run_door(args).await.map(|_| "recorded, delivering".to_string())
+}
+
+/// Withdraw open questions with no answer through the door - `fno-agents
+/// needs --archive <id>... --sink mux`. The same bounded shape as
+/// [`answer`]; `Ok` reads the door's receipt as "archived N".
+pub async fn archive(ids: Vec<String>) -> Result<String, String> {
+    let mut args: Vec<String> = vec!["needs".into()];
+    for id in ids {
+        args.push("--archive".into());
+        args.push(id);
+    }
+    args.push("--sink".into());
+    args.push("mux".into());
+    let stdout = run_door(args).await?;
+    let n = serde_json::from_str::<serde_json::Value>(&stdout)
+        .ok()
+        .and_then(|v| v.get("archived").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+    Ok(format!("archived {n}"))
+}
+
+/// One bounded door call: stdout on success, stderr (or the exit) on a
+/// timeout, a spawn failure, or a nonzero exit.
+async fn run_door(args: Vec<String>) -> Result<String, String> {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
         .args(&args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(WRITE_TIMEOUT, fut)
@@ -436,7 +464,7 @@ pub async fn answer(item_id: &str, pick: AnswerPick) -> Result<String, String> {
         .map_err(|_| ANSWER_TIMEOUT_MESSAGE.to_string())?
         .map_err(|e| e.to_string())?;
     if output.status.success() {
-        Ok("recorded, delivering".to_string())
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(if stderr.is_empty() {

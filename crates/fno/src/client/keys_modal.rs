@@ -102,6 +102,11 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
         // that never send them are named so the operator configures the terminal,
         // or reaches for the no-config paths, instead of reading a dead feature.
+        // Its own section, spaced like the binding sections.
+        rows.push(PopupRow::Header(String::new()));
+        events.push(None);
+        rows.push(PopupRow::Header("right click".into()));
+        events.push(None);
         rows.push(PopupRow::Header(
             "right-click works only where the terminal forwards it".into(),
         ));
@@ -134,7 +139,8 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     // viewport, so the table scrolls in a fixed window instead of growing one
     // row per binding.
     let mut popup = Popup::new(rows, Anchor::Center)
-        .title("keybinds")
+        .title("Keybindings")
+        .width_cap(usize::MAX)
         .plain_body()
         .body_cap_pct(60)
         .footer("j/k scroll · / filter · ⏎ run · esc close");
@@ -147,6 +153,29 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         popup,
         row_events: events,
         filter: filter.map(str::to_string),
+    }
+}
+
+impl KeysModal {
+    /// Fit the modal to a terminal `cols` wide: a row wider than the screen
+    /// wraps into inert continuation rows instead of an ellipsis, and the
+    /// row events follow their source rows (a continuation runs nothing).
+    pub(crate) fn fit(mut self, cols: u16) -> Self {
+        let w = (cols as usize).saturating_sub(chrome::Chrome::FRAME_COLS * 2);
+        let rows = std::mem::take(&mut self.popup.rows);
+        let (rows, src) = crate::popup::wrap_rows(rows, w);
+        let events = std::mem::take(&mut self.row_events);
+        let mut prev = None;
+        self.row_events = src
+            .iter()
+            .map(|&i| {
+                let first = prev != Some(i);
+                prev = Some(i);
+                events.get(i).cloned().flatten().filter(|_| first)
+            })
+            .collect();
+        self.popup.rows = rows;
+        self
     }
 }
 
@@ -178,16 +207,17 @@ pub(crate) fn keys_modal_byte(view: &mut View, b: u8) -> bool {
             }
         }
         if edited {
-            view.keys_modal = Some(keys_modal_with_filter(
-                view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()),
-            ));
+            view.keys_modal = Some(
+                keys_modal_with_filter(view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()))
+                    .fit(view.term.1),
+            );
         }
         return true;
     }
     match b {
         // The search key: enter filter mode (empty query).
         b'/' => {
-            view.keys_modal = Some(keys_modal_with_filter(Some("")));
+            view.keys_modal = Some(keys_modal_with_filter(Some("")).fit(view.term.1));
             true
         }
         // The modal's scroll keys (the footer names them). At either end of
@@ -358,16 +388,6 @@ pub(crate) async fn keys_modal_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
             match view.keys_modal_hit(rep.row, rep.col) {
                 Some(t) => {
                     if let Some(m) = view.keys_modal.as_mut() {
