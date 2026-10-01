@@ -1425,7 +1425,7 @@ fn exec_real(real: &Path, args: &[OsString]) -> BootErr {
 // Sentinel (fast path)
 // ---------------------------------------------------------------------------
 
-fn sentinel_dir() -> PathBuf {
+pub(crate) fn sentinel_dir() -> PathBuf {
     // Empty is unset, the way the sh twin's `${XDG_CACHE_HOME:-...}` reads it:
     // honoring an empty value would resolve the cache (and this PR's adopt
     // discriminator) against the CWD instead of the home cache.

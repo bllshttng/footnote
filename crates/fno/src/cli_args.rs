@@ -25,6 +25,8 @@ pub enum FrontDoor {
     },
     /// `fno version [--json]`: the mux self-report.
     Version { json: bool },
+    /// `fno uninstall [--yes] [--dry-run] [--purge]`.
+    Uninstall(crate::uninstall::Opts),
     /// A native mux invocation, typed as far as this wave cutover reaches.
     Mux(MuxParsed),
     /// Native-shaped but malformed: `message` prints on stderr, exit 2. The
@@ -466,6 +468,8 @@ pub enum RootCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Remove the fno plugins, binaries, launchd agents and harness hooks
+    Uninstall(crate::uninstall::Opts),
     /// Unclaimed argv: the forwarded Python surface, byte-verbatim.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -747,6 +751,7 @@ fn front_door_from(root: FnoRoot, args: &[OsString]) -> FrontDoor {
         // `fno --` (an escape with nothing after it) forwards, as before.
         None => FrontDoor::Forward,
         Some(RootCmd::Version { json }) => FrontDoor::Version { json },
+        Some(RootCmd::Uninstall(opts)) => FrontDoor::Uninstall(opts),
         // Everything unclaimed IS the forwarded Python surface.
         Some(RootCmd::External(_)) => FrontDoor::Forward,
         Some(RootCmd::Mux(mux)) => {

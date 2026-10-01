@@ -173,7 +173,7 @@ fn quiet_scope_workers(workers: &[Value], scope_ids: &BTreeSet<String>) -> Vec<(
 
 /// The node id a spawned worker's name carries (`t-x-9999-glm`): the first
 /// `x-` run of 4 to 8 hex chars bounded by non-alphanumerics.
-fn node_from_name(name: &str) -> Option<String> {
+pub(crate) fn node_from_name(name: &str) -> Option<String> {
     let mut from = 0usize;
     while let Some(pos) = name[from..].find("x-") {
         let abs = from + pos + 2;

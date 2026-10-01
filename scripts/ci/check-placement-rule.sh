@@ -161,6 +161,10 @@
 #      plansDirectory tier of the plans-dir chain, i.e. Claude Code's own
 #      config (not footnote state); its inline tests write fixture copies
 #      under a tempdir. Nothing accumulates in either.
+#      crates/fno/src/uninstall.rs reads Claude Code's plugin registry and
+#      removes the hook entry cli_hooks.py merged into its settings.json:
+#      the reverse of that write, in Claude Code's own config. It stores
+#      nothing there.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -344,6 +348,7 @@ crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/plans_dirs.rs
 crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/plugin_install.rs
+crates/fno/src/uninstall.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs
 crates/fno-agents/src/receipt.rs
