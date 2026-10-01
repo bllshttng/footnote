@@ -651,6 +651,9 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         # always green. It is exercised deliberately, in BOTH lanes, by
         # tests/ci/test_hermetic_lanes.sh, which is where the assertion belongs.
         "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup "
+        # TEMPORARY, remove before merge: faulthandler dumps every thread
+        # stack at 60s so a hang names its frame before the runner stops.
+        "-o faulthandler_timeout=60 "
         "-m 'not slow_e2e' "
         "--ignore=tests/unit/test_ambient_canary.py",
     ),
