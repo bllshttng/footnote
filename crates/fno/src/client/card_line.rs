@@ -85,7 +85,7 @@ pub(super) fn harness_model(a: &AgentRow) -> Option<String> {
 }
 
 /// The card's name: the worker name without the node and model the card
-/// now shows in their own columns. `t-x-5316-opus` keeps only `t`, so it
+/// now shows in their own columns. `t-<node>-opus` keeps only `t`, so it
 /// reads `t-<node slug>` when the board knows the node; with no slug, it
 /// keeps the node rather than show a bare prefix.
 pub(super) fn slug(a: &AgentRow, backlog: &[BacklogCard]) -> String {
