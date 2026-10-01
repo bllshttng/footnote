@@ -511,9 +511,10 @@ def test_missing_cargo_names_component_evidence_and_still_installs_python(
 def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No uv on PATH -> the pip fallback execs bare. The retry wrapper's
-    success marker reads `uv tool dir`, so wrapping pip would refuse a
-    perfectly good install on exactly the machines that have no uv."""
+    """No uv on PATH -> the pip fallback never rides the uv retry wrapper.
+    The wrapper's success marker reads `uv tool dir`, so wrapping pip would
+    refuse a perfectly good install on exactly the machines that have no uv.
+    The install-exit journal's trapped shell is fine: it gates nothing."""
     import fno.update as update_mod
 
     monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
@@ -539,8 +540,14 @@ def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
 
     result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
-    assert captured["file"] != "/bin/sh", "pip must not go through the uv wrapper"
-    assert "pip" in captured["args"]
+    # The install journals its exit through a trapped shell now, but the line
+    # must not carry the uv retry wrapper: its success marker reads `uv tool
+    # dir`, which would refuse a perfectly good pip install on machines that
+    # have no uv.
+    line = captured["args"][2]
+    assert "__fno_verify" not in line
+    assert "uv tool dir" not in line
+    assert "pip" in line
 
 
 # ---------------------------------------------------------------------------
