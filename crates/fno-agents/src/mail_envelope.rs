@@ -234,7 +234,22 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     crate::system_sender::guard_sender(sender)?;
     validate_sender(sender)?;
     validate_attr("msg id", msg_id)?;
-    let header = crate::mail_header::render_header(form_of(input), sender, msg_id, &summary);
+    // The header form: an explicit payload `form` wins (tests, callers with
+    // their own knowledge); otherwise the RECIPIENT harness's contract row
+    // rules (`mail_header_at` - the composer check's verdict as data),
+    // defaulting to the mention form.
+    let form = if attr(input, "form").is_some() {
+        form_of(input)
+    } else {
+        match to_row
+            .and_then(|row| row.harness.as_deref())
+            .and_then(crate::harness_capabilities::packaged_mail_header_at)
+        {
+            Some(false) => crate::mail_header::HeaderForm::Plain,
+            _ => crate::mail_header::HeaderForm::Mention,
+        }
+    };
+    let header = crate::mail_header::render_header(form, sender, msg_id, &summary);
     Ok(match wrapping {
         Some(body) => format!("{header}\n{body}"),
         None => header,
@@ -280,20 +295,43 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     if classify {
-        // The one shape classifier the Python readers reach: framing plus the
-        // msg id, so no Python module keeps a second tag/header test.
-        let text = input.get("text").and_then(Value::as_str).unwrap_or("");
-        let framing = match crate::mail_header::classify(text) {
-            crate::mail_header::Framing::Header => "header",
-            crate::mail_header::Framing::LegacyTag => "legacy_tag",
-            crate::mail_header::Framing::CrossSession => "cross_session",
-            crate::mail_header::Framing::Bare => "bare",
+        // The one shape classifier the Python readers reach: per-text mail
+        // facts (framing, head id, every id, the forgery guard, the paired
+        // block, the relay parse), so no Python module keeps a second shape
+        // test. Input is an array of texts; a bare object maps through as a
+        // one-element batch.
+        let single_object = input.is_object();
+        let items: Vec<Value> = match input {
+            Value::Array(items) => items,
+            single => vec![single],
         };
-        let payload = serde_json::json!({
-            "framing": framing,
-            "msg_id": crate::mail_header::delivered_msg_id(text),
-        });
-        println!("{payload}");
+        let out: Vec<Value> = items
+            .iter()
+            .map(|item| {
+                let text = item.as_str().unwrap_or("");
+                let framing = match crate::mail_header::classify(text) {
+                    crate::mail_header::Framing::Header => "header",
+                    crate::mail_header::Framing::LegacyTag => "legacy_tag",
+                    crate::mail_header::Framing::CrossSession => "cross_session",
+                    crate::mail_header::Framing::Bare => "bare",
+                };
+                serde_json::json!({
+                    "framing": framing,
+                    "msg_id": crate::mail_header::delivered_msg_id(text),
+                    "ids": crate::mail_header::ids_in_text(text),
+                    "holds_tag": crate::mail_header::text_holds_legacy_tag(text),
+                    "envelope_block": crate::mail_header::paired_envelope_block(text),
+                    "legacy_tags": crate::mail_header::legacy_tags(text),
+                    "relay_parse": crate::mail_header::relay_parse_line(text)
+                        .map(|(from, body)| serde_json::json!({"from_session": from, "body": body})),
+                })
+            })
+            .collect();
+        if single_object {
+            println!("{}", out[0]);
+        } else {
+            println!("{}", serde_json::to_string(&out).unwrap_or_default());
+        }
         return 0;
     }
     let Some(registry) = registry else {

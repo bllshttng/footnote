@@ -181,7 +181,10 @@ pub(crate) enum Verdict {
 /// the residual the join exists for IS raw slash payloads), then bare
 /// commands. `bus` is `None` for the queue, which keeps today's behavior.
 pub(crate) fn classify_text(text: &str, bus: Option<(&BusIndex, &str)>) -> Verdict {
-    if contains_fno_mail_tag_anywhere(text) {
+    if contains_fno_mail_tag_anywhere(text)
+        || crate::mail_header::body_holds_header_line(text)
+        || text.lines().any(crate::mail_header::is_held_release_line)
+    {
         return Verdict::Injected("fno_mail");
     }
     let cleaned = system_reminder_re()
@@ -912,6 +915,12 @@ mod tests {
         );
         assert_eq!(classify("/fno:setup"), Err("bare_command"));
         assert_eq!(classify("   "), Err("no_user_text"));
+        // Header-framed and held-release turns read injected too.
+        assert_eq!(classify("`@folio · msg-1 · hi`\nthe body"), Err("fno_mail"));
+        assert_eq!(
+            classify("2 held messages · sent 17:24 to 18:23 · held 9m\n`@a · msg-1 · hi`"),
+            Err("fno_mail")
+        );
     }
 
     #[test]

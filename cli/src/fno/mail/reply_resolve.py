@@ -4,30 +4,17 @@ session's OWN transcript when ``fno agents mail reply --to <id>`` cannot find a 
 Current hosted delivery appends an audit-only bus record, but legacy deliveries
 and a nonretryable audit-append failure can still leave the transcript as the only
 place the ``id -> from`` binding exists. This module reads that fallback record.
+The envelope shapes and attribute reads live in the Rust classifier
+(``fno.mail.envelope`` is the one adapter); no Python regex keeps a second
+shape test.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Optional
 
-# Match one <fno_mail ...> open tag; attribute order is NOT assumed (id and from
-# are pulled independently within the tag).
-_OPEN_TAG_RE = re.compile(r"<fno_mail\b[^>]*>")
-_FROM_RE = re.compile(r'from="([^"]+)"')
-# The FULL sender session id (node). Preferred over `from` whenever the
-# tag carries it: `from` is a head-8 display handle, and under UUIDv7 that is a
-# ~65.536-second clock bucket rather than 32 random bits, so two workers started
-# in one minute share it and a threaded reply to either refuses as ambiguous.
-# `\b` keeps this distinct from the `from="` match above, which cannot fire
-# inside `from_session="` anyway (the literal there is `from_`).
-_FROM_SESSION_RE = re.compile(r'\bfrom_session="([^"]+)"')
-_TO_RE = re.compile(r'\bto="([^"]+)"')
-# Capture the id attribute of a <fno_mail ...> open tag (W2 dedup-at-drain).
-_ID_RE = re.compile(r'<fno_mail\b[^>]*\bid="([^"]+)"')
 
-
-def _addressed_here(tag: str, session_id: str) -> bool:
+def _addressed_here(tag: dict, session_id: str) -> bool:
     """Whether ``tag``'s recipient attribute names the session ``session_id``.
 
     True when the tag carries no USABLE session address, because an absent
@@ -44,10 +31,9 @@ def _addressed_here(tag: str, session_id: str) -> bool:
     """
     from fno.harness_identity import session_handle_tier
 
-    m = _TO_RE.search(tag)
-    if m is None:
+    token = tag.get("to")
+    if not token:
         return True
-    token = m.group(1)
     if ":" in token:
         # Scheme-qualified (`node:<id>`): an address, but not a session one.
         return True
@@ -77,23 +63,18 @@ def sender_from_transcript_text(
     Callers searching more than one candidate store must pass it; the default
     keeps a single-store search unchanged.
     """
+    from fno.mail.envelope import mail_shape
+
     normalized = text.replace('\\"', '"')
-    needle = f'id="{msg_id}"'
-    for tag in _OPEN_TAG_RE.finditer(normalized):
-        s = tag.group(0)
-        if needle not in s:
+    for tag in mail_shape([normalized])[0]["legacy_tags"]:
+        if tag.get("id") != msg_id:
             continue
-        if session_id is not None and not _addressed_here(s, session_id):
+        if session_id is not None and not _addressed_here(tag, session_id):
             continue
         # Full provenance first, display handle second. An envelope written
         # before the attribute existed carries only `from`, and that legacy
         # path stays exactly as it was.
-        full = _FROM_SESSION_RE.search(s)
-        if full:
-            return full.group(1)
-        m = _FROM_RE.search(s)
-        if m:
-            return m.group(1)
+        return tag.get("from_session") or tag.get("from")
     return None
 
 
@@ -149,10 +130,13 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
 
 
 def mail_ids_in_transcript(harness: str, session_id: str) -> Optional[set[str]]:
-    """Every ``<fno_mail id="...">`` id in ``(harness, session_id)``'s own
-    transcript. ``None`` (not an empty set) means a read failure, never
-    evidence of absence. Parameterized out of ``present_mail_ids`` below so
-    a landed check proving a message reached a DIFFERENT session reuses it."""
+    """Every delivered-mail id in ``(harness, session_id)``'s own transcript -
+    a header line's middle token, or an old ``<fno_mail id="...">`` tag.
+    ``None`` (not an empty set) means a read failure, never evidence of
+    absence. Parameterized out of ``present_mail_ids`` below so a landed
+    check proving a message reached a DIFFERENT session reuses it."""
+    from fno.mail.envelope import mail_shape
+
     path = _transcript_path(harness, session_id)
     if path is None:
         return None
@@ -160,7 +144,7 @@ def mail_ids_in_transcript(harness: str, session_id: str) -> Optional[set[str]]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    return set(_ID_RE.findall(text.replace('\\"', '"')))  # JSONL-escapes quotes
+    return set(mail_shape([text.replace('\\"', '"')])[0]["ids"])
 
 
 def present_mail_ids() -> Optional[set[str]]:

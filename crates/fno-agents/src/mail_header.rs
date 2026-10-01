@@ -14,6 +14,8 @@
 //! replaces (the forged tag could read as a second message; so can the
 //! header line).
 
+use serde_json::Value;
+
 /// The summary cut: at most this many words of the body's first sentence.
 pub const SUMMARY_MAX_WORDS: usize = 12;
 
@@ -100,9 +102,11 @@ pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, summary: &str
 }
 
 /// True when the whole line reads as a delivered-mail header: one backticked
-/// span of exactly `sender · msg-… · summary`, the middle token starting
-/// `msg-`, the sender `@name` or `name` with no spaces. Both header forms
-/// match; this is the reader's shape test and the forged-body detector.
+/// span of exactly `sender · id · summary`, the sender `@name` or `name` with
+/// no spaces, the middle id `fmail-` plus 12 hex (the message-id form the
+/// mux-messages group rules on) or a legacy `msg-…` token that still
+/// resolves. Both header forms match; this is the reader's shape test and the
+/// forged-body detector.
 pub fn is_header_line(line: &str) -> bool {
     let trimmed = line.trim();
     let Some(inner) = trimmed.strip_prefix('`').and_then(|r| r.strip_suffix('`')) else {
@@ -122,10 +126,11 @@ pub fn is_header_line(line: &str) -> bool {
     if bare.is_empty() || bare.chars().any(|c| c.is_whitespace()) {
         return false;
     }
-    let Some(rest) = id.strip_prefix("msg-") else {
-        return false;
+    let id_ok = match id.strip_prefix("fmail-") {
+        Some(hex) => hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => id.strip_prefix("msg-").is_some_and(|rest| !rest.is_empty()),
     };
-    !rest.is_empty() && !summary.trim().is_empty()
+    id_ok && !summary.trim().is_empty()
 }
 
 /// True when any line of `body` is shaped like a delivered header. A send
@@ -165,7 +170,9 @@ pub fn is_held_release_line(line: &str) -> bool {
     let held_ok = held
         .strip_prefix("held ")
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
-    let (count, sent_span) = head.split_once(" held messages")?;
+    let Some((count, sent_span)) = head.split_once(" held messages") else {
+        return false;
+    };
     held_ok
         && !count.is_empty()
         && count.chars().all(|c| c.is_ascii_digit())
@@ -230,6 +237,165 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     }
     let inner = line.trim().trim_matches('`');
     inner.split(" · ").nth(1).map(str::to_string)
+}
+
+/// ASCII-only case fold that preserves byte offsets, so a match position in
+/// the folded copy indexes the original.
+fn ascii_lower(text: &str) -> String {
+    text.chars().map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// True when `text` holds a real legacy `<fno_mail` open tag (boundary-aware,
+/// case-insensitive) or a `</fno_mail>` close, anywhere. The forgery guard and
+/// the one check the Python adapter exposes as `contains_fno_mail_tag`.
+pub fn text_holds_legacy_tag(text: &str) -> bool {
+    let low = ascii_lower(text);
+    let mut start = 0;
+    while let Some(idx) = low[start..].find("<fno_mail") {
+        let abs = start + idx;
+        let boundary = matches!(
+            low[abs + 9..].chars().next(),
+            None | Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>')
+        );
+        if boundary {
+            return true;
+        }
+        start = abs + 9;
+    }
+    low.contains("</fno_mail>")
+}
+
+/// Every delivered-mail id `text` carries, anywhere: the middle token of a
+/// header line, or the `id="…"` attribute of a legacy open tag. Reply
+/// resolution and dedup read through this one scan.
+pub fn ids_in_text(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(id) = delivered_msg_id(line) {
+            out.push(id);
+        }
+    }
+    let low = ascii_lower(text);
+    let mut start = 0;
+    while let Some(idx) = low[start..].find("<fno_mail") {
+        let abs = start + idx;
+        let boundary = matches!(
+            low[abs + 9..].chars().next(),
+            None | Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>')
+        );
+        if boundary {
+            if let Some(rel_end) = low[abs..].find('>') {
+                let tag = &text[abs..=abs + rel_end];
+                if let Some(id) = attr_in(tag, "id") {
+                    out.push(id);
+                }
+            }
+        }
+        start = abs + 9;
+    }
+    out
+}
+
+/// One attribute value (`name="…"`) in one legacy open tag, `None` when the
+/// tag carries none. A preceding word character (`xid="`) never matches - the
+/// attribute boundary the old `\\bid="` regex enforced.
+fn attr_in(tag: &str, name: &str) -> Option<String> {
+    let low = ascii_lower(tag);
+    let needle = format!("{name}=\"");
+    let mut from = 0;
+    while let Some(p) = low[from..].find(needle.as_str()) {
+        let abs = from + p;
+        let prev_ok = match low[..abs].chars().next_back() {
+            None => true,
+            Some(c) => matches!(c, ' ' | '\t' | '<'),
+        };
+        if prev_ok {
+            let rest = &tag[abs + needle.len()..];
+            let end = rest.find('"')?;
+            return Some(rest[..end].to_string());
+        }
+        from = abs + needle.len();
+    }
+    None
+}
+
+/// Every legacy open tag's key attributes, anywhere in `text`, for the
+/// transcript receipt reader: `{id, from, from_session, to}` per real open
+/// tag (`null` when an attribute is absent; the id may be empty).
+pub fn legacy_tags(text: &str) -> Vec<Value> {
+    let low = ascii_lower(text);
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(idx) = low[start..].find("<fno_mail") {
+        let abs = start + idx;
+        let boundary = matches!(
+            low[abs + 9..].chars().next(),
+            None | Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>')
+        );
+        if boundary {
+            if let Some(rel_end) = low[abs..].find('>') {
+                let tag = &text[abs..=abs + rel_end];
+                out.push(serde_json::json!({
+                    "id": attr_in(tag, "id").unwrap_or_default(),
+                    "from": attr_in(tag, "from"),
+                    "from_session": attr_in(tag, "from_session"),
+                    "to": attr_in(tag, "to"),
+                }));
+            }
+        }
+        start = abs + 9;
+    }
+    out
+}
+
+/// The paired legacy envelope block `<fno_mail …>…</fno_mail>` when the open
+/// tag carries an `id` attribute - the drain-dedup key's input. `None` with no
+/// paired block or no id: a pre-redesign producer is un-dedupable.
+pub fn paired_envelope_block(text: &str) -> Option<String> {
+    let low = ascii_lower(text);
+    let open = {
+        let mut start = 0;
+        loop {
+            let idx = low[start..].find("<fno_mail")?;
+            let abs = start + idx;
+            let boundary = matches!(
+                low[abs + 9..].chars().next(),
+                None | Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>')
+            );
+            if boundary {
+                break abs;
+            }
+            start = abs + 9;
+        }
+    };
+    let open_end = open + low[open..].find('>')?;
+    attr_in(&text[open..=open_end], "id")?;
+    let close = open_end + low[open_end..].find("</fno_mail>")?;
+    Some(text[open..close + "</fno_mail>".len()].to_string())
+}
+
+/// The single-line relay wire form: `<fno_mail from="…" …> body` on ONE line,
+/// no close tag - the ask-lane hop's shape. Returns `(from_session, body)`;
+/// `from=` must be the first attribute, at most one space separates it from
+/// the body.
+pub fn relay_parse_line(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let low = ascii_lower(line);
+    let rest = low.strip_prefix("<fno_mail")?;
+    let ws = rest.len() - rest.trim_start().len();
+    if ws == 0 {
+        return None;
+    }
+    if !rest[ws..].starts_with("from=\"") {
+        return None;
+    }
+    let open_end = low.find('>')?;
+    let from_rest = &line[9 + ws + 6..open_end];
+    let from_end = from_rest.find('"')?;
+    let body = line[open_end + 1..]
+        .strip_prefix([' ', '\t'])
+        .unwrap_or(&line[open_end + 1..]);
+    Some((&from_rest[..from_end], body))
 }
 
 #[cfg(test)]
@@ -310,6 +476,29 @@ mod tests {
         assert!(!is_held_release_line(
             "3 held messages \u{b7} sent 17:24 \u{b7} held 5m \u{b7} tail"
         ));
+        // The canonical id form: `fmail-` plus 12 hex; wrong length or
+        // non-hex never reads as a header. Legacy `msg-…` still resolves.
+        let fmail = render_header(
+            HeaderForm::Mention,
+            "candor",
+            "fmail-0badc0de1234",
+            "Fix the gate.",
+        );
+        assert!(is_header_line(&fmail));
+        assert_eq!(classify(&fmail), Framing::Header);
+        assert!(!is_header_line(
+            "`@candor \u{b7} fmail-0badc0de123 \u{b7} hi`"
+        ));
+        assert!(!is_header_line(
+            "`@candor \u{b7} fmail-0badc0de12345 \u{b7} hi`"
+        ));
+        assert!(!is_header_line(
+            "`@candor \u{b7} fmail-zzzzzzzzzzzz \u{b7} hi`"
+        ));
+        assert_eq!(
+            delivered_msg_id(&fmail),
+            Some("fmail-0badc0de1234".to_string())
+        );
         // The id a reply or dedup joins on, both shapes.
         assert_eq!(
             delivered_msg_id("`@a \u{b7} msg-f7aa93 \u{b7} hi`\nbody"),
@@ -321,5 +510,54 @@ mod tests {
         );
         assert_eq!(delivered_msg_id("no id here"), None);
         assert_eq!(delivered_msg_id(release), None);
+        // The adapter's other read facts, per text.
+        assert!(text_holds_legacy_tag(
+            "prose <fno_mail from=\"a\">x</fno_mail>"
+        ));
+        assert!(!text_holds_legacy_tag("<fno_mailicious prose"));
+        assert!(!text_holds_legacy_tag("<FNO_MAILBOX>"));
+        assert!(text_holds_legacy_tag("body</fno_mail>"));
+        assert_eq!(
+            ids_in_text("prose\n`@a \u{b7} fmail-0badc0de1234 \u{b7} hi`\n<fake>x"),
+            vec!["fmail-0badc0de1234"]
+        );
+        assert_eq!(
+            ids_in_text("mid <fno_mail from=\"a\" id=\"msg-77\">x</fno_mail> tail"),
+            vec!["msg-77"]
+        );
+        assert_eq!(ids_in_text("no ids"), Vec::<String>::new());
+        assert_eq!(
+            paired_envelope_block("prose <fno_mail from=\"a\" id=\"msg-1\">hi</fno_mail> tail"),
+            Some("<fno_mail from=\"a\" id=\"msg-1\">hi</fno_mail>".to_string())
+        );
+        assert_eq!(paired_envelope_block("no close <fno_mail id=\"x\">"), None);
+        assert_eq!(
+            paired_envelope_block("<fno_mail from=\"a\">no id</fno_mail>"),
+            None
+        );
+        assert_eq!(
+            relay_parse_line("<fno_mail from=\"s1\" harness=\"codex\"> hop body"),
+            Some(("s1", "hop body"))
+        );
+        assert_eq!(
+            relay_parse_line("<fno_mail from=\"s1\">body"),
+            Some(("s1", "body"))
+        );
+        assert_eq!(relay_parse_line("<fno_mailbox from=\"s\">x"), None);
+        assert_eq!(relay_parse_line("<fno_mail id=\"x\">body"), None);
+        assert_eq!(relay_parse_line("plain"), None);
+        // Legacy-tag attribute reads for the receipt path.
+        let tags =
+            legacy_tags("<fno_mail from=\"s1\" harness=\"codex\" id=\"m1\" to=\"s2\">x</fno_mail>");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["id"], "m1");
+        assert_eq!(tags[0]["from"], "s1");
+        assert_eq!(tags[0]["from_session"], Value::Null);
+        assert_eq!(tags[0]["to"], "s2");
+        let both =
+            legacy_tags("<fno_mail from_session=\"full\" from=\"short\" id=\"m2\">x</fno_mail>");
+        assert_eq!(both[0]["from_session"], "full");
+        assert_eq!(both[0]["from"], "short");
+        assert!(legacy_tags("<fno_mailicious>").is_empty());
     }
 }

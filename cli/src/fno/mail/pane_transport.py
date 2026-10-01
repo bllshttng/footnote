@@ -85,12 +85,15 @@ def resolve_pane_identity(session: str, pane_id: int) -> Optional[PaneIdentity]:
 def _already_wrapped(text: str) -> bool:
     """True when ``text`` already carries an attribution container.
 
-    Both the ``<fno_mail>`` a2a envelope and the ``<cross-session-message>``
-    peer-follow-up container mark their sender, so re-wrapping either would
-    nest one attribution inside another (and ``wrap_fno_mail`` refuses a body
-    holding an ``<fno_mail>`` tag anyway).
+    The delivered header line, the ``<fno_mail>`` a2a envelope and the
+    ``<cross-session-message>`` peer-follow-up container all mark their
+    sender, so re-wrapping any of them would nest one attribution inside
+    another (and ``wrap_fno_mail`` refuses a body holding an ``<fno_mail>``
+    tag anyway). The shape read lives in the Rust classifier.
     """
-    return text.lstrip().startswith(("<fno_mail", "<cross-session-message"))
+    from fno.mail.envelope import mail_shape
+
+    return mail_shape([text])[0]["framing"] != "bare"
 
 
 def _pane_entry(session: str, pane_id: int):

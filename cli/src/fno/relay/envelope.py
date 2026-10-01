@@ -29,7 +29,6 @@ registry dependency.
 """
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from fno.bus.log import Envelope
@@ -48,13 +47,6 @@ META_TTL = "ttl"
 DEFAULT_TTL = 8
 
 RELAY_KIND = "relay"
-
-# Parse the wire tag. Attributes beyond ``from`` are ignored: a legacy line
-# carrying harness/model and today's compact line both parse. DOTALL is
-# deliberately NOT set: the tag and body are one physical line.
-_TAG_RE = re.compile(
-    r'^<fno_mail\s+from="(?P<from_session>[^"]*)"[^>]*>\s?(?P<body>.*)$'
-)
 
 
 def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
@@ -83,17 +75,15 @@ def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
 
 
 def parse(line: str) -> Optional[dict]:
-    """Parse a wire line into ``{from_session, body}``.
+    """Parse a wire line into ``{from_session, body}``. The single-line tag
+    read lives in the Rust classifier (``fno.mail.envelope`` is the adapter).
 
     Returns ``None`` if the line is not framed -- the caller uses that to refuse
     an unframed cross-provider injection (AC5-FR)."""
-    m = _TAG_RE.match(line.strip())
-    if not m:
-        return None
-    return {
-        "from_session": m.group("from_session"),
-        "body": m.group("body"),
-    }
+    from fno.mail.envelope import mail_shape
+
+    parsed = mail_shape([line])[0]["relay_parse"]
+    return dict(parsed) if parsed else None
 
 
 def is_framed(line: str) -> bool:
