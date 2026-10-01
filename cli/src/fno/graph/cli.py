@@ -2329,7 +2329,7 @@ def _dispatch_node_summary(e) -> dict:
         "parent": e.get("parent"),
         "size": e.get("size"),
         "difficulty": e.get("difficulty"),
-        # select_lane_fill's dispatch-time collision gate compares plan file
+        # the native lane-fill door's dispatch-time collision gate compares plan file
         # surfaces; without this it has nothing to read.
         "plan_path": e.get("plan_path"),
         # The per-node model pin rides so the active-backlog drain can
@@ -2754,45 +2754,28 @@ def cmd_ready(
 # -- lane-fill --
 
 
+# -- lane-fill (native door) --
+
+
 @cli.command("lane-fill", hidden=True)
 def cmd_lane_fill(
-    max_lanes: Optional[int] = typer.Option(
-        None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
-    ),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
-    mission: Optional[str] = typer.Option(
-        None, "--mission", help="Restrict selection to this mission's nodes."
-    ),
-    claim: bool = typer.Option(
-        False,
-        "--claim",
-        help="Atomically hold a lane slot per selected node (default: preview only).",
-    ),
+    max_lanes: Optional[int] = typer.Option(None, "--max"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    mission: Optional[str] = typer.Option(None, "--mission"),
+    claim: bool = typer.Option(False, "--claim"),
 ) -> None:
-    """Select up to max_lanes ready nodes, each collision-clean (parallel mode).
+    """The parallel fill answers natively; there is no external body here.
 
-    Prints the JSON list of nodes that would dispatch as concurrent lanes -
-    the file-collision gate decides, so same-domain nodes with disjoint
-    surfaces co-schedule (epic , group 2). Read-only by
-    default; ``--claim``
-    atomically holds a dispatch-time lane slot per node - what the dispatcher
-    does before spawn (Locked Decision #8). ``max_lanes < 1`` prints ``[]``
-    (a single lane is the daemon's sequential path).
+    Unlike next/undispatched this wheel spelling keeps nothing: the tombstone
+    is the whole arm, on every backend.
     """
-    from fno.backlog.advance import select_lane_fill
-
-    if max_lanes is None:
-        from fno.config import load_settings
-
-        max_lanes = load_settings().parallel.max_lanes
-
-    selected = select_lane_fill(max_lanes, project, mission=mission, claim=claim)
-    typer.echo(json.dumps(selected, indent=2))
-
-
-# -- schedule (shadow) --
-
-# -- dispatch-lanes --
+    del max_lanes, project, mission, claim
+    typer.echo(
+        "Error: the parallel fill is served by the native door; "
+        "run `fno backlog lane-fill`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 @cli.command("dispatch-lanes", hidden=True)
@@ -3044,7 +3027,7 @@ def cmd_lanes(
     outcome view. Read-only.
     """
     from fno.claims.core import list_claims
-    from fno.claims.lanes import LANE_SLOT_PREFIX
+    LANE_SLOT_PREFIX = "lane-slot:"  # the binary-owned slot namespace
 
     try:
         from fno.config import load_settings

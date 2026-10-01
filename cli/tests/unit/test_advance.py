@@ -1437,7 +1437,11 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
@@ -1504,7 +1508,11 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     _declare_grid_inventory(monkeypatch)
     _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
