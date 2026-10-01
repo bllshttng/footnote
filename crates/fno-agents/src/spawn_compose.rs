@@ -346,6 +346,10 @@ pub struct Answer {
     pub stdout: Option<Value>,
     pub events: Vec<Value>,
     pub injected: bool,
+    /// The billing gate needs `facts.role_resolves` and the ask carried no
+    /// answer: nothing applied, nothing journaled; the transport resolves
+    /// the role once and asks again.
+    pub role_gate_needed: bool,
 }
 
 impl Answer {
@@ -357,6 +361,7 @@ impl Answer {
             "stdout": self.stdout.clone().unwrap_or(Value::Null),
             "events": self.events,
             "injected": self.injected,
+            "role_gate_needed": self.role_gate_needed,
         })
     }
 }
@@ -374,6 +379,7 @@ struct Seam {
     stdout: Option<Value>,
     argv: Option<Vec<String>>,
     injected: bool,
+    role_gate_needed: bool,
 }
 
 impl Seam {
@@ -469,6 +475,7 @@ pub fn compose(inputs: &Inputs) -> Answer {
         stdout: seam.stdout.take(),
         events: seam.events,
         injected: seam.injected,
+        role_gate_needed: seam.role_gate_needed,
     }
 }
 
@@ -542,6 +549,27 @@ fn compose_body(inputs: &Inputs, scan: Axes, seam: &mut Seam) {
     harness_rung(&mut stage, seam);
     if seam.exit.is_some() {
         return;
+    }
+    // Python's seam resolved the role ONLY when the billing model branch
+    // needed it (config model, axis free, a role named): a bare role spawn
+    // resolved zero times at the seam, and cmd_spawn's own single resolve
+    // is the one the role-wiring contract pins. When the gate fires and
+    // the ask carries no answer, stop before any side effect: the
+    // transport resolves and asks again.
+    {
+        let fields = stage.fields.as_ref().expect("fields were read");
+        let needs_role =
+            !fields.model.0.is_empty() && !stage.has_model && stage.scan.role.is_some();
+        let answered = stage
+            .inputs
+            .facts
+            .get("role_resolves")
+            .and_then(Value::as_bool)
+            .is_some();
+        if needs_role && !answered {
+            seam.role_gate_needed = true;
+            return;
+        }
     }
     billing_axes(&mut stage, seam);
     overlay_stage(&mut stage, seam);
@@ -1627,5 +1655,131 @@ fn overlay_stage(stage: &mut Stage, seam: &mut Seam) {
                 "fno agents spawn: harness-keyed defaults skipped ({exc})"
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hermetic() -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("spawn-compose-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        // The consult arm reads the declared rows, the policy and the lanes
+        // from DISK (the gather's own read); pin an empty config or the
+        // test process's ambient config answers the walk.
+        std::fs::write(root.join("config.toml"), "").unwrap();
+        std::env::set_var("FNO_CONFIG", root.join("config.toml"));
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        std::env::set_var("FNO_STATE_DIR", root.join("state"));
+        std::env::set_var("FNO_AGENTS_HOME", root.join("agents-home"));
+        std::env::set_var("FNO_TEST_HERMETIC", "1");
+        (guard, root)
+    }
+
+    fn clear_hermetic(root: &std::path::Path) {
+        for key in [
+            "FNO_CLAIMS_ROOT",
+            "FNO_STATE_DIR",
+            "FNO_AGENTS_HOME",
+            "FNO_CONFIG",
+        ] {
+            std::env::remove_var(key);
+        }
+        std::env::remove_var("FNO_TEST_HERMETIC");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The role gate: a config model, a free axis and a role with no
+    /// `facts.role_resolves` answer stops before any side effect and asks
+    /// the transport to resolve. Python's seam resolved the role only
+    /// under this same gate, so a bare role spawn's single cmd_spawn
+    /// resolve is the one the role-wiring contract pins.
+    #[test]
+    fn a_missing_role_answer_gates_the_composition() {
+        let (guard, root) = hermetic();
+        let inputs = Inputs {
+            argv: vec![
+                "spawn".to_string(),
+                "--name".to_string(),
+                "w".to_string(),
+                "--role".to_string(),
+                "tidy".to_string(),
+                "work".to_string(),
+            ],
+            defaults: toml::Value::Table(toml::map::Map::new()),
+            profiles: "[target]\nmodel = \"cfg-m\"\n".parse().unwrap(),
+            dispatch_verbs: toml::Value::Table(toml::map::Map::new()),
+            roster: vec!["target".to_string()],
+            node_verb: None,
+            env_node: None,
+            ambient_harness: "claude".to_string(),
+            apply_permission_builtin: true,
+            scan: serde_json::json!({
+                "has_harness": false, "explicit_harness": null,
+                "has_model": false, "has_effort": false,
+                "explicit_route": false, "role": "tidy",
+                "has_permission": false, "seed": "/fno:target work",
+                "name": "w", "positional_present": true
+            }),
+            facts: serde_json::json!({"role_resolves": null}),
+            node: None,
+            node_row: None,
+        };
+        let answer = compose(&inputs);
+        drop(guard);
+        clear_hermetic(&root);
+        assert!(answer.role_gate_needed, "the gate declares the need");
+        assert_eq!(answer.exit, 0, "no refusal");
+        assert!(answer.stderr.is_empty(), "no lines printed");
+        assert!(!answer.injected, "nothing applied");
+        assert_eq!(answer.argv, inputs.argv, "argv unchanged");
+    }
+
+    /// A carried answer composes straight through: false composes with the
+    /// config model injecting (the billing ask receives it), true skips
+    /// the model injection. Either way no gate fires.
+    #[test]
+    fn a_carried_role_answer_composes_through() {
+        let (guard, root) = hermetic();
+        let inputs = Inputs {
+            argv: vec![
+                "spawn".to_string(),
+                "--name".to_string(),
+                "w".to_string(),
+                "--role".to_string(),
+                "tidy".to_string(),
+                "work".to_string(),
+            ],
+            defaults: toml::Value::Table(toml::map::Map::new()),
+            profiles: "[target]\nmodel = \"cfg-m\"\n".parse().unwrap(),
+            dispatch_verbs: toml::Value::Table(toml::map::Map::new()),
+            roster: vec!["target".to_string()],
+            node_verb: None,
+            env_node: None,
+            ambient_harness: "claude".to_string(),
+            apply_permission_builtin: true,
+            scan: serde_json::json!({
+                "has_harness": false, "explicit_harness": null,
+                "has_model": false, "has_effort": false,
+                "explicit_route": false, "role": "tidy",
+                "has_permission": false, "seed": "/fno:target work",
+                "name": "w", "positional_present": true
+            }),
+            facts: serde_json::json!({"role_resolves": false}),
+            node: None,
+            node_row: None,
+        };
+        let answer = compose(&inputs);
+        drop(guard);
+        clear_hermetic(&root);
+        assert!(!answer.role_gate_needed, "the carried answer composes");
+        assert!(
+            answer.argv.iter().any(|t| t == "--model"),
+            "an unresolved role lets the config model inject"
+        );
     }
 }

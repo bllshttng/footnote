@@ -909,9 +909,8 @@ def compose_spawn_argv(
     tail = out[1:]
 
     scan = _scan_projection(tail)
-    facts = {"role_resolves": False, "role_protected": None}
+    facts = {"role_resolves": None, "role_protected": None}
     if scan["role"]:
-        facts["role_resolves"] = _role_resolves(scan["role"], None, env)
         try:
             from fno.agents.model_routing import PROTECTED_ROLES
 
@@ -939,6 +938,14 @@ def compose_spawn_argv(
             file=err,
         )
         return out
+
+    # The billing gate declared it needs the role answer (config model, free
+    # axis, a role named): resolve ONCE and ask again. Common case: one verb
+    # call, zero seam resolves; cmd_spawn's own resolve is the one.
+    if answer.get("role_gate_needed"):
+        facts["role_resolves"] = _role_resolves(scan["role"], None, env)
+        payload["facts"] = facts
+        answer = spawn_overlay_call(payload, timeout=90)
 
     for line in answer.get("stderr") or []:
         print(line, file=err)
