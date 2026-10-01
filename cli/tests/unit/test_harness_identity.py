@@ -571,13 +571,15 @@ def test_row_owning_session_id_self_row_is_not_contention(tmp_path):
     )
 
 
-def test_row_owning_session_id_self_binding_with_wrong_harness_still_owner(tmp_path):
-    """A row of a DIFFERENT harness holding the id under test is another
-    session's row even when the caller names the same id as its own: the
-    binding's harness half must agree with the row, or the id is foreign."""
+def test_row_owning_session_id_self_binding_disagreement_still_owner(tmp_path):
+    """A binding that does not fully agree leaves the row an owner. The
+    binding's harness half must match the row even when it names the id under
+    test, and a caller that proves its own id elsewhere is refused an id held
+    by a different live row: the id is foreign either way."""
     from fno.agents.registry import row_owning_session_id
 
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    mine = "019fc88e-aaaa-7c90-926a-6bdd7ebb186c"
     name, reg = _register(tmp_path, sid, provider="claude")
     assert (
         row_owning_session_id(
@@ -585,19 +587,71 @@ def test_row_owning_session_id_self_binding_with_wrong_harness_still_owner(tmp_p
         )
         == name
     )
+    sid2 = "019fc88e-bbbb-7c90-926a-6bdd7ebb186c"
+    name_other, reg_other = _register(tmp_path, sid2, provider="codex")
+    assert (
+        row_owning_session_id(
+            sid2, registry_path=reg_other, self_binding=("codex", mine)
+        )
+        == name_other
+    )
 
 
-def test_row_owning_session_id_self_binding_of_another_id_still_owner(tmp_path):
-    """A caller that proves its own id elsewhere is still refused an id held
-    by a different live row."""
+def test_row_owning_session_id_walk_proven_dead_pid_row_is_self(tmp_path):
+    """A restart re-registers the same row in place (same name, same session
+    id, still live) and leaves its spawn-time pid dead. When the caller's walk
+    names the row's harness family and the row pid is dead (or names this
+    process's own harness ancestor), that row is the restarted session's own,
+    never contention. Every self-blind shape survives: a walk that is silent
+    or names another family, a row whose pid leg never resolved, and a live
+    foreign pid all leave the row an owner (the round-1 P1 refusal)."""
+    import json
+
     from fno.agents.registry import row_owning_session_id
 
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
-    mine = "019fc88e-aaaa-7c90-926a-6bdd7ebb186c"
-    name, reg = _register(tmp_path, sid)
+    name, reg = _register(tmp_path, sid, provider="claude")
+
+    def _set_pid(pid):
+        data = json.loads(reg.read_text())
+        for row in data.get("agents", []):
+            if row.get("harness_session_id") == sid:
+                row["pid"] = pid
+        reg.write_text(json.dumps(data))
+
+    _set_pid(99999999)
     assert (
         row_owning_session_id(
-            sid, registry_path=reg, self_binding=("codex", mine)
+            sid, registry_path=reg, self_binding=None, walk_harness="claude"
+        )
+        is None
+    )
+    # A silent or foreign walk keeps the refusal.
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness=None
+        )
+        == name
+    )
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness="codex"
+        )
+        == name
+    )
+    # A row whose pid leg never resolved keeps the refusal (fail-closed).
+    _set_pid(None)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness="claude"
+        )
+        == name
+    )
+    # A live foreign pid keeps the refusal: a live session owns the id.
+    _set_pid(1)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness="claude"
         )
         == name
     )

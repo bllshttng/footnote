@@ -61,6 +61,9 @@ enum Role {
     AgentsAlias(fno::agents_alias::Org),
     /// An attach invocation with no TTY: print the notice, exit 0.
     NotTty,
+    /// `fno uninstall`: native, because it removes the Python wheel it would
+    /// otherwise forward to.
+    Uninstall(fno::uninstall::Opts),
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -254,6 +257,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Role::MuxUsage(message)
         }
         FrontDoor::Version { json } => Role::MuxVersion(json),
+        FrontDoor::Uninstall(opts) => Role::Uninstall(opts),
         FrontDoor::Attach {
             name,
             explicit_socket,
@@ -375,6 +379,7 @@ fn main() {
             std::process::exit(2);
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
+        Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {

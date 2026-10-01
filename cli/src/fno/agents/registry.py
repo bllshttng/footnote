@@ -650,6 +650,11 @@ class AgentEntry:
     # v26 served facts; the Rust sweep writes them, python is a passthrough.
     liveness: Optional[str] = None
     liveness_measured_at: Optional[str] = None
+    context_used_pct: Optional[int] = None
+    context_used_tokens: Optional[int] = None
+    context_window_tokens: Optional[int] = None
+    context_measured_at: Optional[str] = None
+    mail_unread: Optional[int] = None
     harness_title: Optional[str] = None
     lineage_kind: Optional[str] = None
 
@@ -1613,6 +1618,7 @@ def row_owning_session_id(
     registry_path: Optional[Path] = None,
     *,
     self_binding: Optional[Tuple[str, str]],
+    walk_harness: Optional[str] = None,
 ) -> Optional[str]:
     """Name of an active registry row whose ``harness_session_id`` is
     ``session_id``, or None.
@@ -1635,6 +1641,12 @@ def row_owning_session_id(
     or the id belongs to a different session and is reported. Only rows in
     an ownership-live status count; an exited row's id is free.
 
+    ``walk_harness`` is the process-tree walk's harness answer. A restart
+    re-registers the row in place leaving its spawn-time pid dead, so a
+    walk-proven family row whose pid is dead (or names this process's own
+    harness ancestor, the revival re-mint) is self, never contention. A live
+    foreign pid, silent or foreign walk, or unresolved pid keeps the refusal.
+
     Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
     registry returns None (cannot prove a collision) rather than raising, so an
     unreadable registry never blocks init. Callers that must know whether the
@@ -1654,12 +1666,17 @@ def row_owning_session_id(
     entry = live_row_holding_session_id(session_id, registry_path)
     if entry is None:
         return None
-    if (
-        own
-        and own[1] == needle
-        and own[0] == (getattr(entry, "harness", "") or "").strip().lower()
-    ):
+    row_harness = (getattr(entry, "harness", "") or "").strip().lower()
+    if own and own[1] == needle and own[0] == row_harness:
         return None
+    walked = (walk_harness or "").strip().lower()
+    row_pid = getattr(entry, "pid", None)
+    if walked and walked == row_harness and row_pid:
+        from fno.agents.lock import _pid_is_alive
+        from fno.claims.session_pid import resolve_session_pid
+
+        if not _pid_is_alive(row_pid) or row_pid == resolve_session_pid():
+            return None
     return entry.name
 
 
