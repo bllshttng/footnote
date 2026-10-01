@@ -120,35 +120,23 @@ def _candidate_stores() -> list[tuple[str, str]]:
 
 
 def _sender_from_chats_store(msg_id: str) -> Optional[str]:
-    """Ask the chats record store who sent ``msg_id`` (the durable record
-    plane; rust_binary is the one Python door to the binary).
-
-    ``None`` on any miss (no record, no binary, unreadable answer) so the
-    caller falls through to the transcript scan, which stays exactly as it
-    was for pre-store deliveries.
-    """
+    """Who sent ``msg_id`` per the chats record store; None falls through to
+    the transcript scan."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        answer = verb_call(["chats", "resolve", "--prefix", msg_id], {}, timeout=30)
+        return (verb_call(["chats", "resolve", "--prefix", msg_id], {}, timeout=30) or {}).get(
+            "from_key"
+        )
     except (VerbUnavailable, ValueError):
         return None
-    if not isinstance(answer, dict):
-        return None
-    sender = answer.get("from_key")
-    return sender if isinstance(sender, str) and sender else None
 
 
 def resolve_live_sender(msg_id: str) -> Optional[str]:
-    """Find ``msg_id``'s sender address: the chats record store first, then
-    this session's own transcript scan.
+    """Find ``msg_id``'s sender address by scanning this session's own transcript.
 
     Returns the envelope's full ``from_session`` when it carries one, else its
     ``from`` handle (node).
-
-    The record store answers from the JSONL conversations recorded since the
-    store landed; the transcript fallback keeps resolving pre-store deliveries
-    and a failed record-door call exactly as before.
 
     Searches every candidate store and accepts the one holding a RECEIPT: an
     envelope carrying both ``id="<msg_id>"`` and a ``to=`` equal to that store's

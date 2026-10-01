@@ -394,27 +394,15 @@ def _rotate_locked(live: Path) -> None:
     os.replace(str(live), f"{live}.1")
 
 
-#: Bus kinds recorded as conversation messages in the chats store (the Rust
-#: twin is chats.rs MESSAGE_KINDS). Everything else is control traffic or a
-#: receipt.
-CHATS_MESSAGE_KINDS = frozenset({"send", "announce"})
+CHATS_MESSAGE_KINDS = frozenset({"send", "announce"})  # Rust twin: chats.rs MESSAGE_KINDS
 
 
 def _chats_record(line: str) -> None:
-    """Forward one serialized bus line to the chats record door (the JSONL
-    conversation store; rust_binary is the one Python door to the binary).
+    """Record one bus line through the chats door; raises on failure (the
+    caller aborts message sends, warns on receipts)."""
+    from fno.rust_binary import verb_call
 
-    Raises on any failure so the caller applies the seam's ordering:
-    message kinds abort the send (fail closed, what was never recorded is
-    never sent), receipts warn and continue (a receipt must never break an
-    ack flow).
-    """
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        verb_call(["chats", "append"], json.loads(line), timeout=30)
-    except VerbUnavailable as why:
-        raise RuntimeError(f"chats record door failed: {why}") from why
+    verb_call(["chats", "append"], json.loads(line), timeout=30)
 
 
 def append(env: Envelope) -> None:
@@ -429,9 +417,7 @@ def append(env: Envelope) -> None:
     retained scan rescans all segments rather than declaring loss, so a message
     is at most delayed by one drain cycle, never dropped.
 
-    The record seam: message kinds record through the chats door BEFORE the
-    bus write and abort the send on failure (fail closed); receipts record
-    after the bus write and warn on failure.
+    Record seam: message kinds record first (fail closed), receipts after.
     """
     live = bus_log_path()
     line = to_json_line(env) + "\n"

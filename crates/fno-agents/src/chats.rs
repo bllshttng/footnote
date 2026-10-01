@@ -730,8 +730,7 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
     let mut id_to_chat: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    let mut chats: std::collections::HashMap<String, Vec<Value>> =
-        std::collections::HashMap::new();
+    let mut chats: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
     let mut stage = |chats: &mut std::collections::HashMap<String, Vec<Value>>,
                      order: &mut Vec<String>,
                      chat_id: String,
@@ -1092,7 +1091,9 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .subsec_nanos()
-        ))
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     fn bus_line(id: &str, from: &str, to: &str, kind: &str) -> Value {
@@ -1140,7 +1141,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let dir_mode = std::fs::metadata(chats.join(chat_id)).unwrap().permissions().mode();
+            let dir_mode = std::fs::metadata(chats.join(chat_id))
+                .unwrap()
+                .permissions()
+                .mode();
             let file_mode = std::fs::metadata(&file).unwrap().permissions().mode();
             assert_eq!(dir_mode & 0o777, 0o700, "chat dirs are owner-only");
             assert_eq!(file_mode & 0o777, 0o600, "chat files are owner-only");
@@ -1152,14 +1156,21 @@ mod tests {
         let mut ops = dev.clone();
         ops["id"] = serde_json::json!("fmail-cccccccccccc");
         ops["meta"] = serde_json::json!({"scope": "ops"});
-        let Recorded::Message { chat_id: dev_id } = record_at(&chats, &db, &bus, &dev).unwrap() else { panic!() };
-        let Recorded::Message { chat_id: ops_id } = record_at(&chats, &db, &bus, &ops).unwrap() else { panic!() };
+        let Recorded::Message { chat_id: dev_id } = record_at(&chats, &db, &bus, &dev).unwrap()
+        else {
+            panic!()
+        };
+        let Recorded::Message { chat_id: ops_id } = record_at(&chats, &db, &bus, &ops).unwrap()
+        else {
+            panic!()
+        };
         assert_ne!(dev_id, ops_id, "two scopes, two channel chats (AC3-ERR)");
         assert_eq!(dev_id, chat_id_for_channel("dev"));
         // An unregistered recipient keys on the raw addressee string (AC1-ERR).
         let stranger = bus_line("fmail-eeeeeeeeeeee", "sess-a", "stranger@nowhere", "send");
-        let Recorded::Message { chat_id: fallback_id } =
-            record_at(&chats, &db, &bus, &stranger).unwrap()
+        let Recorded::Message {
+            chat_id: fallback_id,
+        } = record_at(&chats, &db, &bus, &stranger).unwrap()
         else {
             panic!()
         };
@@ -1167,7 +1178,10 @@ mod tests {
         // Control rows skip; a receipt for an unrecorded id skips (AC6-ERR shape).
         let mut withdraw = bus_line("msg-000002", "a", "b", "withdraw");
         withdraw["meta"] = serde_json::json!({"withdraws": "msg-000003"});
-        assert_eq!(record_at(&chats, &db, &bus, &withdraw).unwrap(), Recorded::Skipped);
+        assert_eq!(
+            record_at(&chats, &db, &bus, &withdraw).unwrap(),
+            Recorded::Skipped
+        );
         let orphan = serde_json::json!({
             "v": 1, "id": "msg-000004", "ts": "2026-10-01T19:02:00Z",
             "from": "a", "to": "b", "kind": "landed",
@@ -1188,7 +1202,9 @@ mod tests {
         let db = root.join("db").join("chats.db");
         let bus = root.join("bus").join("messages.jsonl");
         let msg = bus_line("fmail-dddddddddddd", "sess-a", "sess-b", "send");
-        let Recorded::Message { chat_id } = record_at(&chats, &db, &bus, &msg).unwrap() else { panic!() };
+        let Recorded::Message { chat_id } = record_at(&chats, &db, &bus, &msg).unwrap() else {
+            panic!()
+        };
         let landed = serde_json::json!({
             "v": 1, "id": "msg-000001", "ts": "2026-10-01T19:01:00Z",
             "from": "sess-a", "to": "sess-b", "kind": "landed",
@@ -1197,7 +1213,9 @@ mod tests {
         let delivered = record_at(&chats, &db, &bus, &landed).unwrap();
         assert_eq!(
             delivered,
-            Recorded::Delivery { chat_id: chat_id.clone() },
+            Recorded::Delivery {
+                chat_id: chat_id.clone()
+            },
             "the delivery line lands in the message's chat (AC2-HP)"
         );
         let text = std::fs::read_to_string(chats.join(&chat_id).join("messages.jsonl")).unwrap();
