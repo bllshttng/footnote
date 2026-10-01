@@ -230,10 +230,6 @@ const CPU_ADMIT_SAMPLES: u32 = 2;
 /// evidence the fleet is over. It never holds for the whole queue budget and
 /// never admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
 const CPU_BLIND_SAMPLES: u32 = 3;
-#[cfg(not(test))]
-const CPU_BLIND_POLL: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const CPU_BLIND_POLL: Duration = Duration::from_millis(10);
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
@@ -1345,11 +1341,19 @@ pub fn run_gate(
 ) -> Result<GateGuard, Refusal> {
     decide_gate(config_cwd, registry_path, input)
         .map_err(|r| {
-            crate::machine_sample::stamp_refusal(
-                r,
-                &crate::paths::AgentsHome::from_env().events_jsonl(),
-                chrono::Utc::now(),
-            )
+            let home = crate::paths::AgentsHome::from_env();
+            // Every gate refusal leaves a feed-visible row: a refused
+            // launch previously wrote nothing, so the feed showed nothing
+            // for a launch the operator watched refuse.
+            let _ = crate::events::EventEmitter::new(home.events_jsonl(), "spawn-gate").emit(
+                "agent_spawn_refused",
+                &serde_json::json!({
+                    "argv": std::env::args().skip(1).collect::<Vec<String>>(),
+                    "exit_code": r.exit_code,
+                    "reason": verdict_line(&r),
+                }),
+            );
+            crate::machine_sample::stamp_refusal(r, &home.events_jsonl(), chrono::Utc::now())
         })
         .inspect_err(|r| eprintln!("{}", verdict_line(r)))
 }
@@ -2818,6 +2822,14 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+
+/// A blind CPU read (an undecidable band or an unreadable probe) gets at most
+/// CPU_BLIND_SAMPLES total samples before the gate refuses. It never holds
+/// for the whole queue budget and never admits.
+#[cfg(not(test))]
+const CPU_BLIND_POLL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CPU_BLIND_POLL: Duration = Duration::from_millis(10);
 
 #[cfg(test)]
 mod tests {

@@ -158,7 +158,10 @@ def test_observation_branch_mints_a_second_row_and_leaves_a_untouched(
     branch = next(row for row in rows if row.harness_session_id == REMINT)
     assert live_a.predecessor_session_ids == [], "A's row is never overwritten"
     assert branch.forked_from_session_id == BIRTH
-    assert branch.fno_id == REMINT, "a branch row carries a distinct stable id"
+    # A branch row mints its own id at the write; it never copies a session id.
+    assert branch.fno_id
+    assert branch.fno_id != REMINT
+    assert branch.fno_id != BIRTH
     assert branch.name != live_a.name
     assert entry.name == branch.name
 

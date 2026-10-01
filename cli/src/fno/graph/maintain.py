@@ -1120,6 +1120,26 @@ def now_overflow(
 AUTO_DEFER_BLAST_CAP = 10
 
 
+def _now_wip_cap() -> int:
+    """The Now column's WIP cap from the GLOBAL config (config.toml-first).
+
+    Reads ``config.kanban.wip_caps`` directly via ``read_global_block``, the
+    same walk the old board renderer used: a malformed or absent block
+    degrades to the 20 default rather than raising into the maintain pass.
+    """
+    try:
+        from fno.config_io import read_global_block
+
+        kanban = read_global_block("kanban") or {}
+        raw = kanban.get("wip_caps") or {}
+        now = raw.get("now") if isinstance(raw, dict) else None
+        if isinstance(now, int) and not isinstance(now, bool) and now > 0:
+            return now
+    except Exception:
+        pass
+    return 20
+
+
 @dataclass
 class FailureDefer:
     node_id: str
@@ -2401,7 +2421,6 @@ def run_pass(
     from fno.graph.statuses import recompute_statuses
     from fno.graph._intake import _find_node
     from fno.graph.render import make_kanban_column
-    from fno.graph.render_html import _load_wip_caps
 
     # Read once; derive status so the judgment legs see accurate states.
     entries = recompute_statuses(read_graph_strict(graph_path()))
@@ -2539,7 +2558,7 @@ def run_pass(
         stale_ready_cands = stale_ready_cands[: AUTO_DEFER_BLAST_CAP]
     legs_done.append(("stale-ready", str(len(stale_ready_cands))))
 
-    now_cap = _load_wip_caps().get("now", 20)
+    now_cap = _now_wip_cap()
     overflow = _leg("now-cap",
                     lambda: now_overflow(entries, now_cap, make_kanban_column(entries)))
 

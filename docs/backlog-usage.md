@@ -110,7 +110,7 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
-The local `~/.fno/pages/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write the graph store. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
+The board (the served web backlog, and the same page written to disk by the render pass with the rows embedded) shows a vote pill on EVERY row and the count in the detail panel's demand group. A row with no encounter yet reads `0`, muted. On the served board the panel's upvote action posts the encounter with the evidence you type; on a page opened from disk the copy button hands you `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"` to paste and fill. The page never writes the store from a `file://` open.
 
 `demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
 
@@ -488,10 +488,9 @@ A curated view for advertising an OSS project's roadmap. Qualifying nodes are pu
 
 ```bash
 fno backlog update <id> --no-public
-fno backlog roadmap --project fno --out ROADMAP.md \
-  --html roadmap.html --backlog-html backlog.html
+fno backlog roadmap --project fno --out ROADMAP.md
 ```
 
-The roadmap emits only title / priority / size grouped Now / Next / Later / Shipped (Triage folds into Later). The public backlog groups open `idea`, `ready`, `in_progress`, and `blocked` work by subsystem. Neither projection emits IDs, details, plan paths, cwd, blockers, PR links, or sessions.
+The roadmap emits only title / priority / size grouped Now / Next / Later / Shipped (Triage folds into Later), markdown only: the rendered public HTML projections retired with the second board (2026-09-30), and the flags refuse by name. The output emits no IDs, details, plan paths, cwd, blockers, PR links, or sessions.
 
 Before any public file is replaced, the shared gate scans every emitted title for PR references, graph IDs, home paths, and session IDs. One offender makes the command exit nonzero, prints the complete cleanup queue on private stderr, and leaves every requested output unchanged.

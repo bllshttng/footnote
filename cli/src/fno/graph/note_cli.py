@@ -41,8 +41,10 @@ def cmd_note(
     """Record progress on a node by REPLACING its current state.
 
     The prior state lands in permanent history. Read it with
-    `fno backlog notes history <id>`. Nobody bound refuses BEFORE
-    the write: exit 3. No send confirmed: exit 4. ``--quiet`` writes anyway.
+    `fno backlog notes history <id>`. A state another session wrote refuses
+    unless --replace (exit 3, the append recipe is in the refusal). Nobody
+    bound refuses BEFORE the write: exit 3. No send confirmed: exit 4.
+    ``--quiet`` writes anyway; it never bypasses the cross-session guard.
     """
     from fno.decide import (
         UnmeasuredClaimError,
@@ -55,6 +57,10 @@ def cmd_note(
     from fno.text_or_file import read_text_arg
 
     extra = list(ctx.args)
+    # --replace (the cross-session door) rides the passthrough: the Python
+    # flag surface is shrink-only, so the flag is read out of extra rather
+    # than declared as an option parameter.
+    replace = "--replace" in extra
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:
         from fno.rust_binary import resolve_binary
@@ -125,10 +131,12 @@ def cmd_note(
         session_id=session_id,
         graph_path=graph_path,
         reads=read_rows,
+        replace=replace,
     )
     if code != 0:
-        # 1 = budget refusal, 3 = a stale revision conflict; the child
-        # printed the reason on stderr.
+        # 1 = budget refusal, 3 = a refusal that wrote nothing (the
+        # cross-session guard, or a stale revision); the child printed the
+        # reason on stderr.
         raise typer.Exit(code=code)
 
     if claims:
@@ -219,6 +227,7 @@ def _write_state(
     session_id: Optional[str],
     graph_path,
     reads=None,
+    replace: bool = False,
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -236,6 +245,8 @@ def _write_state(
         argv.extend(["--self-session", session_id])
     if quiet:
         argv.append("--quiet")
+    if replace:
+        argv.append("--replace")
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
     if proc.returncode != 0:
         import sys

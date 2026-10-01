@@ -1409,8 +1409,11 @@ mod tests {
         );
         let (exit, _, stderr) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
         assert_eq!(exit, 0);
+        // Not `is_empty`: the success path takes the machine-wide
+        // test:priority claim, so a sibling test mid-sync legitimately adds
+        // the "held by worktree:..." note. The contract here is no REFUSAL.
         assert!(
-            stderr.is_empty(),
+            !stderr.iter().any(|l| l.contains("refusing")),
             "casing mismatch must not refuse: {stderr:?}"
         );
         assert!(*ran.borrow(), "a casing-only mismatch must proceed to sync");

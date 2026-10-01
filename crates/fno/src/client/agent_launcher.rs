@@ -136,6 +136,23 @@ pub(crate) enum Focus {
 }
 
 impl Focus {
+    /// The chip's spoken name, for the keybar's Enter hint: the hint names
+    /// the chip Enter opens instead of a generic "open/launch".
+    fn name(self) -> &'static str {
+        match self {
+            Self::Where => "where",
+            Self::Project => "project",
+            Self::Branch => "branch",
+            Self::Worktree => "worktree",
+            Self::Message => "message",
+            Self::Plus => "flags",
+            Self::Permission => "permission",
+            Self::Harness => "harness",
+            Self::Model => "model",
+            Self::Effort => "effort",
+        }
+    }
+
     /// The chip-row cycle, in paint order. The Branch chip and worktree box
     /// join only when the draft project's facts admit branching (a non-git
     /// project has neither); the effort chip joins only when the catalog
@@ -380,6 +397,9 @@ pub(crate) struct LaunchDraft {
     pub model: String,
     /// The configured routing row picked on the model chip.
     pub model_row: Option<String>,
+    /// The picked row's `vendor/model` route, riding alone at submit: a
+    /// route owns the model, so the request never pairs it with `model`.
+    pub route: String,
     /// The provider of the selected configured route, when present.
     pub provider: String,
     pub effort: String,
@@ -465,17 +485,28 @@ impl LaunchDraft {
                 }
                 Placement::PaneActiveTab => ("pane", Some("active"), None, None),
             };
+        // A routing-row pick rides its ROUTE pin: a route owns the model, so
+        // model and provider never join it. codex and opencode are the
+        // carve-outs: their rows are slugs/ids their own CLI consumes, so the
+        // id rides as --model (a derived openai/... route is claude-only at
+        // the door).
+        let native_model_pin = matches!(self.harness().as_str(), "codex" | "opencode");
         AgentLaunchRequest {
             request_id,
             revision: self.revision,
             cwd: self.cwd(),
             harness: self.harness(),
             substrate: substrate.to_string(),
-            model: non_empty(&self.model),
-            provider: if self.harness() == "opencode" && self.model_row.is_some() {
+            model: if !self.route.is_empty() && !native_model_pin {
                 None
             } else {
-                non_empty(&self.provider)
+                non_empty(&self.model)
+            },
+            provider: None,
+            route: if native_model_pin {
+                None
+            } else {
+                non_empty(&self.route)
             },
             // The composer owns all three axes; keep the selected harness on
             // the request even when a model row also names a provider.
@@ -609,6 +640,7 @@ fn apply_chip_pin(l: &mut Launcher, flag: &str, value: &str) {
         "--model" => {
             l.draft.model = value.to_string();
             l.draft.model_row = None;
+            l.draft.route.clear();
         }
         "--effort" => l.draft.effort = value.to_string(),
         "--harness" => {
@@ -871,6 +903,7 @@ fn fresh_draft(view: &View) -> LaunchDraft {
         node: None,
         model: String::new(),
         model_row: None,
+        route: String::new(),
         provider: String::new(),
         effort: String::new(),
         permission: String::new(),
@@ -1089,7 +1122,7 @@ async fn submit(
     request.extra_flags = extra_flags;
     request.worktree = worktree;
     request.branch = branch;
-    if (request.provider.is_some() || !request.extra_flags.is_empty())
+    if (request.provider.is_some() || request.route.is_some() || !request.extra_flags.is_empty())
         && !supports_launch_extra_axes(&view.session)
     {
         l.phase = Phase::Refused {
@@ -1827,6 +1860,7 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         if !offered {
             draft.model.clear();
             draft.model_row = None;
+            draft.route.clear();
             draft.bump();
         }
     }
@@ -3183,6 +3217,7 @@ pub(crate) fn apply_picker_action(
             }
             l.draft.model = model;
             l.draft.model_row = Some(name.clone());
+            l.draft.route = route.clone();
             l.draft.provider = provider.unwrap_or_default();
             let recent_model = ModelChoice {
                 name: name.clone(),
@@ -3209,6 +3244,7 @@ pub(crate) fn apply_picker_action(
         PickerAction::ClearModel => {
             l.draft.model.clear();
             l.draft.model_row = None;
+            l.draft.route.clear();
             l.draft.provider.clear();
             l.draft.bump();
         }
@@ -3220,6 +3256,7 @@ pub(crate) fn apply_picker_action(
                 // cannot name; its own effort/permission judgment follows.
                 l.draft.model.clear();
                 l.draft.model_row = None;
+                l.draft.route.clear();
                 clear_unoffered_pins(&mut l.draft, catalog);
             }
         }
@@ -3886,12 +3923,24 @@ impl Launcher {
                 RtStyle::new(),
             );
         }
-        buf.set_string(
-            0,
-            (keybar_y + 1).min((body_h as u16).saturating_sub(1)),
-            self.footer(),
-            RtStyle::new().add_modifier(Modifier::DIM),
-        );
+        // The lifecycle line wraps inside the sheet instead of clipping at
+        // the width: a refusal reason cut mid-sentence hid its own remedy.
+        // One row is the floor: a too-short terminal still shows the line's
+        // head, as the single clipped row always did.
+        let footer_y = usize::from(keybar_y + 1);
+        let footer_rows = body_h.saturating_sub(footer_y).max(1);
+        for (i, (_, line)) in wrap_message(&self.footer(), inner_w)
+            .into_iter()
+            .take(footer_rows)
+            .enumerate()
+        {
+            buf.set_string(
+                0,
+                u16::try_from(footer_y + i).unwrap_or(u16::MAX),
+                line,
+                RtStyle::new().add_modifier(Modifier::DIM),
+            );
+        }
         crate::ratatui_blit::blit_area(&buf, oy, ox, cells, cols);
     }
 }
@@ -3903,16 +3952,24 @@ impl Launcher {
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             return "esc cancel".to_string();
         }
-        // One grammar for the whole chip row: Tab moves, Enter opens a
-        // picker (or launches from the input). ^j is a newline in the input
-        // and the launch-from-anywhere key from a chip, so the hint names
-        // the behavior the focused control actually has.
+        // One grammar for the whole chip row: Tab moves, Enter opens the
+        // focused chip's picker or launches from the input - the hint names
+        // which, so the footer never advertises a generic "open/launch".
+        // ^j is a newline in the input and the launch-from-anywhere key from
+        // a chip.
+        let enter = if self.focus == Focus::Message {
+            "\u{21b5} launch".to_string()
+        } else if self.focus == Focus::Worktree {
+            "\u{21b5} toggle worktree".to_string()
+        } else {
+            format!("\u{21b5} open {}", self.focus.name())
+        };
         let ctrl_j = if self.focus == Focus::Message {
             "^j newline"
         } else {
             "^j launch"
         };
-        format!("\u{21b5} open/launch \u{b7} tab next \u{b7} {ctrl_j} \u{b7} esc close")
+        format!("{enter} \u{b7} tab next \u{b7} {ctrl_j} \u{b7} esc close")
     }
 }
 

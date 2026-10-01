@@ -4128,7 +4128,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
     // extended window instead of respecting its own 10s bound.
     let is_wait = matches!(verb, ControlVerb::PaneWait { .. });
     let stream = if is_run {
-        match crate::client::connect_or_spawn(sock) {
+        match crate::client::connect_or_spawn(sock, false) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("fno mux pane: {e}");
@@ -4389,9 +4389,9 @@ fn render_reply(
 ) -> i32 {
     match reply {
         ServerMsg::PaneList { mut panes } => {
-            // `pane ls --fno-id <id>` filters to panes carrying that id.
+            // `pane ls --fno-id` keeps panes answering to either id spelling.
             if let Some(want) = ls_fno_id {
-                panes.retain(|p| p.fno_id.as_deref() == Some(want));
+                panes.retain(|p| p.answers_id(want));
             }
             if json {
                 // Each row carries `fno_id_state` beside the raw

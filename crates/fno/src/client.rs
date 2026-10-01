@@ -38,6 +38,9 @@ use crate::chrome;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
+mod wire_version;
+use row_menu::execute_row_menu_action;
+use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
@@ -46,6 +49,7 @@ use row_menu::{build_row_menu, build_tab_menu};
 
 // Pickers, the launch moment and the snapshot action live in their own
 // modules: client.rs is shrink-only under the file-budget gate.
+pub(crate) mod attach_handshake;
 mod launch;
 mod placement_pickers;
 pub mod snapshot;
@@ -96,9 +100,9 @@ pub(crate) use name_fit::{fit_name, pad_to};
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Connect bound for the attach path. Longer than the scriptable verbs'
-/// probe (a human is willing to wait a beat) but never infinite: a wedged
-/// server must produce a clear line, not a hang.
+/// One connect attempt on the attach path. Longer than the scriptable verbs'
+/// probe. A script refuses when it expires; a human attach says it is still
+/// waiting and tries again.
 const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sideline width in columns at [`Density::Regular`], divider column included.
@@ -402,7 +406,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     }
     let path = proto::socket_path(session)?;
 
-    let stream = connect_or_spawn(&path)?;
+    let stream = connect_or_spawn(&path, true)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
@@ -426,34 +430,40 @@ fn client_log_append(path: &Path, msg: &str) {
 /// server's stale socket gets a one-line notice and a fresh server - never a
 /// hang on a dead socket (the spawned server's bind unlinks it). Shared with
 /// `mux_cli::pane run`, which must self-spawn a server for a script-only
-/// session (AC1-EDGE).
-pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+/// session (AC1-EDGE). `patient` is the human attach: a slow or starved
+/// server gets one "still waiting" line and more time, never a refusal.
+pub(crate) fn connect_or_spawn(
+    path: &Path,
+    patient: bool,
+) -> Result<std::os::unix::net::UnixStream, String> {
     // spawn_server opens a log file in the mux dir, so the dir must exist first.
     // pane run reaches here without going through run_inner's ensure (AC1-EDGE).
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
-    match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
-        Ok(s) => {
-            e2e_client_log(format_args!(
-                "connected to live server at {}",
-                path.display()
-            ));
-            return Ok(s);
-        }
-        // A connect timeout means something holds the socket but never
-        // accepted: a wedged server. Spawning over it would just lose the
-        // bind race, so report instead - never hang, never clobber.
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(format!(
-                "server at {} is not accepting connections (connect timed out); it is \
-                 wedged. Run `fno mux kill-server` for this session: it escalates to \
-                 SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
-                 then retry.",
-                path.display(),
+    let mut said = false;
+    let mut still_waiting = |what: &str| {
+        if !std::mem::replace(&mut said, true) {
+            eprintln!(
+                "fno: {what}, still waiting (Ctrl-C to stop; check {})",
                 log_path(path).display()
-            ));
+            );
         }
-        Err(e) => {
-            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+    };
+    loop {
+        match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
+            Ok(s) => {
+                e2e_client_log(format_args!(
+                    "connected to live server at {}",
+                    path.display()
+                ));
+                return Ok(s);
+            }
+            // Something holds the socket but is not accepting: a starved or
+            // wedged server. A human waits it out; spawning over it would
+            // only lose the bind race.
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut && patient => {
+                still_waiting("server is busy");
+            }
+            Err(e) => break connect_failed(path, e)?,
         }
     }
     if path.exists() {
@@ -464,6 +474,10 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
     loop {
         match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
             Ok(s) => return Ok(s),
+            Err(_) if Instant::now() >= deadline && patient => {
+                still_waiting("server is slow to start");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!(
                     "server did not come up at {} ({e}); check {}",
@@ -472,6 +486,25 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
                 ));
             }
             Err(_) => std::thread::sleep(Duration::from_millis(30)),
+        }
+    }
+}
+
+/// A first connect that failed: a timeout refuses (the non-patient caller
+/// never clobbers a wedged server), anything else means spawn a server.
+fn connect_failed(path: &Path, e: std::io::Error) -> Result<(), String> {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => Err(format!(
+            "server at {} is not accepting connections (connect timed out); it is \
+             wedged. Run `fno mux kill-server` for this session: it escalates to \
+             SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
+             then retry.",
+            path.display(),
+            log_path(path).display()
+        )),
+        _ => {
+            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+            Ok(())
         }
     }
 }
@@ -1013,6 +1046,11 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The attached server's wire version, announced on every Layout (v97).
+    /// `None` until the first layout arrives and forever on an older server;
+    /// commands the announcement predates are refused client-side rather
+    /// than sent into an unknown-variant read failure.
+    server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     sideline_view: crate::view_store::SidelineView,
@@ -2052,6 +2090,7 @@ impl View {
             user_themes: Vec::new(),
             pending_ground: None,
             backlog: Vec::new(),
+            server_proto: None,
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
@@ -8000,8 +8039,8 @@ async fn attach_and_run(
     }
     crate::keys::install(keymap);
     // Held, not stamped. The TTL is an absolute instant, and everything between
-    // here and the first paint - a handshake allowed ten seconds, then a
-    // catch-up fold - happens before anyone could read it. Stamped at the point
+    // here and the first paint - a handshake that may wait on a busy server,
+    // then a catch-up fold - happens before anyone could read it. Stamped at the point
     // the notice can first be SEEN, or a slow server turns "your config was
     // refused" back into the silence this notice exists to break.
     let key_notice = key_warnings
@@ -8024,108 +8063,8 @@ async fn attach_and_run(
     .await
     .map_err(|e| format!("attach failed: {e}"))?;
 
-    // The first Layout (or refusal) decides everything, BEFORE the terminal
-    // is taken over, so a refusal prints as a plain one-liner (AC1-ERR,
-    // version skew). ModeSync may precede it on the reliable channel - stash
-    // and apply once the TUI owns the terminal.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stashed_modesync: Vec<u8> = Vec::new();
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| format!("server did not answer the attach; {log_hint}"))?;
-        let msg = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
-            .await
-            .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
-        match msg {
-            Ok(ServerMsg::Layout {
-                squads,
-                active_squad,
-                panes,
-                focus,
-                area,
-                agents,
-                focus_node,
-                backlog,
-                ..
-            }) => {
-                view.set_layout(LayoutView {
-                    squads,
-                    active_squad,
-                    panes,
-                    focus,
-                    area,
-                    agents,
-                    focus_node,
-                });
-                // The launcher's node picker composes over the feed even
-                // though the sidebar no longer renders it.
-                view.backlog = backlog;
-                break;
-            }
-            Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
-            Ok(ServerMsg::Bye { reason }) => return Err(reason),
-            Ok(ServerMsg::Frame { pane_id, frame }) => {
-                // Tolerated out-of-order preamble: keep it; the Layout names
-                // its rect a message later. The wire trust boundary holds
-                // even here: a geometry-inconsistent frame is refused loudly
-                // (like a malformed message), never skipped or drawn.
-                if !frame.geometry_ok() {
-                    return Err(format!(
-                        "malformed frame from server: {}x{} but {} cells",
-                        frame.rows,
-                        frame.cols,
-                        frame.cells.len()
-                    ));
-                }
-                view.frames.insert(pane_id, frame);
-            }
-            // Info answers a pre-Attach Query; the v4 control-verb replies
-            // answer one-shot `fno mux pane` connections. Neither belongs on
-            // an attached connection - ignore rather than desync.
-            Ok(
-                ServerMsg::Notice { .. }
-                | ServerMsg::Info { .. }
-                | ServerMsg::PaneList { .. }
-                | ServerMsg::PaneText { .. }
-                | ServerMsg::PaneSpawned { .. }
-                | ServerMsg::Ok
-                | ServerMsg::WaitDone { .. }
-                | ServerMsg::Err { .. }
-                // Copy and OpenLink answer a mouse-release, and SearchResult
-                // answers a search - all can only follow attach: stray in the
-                // preamble, ignore rather than desync. LinkHover answers a
-                // hover probe (same class).
-                | ServerMsg::Copy { .. }
-                | ServerMsg::OpenLink { .. }
-                | ServerMsg::SearchResult { .. }
-                | ServerMsg::LinkHover { .. }
-                // PeekBody answers a post-attach PeekAgent: impossible
-                // in the preamble, ignore rather than desync.
-                | ServerMsg::PeekBody { .. }
-                // (v41) Script-layout control-verb replies: only ever sent on a
-                // one-shot control connection, never to an attached client.
-                | ServerMsg::TabList { .. }
-                | ServerMsg::LayoutTree { .. }
-                | ServerMsg::PaneLocation { .. }
-                | ServerMsg::TabSpawned { .. }
-                | ServerMsg::PaneFocused { .. }
-                | ServerMsg::LayoutApplied { .. }
-                | ServerMsg::LayoutGrafted { .. }
-                | ServerMsg::TabLocation { .. }
-                | ServerMsg::TabClosed { .. }
-                // (v60/v71/v75/v78) one-shot control-verb replies: never
-                // attached-client traffic.
-                | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
-                | ServerMsg::ServerStats { .. },
-            ) => {}
-            // A launch update cannot precede attach; ignore a misaddressed
-            // one rather than failing the handshake.
-            Ok(ServerMsg::AgentLaunch(_)) => {}
-            Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
-        }
-    }
+    let stashed_modesync =
+        attach_handshake::read_preamble(&mut sock_r, &mut view, &log_hint).await?;
 
     // Socket reads get their own task. `read_msg` is NOT cancellation-safe
     // (a select! that drops it between the length prefix and the body loses
@@ -8631,9 +8570,10 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, .. }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, proto, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
                     view.backlog = backlog;
+                    view.server_proto = proto;
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -9630,6 +9570,12 @@ async fn dispatch_event(
             view.reveal_pane_ids_at(Instant::now());
         }
         Event::Cmd(cmd) => {
+            if let Command::SplitDir(_) = cmd {
+                if !server_has_splitdir(view.server_proto) {
+                    view.set_notice(split_skew_notice());
+                    return Ok(DispatchFlow::Continue);
+                }
+            }
             view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
                 .await
@@ -10159,526 +10105,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
-/// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
-/// P1), never a misrouted action; every action maps to an existing Command /
-/// overlay / confirm (zero proto).
-async fn execute_row_menu_action(
-    view: &mut View,
-    action: MenuAction,
-    target: MenuTarget,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    let target = match (target, action) {
-        // The section menu's clear-dead action, resolved against the
-        // section rather than a single row.
-        (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
-            return clear_dead_confirm(view, key, label, squad);
-        }
-        // A workspace section's Rename opens the same overlay as selector `r`
-        //. The id is the section's squad, so a non-workspace header
-        // (`squad: None`) can never reach it - it falls to the refuse arm below.
-        (
-            MenuTarget::Section {
-                squad: Some(id), ..
-            },
-            MenuAction::Rename,
-        ) => {
-            view.open_rename(RenameTarget::Squad(id));
-            return Ok(());
-        }
-        // A workspace section's Move up/down sends the same `MoveSquad` the
-        // selector's `J`/`K` send; the server clamps at the edges silently, so
-        // an at-edge click is a no-op exactly like the key.
-        (
-            MenuTarget::Section {
-                squad: Some(sq), ..
-            },
-            MenuAction::MoveSquad(delta),
-        ) => {
-            view.sel_follow = Some(sq);
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
-            )
-            .await
-            .map_err(|e| format!("move-workspace send failed: {e}"))?;
-            return Ok(());
-        }
-        // A workspace section's Remove opens the SAME confirm the keyboard
-        // path builds - the destructive-action gate, never skipped by a mouse.
-        (
-            MenuTarget::Section {
-                squad: Some(sq), ..
-            },
-            MenuAction::RemoveSquad,
-        ) => {
-            let Some(s) = view.layout.squads.iter().find(|s| s.id == sq) else {
-                view.set_notice("workspace is no longer here".into());
-                return Ok(());
-            };
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::RemoveSquad {
-                    squad: sq,
-                    panes: s.panes,
-                    last: view.layout.squads.len() == 1,
-                },
-                label: s.name.clone(),
-            });
-            return Ok(());
-        }
-        // (5.1) The tab menu: every item re-resolves the pinned tab id
-        // against the live layout first, so a tab that closed or moved between
-        // open and pick is a notice, never a redirected action.
-        (MenuTarget::Tab(_tid), MenuAction::TabNew) => {
-            view.note_command_sent(&Command::NewTab);
-            write_msg(sock_w, &ClientMsg::Command(Command::NewTab))
-                .await
-                .map_err(|e| format!("new-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabRename) => {
-            if view.find_tab(tid).is_none() {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            }
-            view.open_rename(RenameTarget::Tab(tid));
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabReorder(delta)) => {
-            // The squad is resolved at execute, not carried from the menu: a
-            // tab can move workspaces between open and pick, and ReorderTab
-            // names both ids explicitly.
-            let Some((squad, _, _)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ReorderTab {
-                    squad,
-                    tab: tid,
-                    delta,
-                }),
-            )
-            .await
-            .map_err(|e| format!("reorder-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabMoveTo) => {
-            // Same execute-time re-resolution as the reorder pair: a tab that
-            // closed or moved between open and pick is a notice, never a
-            // redirected action.
-            if view.find_tab(tid).is_none() {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            }
-            view.open_move_to(tid);
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabJoin(dir)) => {
-            // Join the whole tab into the VIEWED tab as a split of the focused
-            // pane - the menu twin of dragging the tab cell onto a content
-            // edge. A join into itself is suppressed client-side (the wire's
-            // own rule), so it is named as a refusal rather than sent.
-            let Some((_, _, tab)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            if tab.panes.iter().any(|p| p.id == view.layout.focus) {
-                view.set_notice("cannot join a tab into itself".into());
-                return Ok(());
-            }
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::JoinTab {
-                    src_tab: tid,
-                    anchor_pane: view.layout.focus,
-                    dir,
-                }),
-            )
-            .await
-            .map_err(|e| format!("join-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabSplit(dir)) => {
-            // Split the viewed tab from its own cell: a SplitDir on the
-            // focused pane, the menu twin of the `%` family. The menu only
-            // builds Split rows on the viewed tab, so a non-viewed target
-            // here is a stale menu; name it rather than guess.
-            if view.active_squad_active_tab_id() != Some(tid) {
-                view.set_notice("split acts on the viewed tab".into());
-                return Ok(());
-            }
-            write_msg(sock_w, &ClientMsg::Command(Command::SplitDir(dir)))
-                .await
-                .map_err(|e| format!("split-tab send failed: {e}"))?;
-            return Ok(());
-        }
-        (MenuTarget::Tab(tid), MenuAction::TabClose) => {
-            let Some((_, _, tab)) = view.find_tab(tid) else {
-                view.set_notice("tab is no longer here".into());
-                return Ok(());
-            };
-            // A confirm owns the bottom row; a too-short terminal refuses
-            // rather than arm an invisible prompt (same gate as stop/remove).
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::CloseTab { tab: tid },
-                label: tab.name.clone(),
-            });
-            return Ok(());
-        }
-        // A menu is built for exactly one target kind, so a crossed pair can only
-        // come from a bug; refuse rather than guess at a target.
-        (MenuTarget::Section { .. }, _)
-        | (MenuTarget::Tab(_), _)
-        | (_, MenuAction::ClearDead)
-        | (_, MenuAction::TabNew)
-        | (_, MenuAction::TabRename)
-        | (_, MenuAction::TabReorder(_))
-        | (_, MenuAction::TabMoveTo)
-        | (_, MenuAction::TabJoin(_))
-        | (_, MenuAction::TabSplit(_))
-        | (_, MenuAction::TabClose) => {
-            view.set_notice("action does not apply to this row".into());
-            return Ok(());
-        }
-        (MenuTarget::Agent(a), _) => a,
-    };
-    // Fail closed unless the identity resolves to EXACTLY one live row: two rows
-    // sharing a name must never let a menu act on the wrong one (codex P1).
-    let mut hits = view.layout.agents.iter().filter(|a| target.matches(a));
-    let a = match (hits.next(), hits.next()) {
-        (Some(a), None) => a.clone(),
-        _ => {
-            view.set_notice(format!("agent {} is no longer uniquely here", target.name));
-            return Ok(());
-        }
-    };
-    match action {
-        MenuAction::OpenHere => {
-            let Some(id) = a.attach_id.clone() else {
-                view.set_notice("agent is no longer attachable".into());
-                return Ok(());
-            };
-            write_msg(sock_w, &ClientMsg::Command(Command::attach_agent_here(id)))
-                .await
-                .map_err(|e| format!("attach send failed: {e}"))?;
-        }
-        MenuAction::NewTab | MenuAction::Split(_) => {
-            let Some(id) = a.attach_id.clone() else {
-                view.set_notice("agent is no longer attachable".into());
-                return Ok(());
-            };
-            let split = match action {
-                MenuAction::Split(d) => Some(d),
-                _ => None,
-            };
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::AttachAgent {
-                    id,
-                    placement: PanePlacement {
-                        target: PaneTarget::CurrentRoute,
-                        split,
-                        ..Default::default()
-                    },
-                }),
-            )
-            .await
-            .map_err(|e| format!("attach send failed: {e}"))?;
-        }
-        // Where the pane already IS decides what "move it `dir`" can mean, so
-        // the destination is chosen on that and nothing else.
-        MenuAction::MoveDir(dir) => match a.pane_id {
-            Some(pid) => {
-                // On screen: step one place `dir`-ward from the pane itself, so
-                // leave `target` unset and let the server navigate from the
-                // mover - the geometry the keyboard bind uses. Naming the focus
-                // here would instead teleport the pane across any panes between
-                // them, and whenever it already sits `dir`-ward of the focus the
-                // reshape is identical to the current tree, which `move_leaf`
-                // reports as an origin drop and the server discards WITHOUT a
-                // notice - a menu entry that does nothing and says nothing.
-                //
-                // Off screen: there is no meaningful in-tab neighbour to step
-                // toward, so name the viewed focus and let the server graft the
-                // pane into the current view (the cross-tab arm). That is the
-                // destination `commit_row_drag` names from its drop zone.
-                let on_screen = view.layout.panes.iter().any(|(id, _)| *id == pid);
-                let target = (!on_screen).then_some(view.layout.focus);
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::MovePane {
-                        mover: Some(pid),
-                        target,
-                        dir,
-                    }),
-                )
-                .await
-                .map_err(|e| format!("move send failed: {e}"))?;
-            }
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::BreakOut => match a.pane_id {
-            Some(pid) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::BreakPane { pane: pid }),
-            )
-            .await
-            .map_err(|e| format!("break send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Detach => match (a.pane_id, a.exited) {
-            (Some(pid), false) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::DetachPane { pane: pid }),
-            )
-            .await
-            .map_err(|e| format!("detach send failed: {e}"))?,
-            _ => view.set_notice("only a live pane-hosted worker can detach".into()),
-        },
-        MenuAction::ClosePortal => match a.pane_id {
-            // One command, the seat named: FocusPane plus ClosePane would
-            // close whatever holds focus if the seat vanished between the
-            // two sends.
-            Some(pid) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ClosePortal { seat: pid }),
-            )
-            .await
-            .map_err(|e| format!("close portal send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::PortalPicker => {
-            // One decision path with sideline `P`: the picker itself refuses
-            // what it cannot show (not attachable, no open portals to keep).
-            match view.portal_pick_decision(Some(&a)) {
-                PortalPickDecision::Open(id) => view.open_portal_pick(id),
-                PortalPickDecision::Refuse(text) => view.set_notice(text),
-            }
-        }
-        MenuAction::MoveToWorkspace => match a.pane_id {
-            Some(pid) => {
-                // Recomputed at execute (a workspace added or removed between
-                // open and pick is reflected); `move_pick_keys` re-validates.
-                let dsts = view.move_dst_squads(a.squad);
-                if dsts.is_empty() {
-                    view.set_notice("no other workspace to move into".into());
-                } else {
-                    view.open_move_pick(MoveSrc::Pane(pid), dsts);
-                }
-            }
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Focus => match a.pane_id {
-            Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
-                .await
-                .map_err(|e| format!("focus send failed: {e}"))?,
-            None => view.set_notice("agent has no pane here".into()),
-        },
-        MenuAction::Diff => {
-            // Send the pane too: the server prefers it, which keeps the diff on
-            // the row that was clicked when two share a name, and reaches a row
-            // the registry never had.
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::ToggleDiffPane {
-                    agent: Some(a.name.clone()),
-                    pane: a.pane_id,
-                }),
-            )
-            .await
-            .map_err(|e| format!("diff send failed: {e}"))?;
-        }
-        MenuAction::RenameAgent => {
-            // The CURRENT label, re-resolved at execute above (a rename
-            // between menu-open and pick addresses the live row), seeded so
-            // Enter with no edit lands on the verb's same-label no-op.
-            view.open_rename_seeded(RenameTarget::Agent(a.name.clone()), a.name.clone());
-        }
-        MenuAction::Peek | MenuAction::Mail => {
-            let idx = view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
-            match idx {
-                Some(idx) => {
-                    fetch_peek(view, idx, a.name.clone(), sock_w).await?;
-                    // (6.2) Mail arms the SAME free-text composer peek
-                    // `m` opens - one input surface, two doors.
-                    if matches!(action, MenuAction::Mail) {
-                        view.peek_input = Some((a.name.clone(), String::new()));
-                        view.peek_input_esc.clear();
-                    }
-                }
-                None => view.set_notice("agent is no longer here".into()),
-            }
-        }
-        // (6.2) Resume: the same command peek `r` sends, re-checked
-        // against the row's LIVE state - a row that restarted on its own
-        // between open and pick must not be respawned again.
-        MenuAction::Resume => {
-            if a.exited {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::RespawnAgent {
-                        name: a.name.clone(),
-                    }),
-                )
-                .await
-                .map_err(|e| format!("respawn send failed: {e}"))?;
-            } else {
-                view.set_notice("only an exited row can resume".into());
-            }
-        }
-        MenuAction::Reattach => {
-            if !a.exited && a.pane_id.is_none() {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::ResumeAgent {
-                        name: a.name.clone(),
-                    }),
-                )
-                .await
-                .map_err(|e| format!("reattach send failed: {e}"))?;
-            } else {
-                view.set_notice("only a live paneless row can reattach".into());
-            }
-        }
-        // Unreachable: Rename is built only for a workspace section, which
-        // returns above. Visible refusal over a silent no-op.
-        MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
-        MenuAction::Stop | MenuAction::Remove => {
-            let kind = match action {
-                MenuAction::Stop => match (a.external, a.attach_id.clone()) {
-                    (true, Some(id)) => ConfirmKind::StopExternal {
-                        attach_id: id,
-                        name: a.name.clone(),
-                    },
-                    _ => ConfirmKind::StopAgent {
-                        name: a.name.clone(),
-                        sid: a.harness_session_id.clone(),
-                        pane_id: a.pane_id,
-                    },
-                },
-                // Remove routes by row KIND through [`remove_dead`], the same
-                // mapping the bulk clear uses, so the single-row and section
-                // paths cannot disagree about which store owns a dead row.
-                _ => match remove_dead(&a) {
-                    Command::DismissMember { squad, attach_id } => {
-                        ConfirmKind::DismissMember { squad, attach_id }
-                    }
-                    Command::RemoveExternal { attach_id, name } => {
-                        ConfirmKind::RemoveExternal { attach_id, name }
-                    }
-                    _ => ConfirmKind::RemoveAgent {
-                        name: a.name.clone(),
-                        sid: a.harness_session_id.clone(),
-                        pane_id: a.pane_id,
-                        measure: agent_lattice_state(&a) == LatticeState::Unmeasured,
-                    },
-                },
-            };
-            // (scope a+c) Same post-commit re-anchor slot the bare `x`
-            // arms: the sideline stays open, the cursor stays on the row.
-            view.row_slot = view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
-            // The confirm pref arms the overlay; the default (off)
-            // dispatches the SAME command the confirm would commit, so the two
-            // paths cannot disagree about what a gesture sends. The
-            // too-short-terminal guard rides the confirm branch only: it exists
-            // so the prompt is visible, which the default never shows.
-            if view.confirm_lifecycle {
-                // A confirm owns the bottom row; a too-short terminal refuses
-                // rather than arm an invisible prompt (matching the selector's
-                // stop/reap).
-                if view.term.0 < MIN_ROWS_FOR_STATUS {
-                    view.set_notice("terminal too short for the confirm prompt".into());
-                    return Ok(());
-                }
-                view.open_confirm(ConfirmAction {
-                    action: kind,
-                    label: a.name.clone(),
-                });
-            } else {
-                // The confirm path stamps the row when it commits; the default
-                // dispatch gets the same treatment, so the outcome notice
-                // renders at the row either way.
-                view.arm_row_stamp(&kind);
-                let sent = match kind.command() {
-                    Some(cmd) => {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("lifecycle dispatch send failed: {e}"))?;
-                        true
-                    }
-                    None => false,
-                };
-                if sent {
-                    view.reanchor_after_row_commit(Some(a.name.as_str()));
-                }
-            }
-        }
-        // Only ever built alongside `MenuTarget::Section`, which returned above.
-        // A Notice rather than `unreachable!` - a panic here would take the whole
-        // multiplexer down over a menu-construction bug.
-        MenuAction::ClearDead => view.set_notice("clear dead needs a section header".into()),
-        MenuAction::MoveSquad(_) | MenuAction::RemoveSquad => {
-            view.set_notice("move and remove need a workspace section header".into())
-        }
-        // Unreachable: the tab actions all pair with `MenuTarget::Tab`, which
-        // returns in the target match above. Visible refusal over a no-op.
-        MenuAction::TabNew
-        | MenuAction::TabRename
-        | MenuAction::TabReorder(_)
-        | MenuAction::TabMoveTo
-        | MenuAction::TabJoin(_)
-        | MenuAction::TabSplit(_)
-        | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
-    }
-    Ok(())
-}
-
-/// Arm the clear-dead confirm for a section, over the dead set as it
-/// stands NOW rather than as the menu found it.
-fn clear_dead_confirm(
-    view: &mut View,
-    key: SectionKey,
-    label: String,
-    squad: Option<u64>,
-) -> Result<(), String> {
-    let dead = view
-        .section_dead_rows(&key, squad)
-        .len()
-        .min(CLEAR_DEAD_MAX);
-    if dead == 0 {
-        view.set_notice(format!("no dead rows in {label}"));
-        return Ok(());
-    }
-    // A confirm owns the bottom row; a too-short terminal refuses rather than
-    // arm an invisible prompt (matching the selector's stop/reap).
-    if view.term.0 < MIN_ROWS_FOR_STATUS {
-        view.set_notice("terminal too short for the confirm prompt".into());
-        return Ok(());
-    }
-    view.open_confirm(ConfirmAction {
-        action: ConfirmKind::ClearDead { key, squad, dead },
-        label,
-    });
-    Ok(())
 }
 
 /// Run the row menu's selected entry (Enter/click), then close - the popup never

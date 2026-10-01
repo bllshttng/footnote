@@ -43,6 +43,12 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/repo/.fno" "$T/home"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$CAPTURE"\n' > "$T/bin/fno"
 chmod +x "$T/bin/fno"
+# The init run mints its run id through `fno-agents state mint-id`, which used
+# to fall out of the ambient binary. The test double rides PATH under its own
+# name; each init case pins FNO_TEST_SPACE to the manifest dir its assertions
+# read, so the run passes with or without a real fno-agents on the machine.
+cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" "$T/bin/fno-agents"
+chmod +x "$T/bin/fno-agents"
 # HOME is sandboxed: finalize's ledger step runs the real fno.cost._register,
 # which writes ~/.fno/ledger.json. Without this the suite appends fixture rows
 # to the developer's own ledger, and then DEDUPES against it -- so a rerun takes
@@ -189,7 +195,7 @@ mkdir -p "$P/.fno" "$P/.home"
 git -C "$P" init -q 2>/dev/null
 git -C "$P" config user.email t@t && git -C "$P" config user.name t
 git -C "$P" commit -q --allow-empty -m base
-(cd "$P" && HOME="$P/.home" TARGET_START=1 TARGET_INPUT="x" \
+(cd "$P" && HOME="$P/.home" FNO_TEST_SPACE="$P/.fno" TARGET_START=1 TARGET_INPUT="x" \
     TARGET_LOCATION_OK=main-acknowledged bash "$INIT_SCRIPT") >/dev/null 2>&1
 STATE=$(cat "$P/.fno/target-state.md" 2>/dev/null || echo "")
 EXPECTED_HEAD=$(git -C "$P" rev-parse HEAD)
@@ -204,7 +210,7 @@ E="$T/empty"
 mkdir -p "$E/.fno" "$E/.home"
 git -C "$E" init -q 2>/dev/null
 git -C "$E" config user.email t@t && git -C "$E" config user.name t
-(cd "$E" && HOME="$E/.home" TARGET_START=1 TARGET_INPUT="x" \
+(cd "$E" && HOME="$E/.home" FNO_TEST_SPACE="$E/.fno" TARGET_START=1 TARGET_INPUT="x" \
     TARGET_LOCATION_OK=main-acknowledged bash "$INIT_SCRIPT") >/dev/null 2>&1
 ESTATE=$(cat "$E/.fno/target-state.md" 2>/dev/null || echo "")
 if [[ -n "$ESTATE" ]]; then

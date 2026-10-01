@@ -37,11 +37,11 @@ The registry schema version lives in one place (`crates/fno-agents/src/registry_
 # silently coming back on the default account. Same additive-optional shape and
 # same forward-compat rationale as v11: asdict emits the key on every written
 # row, so a pre-v12 reader must reject the store rather than TypeError on it.
-# v13: additive `fno_id` - a durable fno identity independent of the
-# harness session id. Adopted target orphans carry the target run id; pane rows
-# carry the bound harness id or their unique registry name when the harness has
-# no session id. Same additive-optional shape and
-# forward-compat rationale as v12.
+# v13: additive `fno_id` - footnote's own session id, a random UUID minted
+# at the row's first write, separate from `harness_session_id`, which names the
+# harness conversation beside it. Rows written before the mint keep the value
+# they hold (a harness copy, short id, or name). Same additive-optional shape
+# and forward-compat rationale as v12.
 # v14: additive `delivery_policy` - a recipient's mail delivery
 # policy ("bus-only": never prompt-line inject, always durable bus). Same
 # additive-optional shape and same forward-compat rationale as v12/v13: asdict
