@@ -1681,15 +1681,12 @@ mod tests {
     }
 
     fn clear_hermetic(root: &std::path::Path) {
-        for key in [
-            "FNO_CLAIMS_ROOT",
-            "FNO_STATE_DIR",
-            "FNO_AGENTS_HOME",
-            "FNO_CONFIG",
-        ] {
-            std::env::remove_var(key);
-        }
-        std::env::remove_var("FNO_TEST_HERMETIC");
+        // Only FNO_CONFIG is unpinned: it is a config path, not a state
+        // root, so no guard reads its absence. The root pins stay set for
+        // the process; removing one mid-run races lock-free readers into
+        // the paths.rs undeclared-$HOME panic. Their dirs are gone, so
+        // later reads degrade as unreadable, a branch every reader has.
+        std::env::remove_var("FNO_CONFIG");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -4643,10 +4643,12 @@ mod tests {
             // Pin the whole state world: a var an earlier test in this
             // process set without cleaning up (FNO_STATE_DIR, the global
             // settings pin, the agents home) would otherwise answer the
-            // walk's capacity and identity reads.
+            // walk's capacity and identity reads. The pins are SET, never
+            // removed: removing a root pin mid-run makes a lock-free reader
+            // resolve $HOME undeclared and trip the paths.rs guard.
             std::env::set_var("FNO_STATE_DIR", dir.path());
             std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
-            std::env::remove_var("FNO_AGENTS_HOME");
+            std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents-home"));
             match fno_bin {
                 Some(path) => std::env::set_var("FNO_BIN", path),
                 None => std::env::remove_var("FNO_BIN"),
@@ -4661,10 +4663,13 @@ mod tests {
     }
 
     impl Drop for CapacityEnv {
+        // The root pins stay set after the drop: a mid-run removal races
+        // lock-free state-resolving tests into the paths.rs guard. Their
+        // temp dirs are gone, so later reads degrade as unreadable, which
+        // every reader already treats as a branch.
         fn drop(&mut self) {
             std::env::remove_var("FNO_CONFIG");
             std::env::remove_var("FNO_RUNTIME_STATE_PATH");
-            std::env::remove_var("FNO_STATE_DIR");
         }
     }
 
