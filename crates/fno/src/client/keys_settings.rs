@@ -6,12 +6,14 @@ use super::input_field::back_row;
 use super::*;
 use crate::keys::KeySection;
 
-/// An open capture: the action id being rebound ("prefix" for the prefix)
-/// and the split-arrow carry.
+/// An open capture: the action id being rebound ("prefix" for the prefix),
+/// the split-arrow carry, and the list position to return to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeyCapture {
     action: String,
     esc: Vec<u8>,
+    sel: usize,
+    scroll: usize,
 }
 
 const SECTIONS: [KeySection; 4] = [
@@ -87,11 +89,31 @@ pub(super) fn rows(view: &View) -> (Vec<PopupRow>, Vec<AuxAction>) {
 }
 
 pub(super) fn open_capture(view: &mut View, action: String) {
+    let (sel, scroll) = view
+        .aux
+        .as_ref()
+        .map_or((0, 0), |m| (m.popup.sel, m.popup.scroll));
     view.key_capture = Some(KeyCapture {
         action,
         esc: Vec::new(),
+        sel,
+        scroll,
     });
     view.reopen_settings_keeping_sel();
+}
+
+/// Close an open capture and put the cursor back on the row it was opened
+/// from, so the next edit starts there and not at the top of the list.
+pub(super) fn close(view: &mut View) -> bool {
+    let Some(capture) = view.key_capture.take() else {
+        return false;
+    };
+    view.reopen_settings_keeping_sel();
+    if let Some(m) = view.aux.as_mut() {
+        m.popup.sel = capture.sel;
+        m.popup.scroll = capture.scroll;
+    }
+    true
 }
 
 /// Keys while the capture is open. A lone Esc steps back; an arrow or other
@@ -105,8 +127,15 @@ pub(super) async fn capture_keys(
         return Ok(());
     };
     let keys = fold_search_input(&mut capture.esc, bytes);
-    for key in keys {
+    let mut keys = keys.into_iter().peekable();
+    while let Some(key) = keys.next() {
         match key {
+            // An SS3 arrow (application cursor mode) folds as Esc, `O`, and
+            // a final byte: drop all three, as a CSI arrow is dropped.
+            SearchKey::Esc if keys.peek() == Some(&SearchKey::Byte(b'O')) => {
+                keys.next();
+                keys.next();
+            }
             SearchKey::Esc => {
                 settings_modal::back(view);
                 break;
@@ -165,7 +194,7 @@ async fn apply(view: &mut View, byte: u8) -> bool {
         }
     };
     view.set_notice(notice);
-    view.key_capture = None;
+    close(view);
     true
 }
 
@@ -177,12 +206,15 @@ pub(super) async fn edit_keys_file(view: &mut View) {
         let _ = std::fs::create_dir_all(dir);
     }
     let edited = path.clone();
-    let _ = tokio::task::spawn_blocking(move || editor::edit_file_suspended(&edited)).await;
+    let ok = tokio::task::spawn_blocking(move || editor::edit_file_suspended(&edited))
+        .await
+        .unwrap_or(false);
     let (map, warnings) = crate::digest_overlay::keymap(&cwd);
     crate::keys::reinstall(map);
     view.set_notice(match warnings.first() {
         Some(warning) => warning.0.clone(),
-        None => format!("keys reloaded from {}", path.display()),
+        None if ok => format!("keys reloaded from {}", path.display()),
+        None => "editor: failed or exited non-zero; keys reloaded from config as it stands".into(),
     });
     view.reopen_settings_keeping_sel();
 }

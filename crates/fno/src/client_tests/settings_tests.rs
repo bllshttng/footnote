@@ -338,12 +338,19 @@ async fn key_capture_refuses_a_conflict_and_takes_a_free_key() {
     // The page is taller than the terminal: select the row, then Enter.
     let modal = v.aux.as_mut().unwrap();
     let detach = AuxAction::KeyCapture("detach".into());
-    modal.popup.sel = modal.actions.iter().position(|a| *a == detach).unwrap();
+    let row = modal.actions.iter().position(|a| *a == detach).unwrap();
+    modal.popup.sel = row;
     keys.send(&mut v, b"\r").await;
     assert!(frame_text(&mut v)
         .iter()
         .any(|l| l.contains("press the new key for detach")));
     // `c` is new tab: refused with the resolver's sentence, nothing moves.
+    // An arrow, CSI or SS3, is no key: dropped whole, the capture stays.
+    keys.send(&mut v, b"\x1b[A\x1bOA").await;
+    assert!(
+        v.key_capture.is_some(),
+        "an arrow neither binds nor cancels"
+    );
     keys.send(&mut v, b"c").await;
     assert!(
         v.notice
@@ -365,6 +372,11 @@ async fn key_capture_refuses_a_conflict_and_takes_a_free_key() {
     // that moves detach would change the process keymap other tests read.)
     keys.send(&mut v, b"d").await;
     assert!(v.key_capture.is_none(), "the capture closes");
+    assert_eq!(
+        v.aux.as_ref().unwrap().popup.sel,
+        row,
+        "the cursor returns to the edited row"
+    );
     assert_eq!(crate::keys::key_for("detach").as_deref(), Some("d"));
     assert_eq!(
         v.notice.as_ref().map(|(n, _)| n.as_str()),
