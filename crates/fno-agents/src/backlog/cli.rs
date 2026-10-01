@@ -185,6 +185,13 @@ pub fn run(args: &[String]) -> i32 {
         // same change (d-e11b2b3e), so the door owns every shape, help
         // included.
         "decisions" => super::decisions_cli::run(resolved.tail),
+        // The decide record verb is native end to end: the same door
+        // `fno inbox decide` uses, every lane, the Python twin deleted in
+        // the same change.
+        "decide" => crate::law_match::run_decide_door(resolved.tail),
+        // The recovery backfill is native: compact + journal fold, the port
+        // of the deleted Python `reindex`.
+        "decide-reindex" => crate::law_match::run_decide_reindex(resolved.tail),
         // The blueprint session lifecycle is native end to end: identity,
         // claims substrate, session rows, receipts. The Python twin is gone.
         "session" => super::session_cli::run(resolved.tail),
