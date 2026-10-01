@@ -145,27 +145,49 @@ jobs:
           #    the candidate tracks the newest green main sha, not a
           #    possibly week-old nightly tag.
           pick_green_sha() {
-            local rust_sha cli_run
-            rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"
+            local rust_sha cli_run runs
+            # The step runs under set -euo pipefail, so an unguarded listing
+            # call would exit silently inside the command substitution, with
+            # no ::error line. Guard every gh call.
+            if ! rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"; then
+              echo "::error::the rust-ci run list failed (see the gh error above); nothing to ship" >&2
+              exit 1
+            fi
             if [ -z "$rust_sha" ]; then
-              echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship"
+              echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship" >&2
               exit 1
             fi
-            echo "newest green rust-ci push run: ${rust_sha}"
+            # Diagnostics go to stderr: this function's stdout is captured by
+            # the sha= assignment, so a stdout echo would corrupt the sha -
+            # and an error echo on stdout vanishes into the dead variable
+            # instead of reaching the log. ::error:: annotates from stderr.
+            echo "newest green rust-ci push run: ${rust_sha}" >&2
 
-            cli_run="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
-              --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.databaseId) \(.headSha) \(.conclusion)"' \
-              | while read -r _run_id run_sha run_conclusion; do
-                  if git merge-base --is-ancestor "$run_sha" "$rust_sha" 2>/dev/null; then
-                    echo "$run_conclusion"
-                    break
-                  fi
-                done)"
-            if [ -n "$cli_run" ] && [ "$cli_run" != "success" ]; then
-              echo "::error::the newest cli-ci push run at or before ${rust_sha} concluded '${cli_run}'; the release is blocked until cli-ci is green"
+            # The list is captured before the loop: breaking out of a read
+            # against gh's pipe can SIGPIPE the producer, and pipefail would
+            # turn that into a silent step failure. --json matches the jq
+            # program exactly; a field the program reads but the flag never
+            # requests is the trap this replaces.
+            if ! runs="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
+              --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.headSha) \(.conclusion)"')"; then
+              echo "::error::the cli-ci run list failed (see the gh error above); cannot gate on cli-ci" >&2
               exit 1
             fi
-            [ -z "$cli_run" ] && echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here"
+            cli_run=""
+            while read -r run_sha run_conclusion; do
+              if [ -n "$run_sha" ] && git merge-base --is-ancestor "$run_sha" "$rust_sha" 2>/dev/null; then
+                cli_run="$run_conclusion"
+                break
+              fi
+            done <<< "$runs"
+
+            if [ -n "$cli_run" ] && [ "$cli_run" != "success" ]; then
+              echo "::error::the newest cli-ci push run at or before ${rust_sha} concluded '${cli_run}'; the release is blocked until cli-ci is green" >&2
+              exit 1
+            fi
+            if [ -z "$cli_run" ]; then
+              echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here" >&2
+            fi
 
             printf '%s' "$rust_sha"
           }

@@ -2031,6 +2031,10 @@ fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<S
             Some(p) => e.get("project").and_then(Value::as_str) == Some(p),
             None => true,
         })
+        // A done node cannot be the repair lane: its repair landed, so a
+        // pointer that still names one is stale; the sentence names a live
+        // node or none.
+        .filter(|e| e.get("status").and_then(Value::as_str) != Some("done"))
         .filter_map(|e| crate::graph_store::entry_id(e))
         .collect();
     Some(if lanes.is_empty() {
@@ -4755,6 +4759,36 @@ mod tests {
                 err_words(&clearing)
             );
         }
+    }
+
+    /// The repair-lane sentence never names a done node: its repair landed,
+    /// so a pointer still naming one is stale and the refusal falls back to
+    /// the no-lane sentence.
+    #[test]
+    fn the_repair_lane_sentence_never_names_a_done_node() {
+        let entries = |lane_status: &str| {
+            vec![
+                serde_json::json!({
+                    "id": "x-feat", "status": "in_progress", "project": "fno",
+                    "tags": [],
+                }),
+                serde_json::json!({
+                    "id": "x-fix", "status": lane_status, "project": "fno",
+                    "tags": ["main-repair"],
+                }),
+            ]
+        };
+        let facts = PrFacts {
+            body: Some("Backlog-Closure: x-feat\n".to_string()),
+            ..open_facts()
+        };
+        let live = main_repair_hold_from_entries(&entries("in_progress"), &facts);
+        assert_eq!(live, Some("the declared repair lane is x-fix".to_string()));
+        let done = main_repair_hold_from_entries(&entries("done"), &facts);
+        assert_eq!(
+            done.as_deref(),
+            Some("no node is declared the repair lane; tag the repair node: fno backlog update <node> --tag main-repair")
+        );
     }
 
     /// The refused word of a decide on `fake`, for a failure message.
