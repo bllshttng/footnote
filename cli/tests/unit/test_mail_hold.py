@@ -256,7 +256,7 @@ def test_gate_fails_closed_when_the_binary_is_missing(monkeypatch):
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
-def test_two_same_window_codex_rows_never_share_one_clock():
+def test_two_same_window_codex_rows_never_share_one_clock(monkeypatch):
     """Writers key the full session identity key.
 
     Codex UUIDv7 ids opened in one 65.536-second window share their first
@@ -274,6 +274,7 @@ def test_two_same_window_codex_rows_never_share_one_clock():
         name="beta", short_id="", harness_session_id=sid_b, delivery_policy="bus-only"
     )
 
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
     hold_mod.arm(session_identity_key(sid_a), 5)
 
     assert hold_mod.read_any(row_a) is not None
