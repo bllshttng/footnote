@@ -171,8 +171,7 @@ class Envelope:
 
 
 def new_msg_id() -> str:
-    """Generate a 'fmail-' + 12-hex id, the message-id form the mux-messages
-    group rules on; old 'msg-' ids on the bus still resolve."""
+    """Generate a 'fmail-' + 12-hex id; old 'msg-' ids on the bus still resolve."""
     return "fmail-" + secrets.token_hex(6)
 
 

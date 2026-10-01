@@ -278,20 +278,14 @@ def _extract_pairs(
         if path is None:
             return []
         if rt.kind == "opencode-db":
-            return _opencode_pairs(path, sid)
-        if rt.harness == "codex":
-            return _codex_pairs(path)
-        return _claude_pairs(path)
+            pairs = _opencode_pairs(path, sid)
+        elif rt.harness == "codex":
+            pairs = _codex_pairs(path)
+        else:
+            pairs = _claude_pairs(path)
     except Exception:
         return []
-
-
-def _pairs_without_mail(
-    pairs: list[tuple[str, str, Optional[float]]],
-) -> list[tuple[str, str, Optional[float]]]:
-    """One batched classify per transcript read (the one Python reach to the
-    Rust mail-shape classifier): a turn that IS delivered mail never counts
-    as a conversational pair."""
+    # One batched classify per read: delivered mail never counts as a pair.
     from fno.mail.envelope import mail_shape
 
     shapes = mail_shape([text for _, text, _ in pairs])
@@ -301,7 +295,7 @@ def _pairs_without_mail(
 def _claude_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
     from fno.agents import read
 
-    candidates: list[tuple[str, str, Optional[float]]] = []
+    pairs: list[tuple[str, str, Optional[float]]] = []
     for line in read._read_jsonl_tail(path, _TAIL_RECORDS_READ):
         rec = _loads(line)
         if not isinstance(rec, dict) or rec.get("type") not in ("user", "assistant"):
@@ -311,14 +305,14 @@ def _claude_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
             continue
         text = _text_from_content(msg.get("content"))
         if text:
-            candidates.append((msg["role"], text, _parse_ts(rec.get("timestamp"))))
-    return _pairs_without_mail(candidates)
+            pairs.append((msg["role"], text, _parse_ts(rec.get("timestamp"))))
+    return pairs
 
 
 def _codex_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
     from fno.agents import read
 
-    candidates: list[tuple[str, str, Optional[float]]] = []
+    pairs: list[tuple[str, str, Optional[float]]] = []
     for line in read._read_jsonl_tail(path, _TAIL_RECORDS_READ):
         rec = _loads(line)
         if not isinstance(rec, dict) or rec.get("type") != "response_item":
@@ -330,8 +324,8 @@ def _codex_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
             continue
         text = _text_from_content(payload.get("content"))
         if text:
-            candidates.append((payload["role"], text, _parse_ts(rec.get("timestamp"))))
-    return _pairs_without_mail(candidates)
+            pairs.append((payload["role"], text, _parse_ts(rec.get("timestamp"))))
+    return pairs
 
 
 def _opencode_pairs(
@@ -348,7 +342,7 @@ def _opencode_pairs(
         "ORDER BY m.time_created DESC, p.time_created DESC LIMIT ?",
         (session_id, _TAIL_RECORDS_READ),
     )
-    candidates: list[tuple[str, str, Optional[float]]] = []
+    pairs: list[tuple[str, str, Optional[float]]] = []
     for ts_ms, role, text in rows:
         if role not in ("user", "assistant") or not isinstance(text, str):
             continue
@@ -356,9 +350,9 @@ def _opencode_pairs(
         if not text:
             continue
         ts = (ts_ms / 1000.0) if isinstance(ts_ms, (int, float)) else None
-        candidates.append((role, text, ts))
-    candidates.reverse()  # store returns newest-first; restore chronological order
-    return _pairs_without_mail(candidates)
+        pairs.append((role, text, ts))
+    pairs.reverse()  # store returns newest-first; restore chronological order
+    return pairs
 
 
 def _text_from_content(content) -> str:

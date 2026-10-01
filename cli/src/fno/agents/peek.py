@@ -398,8 +398,7 @@ def _opencode_records(
 
 def _resolve_peer_roles(records: list[Record]) -> list[Record]:
     """Flip ``user`` roles whose text IS a delivered mail turn to ``peer``,
-    through ONE batched classify for the whole read (the one Python reach to
-    the Rust mail-shape classifier). Bare text keeps its raw role."""
+    one batched classify for the whole read."""
     from fno.mail.envelope import mail_shape
 
     user_records = [r for r in records if r.role == "user"]
@@ -423,13 +422,8 @@ def recent_records(
     opencode_storage_dir: Optional[Path] = None,
     transcript_path: Optional[Path] = None,
 ) -> list[Record]:
-    """The per-harness reader seam (Locked Decision 3).
-
-    Dispatches on ``agent`` and returns a uniform ``Record`` list so the command
-    body never special-cases a harness. An empty list means "resolved, nothing
-    to show yet". An unregistered harness raises ``ObserveUnsupported`` (the
-    command turns that into a legible exit-1, distinct from the exit-13 miss).
-    """
+    """The per-harness reader seam: a uniform ``Record`` list or empty; an
+    unregistered harness raises ``ObserveUnsupported``."""
     records: list[Record] = []
     if agent == "claude":
         if transcript_path is not None:

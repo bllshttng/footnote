@@ -3,10 +3,8 @@ session's OWN transcript when ``fno agents mail reply --to <id>`` cannot find a 
 
 Current hosted delivery appends an audit-only bus record, but legacy deliveries
 and a nonretryable audit-append failure can still leave the transcript as the only
-place the ``id -> from`` binding exists. This module reads that fallback record.
-The envelope shapes and attribute reads live in the Rust classifier
-(``fno.mail.envelope`` is the one adapter); no Python regex keeps a second
-shape test.
+place the ``id -> from`` binding exists. This module reads that fallback record;
+the shape reads live in the Rust classifier.
 """
 from __future__ import annotations
 
@@ -71,9 +69,7 @@ def sender_from_transcript_text(
             continue
         if session_id is not None and not _addressed_here(tag, session_id):
             continue
-        # Full provenance first, display handle second. An envelope written
-        # before the attribute existed carries only `from`, and that legacy
-        # path stays exactly as it was.
+        # Full provenance first, display handle second.
         return tag.get("from_session") or tag.get("from")
     return None
 

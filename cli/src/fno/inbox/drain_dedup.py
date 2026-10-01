@@ -28,11 +28,9 @@ _CAP = 2000
 
 
 def dedup_key(body: str) -> Optional[str]:
-    """A collision-resistant dedup key for ``body``: the sha256 of its paired
-    ``<fno_mail>...</fno_mail>`` block, but only when that block carries an ``id``
-    attribute. ``None`` for a block with no id (pre-redesign; un-dedupable) or no
-    envelope at all - the caller then processes the message normally. The block
-    read lives in the Rust classifier; ``fno.mail.envelope`` is the adapter."""
+    """Sha256 of the paired ``<fno_mail>...</fno_mail>`` block when it carries
+    an ``id``; ``None`` otherwise (the caller processes the message normally).
+    The block read lives in the Rust classifier."""
     from fno.mail.envelope import mail_shape
 
     block = mail_shape([body])[0]["envelope_block"]

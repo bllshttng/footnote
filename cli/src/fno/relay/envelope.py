@@ -75,11 +75,8 @@ def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
 
 
 def parse(line: str) -> Optional[dict]:
-    """Parse a wire line into ``{from_session, body}``. The single-line tag
-    read lives in the Rust classifier (``fno.mail.envelope`` is the adapter).
-
-    Returns ``None`` if the line is not framed -- the caller uses that to refuse
-    an unframed cross-provider injection (AC5-FR)."""
+    """Parse a wire line into ``{from_session, body}``; ``None`` when unframed
+    (the caller refuses an unframed cross-provider injection, AC5-FR)."""
     from fno.mail.envelope import mail_shape
 
     parsed = mail_shape([line])[0]["relay_parse"]

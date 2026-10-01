@@ -257,13 +257,9 @@ def _accumulate_entry(
 
 
 def _count_user_vs_mail(metrics: SessionMetrics, texts: list[str]) -> None:
-    """One batched classify per transcript read (the one Python reach to the
-    Rust mail-shape classifier): a user turn that IS a delivered mail turn
-    counts as mail, never operator."""
     from fno.mail.envelope import mail_shape
 
-    shapes = mail_shape(texts)
-    for shape in shapes:
+    for shape in mail_shape(texts):
         if shape["framing"] != "bare":
             metrics.mail_messages += 1
         else:
@@ -356,9 +352,9 @@ def parse_transcript(
                 if entry_ts < since:
                     continue
 
-            user_texts.append(
-                _accumulate_entry(obj, metrics, prev_context_size, seen=seen)
-            )
+            text = _accumulate_entry(obj, metrics, prev_context_size, seen=seen)
+            if text is not None:
+                user_texts.append(text)
 
     _count_user_vs_mail(metrics, user_texts)
 
@@ -379,7 +375,7 @@ def get_branch_breakdown(path: str, session_id: str) -> dict[str, SessionMetrics
     """Parse a transcript and return metrics grouped by gitBranch."""
     branches: dict[str, SessionMetrics] = {}
     skipped_lines = 0
-    branch_texts: list[tuple[str, str]] = []
+    branch_texts: dict[str, list[str]] = {}
     # One dedup set across all branches: every content-block line of an API
     # message carries the same gitBranch, so the message lands on exactly
     # one branch and is counted once.
@@ -399,14 +395,11 @@ def get_branch_breakdown(path: str, session_id: str) -> dict[str, SessionMetrics
                     session_id=f"{session_id}:{git_branch}"
                 )
 
-            branch_texts.append(
-                (git_branch, _accumulate_entry(obj, branches[git_branch], seen=seen))
-            )
+            text = _accumulate_entry(obj, branches[git_branch], seen=seen)
+            if text is not None:
+                branch_texts.setdefault(git_branch, []).append(text)
 
-    by_branch: dict[str, list[str]] = {}
-    for branch_key, text in branch_texts:
-        by_branch.setdefault(branch_key, []).append(text)
-    for branch_key, texts in by_branch.items():
+    for branch_key, texts in branch_texts.items():
         _count_user_vs_mail(branches[branch_key], texts)
 
     if skipped_lines > 0:
