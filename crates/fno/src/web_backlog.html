@@ -1665,7 +1665,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   function moveSel(delta) {
     if (!visibleIds.length) return;
     let i = visibleIds.indexOf(selId);
-    if (i < 0) i = delta > 0 ? -1 : 0;
+    if (i < 0) i = delta > 0 ? -1 : visibleIds.length;
     i = Math.max(0, Math.min(visibleIds.length - 1, i + delta));
     setSel(visibleIds[i]);
   }
@@ -1713,6 +1713,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     });
     if (!action) return;
     if (action === "clear-search" || action === "close-panel") return;
+    // Enter on a focused button or link is that control's native activate:
+    // the board open must never swallow it.
+    if (action === "open" && ev.target.closest && ev.target.closest("button, a")) return;
     ev.preventDefault();
     if (action === "focus-search") focusSearch();
     else if (action === "close-sheet") sheetEl.hidden = true;
