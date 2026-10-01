@@ -94,5 +94,14 @@
     "guard": "pause both runs when the 5-minute load stays at 48 or more for 5 minutes; resume them when it stays at 24 or less for 10 minutes",
     "paused_trials": "in-flight trials stop with no result and rerun on resume; never counted as failures",
     "docker_networks": "46 claude-code trials at 2026-10-01T02:36Z failed on Docker subnet exhaustion before any agent started; rerun, counted as infrastructure"
+  },
+  "amendment_9": {
+    "declared_at": "2026-10-01T21:55:00Z",
+    "scope": "drain, never kill (vellum ruling on the guard question); no grade or rule changes",
+    "drain": "5-minute load at 48 or more for 5 minutes: both runs start no new trial or attempt; in-flight work finishes and counts",
+    "lift": "24 or less for 10 minutes: new work starts again",
+    "kill": "only 150 or more for 5 minutes kills both runs; killed work reruns on resume",
+    "mechanism": "a drain file holds each new Run 0 trial before its first timer and each Run 1 attempt before it starts; zcode runs one attempt at a time through the top-up",
+    "concurrency": "2 Run 0 trials; Run 1 one attempt at a time"
   }
 }
