@@ -170,15 +170,14 @@ mod tests {
             rows(&req.journal_path, &["operator_question_closed"]).len(),
             1
         );
-    }
 
-    /// A rerun clear on a store carrying recovery history must resume from
-    /// the raw stored line: journal_text re-renders committed rows with
-    /// `_store_seq`/`_history_only`, and hashing that annotated text misses
-    /// the stored row_hash, so the mirror falls back to decision_id and
-    /// appends the annotated render as a second row.
-    #[test]
-    fn recovery_store_rerun_resumes_the_raw_line_without_a_duplicate() {
+        // The same rerun on stores carrying recovery history: journal_text
+        // re-renders committed rows with `_store_seq`/`_history_only`, and
+        // hashing that annotated text misses the stored row_hash, so the
+        // mirrors must still land the raw stored line. The stores diverge:
+        // the decisions store's decision row sits at a different seq, so the
+        // journal's _store_seq cannot resolve there and the mirror must
+        // still append metadata-free bytes.
         let tmp = tempfile::tempdir().unwrap();
         let req = request(&tmp, "q-recovery", Some("ship it"));
         seed_question(&req, &ask("q-recovery", "which lane?", None, None));
@@ -187,9 +186,6 @@ mod tests {
         crate::backlog::api::decision_record(&crate::backlog::api::Store::new(&req.graph), stored)
             .unwrap();
         crate::event_store::append_envelope(&req.journal_path, &raw_line, None).unwrap();
-        // The stores diverge: the decisions store's decision row sits at a
-        // different seq, so the journal's _store_seq cannot resolve there and
-        // the mirror must still append metadata-free bytes.
         crate::event_store::append_envelope(
             &req.decisions_path,
             &json!({
