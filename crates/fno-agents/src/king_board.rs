@@ -152,7 +152,9 @@ fn undispatched_from_board(
     let mut claim_rows = Vec::new();
     for claim in claims.rows() {
         let Some(key) = claim.get("key").and_then(Value::as_str) else {
-            return SourceRead::err("claims unreadable: claim key is not a string");
+            return SourceRead::err(
+                crate::backlog::undispatched::CLAIMS_UNREADABLE_KEY_NOT_A_STRING,
+            );
         };
         claim_rows.push(json!({"key": key, "state": Value::Null}));
     }
