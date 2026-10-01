@@ -133,10 +133,10 @@ ${E}[1m┃${E}[0m cache product search for 60 seconds
 
   ${E}[32m✓${E}[0m Edit src/search/index.ts ${E}[32m+18${E}[0m ${E}[31m-2${E}[0m
 
-  ${E}[33m⚠ Permission required: git push${E}[0m
+  Running npm test -- search
 EOF
 cat >"$ROOT/text/opencode.foot" <<EOF
-${E}[1m┃${E}[0m ${E}[2mallow once (a) · always (A) · reject (r)${E}[0m
+${E}[1m┃${E}[0m ${E}[2mType a message${E}[0m
 
 ${E}[2m  zen · opencode · ~/code/checkout${E}[0m
 EOF
@@ -191,12 +191,27 @@ def row(name, harness, model, pane, state, sid=None):
         "mux": {"session": server, "pane_id": pane},
         "inside_leg": {"state": state, "seq": 1, "received_at": now},
     }
+def thread(name, harness, how):
+    # idle: a live thread with no report; unmeasured: exited with no proof;
+    # exited: a confirmed exit.
+    exited = how != "idle"
+    return {
+        "name": name, "cwd": cwd, "harness": harness, "substrate": "thread",
+        "status": "exited" if exited else "live",
+        "liveness": {"idle": "alive", "unmeasured": "unmeasured", "exited": "dead"}[how],
+        "liveness_measured_at": now, "created_at": now, "last_message_at": now,
+        "mux": None,
+    }
 json.dump({"schema_version": 1, "agents": [
     row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
     row("scout", "claude", "opus", ids[1], "done", sids[0]),
-    row("reviewer", "opencode", "zen", ids[2], "blocked", sids[2]),
+    row("reviewer", "opencode", "zen", ids[2], "working", sids[2]),
     row("pager", "pi", "glm-5", ids[3], "working"),
     row("scribe", "claude", "sonnet", ids[4], "done"),
+    # Paneless threads, so the sideline shows the other states too.
+    thread("planner", "codex", "idle"),
+    thread("indexer", "claude", "unmeasured"),
+    thread("migrator", "opencode", "exited"),
 ]}, open(path, "w"))
 PY
 

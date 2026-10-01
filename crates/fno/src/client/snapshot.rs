@@ -19,7 +19,7 @@ use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSI
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
-[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]]";
+[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] [--font <family>]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -40,6 +40,9 @@ pub struct SnapshotArgs {
     /// Attach as a sizing client, so the server lays its panes out at `size`.
     /// It resizes every pane, so it is for a throwaway server only.
     pub fit: bool,
+    /// The font family drawn first, ahead of the common monospace stack: an
+    /// image has no terminal, so its font is named here or left to the stack.
+    pub font: Option<String>,
 }
 
 /// True when a `serve` tail asks for a snapshot rather than the web bridge.
@@ -56,6 +59,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut format = None;
     let mut size = None;
     let mut fit = false;
+    let mut font = None;
     let mut it = tail.iter();
     while let Some(a) = it.next() {
         let a = a.to_str().ok_or_else(|| USAGE.to_string())?;
@@ -68,6 +72,15 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
         match a {
             "--snapshot" => {}
             "--fit" => fit = true,
+            "--font" => {
+                let f = value()?;
+                if f.is_empty() || f.contains(['\'', '"', '<', '>', '&']) {
+                    return Err(format!(
+                        "fno mux serve --snapshot: bad --font {f:?}\n{USAGE}"
+                    ));
+                }
+                font = Some(f);
+            }
             "--out" => out = Some(PathBuf::from(value()?)),
             tok @ ("--server" | "--session") => {
                 crate::mux_cli::note_server_flag(tok);
@@ -133,6 +146,7 @@ session text, run scripts/ops/mux-demo-snapshot.sh"
         format,
         size,
         fit,
+        font,
     })
 }
 
@@ -170,11 +184,15 @@ pub fn run(args: SnapshotArgs) -> i32 {
 }
 
 fn write(frame: &Frame, args: &SnapshotArgs) -> Result<(), String> {
-    let svg = || frame_html::frame_svg(frame, args.theme);
+    let font = |page: String| match &args.font {
+        Some(f) => page.replace("'SF Mono',", &format!("'{f}','SF Mono',")),
+        None => page,
+    };
+    let svg = || font(frame_html::frame_svg(frame, args.theme));
     let io = |e: std::io::Error| format!("cannot write {}: {e}", args.out.display());
     match args.format {
         Format::Html => {
-            std::fs::write(&args.out, frame_html::screen_html(frame, args.theme)).map_err(io)
+            std::fs::write(&args.out, font(frame_html::screen_html(frame, args.theme))).map_err(io)
         }
         Format::Svg => std::fs::write(&args.out, svg()).map_err(io),
         Format::Png => png(&svg(), frame, &args.out),
@@ -309,6 +327,7 @@ fn live_frame(
         }
     };
     runtime.block_on(super::backlog_board::fold_once(&mut view));
+    crate::lattice::freeze_spin();
     Ok(view.compose())
 }
 
