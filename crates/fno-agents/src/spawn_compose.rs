@@ -166,7 +166,7 @@ fn known_verb_keys(inputs: &Inputs) -> (Vec<String>, bool) {
         .as_table()
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
-    let mut roster_ok = !inputs.roster.is_empty();
+    let roster_ok = !inputs.roster.is_empty();
     known.extend(inputs.roster.iter().cloned());
     if let Some(registry) = inputs.dispatch_verbs.as_table() {
         for key in registry.keys() {
@@ -177,7 +177,6 @@ fn known_verb_keys(inputs: &Inputs) -> (Vec<String>, bool) {
             }
         }
     }
-    let _ = &mut roster_ok;
     (known, roster_ok)
 }
 
@@ -1071,17 +1070,37 @@ fn harness_rung(stage: &mut Stage, seam: &mut Seam) {
 /// The vendor-mismatch judgment over the FINAL argv: a typed mismatch warns
 /// and proceeds, an injected one refuses; an explicit route suppresses both.
 fn vendor_check(stage: &Stage, seam: &mut Seam, model_source: Option<&str>) {
+    // Python's fast path: no --model on the final argv (typed or injected)
+    // leaves nothing to judge. The lane's harness is the final argv's first
+    // --harness: an injected one is the only kind the head can add, because
+    // injection is suppressed when the operator typed one.
+    let model_on_argv = stage.scan.has_model || seam.inject.iter().any(|t| t == "--model");
+    if !model_on_argv {
+        return;
+    }
     let harness_typed = stage
         .scan
         .explicit_harness
         .as_deref()
         .map(|h| !h.trim().is_empty())
         .unwrap_or(false);
+    let harness = seam
+        .inject
+        .iter()
+        .position(|t| t == "--harness")
+        .and_then(|i| seam.inject.get(i + 1))
+        .cloned()
+        .or_else(|| stage.scan.explicit_harness.clone());
+    let argv_tail: Vec<String> = seam
+        .argv
+        .as_ref()
+        .map(|a| a.iter().skip(1).cloned().collect())
+        .unwrap_or_default();
     let ask = json!({
         "kind": "model-vendor",
-        "argv_tail": stage.argv_tail(),
+        "argv_tail": argv_tail,
         "argv_head": "spawn",
-        "harness": stage.scan.explicit_harness,
+        "harness": harness,
         "env_harness": stage.inputs.ambient_harness,
         "model_source": model_source,
         "harness_typed": harness_typed,
@@ -1120,19 +1139,10 @@ fn billing_axes(stage: &mut Stage, seam: &mut Seam) {
         return;
     }
     let role = stage.scan.role.clone();
-    // The resolved provider at this point: the typed axis, else the axis the
-    // harness rung injected, else the ambient default.
-    let prov = stage
-        .harness
-        .clone()
-        .or_else(|| {
-            stage
-                .scan
-                .explicit_harness
-                .clone()
-                .filter(|h| !h.trim().is_empty())
-        })
-        .unwrap_or_else(|| stage.inputs.ambient_harness.clone());
+    // Python's prov here is resolved_harness(): explicit -H, the grid's
+    // seeded pick, the config field rung, then ambient - the cached chain,
+    // never the ambient default directly.
+    let prov = resolved_harness(stage).unwrap_or_default();
     let mut role_resolves = false;
     if !fields.model.0.is_empty() && !stage.has_model && role.is_some() {
         role_resolves = stage
@@ -1143,7 +1153,9 @@ fn billing_axes(stage: &mut Stage, seam: &mut Seam) {
             .unwrap_or(false);
     }
     let mut harness_target: Option<String> = None;
-    let mut harness_target_failed = false;
+    // Python set this only when its dispatch-harness probe threw; the
+    // in-process read cannot fail, so the ask always carries false.
+    let harness_target_failed = false;
     if !fields.model.0.is_empty()
         && !stage.has_model
         && !stage.scan.explicit_route
@@ -1162,7 +1174,6 @@ fn billing_axes(stage: &mut Stage, seam: &mut Seam) {
         } else {
             Some(stage.inputs.ambient_harness.clone())
         };
-        let _ = &mut harness_target_failed;
     }
     let ask = json!({
         "route": {"value": fields.route.0.clone(), "rung": fields.route.1.clone().unwrap_or_default()},
