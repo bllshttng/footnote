@@ -470,7 +470,12 @@ class SelectUnmeasured(RuntimeError):
 
 def _select_read(kind: str, args: list[str]) -> Any:
     from fno.rust_binary import call_binary_json
-    error, receipt = call_binary_json("select-read", [kind, *args], timeout=None)
+    # The door's own worst case is the select bound (120s default) plus the
+    # enrich second exec (30s) plus spawn overhead, so the caller waits a
+    # bounded 180s: an unbounded wait here orphans the door chain when the
+    # caller dies first, and orphans holding graph locks cascade on a loaded
+    # runner.
+    error, receipt = call_binary_json("select-read", [kind, *args], timeout=180)
     if error is not None or not isinstance(receipt, dict):
         raise RuntimeError(f"select-read {kind}: {error or 'unreadable receipt'}")
     if receipt.get("status") == "unmeasured":
