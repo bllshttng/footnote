@@ -194,3 +194,71 @@ fn gc_sweep_keeps_the_open_pr_driver_without_a_termination_and_alerts_a_terminat
     assert_eq!(reaped["data"]["termination_event"], true);
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// A worker rebound to a new node is judged by that node. The session's row
+/// on the old node ended and the old node reads merged; its open row on the
+/// new node drives an open PR. Graph order lists the old node first, the
+/// order that once released the row through the old node's recorded merge.
+#[test]
+fn gc_sweep_keeps_a_rebound_worker_on_its_current_node_open_pr() {
+    let sandbox = tmp_home("gc-rebound-worker");
+    let home = AgentsHome::at(sandbox.root().join("agents"));
+    home.ensure_root().unwrap();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let repo = home.root().join("rebound-repo");
+    std::fs::create_dir_all(repo.join(".fno")).unwrap();
+    assert!(crate::git_test_helpers::git_init(&repo));
+    stage_graph(
+        sandbox.root(),
+        json!([
+            {
+                "id": "x-0ld1", "status": "in_review", "pr_number": 4300,
+                "merge_status": "merged",
+                "sessions": [{"session_id": "rebound-uuid", "phase": "execute",
+                    "harness": "claude", "started_at": "2026-10-01T01:02:37Z",
+                    "ended_at": "2026-10-01T03:35:52Z"}],
+            },
+            {
+                "id": "x-0e01", "status": "in_review", "pr_number": 4301,
+                "merge_status": null,
+                "sessions": [{"session_id": "rebound-uuid", "phase": "execute",
+                    "harness": "claude", "started_at": "2026-10-01T04:02:26Z"}],
+            },
+        ]),
+    );
+    let mut row = bg_claude_row("t-x0ld1-fix", "rebd0001");
+    row.cwd = repo.to_string_lossy().into_owned();
+    row.log_path = Some(stale_log(&repo));
+    row.harness_session_id = Some("rebound-uuid".into());
+    state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
+
+    let mut graph = gc_sweep::read_graph_entries(&home).expect("staged graph reads");
+    graph
+        .pr_reads
+        .insert((repo.to_string_lossy().into_owned(), 4301), Some(true));
+    let summary = staged_sweep(
+        &home,
+        &emitter,
+        0,
+        Some(graph),
+        &|e| {
+            e.log_path
+                .as_deref()
+                .map(|p| vec![std::path::PathBuf::from(p)])
+        },
+        &|_| (None, None),
+    );
+
+    assert!(
+        summary.retired.iter().all(|(id, _)| id != "rebd0001"),
+        "the rebound worker must not retire on its old node's merge: {summary:#?}"
+    );
+    assert!(
+        summary
+            .kept_open_pr
+            .iter()
+            .any(|(id, node)| id == "rebd0001" && node.contains("x-0e01")),
+        "the keep names the current node: {summary:#?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
