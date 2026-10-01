@@ -94,26 +94,27 @@ done
 "$MUX_BIN" mux pane run --session "$SESSION" --json -- sleep 600 >"$TMP_DIR/a.json"
 "$MUX_BIN" mux pane run --session "$SESSION" --json -- sleep 600 >"$TMP_DIR/b.json"
 
-mapfile -t CHILD_PIDS < <("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+CHILD_PIDS="$("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
 import json, sys
 rows = json.load(sys.stdin)
 pids = sorted(r["child_pid"] for r in rows if r.get("child_pid"))
 assert len(pids) == 2, f"expected two pane child pids, got {rows}"
-print("\n".join(str(p) for p in pids))
-')
-CHILD_A="${CHILD_PIDS[0]}"
-CHILD_B="${CHILD_PIDS[1]}"
+print(pids[0])
+print(pids[1])
+')"
+CHILD_A="$(echo "$CHILD_PIDS" | sed -n 1p)"
+CHILD_B="$(echo "$CHILD_PIDS" | sed -n 2p)"
 PIDS="$CHILD_A $CHILD_B"
 
 keeper_pid_for() {
-    CHILD="$1" "$MUX_BIN" mux pane keeper list --json | python3 -c '
+    "$MUX_BIN" mux pane keeper list --json | python3 -c '
 import json, os, sys
 rows = json.load(sys.stdin)
-child = int(os.environ["CHILD"])
+child = int(sys.argv[1])
 rows = [r for r in rows if r.get("session") == os.environ["SESSION"] and r.get("child_pid") == child]
 assert len(rows) == 1, f"expected one keeper row for child {child}, got {rows}"
 print(rows[0]["keeper_pid"])
-'
+' "$1"
 }
 KEEPER_A="$(keeper_pid_for "$CHILD_A")"
 KEEPER_B="$(keeper_pid_for "$CHILD_B")"
@@ -141,13 +142,13 @@ SERVER_PID=""
 sleep 1
 RESULT=FAIL
 if alive "$KEEPER_A" && [[ "$(ppid_of "$KEEPER_A")" == "1" ]]; then
-    if CHILD_A="$CHILD_A" KEEPER_A="$KEEPER_A" "$MUX_BIN" mux pane keeper list --json 2>/dev/null | python3 -c '
+    if "$MUX_BIN" mux pane keeper list --json 2>/dev/null | python3 -c '
 import json, os, sys
 rows = json.load(sys.stdin)
-keeper = int(os.environ["KEEPER_A"])
-child = int(os.environ["CHILD_A"])
+keeper = int(sys.argv[1])
+child = int(sys.argv[2])
 sys.exit(0 if any(r.get("keeper_pid") == keeper and r.get("child_pid") == child for r in rows) else 1)
-'; then
+' "$KEEPER_A" "$CHILD_A"; then
         RESULT=PASS
     fi
 fi
