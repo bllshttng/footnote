@@ -482,7 +482,9 @@ fn canonical_root(git: &str, cwd: &str, timeout: Duration) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let mut child = crate::process_admission::std_spawn(&mut command).ok()?;
+    // An attach resolves its squad here before its first Layout, so the
+    // probe takes the human door: no admission lock wait, no refusal.
+    let mut child = crate::process_admission::std_spawn_for_human(&mut command).ok()?;
 
     let deadline = Instant::now() + timeout;
     let status = loop {

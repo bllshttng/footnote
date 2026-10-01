@@ -198,6 +198,8 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         )
         assert pane["fno_id"] == footnote_identity
         assert pane["harness_session_id"] == identity
+        assert pane["fno_id"] == row.fno_id
+        assert row.fno_id != identity
         located = subprocess.run(
             [str(fno_bin), "mux", "where", identity, "--server", mux_session, "--json"],
             cwd=repo,
