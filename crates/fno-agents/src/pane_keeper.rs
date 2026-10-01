@@ -553,7 +553,11 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
             }
         })
-        .map_err(|e| format!("pty reader thread: {e}"))?;
+        .map_err(|e| {
+            end_child(child_pid);
+            let _ = std::fs::remove_file(&cfg.sock);
+            format!("pty reader thread: {e}")
+        })?;
 
     // The accept loop: every connection is served on its own thread, so a
     // `keeper list` probe is answered even while the server holds the
@@ -585,7 +589,11 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                         .expect("spawn keeper client thread");
                 }
             })
-            .map_err(|e| format!("accept thread: {e}"))?;
+            .map_err(|e| {
+                end_child(child_pid);
+                let _ = std::fs::remove_file(&cfg.sock);
+                format!("accept thread: {e}")
+            })?;
     }
 
     // The sigwait thread: SIGTERM is blocked on every thread, so delivery
@@ -605,7 +613,11 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
                 end_child(child_pid);
             })
-            .map_err(|e| format!("term thread: {e}"))?;
+            .map_err(|e| {
+                end_child(child_pid);
+                let _ = std::fs::remove_file(&cfg.sock);
+                format!("term thread: {e}")
+            })?;
     }
 
     // The socket-dir-gone thread. Why the DIRECTORY and not the socket
@@ -662,7 +674,11 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                     }
                 }
             })
-            .map_err(|e| format!("orphan thread: {e}"))?;
+            .map_err(|e| {
+                end_child(child_pid);
+                let _ = std::fs::remove_file(&cfg.sock);
+                format!("orphan thread: {e}")
+            })?;
     }
 
     // The main thread waits on the child (AC5-ERR): on exit, the exit frame,
