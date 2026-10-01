@@ -657,7 +657,7 @@ printf '{"entries":[{"id":"x-a166","status":"ready","title":"live node","priorit
 printf 'state_dir = "%s"\n' "$REAL_TMP" > "$REAL_CONFIG"
 cat > "$REAL_BIN/fno" <<EOF
 #!/usr/bin/env bash
-exec uv run --project "$REPO_ROOT/cli" fno "\$@"
+exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
 EOF
 chmod +x "$REAL_BIN/fno"
 payload="$(jq -cn --arg cwd "$REAL_REPO" '{cwd:$cwd,session_id:"owner-session",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"

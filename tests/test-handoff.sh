@@ -495,13 +495,13 @@ esac
 STUBEOF
   chmod +x "$sbx/stub-bin/fno"
 
-  # The probe prefers `fno`, and an ambient deployed fno predating the
+  # The probe prefers `fno-py`, and an ambient deployed fno-py predating the
   # verb fold does not know `fno whoami context`, so scenarios 7/7b would read
   # empty and park without the measurement. Delegate to the same FNO_PYTHON
   # the stub's doors use, keeping the suite hermetic against the machine.
   printf '#!/usr/bin/env bash\nexec env PYTHONPATH="%s" "%s" -m fno.cli "$@"\n' \
-    "$FNO_SRC" "$FNO_PYTHON" > "$sbx/stub-bin/fno"
-  chmod +x "$sbx/stub-bin/fno"
+    "$FNO_SRC" "$FNO_PYTHON" > "$sbx/stub-bin/fno-py"
+  chmod +x "$sbx/stub-bin/fno-py"
 
   echo "$sbx"
 }

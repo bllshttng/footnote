@@ -7,11 +7,11 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$REPO_ROOT/skills/target/scripts/context-probe.sh"
 
-# Pin the probe's CLI door to the source under test. The probe prefers `fno`;
+# Pin the probe's CLI door to the source under test. The probe prefers `fno-py`;
 # an ambient deployed `fno` predating the verb fold does not know
 # `fno whoami context` and would empty every reading without failing a single
 # setup assert. Reuse the worktree venv when present, else shim python3.
-if [ -x "$REPO_ROOT/cli/.venv/bin/fno" ]; then
+if [ -x "$REPO_ROOT/cli/.venv/bin/fno-py" ]; then
   PATH="$REPO_ROOT/cli/.venv/bin:$PATH"
   export PATH
 else
@@ -19,8 +19,8 @@ else
   if [ -n "$_PY" ] && PYTHONPATH="$REPO_ROOT/cli/src" "$_PY" -c 'import fno.cli' >/dev/null 2>&1; then
     _BIN="$(mktemp -d)"
     printf '#!/usr/bin/env bash\nexec env PYTHONPATH="%s/cli/src" "%s" -m fno.cli "$@"\n' "$REPO_ROOT" "$_PY" \
-      > "$_BIN/fno"
-    chmod +x "$_BIN/fno"
+      > "$_BIN/fno-py"
+    chmod +x "$_BIN/fno-py"
     PATH="$_BIN:$PATH"
     export PATH
   fi

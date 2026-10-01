@@ -4,7 +4,7 @@
 # Verifies hooks/frontdoor-nudge-session-start.sh (x-40c4): the SessionStart
 # reminder to install the Rust `fno` front door. It must go SILENT when `fno` on
 # PATH answers a mux-only verb (the Rust front door is active), and print the
-# one-line reminder when `fno` is absent or is the Python `fno` (no `mux`
+# one-line reminder when `fno` is absent or is the Python `fno-py` (no `mux`
 # subcommand).
 #
 # Cases 5-9 cover the installer launch: with CLAUDE_PLUGIN_DATA set, the hook
@@ -59,18 +59,18 @@ REMIND_XDG="$WORK/xdg-remind"
 mkdir -p "$REMIND_XDG/fno/plugin-install"
 printf '%s' "$REAL_VERSION" > "$REMIND_XDG/fno/plugin-install/postinstall.version"
 
-# --- Case 2: fno only (fno exists but has no `mux` verb) -> REMIND ----------
+# --- Case 2: fno-py only (fno exists but has no `mux` verb) -> REMIND ----------
 cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash
-# Mimics the Python `fno`: any mux verb is "No such command".
+# Mimics the Python `fno-py`: any mux verb is "No such command".
 echo "No such command 'mux'." >&2
 exit 2
 FAKE
 chmod +x "$FAKEBIN/fno"
 out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
-grep -q "Install the .fno. front door" <<<"$out" || fail "fno-only must remind, got: $out"
+grep -q "Install the .fno. front door" <<<"$out" || fail "fno-py-only must remind, got: $out"
 grep -q "cargo install fno" <<<"$out" || fail "reminder must name the fix, got: $out"
-pass "fno only -> reminder with fix"
+pass "fno-py only -> reminder with fix"
 
 # --- Case 3: no `fno` on PATH at all -> REMIND --------------------------------
 rm -f "$FAKEBIN/fno"
@@ -81,7 +81,7 @@ pass "no fno on PATH -> reminder"
 # --- Case 4: wedged mux socket -> BOUNDED and SILENT --------------------------
 # This hook probes a socket at SessionStart, so an unbounded probe stalls every
 # session start. On a host with no coreutils timeout(1) it had no bound at all.
-# A wedged socket also PROVES the Rust front door is present (fno has no
+# A wedged socket also PROVES the Rust front door is present (fno-py has no
 # `mux` verb and fails fast), so the correct behavior is silence, not a reminder
 # telling the user to install what they already have.
 cat > "$FAKEBIN/fno" <<'FAKE'

@@ -35,11 +35,11 @@ command -v git &>/dev/null || skip "git not on PATH"
 
 # The state CLI for the one verb the suite runs (T5's archive repair). The
 # binary's name differs by environment: a developer PATH has `fno`; the smoke
-# env pins cli/.venv/bin, which ships `fno`. Same command tree either way.
+# env pins cli/.venv/bin, which ships `fno-py`. Same command tree either way.
 if command -v fno &>/dev/null; then
   STATE_CLI=fno
-elif command -v fno &>/dev/null; then
-  STATE_CLI=fno
+elif command -v fno-py &>/dev/null; then
+  STATE_CLI=fno-py
 else
   STATE_CLI=""
 fi
@@ -183,7 +183,7 @@ RC_B5="$(run_init "$TMP5" "$TMP5/init-b.out" \
 [[ "$RC_B5" != "0" ]] \
   || fail "T5 precondition: expected the foreign-manifest refusal first (got exit 0; $(cat "$TMP5/init-b.out"))"
 
-[[ -n "$STATE_CLI" ]] || fail "T5a: no fno/fno on PATH to run the state archive repair"
+[[ -n "$STATE_CLI" ]] || fail "T5a: no fno/fno-py on PATH to run the state archive repair"
 ARCH_OUT="$(FNO_SPACES_DIR="$TMP5/spaces" "$STATE_CLI" do state archive --path "$STATE5" 2>&1)" \
   || fail "T5a: state archive failed: $ARCH_OUT"
 [[ -f "$STATE5" ]] || pass "T5a: archived manifest moved out of the way"
