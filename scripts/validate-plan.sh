@@ -1254,6 +1254,23 @@ if isinstance(node_id, str) and node_id.strip():
             "`fno backlog decide-reindex` and re-validate\n" % damaged
         )
     else:
+        # The door degrades a graph it cannot read to `lifecycle: unknown`
+        # rows that carry the reason; that is the fail-closed W below, never
+        # a clean read - an unreadable graph could be hiding the closing
+        # verdict this gate exists to catch.
+        unknown_graph = [
+            r
+            for r in rows
+            if r.get("lifecycle") == "unknown"
+            and "could not be read" in str(r.get("lifecycle_reason") or "")
+        ]
+        if unknown_graph:
+            sys.stdout.write(
+                "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
+                % " ".join(str(unknown_graph[0].get("lifecycle_reason") or "").split())[:160]
+            )
+            raise SystemExit(0)
+
         def valid_expiry_ref_shape(ref):
             if not isinstance(ref, dict):
                 return False

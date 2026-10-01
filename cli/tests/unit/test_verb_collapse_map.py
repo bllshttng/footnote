@@ -348,7 +348,9 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # The update cut-over retired the `backlog update` KEEP row: 81 -> 80.
     # The native retract port retired the old `decide retract` Python alias: 80 -> 79.
     # The native decisions listing retired the `decide list` KEEP shim: 79 -> 78.
-    assert projected == 78
+    # The decide family ported native: its dispatch group and the KEEP
+    # reindex leaf left the map with the registrations: 78 -> 76.
+    assert projected == 76
     assert projected <= 99
 
 
