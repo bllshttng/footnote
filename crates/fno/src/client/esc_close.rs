@@ -37,9 +37,8 @@ pub(super) async fn tap(
         // had no reader anywhere above. The tap is a gesture on the panel's
         // own chip: it closes the panel.
         None if view.feed.is_some() => {
-            return feed_view::toggle(view, sock_w)
-                .await
-                .map(StdinFlow::Continue);
+            feed_view::toggle(view, sock_w).await?;
+            return Ok(StdinFlow::Continue);
         }
         _ => {}
     }
