@@ -546,15 +546,21 @@ mod tests {
         assert_eq!(p.kind, "observed");
         assert_eq!(p.sandbox, "danger-full-access");
         assert_eq!(p.approval, "never");
-        let ev = std::fs::read_to_string(home.events_jsonl()).unwrap();
-        let changed = ev
-            .lines()
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        // The store cutover: emitted events live behind the store, not raw
+        // journal bytes (the same read read_events does).
+        let journal = home.events_jsonl();
+        let _ = crate::event_store::import_all(&journal);
+        let rows =
+            crate::event_store::query_events(&journal, &crate::event_store::EventQuery::default())
+                .unwrap_or_default();
+        let changed = rows
+            .iter()
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.line).ok())
             .filter(|e| e["type"] == "agent_posture_changed")
             .collect::<Vec<_>>();
-        assert_eq!(changed.len(), 1, "one posture change event: {ev}");
-        assert_eq!(changed[0]["from"], "workspace-write:on-request");
-        assert_eq!(changed[0]["to"], "danger-full-access:never");
+        assert_eq!(changed.len(), 1, "one posture change event: {rows:?}");
+        assert_eq!(changed[0]["data"]["from"], "workspace-write:on-request");
+        assert_eq!(changed[0]["data"]["to"], "danger-full-access:never");
 
         // A posture the daemon cannot parse (no colon, an empty half) is an
         // InvalidParams refusal, never a stored guess.
