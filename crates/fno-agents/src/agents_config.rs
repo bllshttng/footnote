@@ -1255,7 +1255,7 @@ pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
 
 /// The normalized raw scalar for a direct child of `agents:`, so each caller
 /// applies its own coercion.
-fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
+pub(crate) fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
     resolve(cwd, |t| {
         table_agents_scalar(t, key)
             .as_ref()

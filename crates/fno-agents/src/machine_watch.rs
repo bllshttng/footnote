@@ -409,9 +409,37 @@ pub(crate) fn brake_path() -> PathBuf {
     crate::state_layout::place(&PathBuf::from(home).join(".fno"), MACHINE_BRAKE_NAME)
 }
 
+/// The hold line for an unexpired brake, `None` when none is armed: the
+/// spawn gate's own door on the brake. The arm attributes load before it
+/// arms the brake, so a hold here means fno's own fan-out. A missing,
+/// unreadable, or expired file holds nothing.
+pub fn brake_holds() -> Option<String> {
+    let text = std::fs::read_to_string(brake_path()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let until = value.get("until_epoch")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    (now < until).then(|| {
+        let left = until - now;
+        let reason = value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unspecified");
+        format!("machine runaway brake holds ({left}s left): {reason}")
+    })
+}
+
 /// The runaway brake: a self-expiring file the spawn admission honors.
 /// Best-effort - a failed write costs the refusal leg, never the notice.
-fn write_brake_file(sample: &MachineSample, reason: &str) -> Result<(), String> {
+/// The measured fleet/outside split rides the file, so a refusal names
+/// whose load it was without a re-walk of the process table.
+fn write_brake_file(
+    sample: &MachineSample,
+    reason: &str,
+    split: Option<(f64, f64)>,
+) -> Result<(), String> {
     let until = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() + MACHINE_BRAKE_HOLD_SECS)
@@ -423,13 +451,17 @@ fn write_brake_file(sample: &MachineSample, reason: &str) -> Result<(), String> 
         .and_then(|rows| rows.first())
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "until_epoch": until,
         "reason": reason,
         "group": group,
         "processes": sample.processes,
         "swap_used_gb": sample.swap_used_gb,
     });
+    if let Some((fleet, machine)) = split {
+        payload["fleet_cores"] = serde_json::json!(fleet);
+        payload["machine_cores"] = serde_json::json!(machine);
+    }
     let path = brake_path();
     std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default())
         .map_err(|error| format!("{}: {error}", path.display()))
@@ -642,6 +674,11 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
         );
+        // Whose load the box is in, from the one footprint answerer the
+        // spawn CPU axis already reads: unreadable or fleet-majority keeps
+        // today's path, a minority share is outside load.
+        let split = crate::spawn_gate::fleet_split();
+        let source = crate::machine_load::classify(split);
         let outcome = {
             let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
             guard.prev_ticks = ticks;
@@ -657,6 +694,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             let brake_error = std::cell::RefCell::new(None);
             let tests_first = std::cell::RefCell::new(None::<String>);
             let held_first = std::cell::Cell::new(false);
+            let extra_body = std::cell::RefCell::new(None::<String>);
             let outcome = tick_machine_watch_with_thresholds(
                 &mut guard,
                 Ok(&sample),
@@ -665,11 +703,16 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     if let Some(error) = brake_error.borrow_mut().take() {
                         body.push_str(&format!("; spawn brake write failed: {error}"));
                     }
+                    if let Some(extra) = extra_body.borrow_mut().take() {
+                        body.push_str(&extra);
+                    }
                     if let Some(held) = tests_first.borrow_mut().take() {
                         body.push_str(&format!(
                             "; {held}; the spawn brake and session stop wait for the next runaway tick"
                         ));
-                    } else if title.ends_with("box runaway") {
+                    } else if title.ends_with("box runaway")
+                        && source == crate::machine_load::LoadSource::Fleet
+                    {
                         let stop_result = top_session_id(&sample).and_then(|session| {
                             runtime.block_on(crate::daemon::stop_session_for_home(
                                 &stop_home, &session,
@@ -686,24 +729,77 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 },
                 Instant::now(),
                 |sample, reason| {
-                    // Tests yield first: with no stop armed, a runaway holds
-                    // tests and brakes nothing else this tick.
-                    match crate::test_hold::hold_for_runaway(
-                        &stop_home,
-                        reason,
-                        MACHINE_BRAKE_HOLD_SECS,
-                    ) {
-                        Ok(Some(held)) => {
-                            *tests_first.borrow_mut() = Some(held);
-                            held_first.set(true);
-                            return;
+                    match source {
+                        crate::machine_load::LoadSource::Fleet => {
+                            // fno's own load: reap its orphan test binaries
+                            // first, then demote its live workers, then
+                            // today's tests-first hold and the brake.
+                            let reaped = crate::orphan_reap::reap_sweep_once(
+                                true,
+                                crate::orphan_reap::min_elapsed_secs(&cwd),
+                            );
+                            if !reaped.is_empty() {
+                                *extra_body.borrow_mut() =
+                                    Some(format!("; reaped {} orphan test binaries", reaped.len()));
+                            }
+                            let mut warnings = Vec::new();
+                            for row in
+                                crate::spawn_gate::live_rows(&home.registry_json(), &mut warnings)
+                            {
+                                if let Some(pid) = row.pid {
+                                    crate::spawn_gate::qos_demote_pid(&cwd, pid);
+                                }
+                            }
+                            // Tests yield first: with no stop armed, a
+                            // runaway holds tests and brakes nothing else
+                            // this tick.
+                            match crate::test_hold::hold_for_runaway(
+                                &stop_home,
+                                reason,
+                                MACHINE_BRAKE_HOLD_SECS,
+                            ) {
+                                Ok(Some(held)) => {
+                                    *tests_first.borrow_mut() = Some(held);
+                                    held_first.set(true);
+                                    return;
+                                }
+                                Ok(None) => {}
+                                Err(error) => tracing::warn!(%error, "tests-first hold failed"),
+                            }
+                            if let Err(error) = write_brake_file(sample, reason, split) {
+                                tracing::error!(%error, "machine runaway brake write failed");
+                                *brake_error.borrow_mut() = Some(error);
+                            }
                         }
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(%error, "tests-first hold failed"),
-                    }
-                    if let Err(error) = write_brake_file(sample, reason) {
-                        tracing::error!(%error, "machine runaway brake write failed");
-                        *brake_error.borrow_mut() = Some(error);
+                        crate::machine_load::LoadSource::Outside => {
+                            // Not fno's load: no hold, no brake file, no
+                            // session stop. Ask the user about the top
+                            // outside groups instead; the intake's subject
+                            // dedup keeps it to one open question.
+                            let fleet = crate::session_cost::owned_pids(
+                                &sample.procs,
+                                &crate::session_cost::session_roots(&home, &sample.procs),
+                            );
+                            let groups = crate::machine_load::outside_groups(&sample.procs, &fleet);
+                            let stored: Vec<crate::machine_load::StoredGroup> = groups
+                                .into_iter()
+                                .map(|g| crate::machine_load::StoredGroup {
+                                    name: g.name,
+                                    cpu_pct: g.cpu_pct,
+                                    rss_kb: g.rss_kb,
+                                    bundle: g.bundle,
+                                    pids: g.pids,
+                                })
+                                .collect();
+                            let named: Vec<String> =
+                                stored.iter().take(2).map(|g| g.name.clone()).collect();
+                            if crate::machine_load::file_outside_question(&home, &cwd, stored) {
+                                *extra_body.borrow_mut() = Some(format!(
+                                    "; outside load: {}; asked the user before acting",
+                                    named.join(", ")
+                                ));
+                            }
+                        }
                     }
                 },
                 thresholds,
@@ -729,6 +825,21 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             Some(&outcome.detail),
             interval.as_secs(),
         );
+        // Outside-load asks: apply each fresh answer once, and the first
+        // calm tick resumes what a pause held.
+        if let Some(applied) = crate::machine_load::poll_answers(&home, &cwd) {
+            tracing::info!(applied = %applied, "machine-load answer applied");
+        }
+        if outcome.verdict == "calm" {
+            if let Some(resumed) = crate::machine_load::resume_paused() {
+                tracing::info!(resumed = %resumed, "paused pids resumed");
+            }
+        }
+        // The budget ask rides a calm tick: a runaway tick is already
+        // acting, and the intake dedup keeps it to one open question.
+        if outcome.verdict == "calm" {
+            crate::machine_load::file_budget_question(&home, &cwd, &sample);
+        }
     });
 }
 
@@ -904,7 +1015,7 @@ mod tests {
             |s, r| {
                 brake_calls += 1;
                 actions.borrow_mut().push("brake");
-                write_brake_file(s, r).unwrap();
+                write_brake_file(s, r, Some((6.0, 8.0))).unwrap();
             },
         );
         assert_eq!(outcome.acted, 1, "no debounce on a runaway");
