@@ -509,20 +509,24 @@ fn counts_line(counts: &serde_json::Value) -> String {
 /// `├ `/`└ ` per row from depth alone, so a filtered or folded tree still
 /// closes each branch on its real last child.
 fn tree_guides(rows: &[Row]) -> Vec<String> {
-    let last = |i: usize| {
-        rows[i + 1..]
-            .iter()
-            .find(|r| r.depth <= rows[i].depth)
-            .is_none_or(|r| r.depth < rows[i].depth)
-    };
+    // Walk back once: a row is last when no later sibling precedes its parent's end.
+    let mut sibling_after = [false; 3];
+    let mut last = vec![true; rows.len()];
+    for (i, r) in rows.iter().enumerate().rev() {
+        let d = r.depth.min(2);
+        last[i] = !sibling_after[d];
+        sibling_after[d] = true;
+        sibling_after[d + 1..].fill(false);
+    }
     let mut parent_last = true;
-    (0..rows.len())
-        .map(|i| {
-            let tee = if last(i) { "└ " } else { "├ " };
-            match rows[i].depth {
+    rows.iter()
+        .zip(last)
+        .map(|(r, last)| {
+            let tee = if last { "└ " } else { "├ " };
+            match r.depth {
                 0 => String::new(),
                 1 => {
-                    parent_last = last(i);
+                    parent_last = last;
                     tee.into()
                 }
                 _ => format!("{}{tee}", if parent_last { "  " } else { "│ " }),
