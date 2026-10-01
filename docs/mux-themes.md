@@ -41,7 +41,7 @@ The settings values `mux.theme.brand`, `mux.theme.needs_you`, and `mux.theme.bor
 
 ## Import a theme from Settings
 
-Open **Settings > Theme** and choose **add theme file**. Enter a local file path, a folder path, or a public GitHub theme file URL. A relative path uses the mux working directory. A path that starts with `~/` uses your home directory. You can also drop a file onto the field, or, on a local macOS session, choose **choose file…** (or press Enter on an empty field) to pick one in the system file dialog. Esc steps back one level.
+Open **Settings > Theme** and choose **add theme file**. Enter a local file path, a folder path, or a public GitHub theme file URL. A relative path uses the mux working directory. A path that starts with `~/` uses your home directory. You can also drop a file onto the field. On a local macOS session, **choose file…** opens the system file dialog, and so does Enter on an empty field. Esc steps back one level.
 
 The importer reads fno theme files with `[mux.themes.<name>]` tables or top-level role keys. It also reads Ghostty theme files. It previews the result before it saves the theme to `<state root>/mux/themes/<name>.toml` and applies it.
 
