@@ -76,6 +76,32 @@ pub(crate) fn codex_rollout_fresh(index: &[(String, u64)], session_id: &str, now
     })
 }
 
+/// Does a durable rollout exist for this thread row (the sweep's settle
+/// question, `docs/architecture/codex-thread-driver.md`): the row's recorded
+/// path when it carries one, else the same store walk the freshness rung
+/// reads, keyed by the session id. A manifest-only adoption of a Desktop
+/// thread records no path, and reading the empty record as "nothing
+/// persisted" settled live threads Exited with an exit stamp that blinded
+/// the freshness rung forever. Fail closed: no index, no existence.
+pub(crate) fn codex_rollout_exists(
+    index: Option<&[(String, u64)]>,
+    log_path: Option<&str>,
+    session_id: Option<&str>,
+) -> bool {
+    if log_path.is_some_and(|p| std::path::Path::new(p).is_file()) {
+        return true;
+    }
+    let Some(index) = index else {
+        return false;
+    };
+    let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    index
+        .iter()
+        .any(|(name, _)| codex_rollout_matches(name, sid))
+}
+
 /// One codex rollout file with its session id: the session listing
 /// [`crate::provenance::CodexSource`] folds.
 pub(crate) struct CodexSessionFile {

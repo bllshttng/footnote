@@ -240,3 +240,6 @@ cli/tests/integration/test_collision.py::_native_supersede::pytest.skip  # nativ
 cli/tests/unit/test_contain.py::_native_contain::pytest.skip  # native contain door: the guard ladder is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_decompose.py::_native_supersede::pytest.skip  # native supersede door: the release contract is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # native supersede door: the evidence-record contract is the Rust leg's; no dev build means no door to pin
+cli/tests/agents/test_rust_runtime.py::test_spawn_seam_injects_config_defaults::pytest.skip  # native door: the compose reads the config FILE through the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_spawn_defaults.py::_pin_world::pytest.skip  # native door: the compose parity drives the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_dispatch_harness_stage_table.py::test_spawn_door_answers_the_same_harness::pytest.skip  # native door: both doors drive the fno-agents binary; without a dev build there is no door to pin

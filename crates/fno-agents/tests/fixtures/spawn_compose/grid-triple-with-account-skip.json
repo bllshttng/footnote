@@ -1,0 +1,143 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w11",
+    "/fno:target x-9"
+  ],
+  "config_toml": "[[routing.models]]\nname = \"acct-x\"\nharness = \"codex\"\nmodel = \"gpt-acct-x\"\nband = \"high\"\naccount = \"readyrule\"\nroute = \"zai/glm-x\"\neffort = \"high\"\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--harness",
+      "codex",
+      "--model",
+      "gpt-acct-x",
+      "--effort",
+      "high",
+      "--route",
+      "zai/glm-x",
+      "--name",
+      "w11",
+      "/fno:target x-9"
+    ],
+    "exit": 0,
+    "journal": {
+      "applied": [
+        [
+          "grid",
+          "grid effort(high)",
+          "routing"
+        ],
+        [
+          "grid",
+          "codex/gpt-acct-x",
+          "difficulty-grid"
+        ],
+        [
+          "effort",
+          "high",
+          "difficulty-grid"
+        ],
+        [
+          "route",
+          "zai/glm-x",
+          "difficulty-grid"
+        ]
+      ],
+      "fingerprint": "13f7c9b05408",
+      "kind": "spawn_defaults_applied",
+      "name": "w11",
+      "resolved": {
+        "account": {
+          "rung": null,
+          "value": ""
+        },
+        "effort": {
+          "rung": null,
+          "value": ""
+        },
+        "model": {
+          "rung": null,
+          "value": ""
+        },
+        "pane_group": {
+          "rung": null,
+          "value": ""
+        },
+        "permission_mode": {
+          "rung": "builtin.autonomous",
+          "value": "bypassPermissions"
+        },
+        "provider": {
+          "rung": null,
+          "value": ""
+        },
+        "route": {
+          "rung": null,
+          "value": ""
+        },
+        "substrate": {
+          "rung": null,
+          "value": ""
+        }
+      },
+      "seed": "/fno:target x-9",
+      "suppressed": [
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous",
+          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
+        ]
+      ],
+      "verb": "target"
+    },
+    "stderr": [
+      "fno agents spawn: account skipped (claude-only, grid harness 'codex'); 'readyrule' ignored",
+      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
+      "fno agents spawn: applied grid=grid effort(high) (routing), grid=codex/gpt-acct-x (difficulty-grid), effort=high (difficulty-grid), route=zai/glm-x (difficulty-grid)"
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": {
+    "difficulty": "high",
+    "id": "x-9",
+    "priority": "p2"
+  },
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w11",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-9",
+    "seed_form": "positional",
+    "seed_index": 3,
+    "spawn_tokens": [
+      "--name",
+      "w11",
+      "/fno:target x-9"
+    ],
+    "tab_flag_present": false
+  }
+}

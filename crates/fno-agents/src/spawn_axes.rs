@@ -1,9 +1,9 @@
 //! The billing axes of the spawn seam: config-sourced route, account and
-//! model, decided in one place. This is the port of the seam's largest
-//! decision block (`inject_spawn_defaults`, the route/account/model region):
-//! the Python front door projects the caller's facts and the config axes'
-//! values plus rungs, this module returns the injections, receipts and skip
-//! reasons verbatim, and the seam only applies them. The message strings are
+//! model, decided in one place. This module answers the spawn compose's
+//! axis-region asks (route/account/model): the Python front door projects the
+//! caller's facts and the config axes' values plus rungs, this module
+//! returns the injections, receipts and skip reasons verbatim, and the seam
+//! only applies them. The message strings are
 //! the seam's own vocabulary - one spelling, read by tests and operators
 //! alike. Pure over its input: no config, filesystem or network reads.
 

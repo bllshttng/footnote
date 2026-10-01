@@ -505,6 +505,25 @@ def _resolve_dispatch_node(
     return matches[0] if len(matches) == 1 else None
 
 
+def _target_binding(input_, node_id, plan_path, phase: str, *, exit_on_fork: bool) -> dict:
+    """Transport to the native binding owner; refused exits 1, a fork may exit 3."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+    payload = {"input": input_ or "", "node": node_id or "", "plan_path": plan_path or "",
+               "phase": phase, "allow_in_review": os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1"}
+    try:
+        receipt = verb_call(["backlog", "target-binding", "--stdin"], payload, timeout=120)
+    except VerbUnavailable as exc:
+        typer.echo(f"fno do target {phase}: target binding unavailable: {exc}", err=True)
+        return {}
+    if receipt.get("message"):
+        typer.echo(receipt["message"], err=True)
+    if receipt.get("verdict") == "refused" or (receipt.get("verdict") == "forked" and exit_on_fork):
+        if receipt.get("next"):
+            typer.echo(f"next: {receipt['next']}", err=True)
+        raise typer.Exit(code=1 if receipt["verdict"] == "refused" else 3)
+    return receipt
+
+
 def _redirect_if_contained(node: Optional[dict]) -> None:
     """Route a named contained node to the delivery unit that owns its PR.
 
@@ -1680,6 +1699,9 @@ def init(
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (task 1.3b).
     _redirect_if_contained(_dispatch_node)
+    _binding = _target_binding(
+        input_, _dispatch_node.get("id"), plan_path, "init", exit_on_fork=True
+    ) if isinstance(_dispatch_node, dict) else {}
 
     from fno.review_capability import env_marks_unattended
 
@@ -1841,6 +1863,8 @@ def init(
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
+    env["FNO_TARGET_BINDING"] = str(_binding.get("verdict") or "")
+    env["TARGET_ADOPTED_PR"] = str(_binding.get("pr") or "")
     # Change D: resolve `attended` from the substrate before the bash
     # manifest writer runs. Marking the run unattended makes init stamp
     # `attended: false`, so the skill surfaces offers as non-blocking lines
@@ -2423,7 +2447,7 @@ def resolve_model(
     refuse_retired_provider(_provider_tombstone)
 
     # include_difficulty: the bash dispatch lane pins --harness in its spawn
-    # argv, which stands inject_spawn_defaults' grid down - there is no grid
+    # argv, which stands the compose's grid down - there is no grid
     # receiving end here, so the band resolves statically (the resolution
     # model_tier gave this lane before the field retired).
     model, _source = _resolve_node_model(
@@ -3627,6 +3651,12 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
+    # Bare id: init binds. Scope may fork a child, so a held parent refuses first.
+    if len(node.split()) > 1 or os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1":
+        _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
+        binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
+        if binding.get("verdict") == "forked":
+            node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None
 
     # Boundary: already isolated -> no-op, create nothing (case). But
     # first refuse if a DIFFERENT live session holds this node's claim: this cwd

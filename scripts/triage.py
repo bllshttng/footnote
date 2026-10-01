@@ -1,69 +1,27 @@
 #!/usr/bin/env python3
 """Compatibility shim. Real implementation lives in ``fno backlog triage``.
 
-Preference order:
-    1. ``fno backlog triage <verb>`` when the installed CLI is on PATH
-    2. The in-repo ``fno.graph.triage`` module (cli/src fallback)
-
-Falls through with a loud error only when neither is available, which
-should only happen on a broken install.
-
+Everything forwards through the ``fno`` front door; the retired in-repo
+``fno.graph.triage`` import leg is gone with the consumers repoint.
 Kept in-repo so external callers (the ``/triage`` skill, hooks, users
-with muscle memory for ``scripts/triage.py``) keep working across the
-v1 -> v2 graph migration.
+with muscle memory for ``scripts/triage.py``) keep working.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
-from pathlib import Path
-
-
-_repo_root = Path(__file__).resolve().parents[1]
-_cli_src = _repo_root / "cli" / "src"
-if _cli_src.is_dir() and str(_cli_src) not in sys.path:
-    sys.path.insert(0, str(_cli_src))
-
-
-def _fno_on_path() -> bool:
-    # Check for `fno-py` (the Python CLI console script), matching what `_forward`
-    # actually calls - the mux binary owns `fno`, and `fno-py` is what runs the
-    # `backlog triage` verb.
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        candidate = Path(entry) / "fno-py"
-        try:
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def _forward(argv: list[str]) -> int:
-    """Try installed CLI first; fall back to in-repo import; error otherwise."""
-    if _fno_on_path():
-        return subprocess.call(["fno-py", "backlog", "triage", *argv])
-
+    """One front-door call; a missing `fno` refuses loudly."""
     try:
-        from fno.graph.triage import cli as triage_app  # type: ignore[import-not-found]
-    except ImportError:
+        return subprocess.call(["fno", "backlog", "triage", *argv])
+    except FileNotFoundError:
         sys.stderr.write(
-            f"error: fno CLI not found. Install with: uv tool install --compile-bytecode '{_repo_root / 'cli'}'\n"
-            "       (or run from a repo where cli/src is on PYTHONPATH)\n"
+            "error: fno CLI not found. Install fno, then re-run: "
+            "fno backlog triage " + " ".join(argv) + "\n"
         )
         return 3
-
-    try:
-        triage_app(argv, standalone_mode=True)
-        return 0
-    except SystemExit as exc:
-        code = exc.code
-        if isinstance(code, int):
-            return code
-        return 0 if code is None else 1
 
 
 if __name__ == "__main__":
