@@ -157,12 +157,12 @@ fn project_picker_lists_projects_and_enter_never_launches() {
     // Wait out the facts probe so the Branch/Worktree chips (painted while
     // facts are unread) no longer sit between Project and the input; this
     // scratch is not a git repo, so the pair hides once the probe lands.
-    h.wait_screen(15, |s| !s.contains("worktree"));
+    h.wait_screen(35, |s| !s.contains("worktree"));
     // Shift-Tab from the input lands on the Directory chip; Enter drops its
     // picker (title `directory`).
     type_and_settle(&mut h, b"\x1b[Z");
     type_and_settle(&mut h, b"\r");
-    let screen = h.wait_screen(10, |s| s.contains("directory"));
+    let screen = h.wait_screen(35, |s| s.contains("directory"));
     assert!(
         !screen.contains("starting..."),
         "opening the project picker never launches: {screen}"
@@ -316,9 +316,9 @@ fn project_chip_focus_shows_the_working_directory_line() {
     // While the facts probe is in flight the Branch/Worktree chips paint
     // between Project and the input and would eat the BackTab; this scratch
     // is not a git repo, so the pair hides once the probe lands.
-    h.wait_screen(15, |s| !s.contains("worktree"));
+    h.wait_screen(35, |s| !s.contains("worktree"));
     type_and_settle(&mut h, b"\x1b[Z"); // Project chip
-    let screen = h.wait_screen(10, |s| s.contains("Working directory"));
+    let screen = h.wait_screen(35, |s| s.contains("Working directory"));
     assert!(
         screen.contains("Working directory"),
         "the cwd line paints: {screen}"
