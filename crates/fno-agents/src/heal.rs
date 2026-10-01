@@ -2734,17 +2734,14 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_are_stripped_so_anchored_patterns_can_match() {
+    fn classify_rows() {
         let stripped = strip_timestamps(FMT_LOG);
         assert!(
             stripped.contains("Diff in /home/runner/work/footnote/footnote/crates/fno/src/"),
             "got: {stripped}"
         );
         assert!(!stripped.contains("2026-09-03T03:06"), "got: {stripped}");
-    }
 
-    #[test]
-    fn a_fmt_red_row_classifies_as_rustfmt_drift_in_the_crate_the_log_named() {
         let log = strip_timestamps(FMT_LOG);
         let f = classify(&ctx("cargo fmt --check (pinned)", &log), false);
         assert_eq!(f.signature, "rustfmt-drift");
@@ -2757,10 +2754,7 @@ mod tests {
             }
             other => panic!("expected Auto, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn two_drifted_crates_yield_one_finding_carrying_both() {
         let log = strip_timestamps(&format!(
             "{FMT_LOG}2026-09-03T03:06:03Z Diff in /home/runner/work/footnote/footnote/crates/fno-agents/src/heal.rs:1:\n"
         ));
@@ -2772,20 +2766,14 @@ mod tests {
             }
             other => panic!("expected Auto, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_fmt_check_whose_log_named_no_path_sweeps_both_crates() {
         let f = classify(&ctx("cargo fmt --check (pinned)", "log unavailable"), false);
         assert_eq!(f.signature, "rustfmt-drift");
         match f.remedy {
             Remedy::Auto { run, .. } => assert_eq!(run.len(), 2, "{run:?}"),
             other => panic!("expected Auto, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn modern_ruff_output_classifies_as_ruff_lint() {
         // The shape ruff actually prints: code first, location beneath.
         let log = strip_timestamps(concat!(
             "2026-09-03T07:15:29.7310174Z F821 Undefined name `Callable`\n",
@@ -2807,10 +2795,7 @@ mod tests {
             }
             other => panic!("expected Auto, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_mypy_error_is_mypy_not_ruff_lint() {
         let log = "src/fno/x.py:12: error: Incompatible return value type";
         let f = classify(&ctx("Python static correctness", log), false);
         assert_eq!(f.signature, "mypy");
@@ -2822,7 +2807,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_closure_trailer_edits_the_body_with_the_named_node() {
+    fn heal_write_rows() {
         let log = concat!(
             "check-pr-node-closure: HEAD ref 'feature/x-aaaa' names x-aaaa, ",
             "and the exact trailer claims none of them.\n",
@@ -2836,10 +2821,7 @@ mod tests {
                 nodes: vec!["x-aaaa".to_string()]
             }
         );
-    }
 
-    #[test]
-    fn one_heal_carries_every_id_on_the_one_verb_line() {
         // Two branch nodes and a body whose two stale trailer lines name two
         // more ids: one invocation, four ids, one line, no stale line left.
         let mk = |ids: &str| {
@@ -2870,10 +2852,7 @@ mod tests {
         assert!(!stripped.contains("Backlog-Closure:"));
         assert!(stripped.starts_with("Fixes the thing."));
         assert!(stripped.contains("Second line."));
-    }
 
-    #[test]
-    fn a_second_heal_over_its_own_output_writes_the_same_body() {
         let mk = |ids: &str| {
             let log = format!(
                 "check-pr-node-closure: HEAD ref 'feature/{ids}' names {ids}, \
@@ -2904,7 +2883,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pytest_failure_escalates_with_a_repro_that_runs_from_cli() {
+    fn pytest_rows() {
         let log = concat!(
             "FAILED tests/unit/test_mail_force.py::test_force_writes_a_row - AssertionError\n",
             "FAILED tests/unit/test_agents_cli_fold.py::test_paths - assert\n",
@@ -2920,10 +2899,7 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_pytest_repro_runs_from_cli_whichever_cwd_the_shard_used() {
         // Two real shards, two spellings of the same path. Both repros have
         // to run from `cli`, so the `cli/` prefix is dropped rather than
         // producing a path that does not exist there.
@@ -2939,10 +2915,7 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_long_pytest_failure_list_is_capped_and_says_how_many_it_dropped() {
         let log: String = (1..=9)
             .map(|n| format!("FAILED tests/unit/t.py::test_{n} - x"))
             .collect::<Vec<_>>()
@@ -2959,7 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fan_in_gate_names_its_failing_shards_instead_of_reading_unknown() {
+    fn rollup_rows() {
         // The `smoke` job's whole log, near enough: one echo and an exit on
         // its shards' results. Classified `unknown` it printed 38 lines of
         // runner boilerplate on every red PR and pointed at nothing.
@@ -2977,18 +2950,12 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn an_all_green_rollup_is_not_a_shard_rollup_finding() {
         // The gate only classifies when a shard did not pass; an all-green
         // echo in some other job's log must not capture that job.
         assert_eq!(shard_rollup_shards("a=success b=success"), None);
         assert_eq!(shard_rollup_shards("a=success b=skipped"), None);
-    }
 
-    #[test]
-    fn a_cancelled_shard_is_named_not_read_as_unknown() {
         // A real rollup off PR 1413. `cancelled` was outside the accepted
         // vocabulary, so the gate read `unknown` and printed 38 lines of
         // runner boilerplate. A cancelled shard is common precisely because a
@@ -3013,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn terse_mode_keeps_one_line_per_check_for_the_all_report() {
+    fn report_rows() {
         // 13 unrecognized checks across every open PR buried the --all report
         // in 40-line log tails. Terse keeps the first line only.
         let findings = vec![classify(
@@ -3026,10 +2993,7 @@ mod tests {
             "the full detail is multi-line"
         );
         assert_eq!(report(&findings, true, true), EXIT_ESCALATIONS);
-    }
 
-    #[test]
-    fn a_cargo_test_failure_escalates_naming_the_failing_test() {
         let log = "test stream_worker::tests::mid_turn_silence ... FAILED\n\
                    test result: FAILED. 1948 passed; 1 failed;\n";
         let f = classify(&ctx("cargo test + schema parity", log), false);
@@ -3044,10 +3008,7 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_guard_refusal_escalates_with_the_guards_own_script() {
         let log = "check-file-budget: cli/src/fno/mail/cli.py is 6105 lines (budget 5000)";
         let f = classify(&ctx("guards", log), false);
         assert_eq!(f.signature, "guard-script");
@@ -3057,10 +3018,7 @@ mod tests {
                 repro: "bash scripts/ci/check-file-budget.sh".to_string()
             }
         );
-    }
 
-    #[test]
-    fn a_smoke_shard_reads_the_runners_own_failing_step_not_a_guard_prefix() {
         // The real log that misdiagnosed: dozens of passing guards announcing
         // themselves, then a failure from a step that prints no `check-`
         // prefix at all. Prefix-matching named `check-pitfalls`, which passes.
@@ -3080,10 +3038,7 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn a_guards_job_names_the_guard_that_refused_not_the_first_that_announced() {
         // Every guard announces itself on success too, so a `guards` log is
         // mostly passing prefixes. The repro has to name the last one before
         // the error marker; the first one exits 0 and diagnoses nothing.
@@ -3103,10 +3058,7 @@ mod tests {
                 repro: "bash scripts/ci/check-reachable-paths.sh".to_string()
             }
         );
-    }
 
-    #[test]
-    fn a_red_review_coverage_status_is_the_gate_not_a_defect() {
         let f = classify(&ctx("fno/review-coverage", ""), false);
         assert_eq!(f.signature, "review-gate");
         assert!(
@@ -3114,10 +3066,7 @@ mod tests {
             "{:?}",
             f.remedy
         );
-    }
 
-    #[test]
-    fn a_cancelled_check_is_not_an_unrecognized_failure() {
         // Measured on three open PRs: every `unknown` heal reported was a
         // cancelled check whose log carried one line. An empty log has three
         // explanations, and "the run concluded nothing" is the one that was
@@ -3135,24 +3084,18 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_check_red_on_main_still_reads_inherited() {
+    fn inherited_rows() {
         // inherited is checked before the table, so main's problem never
         // becomes this PR's whatever the bucket says.
         let f = classify(&cancelled_ctx("guards", ""), true);
         assert_eq!(f.signature, "inherited");
-    }
 
-    #[test]
-    fn a_check_red_on_main_reads_inherited_even_when_its_log_matches() {
         let log = strip_timestamps(FMT_LOG);
         let f = classify(&ctx("cargo fmt --check (pinned)", &log), true);
         assert_eq!(f.signature, "inherited");
         assert_eq!(f.remedy, Remedy::Inherited);
         assert!(!f.counts_against_pr());
-    }
 
-    #[test]
-    fn an_unmatched_log_is_unknown_and_carries_its_tail() {
         let log: String = (1..=60)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
@@ -3168,17 +3111,14 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn an_unavailable_log_is_unknown_never_dropped() {
         let f = classify(&ctx("some-check", ""), false);
         assert_eq!(f.signature, "unknown");
         assert!(f.counts_against_pr());
     }
 
     #[test]
-    fn the_playbook_names_every_signature_in_the_table() {
+    fn table_rows() {
         let text = playbook();
         for sig in SIGNATURES {
             assert!(
@@ -3189,10 +3129,7 @@ mod tests {
         }
         assert!(text.contains("inherited"));
         assert!(text.contains("unknown"));
-    }
 
-    #[test]
-    fn failing_rows_keeps_fail_and_cancel_and_drops_the_rest() {
         let checks = json!([
             {"name": "a", "bucket": "fail", "link": "", "workflow": "w"},
             {"name": "b", "bucket": "pass", "link": "", "workflow": "w"},
@@ -3204,18 +3141,12 @@ mod tests {
             .map(|r| r["name"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(names, vec!["a", "c"]);
-    }
 
-    #[test]
-    fn any_pending_sees_a_run_still_in_flight() {
         let settled = json!([{"name": "a", "bucket": "fail"}, {"name": "b", "bucket": "pass"}]);
         assert!(!any_pending(&settled));
         let running = json!([{"name": "a", "bucket": "pass"}, {"name": "b", "bucket": "pending"}]);
         assert!(any_pending(&running));
-    }
 
-    #[test]
-    fn job_id_reads_a_check_link_and_declines_a_status_context() {
         assert_eq!(
             job_id("https://github.com/o/r/actions/runs/123/job/456"),
             Some("456".to_string())
@@ -3374,7 +3305,7 @@ exit 0
     }
 
     #[test]
-    fn a_dry_run_touches_nothing_and_says_so() {
+    fn remedy_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh(d, false);
@@ -3384,10 +3315,7 @@ exit 0
         assert_eq!(code, EXIT_ESCALATIONS.max(EXIT_CLEAN), "dry run reports");
         assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran");
         assert!(!log_of(d, "git.log").contains("push"), "no push");
-    }
 
-    #[test]
-    fn a_dirty_worktree_refuses_before_any_remedy_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh(d, false);
@@ -3397,10 +3325,7 @@ exit 0
         assert_eq!(code, EXIT_CWD_REFUSAL);
         assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran");
         assert!(!log_of(d, "git.log").contains("push"));
-    }
 
-    #[test]
-    fn the_wrong_branch_refuses_too() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh(d, false);
@@ -3408,10 +3333,7 @@ exit 0
         stub_cargo(d);
         assert_eq!(run_heal(&args_for(d, &["--apply"])), EXIT_CWD_REFUSAL);
         assert_eq!(log_of(d, "cargo.log"), "");
-    }
 
-    #[test]
-    fn apply_commits_once_and_pushes_once() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh(d, false);
@@ -3421,10 +3343,7 @@ exit 0
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git commit").count(), 1, "{git}");
         assert_eq!(git.matches("git push").count(), 1, "{git}");
-    }
 
-    #[test]
-    fn a_run_in_flight_keeps_the_commit_local_and_never_pushes() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         // The pre-push re-read reports a check still running.
@@ -3436,10 +3355,7 @@ exit 0
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git commit").count(), 1, "the fix is kept");
         assert!(!git.contains("git push"), "but never pushed: {git}");
-    }
 
-    #[test]
-    fn a_remedy_that_changed_nothing_takes_no_credit_for_a_dirty_tree() {
         // `dirty` is a WHOLE-WORKTREE question and the remedies share one
         // worktree, so an earlier remedy's uncommitted edit made a later
         // no-op remedy read as dirty and take credit for work it did not do.
@@ -3469,10 +3385,7 @@ exit 0
             "{:?}",
             findings[0].remedy
         );
-    }
 
-    #[test]
-    fn a_failed_commit_never_reports_the_pr_clean() {
         // The fix is in the worktree but no commit and no push happened, so
         // the check is still red on the remote. Exiting 0 there is the false
         // green the no-op arm was written to close, left open on this path.
@@ -3488,10 +3401,7 @@ exit 0
             !log_of(d, "git.log").contains("git push"),
             "and nothing is pushed"
         );
-    }
 
-    #[test]
-    fn dry_run_outside_the_drive_loop_is_a_usage_error() {
         // --dry-run rehearses --all --apply; on the single-PR path it would
         // silently mean "the report you already get without --apply".
         assert_eq!(
@@ -3639,7 +3549,7 @@ exit 0
     }
 
     #[test]
-    fn head_ref_node_ids_follow_the_closure_producers_delimiter_rule() {
+    fn drive_rows() {
         // Parity cases from the Python half and the CI gate: a plain branch
         // names nothing, a node branch names its node, and a trailing segment
         // never re-glues into a second, bogus candidate.
@@ -3660,10 +3570,7 @@ exit 0
             branch_node_ids("feature/x-5b667"),
             vec!["x-5b667".to_string()]
         );
-    }
 
-    #[test]
-    fn the_drive_loop_skips_a_claimed_pr_and_rehearses_the_free_one() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive(d, false);
@@ -3687,10 +3594,7 @@ exit 0
         assert!(events.contains("\"dry_run\":true"), "{events}");
         assert!(events.contains("\"skip_claim_held\":1"), "{events}");
         assert!(events.contains("\"would_heal\":1"), "{events}");
-    }
 
-    #[test]
-    fn the_drive_loop_heals_the_free_pr_from_its_own_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive(d, false);
@@ -3707,10 +3611,81 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"healed\":1"), "{events}");
         assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, false);
+        // No stub_git_drive: `git worktree list` fails, so no worktree is
+        // found for the free PR's branch.
+        stub_git(d, "feature/x-1111", false);
+        stub_cargo(d);
+        stub_fno(d);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code = run_heal(&drive_args(d, &[]));
+        assert_ne!(code, EXIT_CLEAN, "the red PR is still red");
+        assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran anywhere");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("skip_no_worktree"), "{events}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        assert_eq!(run_heal(&args_for(d, &["--playbook"])), EXIT_CLEAN);
+        assert_eq!(log_of(d, "gh.log"), "", "no read");
+
+        assert_eq!(run_heal(&["--nope".to_string()]), EXIT_READ_ERROR);
+
+        // --slurp hands back an array of pages, so nothing has to find a
+        // boundary. The old hand-rolled `split("][")` cut inside any PR body
+        // carrying a markdown reference link and dropped those PRs silently.
+        let one: Vec<Value> = vec![json!([{"number": 7}, {"number": 9}])];
+        assert_eq!(open_pr_numbers(&one), vec!["7", "9"]);
+
+        let many: Vec<Value> = vec![json!([{"number": 7}]), json!([{"number": 9}])];
+        assert_eq!(open_pr_numbers(&many), vec!["7", "9"]);
+
+        let with_bracket_pair: Vec<Value> =
+            vec![json!([{"number": 7, "body": "see [the doc][ref]"}])];
+        assert_eq!(open_pr_numbers(&with_bracket_pair), vec!["7"]);
+
+        // Keeping the LAST non-clean code let a later escalation mask an
+        // earlier failure to read the world at all.
+        assert_eq!(worse_of(EXIT_READ_ERROR, EXIT_ESCALATIONS), EXIT_READ_ERROR);
+        assert_eq!(worse_of(EXIT_ESCALATIONS, EXIT_IN_FLIGHT), EXIT_ESCALATIONS);
+        assert_eq!(worse_of(EXIT_CLEAN, EXIT_IN_FLIGHT), EXIT_IN_FLIGHT);
+        assert_eq!(worse_of(EXIT_CLEAN, EXIT_CLEAN), EXIT_CLEAN);
+
+        // The guard joins candidates with commas and NO space, so a capture
+        // that cannot cross a comma matched nothing and the remedy became a
+        // silent no-op on exactly the branches that needed it most.
+        let log = concat!(
+            "check-pr-node-closure: HEAD ref 'feature/x-a1-x-b2' names x-a1,x-b2, ",
+            "and the exact trailer claims none of them.\n",
+        );
+        let f = classify(&ctx("check-pr-node-closure", log), false);
+        assert_eq!(
+            f.remedy,
+            Remedy::EditBody {
+                nodes: vec!["x-a1".to_string(), "x-b2".to_string()]
+            }
+        );
+
+        let unknown = json!({"status": "completed", "conclusion": "action_required"});
+        assert_eq!(rest_bucket(&unknown), "fail");
+        assert_eq!(
+            rest_bucket(&json!({"status": "completed", "conclusion": "success"})),
+            "pass"
+        );
+        assert_eq!(
+            rest_bucket(&json!({"status": "queued", "conclusion": null})),
+            "pending"
+        );
     }
 
     #[test]
-    fn an_unknown_red_reruns_once_then_escalates_as_real() {
+    fn rerun_rows() {
         // The rerun comes first, exactly once per (sha, run id); only a
         // second red on the same pair is the verdict. The escalation names
         // the double failure, so the operator reads a verdict, not a guess.
@@ -3756,104 +3731,7 @@ exit 0
         );
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"unknown\":1"), "{events}");
-    }
 
-    #[test]
-    fn a_pr_with_no_worktree_is_named_and_skipped_never_cloned() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive(d, false);
-        // No stub_git_drive: `git worktree list` fails, so no worktree is
-        // found for the free PR's branch.
-        stub_git(d, "feature/x-1111", false);
-        stub_cargo(d);
-        stub_fno(d);
-        hold_claim(d);
-        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
-        let code = run_heal(&drive_args(d, &[]));
-        assert_ne!(code, EXIT_CLEAN, "the red PR is still red");
-        assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran anywhere");
-        let events = log_of(d, "events.jsonl");
-        assert!(events.contains("skip_no_worktree"), "{events}");
-    }
-
-    #[test]
-    fn playbook_exits_clean_without_reading_anything() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh(d, false);
-        stub_git(d, "feature/x", false);
-        assert_eq!(run_heal(&args_for(d, &["--playbook"])), EXIT_CLEAN);
-        assert_eq!(log_of(d, "gh.log"), "", "no read");
-    }
-
-    #[test]
-    fn an_unknown_flag_is_refused_rather_than_ignored() {
-        assert_eq!(run_heal(&["--nope".to_string()]), EXIT_READ_ERROR);
-    }
-
-    #[test]
-    fn open_pr_numbers_reads_one_page_and_several() {
-        // --slurp hands back an array of pages, so nothing has to find a
-        // boundary. The old hand-rolled `split("][")` cut inside any PR body
-        // carrying a markdown reference link and dropped those PRs silently.
-        let one: Vec<Value> = vec![json!([{"number": 7}, {"number": 9}])];
-        assert_eq!(open_pr_numbers(&one), vec!["7", "9"]);
-
-        let many: Vec<Value> = vec![json!([{"number": 7}]), json!([{"number": 9}])];
-        assert_eq!(open_pr_numbers(&many), vec!["7", "9"]);
-
-        let with_bracket_pair: Vec<Value> =
-            vec![json!([{"number": 7, "body": "see [the doc][ref]"}])];
-        assert_eq!(open_pr_numbers(&with_bracket_pair), vec!["7"]);
-    }
-
-    #[test]
-    fn a_read_error_outranks_an_escalation_across_prs() {
-        // Keeping the LAST non-clean code let a later escalation mask an
-        // earlier failure to read the world at all.
-        assert_eq!(worse_of(EXIT_READ_ERROR, EXIT_ESCALATIONS), EXIT_READ_ERROR);
-        assert_eq!(worse_of(EXIT_ESCALATIONS, EXIT_IN_FLIGHT), EXIT_ESCALATIONS);
-        assert_eq!(worse_of(EXIT_CLEAN, EXIT_IN_FLIGHT), EXIT_IN_FLIGHT);
-        assert_eq!(worse_of(EXIT_CLEAN, EXIT_CLEAN), EXIT_CLEAN);
-    }
-
-    #[test]
-    fn a_multi_node_branch_still_yields_its_closure_nodes() {
-        // The guard joins candidates with commas and NO space, so a capture
-        // that cannot cross a comma matched nothing and the remedy became a
-        // silent no-op on exactly the branches that needed it most.
-        let log = concat!(
-            "check-pr-node-closure: HEAD ref 'feature/x-a1-x-b2' names x-a1,x-b2, ",
-            "and the exact trailer claims none of them.\n",
-        );
-        let f = classify(&ctx("check-pr-node-closure", log), false);
-        assert_eq!(
-            f.remedy,
-            Remedy::EditBody {
-                nodes: vec!["x-a1".to_string(), "x-b2".to_string()]
-            }
-        );
-    }
-
-    #[test]
-    fn a_rest_conclusion_heal_does_not_know_buckets_fail_never_pass() {
-        let unknown = json!({"status": "completed", "conclusion": "action_required"});
-        assert_eq!(rest_bucket(&unknown), "fail");
-        assert_eq!(
-            rest_bucket(&json!({"status": "completed", "conclusion": "success"})),
-            "pass"
-        );
-        assert_eq!(
-            rest_bucket(&json!({"status": "queued", "conclusion": null})),
-            "pending"
-        );
-    }
-
-    // ── the rerun remedy ──────────────────────────────────────────────────
-
-    #[test]
-    fn a_cancelled_run_with_a_run_link_resolves_to_a_rerun() {
         let f = classify(
             &cancelled_run_ctx("ci", "https://github.com/o/r/actions/runs/777/job/9"),
             false,
@@ -3868,10 +3746,7 @@ exit 0
         assert_eq!(f.action(), "rerun");
         assert_eq!(f.detail(), "gh run rerun 777");
         assert!(f.counts_against_pr());
-    }
 
-    #[test]
-    fn a_cancelled_check_without_a_run_link_still_escalates() {
         // A link that names no run (a StatusContext, or no link at all)
         // leaves nothing to rerun; the escalation is the honest answer.
         let f = classify(&cancelled_ctx("ci", ""), false);
@@ -3881,10 +3756,7 @@ exit 0
             "{:?}",
             f.remedy
         );
-    }
 
-    #[test]
-    fn a_cancelled_run_is_rerun_once_per_sha() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_rerun(d);
@@ -3903,10 +3775,7 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"reran\":1"), "{events}");
         assert!(events.contains("\"rerun_keys\":[\"aaa1:777\"]"), "{events}");
-    }
 
-    #[test]
-    fn a_manual_single_pr_rerun_is_ledgered_for_the_once_per_sha_guard() {
         // The guard reads rerun_shas off pr_heal_tick rows; the drive loop
         // writes its own. A manual `pr-heal <n> --apply` writes one too, so
         // a hand rerun is never issued a second time by the next cycle.
@@ -3930,10 +3799,7 @@ exit 0
             1,
             "the second manual apply never re-runs the sha: {gh}"
         );
-    }
 
-    #[test]
-    fn a_second_cancelled_verdict_on_the_same_sha_escalates_instead_of_rerunning() {
         // The journal is the once-guard: a prior pr_heal_tick row naming the
         // sha in rerun_shas means the rerun was already issued; a second
         // cancelled verdict on the same sha reached a real result.
@@ -3958,6 +3824,8 @@ exit 0
             "the demoted rerun is still red, never healed: {events}"
         );
     }
+
+    // ── the rerun remedy ──────────────────────────────────────────────────
 
     // ── the rebase triggers ───────────────────────────────────────────────
 
@@ -4018,7 +3886,7 @@ exit 0
     }
 
     #[test]
-    fn a_conflicting_pr_rebases_once_from_its_own_worktree() {
+    fn rebase_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_rebase(d, "false");
@@ -4055,10 +3923,7 @@ exit 0
             "{}",
             status_line(&sa)
         );
-    }
 
-    #[test]
-    fn the_merge_slot_holder_is_rebased_when_mergeable_reads_null() {
         // `mergeable` reads null while GitHub computes; the merge slot is the
         // other trigger, and the ONLY reason this PR rebases. PR 2 conflicts
         // but holds no slot and has no worktree, so nothing else is rebased.
@@ -4076,10 +3941,7 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"rebased\":1"), "{events}");
         assert!(events.contains("\"skip_no_worktree\":1"), "{events}");
-    }
 
-    #[test]
-    fn a_live_worker_claim_blocks_the_rebase_of_its_pr() {
         // Refusal 1 runs FIRST: a conflicting PR whose node a live worker
         // holds is never rebased by the healer. PR 1 holds no trigger
         // (mergeable null, no slot), PR 2's node is claim-held and
@@ -4100,10 +3962,7 @@ exit 0
         );
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"skip_claim_held\":1"), "{events}");
-    }
 
-    #[test]
-    fn the_rebase_budget_stops_the_run_after_six() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         // Seven conflicting PRs, all on the one branch the git stub lists a
@@ -4172,7 +4031,7 @@ echo '[]'
     }
 
     #[test]
-    fn a_rerunnable_red_reruns_once_per_sha_and_run() {
+    fn pytest_rerun_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_pytest(d);
@@ -4192,10 +4051,7 @@ echo '[]'
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"reran\":1"), "{events}");
         assert!(events.contains("\"rerun_keys\":[\"aaa1:777\"]"), "{events}");
-    }
 
-    #[test]
-    fn nine_checks_sharing_one_run_id_cost_one_rerun() {
         // The dedup key is (sha, run id), not the check name: nine failing
         // checks from one workflow run are ONE rerun. Measured on PR 2162:
         // nine red checks, one run id, one `--failed` rerun covers all nine.
@@ -4223,10 +4079,7 @@ echo '[]'
             1,
             "one rerun for nine checks: {gh}"
         );
-    }
 
-    #[test]
-    fn a_second_red_on_the_rerun_key_escalates_as_real() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_pytest(d);
@@ -4292,7 +4145,7 @@ echo '[]'
     }
 
     #[test]
-    fn a_green_rerun_records_a_flake_row() {
+    fn flake_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_flake(d);
@@ -4306,10 +4159,7 @@ echo '[]'
         assert!(events.contains("pr_heal_flake"), "{events}");
         assert!(events.contains("\"key_guard\":\"aaa1:777:ci\""), "{events}");
         assert!(events.contains("\"key\":\"ci\""), "{events}");
-    }
 
-    #[test]
-    fn the_third_flake_occurrence_files_one_node() {
         // Two prior rows for key ci, no node yet: the third green rerun
         // files exactly one node through `fno backlog idea`.
         let tmp = tempfile::tempdir().unwrap();
@@ -4327,10 +4177,7 @@ echo '[]'
         assert_eq!(fno.matches("backlog idea").count(), 1, "{fno}");
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"node_id\":\"fno-abc9\""), "{events}");
-    }
 
-    #[test]
-    fn a_flake_key_with_a_node_never_refiles() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive_flake(d);
@@ -4343,10 +4190,7 @@ echo '[]'
         run_heal(&drive_args(d, &[]));
         let fno = log_of(d, "fno.log");
         assert!(!fno.contains("backlog idea"), "{fno}");
-    }
 
-    #[test]
-    fn the_playbook_names_rerunnability() {
         let text = playbook();
         assert!(text.contains("rerunnable"), "{text}");
         assert!(text.contains("yes"), "{text}");
@@ -4366,7 +4210,7 @@ echo '[]'
     }
 
     #[test]
-    fn detach_spawns_a_child_names_it_in_a_pid_file_and_journals_the_spawn() {
+    fn detach_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         let a = parse_args(&detach_args(d)).unwrap();
@@ -4403,10 +4247,7 @@ echo '[]'
         assert!(events.contains("control_plane_tick"), "{events}");
         assert!(events.contains("\"arm\":\"heal\""), "{events}");
         assert!(events.contains("\"acted\":1"), "{events}");
-    }
 
-    #[test]
-    fn detach_with_a_live_pid_skips_and_journals_in_flight() {
         // A drive loop still running when the next tick fires is skipped,
         // never double-spawned (the in-flight case the pid file exists for).
         let tmp = tempfile::tempdir().unwrap();
@@ -4426,10 +4267,7 @@ echo '[]'
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"acted\":0"), "{events}");
         assert!(events.contains("in_flight"), "{events}");
-    }
 
-    #[test]
-    fn detach_under_an_armed_incident_spawns_nothing_and_journals_fleet_stop() {
         // The breaker exists to stop spawns: the drive loop obeys it on its
         // own arm row instead of feeding the admission gate a spawn to
         // refuse, and the tick still completes its other legs.
@@ -4458,10 +4296,7 @@ echo '[]'
         assert!(events.contains("\"acted\":0"), "{events}");
         assert!(events.contains("fleet_stop"), "{events}");
         assert!(events.contains("generation 9"), "{events}");
-    }
 
-    #[test]
-    fn detach_with_a_dead_pid_spawns_and_overwrites_the_pid_file() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         // A real, now-dead pid: spawned, waited, gone.
@@ -4492,10 +4327,7 @@ echo '[]'
             Some(std::process::id()),
             "the pid file names the new child"
         );
-    }
 
-    #[test]
-    fn a_two_root_detach_spawns_one_child_carrying_every_root() {
         // The per-root Python loop is gone: one spawn whose child argv
         // carries every --cwd, one pid file. The second root rides
         // drive_args' own --cwd plus one more.
@@ -4539,10 +4371,7 @@ echo '[]'
             Some(std::process::id()),
             "one pid file written"
         );
-    }
 
-    #[test]
-    fn a_two_root_detach_with_a_live_pid_skips_in_flight() {
         // The in-flight guard reads the ONE pid file whatever root asked:
         // the per-root files never let it see a loop started for a root
         // other than its own.
@@ -4566,10 +4395,16 @@ echo '[]'
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"acted\":0"), "{events}");
         assert!(events.contains("in_flight"), "{events}");
+
+        assert_eq!(
+            run_heal(&["--detach".to_string()]),
+            EXIT_READ_ERROR,
+            "--detach without --all --apply has nothing to detach"
+        );
     }
 
     #[test]
-    fn a_spent_deadline_skips_every_pr_with_a_receipt() {
+    fn tick_rows() {
         // Deadline already spent: no PR is read, every PR gets one
         // skip_deadline receipt, and the tick row carries the count.
         let tmp = tempfile::tempdir().unwrap();
@@ -4607,10 +4442,7 @@ echo '[]'
             "one receipt per unreached PR: {events}"
         );
         assert!(events.contains("\"skip_deadline\":3"), "{events}");
-    }
 
-    #[test]
-    fn run_roots_apply_visits_every_root_and_writes_its_row() {
         // One process, one pr_heal_tick row per root, folded to the worst
         // verdict. Instant stubs and a generous budget: no timing dependence
         // (the skip itself is covered by the spent-deadline tests).
@@ -4647,10 +4479,7 @@ echo '[]'
                 .unwrap_or_else(|| panic!("no tick row for {root:?}: {events}"));
             assert!(row.contains("\"dry_run\":false"), "{row}");
         }
-    }
 
-    #[test]
-    fn remedy_timeout_never_outruns_the_deadline() {
         let tmp = tempfile::tempdir().unwrap();
         let a = parse_args(&args_for(tmp.path(), &[])).unwrap();
         assert_eq!(remedy_timeout(&a), REMEDY_TIMEOUT, "no deadline: unchanged");
@@ -4667,10 +4496,7 @@ echo '[]'
             std::time::Duration::from_secs(1),
             "spent deadline: the 1s floor"
         );
-    }
 
-    #[test]
-    fn a_single_root_tick_row_carries_the_root() {
         // One --cwd behaves as today, except the pr_heal_tick row now names
         // its root: the field the two-probe done-check reads.
         let tmp = tempfile::tempdir().unwrap();
@@ -4686,170 +4512,7 @@ echo '[]'
             events.contains(&format!("\"root\":\"{}\"", d.to_str().unwrap())),
             "{events}"
         );
-    }
 
-    #[test]
-    fn status_line_unarmed_names_the_arm_command() {
-        let a = parse_args(&["--status".to_string()]).unwrap();
-        assert_eq!(
-            status_line(&a),
-            "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)"
-        );
-    }
-
-    #[test]
-    fn status_line_armed_without_a_row_says_never_ran() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            tmp.path()
-                .join("events.jsonl")
-                .to_string_lossy()
-                .into_owned(),
-        ])
-        .unwrap();
-        assert_eq!(status_line(&a), "Heal: armed; never ran");
-    }
-
-    #[test]
-    fn status_line_armed_with_a_recent_row_prints_counts_and_age() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let ts =
-            (chrono::Utc::now() - chrono::Duration::minutes(12) - chrono::Duration::seconds(5))
-                .to_rfc3339();
-        std::fs::write(
-            &events,
-            format!(
-                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":1,\"escalated\":3}}}}\n"
-            ),
-        )
-        .unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            events.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
-        let line = status_line(&a);
-        assert!(line.starts_with("Heal: armed; last run "), "{line}");
-        assert!(line.contains("(12m ago, root unknown)"), "{line}");
-        assert!(
-            line.contains("healed 1, rebased 0, reran 0, escalated 3"),
-            "{line}"
-        );
-        assert!(line.contains("acted on nothing"), "{line}");
-        assert!(line.contains("in-flight none"), "{line}");
-    }
-
-    #[test]
-    fn status_line_prints_rebased_reran_and_the_acted_prs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let ts = chrono::Utc::now().to_rfc3339();
-        std::fs::write(
-            &events,
-            format!(
-                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":0,\"rebased\":1,\"reran\":2,\"escalated\":1,\"acted_prs\":[2155,2162]}}}}\n"
-            ),
-        )
-        .unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            events.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
-        let line = status_line(&a);
-        assert!(
-            line.contains("healed 0, rebased 1, reran 2, escalated 1; acted on PR 2155, 2162"),
-            "{line}"
-        );
-    }
-
-    #[test]
-    fn status_line_prints_days_when_the_row_is_older_than_a_day() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let ts = (chrono::Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
-        std::fs::write(
-            &events,
-            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
-        )
-        .unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            events.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
-        assert!(
-            status_line(&a).contains("(1d ago, root unknown)"),
-            "{}",
-            status_line(&a)
-        );
-    }
-
-    #[test]
-    fn status_line_names_a_live_pid_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let ts = chrono::Utc::now().to_rfc3339();
-        std::fs::write(
-            &events,
-            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
-        )
-        .unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            events.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
-        let pid_file = heal_pid_file(&a);
-        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
-        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
-        assert!(
-            status_line(&a).contains(&format!("in-flight {}", std::process::id())),
-            "{}",
-            status_line(&a)
-        );
-    }
-
-    #[test]
-    fn the_status_line_labels_the_root_its_row_names() {
-        // One row names one root's run: the line labels whose counts these
-        // are instead of letting the last root's row read as the whole tick.
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let ts = chrono::Utc::now().to_rfc3339();
-        std::fs::write(
-            &events,
-            format!(
-                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"root\":\"/srv/repo\",\"healed\":2}}}}\n"
-            ),
-        )
-        .unwrap();
-        let a = parse_args(&[
-            "--status".to_string(),
-            "--armed".to_string(),
-            "--events-file".to_string(),
-            events.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
-        let line = status_line(&a);
-        assert!(line.contains("root /srv/repo"), "{line}");
-        assert!(line.contains("healed 2"), "{line}");
-    }
-
-    #[test]
-    fn a_stale_per_root_pid_file_with_a_live_pid_holds_the_tick() {
         // Migration guard: a pre-upgrade loop still alive in an old
         // pr-heal.<root>.pid file holds the tick, so a binary swap cannot
         // double-spawn the healer while the old loop lives.
@@ -4875,10 +4538,7 @@ echo '[]'
         );
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("in_flight"), "{events}");
-    }
 
-    #[test]
-    fn a_recycled_pid_that_names_no_healer_does_not_hold_the_tick() {
         // A stale pid file outlives its loop and pids are recycled: the pid
         // in an old file may belong to any unrelated process. `ps` names the
         // owner; a non-healer owner never holds the tick (the P1 codex
@@ -4913,10 +4573,7 @@ echo '[]'
             1,
             "a recycled pid naming no healer never holds the tick"
         );
-    }
 
-    #[test]
-    fn a_spent_budget_skips_every_root_without_paying_the_pre_loop_reads() {
         // Zero slice, zero work: an exhausted budget runs no listing, no
         // worktree scan, no main-HEAD read for any root, and writes no tick
         // row (AC2 corner codex raised: the reads cost up to 60s each).
@@ -4948,11 +4605,144 @@ exit 0
     }
 
     #[test]
-    fn detach_without_the_drive_loop_is_a_usage_error() {
+    fn status_rows() {
+        let a = parse_args(&["--status".to_string()]).unwrap();
         assert_eq!(
-            run_heal(&["--detach".to_string()]),
-            EXIT_READ_ERROR,
-            "--detach without --all --apply has nothing to detach"
+            status_line(&a),
+            "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)"
         );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            tmp.path()
+                .join("events.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(status_line(&a), "Heal: armed; never ran");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts =
+            (chrono::Utc::now() - chrono::Duration::minutes(12) - chrono::Duration::seconds(5))
+                .to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":1,\"escalated\":3}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(line.starts_with("Heal: armed; last run "), "{line}");
+        assert!(line.contains("(12m ago, root unknown)"), "{line}");
+        assert!(
+            line.contains("healed 1, rebased 0, reran 0, escalated 3"),
+            "{line}"
+        );
+        assert!(line.contains("acted on nothing"), "{line}");
+        assert!(line.contains("in-flight none"), "{line}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":0,\"rebased\":1,\"reran\":2,\"escalated\":1,\"acted_prs\":[2155,2162]}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(
+            line.contains("healed 0, rebased 1, reran 2, escalated 1; acted on PR 2155, 2162"),
+            "{line}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = (chrono::Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
+        std::fs::write(
+            &events,
+            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert!(
+            status_line(&a).contains("(1d ago, root unknown)"),
+            "{}",
+            status_line(&a)
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let pid_file = heal_pid_file(&a);
+        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
+        assert!(
+            status_line(&a).contains(&format!("in-flight {}", std::process::id())),
+            "{}",
+            status_line(&a)
+        );
+
+        // One row names one root's run: the line labels whose counts these
+        // are instead of letting the last root's row read as the whole tick.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"root\":\"/srv/repo\",\"healed\":2}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(line.contains("root /srv/repo"), "{line}");
+        assert!(line.contains("healed 2"), "{line}");
     }
 }

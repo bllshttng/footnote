@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn tiles_whole_range_grants_only_whole_range_proofs() {
+    fn tile_rows() {
         // The tiling question is stronger than the coverage question: a tile
         // asserts every shipping line was read, so the interdiff arm tiles
         // only at zero, and Stale never tiles whatever counts() says.
@@ -647,10 +647,7 @@ mod tests {
         assert!(Freshness::CarriedInterdiff { lines: 0, cap: 100 }.tiles_whole_range());
         assert!(!Freshness::CarriedInterdiff { lines: 1, cap: 100 }.tiles_whole_range());
         assert!(!Freshness::Stale.tiles_whole_range());
-    }
 
-    #[test]
-    fn interdiff_under_cap_carries_with_its_numbers() {
         // Law d-608344c1's headline shape: a 3-line conflict resolution
         // (measured as a small multiset difference) no longer costs a round.
         let verdict = review_freshness(
@@ -664,10 +661,7 @@ mod tests {
             verdict.as_label(),
             "carried_interdiff(n=6, cap=100)".to_string()
         );
-    }
 
-    #[test]
-    fn interdiff_at_cap_stales() {
         // 99 carries; 100 does not: the law says UNDER 100 lines.
         assert_eq!(
             review_freshness(
@@ -694,10 +688,7 @@ mod tests {
             ),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn interdiff_none_never_carries_even_with_both_identities() {
         // An unreadable patch read on either side is a failed read: absence
         // never carries, whatever the identities say.
         assert_eq!(
@@ -708,10 +699,7 @@ mod tests {
             ),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn interdiff_cap_zero_disables_the_arm() {
         assert_eq!(
             review_freshness(
                 "r",
@@ -720,10 +708,7 @@ mod tests {
             ),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn docs_only_still_carries_before_the_interdiff_arm() {
         // Arm order: equal identities with an all-documentation tree diff are
         // CarriedDocsOnly, exactly as before the interdiff arm existed.
         assert_eq!(
@@ -740,10 +725,7 @@ mod tests {
             ),
             Freshness::CarriedDocsOnly
         );
-    }
 
-    #[test]
-    fn interdiff_label_serializes_as_its_string() {
         // The event schema pins freshness to a string; the new arm rides the
         // same shape with its numbers inline.
         let value = serde_json::to_value(Freshness::CarriedInterdiff {
@@ -752,10 +734,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(value, serde_json::json!("carried_interdiff(n=37, cap=100)"));
-    }
 
-    #[test]
-    fn every_label_round_trips_and_unknowns_fail_closed() {
         // Deserialize is the inverse of as_label, so an emitted row is
         // re-readable by the language that wrote it. A future or malformed
         // label reads Stale: an unknown freshness must never count.
@@ -778,10 +757,7 @@ mod tests {
             let back: Freshness = serde_json::from_value(serde_json::json!(unknown)).unwrap();
             assert_eq!(back, Freshness::Stale, "{unknown:?} must not count");
         }
-    }
 
-    #[test]
-    fn multiset_difference_counts_duplicates() {
         let a = vec!["x".to_string(), "x".to_string(), "y".to_string()];
         let b = vec!["x".to_string()];
         assert_eq!(multiset_symmetric_difference(&a, &b), 2);
@@ -837,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_small_delta_carries_and_large_delta_stales() {
+    fn resolver_rows() {
         // Same-shape repo twice: a 5-then-8 line rewrite sits far under the
         // 100-line budget and carries; a 60-then-95 line rewrite sits far
         // over it and does not. One test, both directions, so neither can
@@ -857,10 +833,7 @@ mod tests {
             Freshness::Stale,
             "a large rewrite must not carry"
         );
-    }
 
-    #[test]
-    fn resolver_rebase_still_carries_by_identity_first() {
         // The pre-existing contract on the moved code: a rebase that
         // rewrote every commit but changed no content carries by identity,
         // paying no interdiff read at all.
@@ -888,49 +861,14 @@ mod tests {
         let head = git(&repo, &["rev-parse", "HEAD"]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert!(resolver.freshness(&reviewed).counts());
-    }
 
-    // ── docs-only PRs ───────────────────────────────────────────────────────
-
-    /// A repo on `main` holding `f.txt`, with `origin/main` pointing at it.
-    fn base_repo() -> (tempfile::TempDir, std::path::PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("r");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
-        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "base"]);
-        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        (tmp, repo)
-    }
-
-    /// Write `files` into `repo`, commit, and return the new sha.
-    fn commit(repo: &Path, files: &[(&str, &str)]) -> String {
-        for (path, body) in files {
-            let full = repo.join(path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(full, body).unwrap();
-        }
-        git(repo, &["add", "-A"]);
-        git(repo, &["commit", "-q", "-m", "c"]);
-        git(repo, &["rev-parse", "HEAD"])
-    }
-
-    #[test]
-    fn resolver_docs_only_pr_carries_a_docs_advance() {
         let (_tmp, repo) = base_repo();
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
         let head = commit(&repo, &[("docs/x.md", "one\ntwo\n")]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert_eq!(resolver.freshness(&reviewed), Freshness::CarriedDocsOnly);
-    }
 
-    #[test]
-    fn resolver_docs_only_pr_carries_across_a_rebase() {
         let (_tmp, repo) = base_repo();
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
@@ -946,20 +884,14 @@ mod tests {
             verdict.counts(),
             "a docs-only rebase must carry: {verdict:?}"
         );
-    }
 
-    #[test]
-    fn resolver_docs_only_review_does_not_carry_new_code() {
         let (_tmp, repo) = base_repo();
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
         let head = commit(&repo, &[("code.txt", "new code\n")]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
-    }
 
-    #[test]
-    fn resolver_code_review_does_not_carry_a_revert_to_docs_only() {
         let (_tmp, repo) = base_repo();
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         let reviewed = commit(&repo, &[("code.txt", "code\n"), ("docs/x.md", "one\n")]);
@@ -968,10 +900,7 @@ mod tests {
         let head = git(&repo, &["rev-parse", "HEAD"]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
-    }
 
-    #[test]
-    fn resolver_merged_docs_only_pr_never_matches_absence() {
         // Both commits already sit in origin/main, so both three-dot diffs are
         // empty: the merged-PR absence, which must not carry.
         let (_tmp, repo) = base_repo();
@@ -980,10 +909,7 @@ mod tests {
         git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
-    }
 
-    #[test]
-    fn empty_code_identity_on_one_side_never_carries() {
         let docs_only = || Some(ident_of(&[]));
         let code = || Some(ident_of(&[":100644 100644 a b M\tcode.txt"]));
         for (reviewed_identity, head_identity) in [(docs_only(), code()), (code(), docs_only())] {
@@ -1000,10 +926,7 @@ mod tests {
             );
             assert_eq!(verdict, Freshness::Stale);
         }
-    }
 
-    #[test]
-    fn resolver_rebase_of_different_hunks_carries_zero_interdiff() {
         // The measured defect shape: the PR and main edit one file in
         // different hunks, so the rebase rewrites both blob shas (the raw
         // identity moves) while the patch content is unchanged. The rule
@@ -1046,10 +969,7 @@ mod tests {
             Freshness::CarriedInterdiff { lines: 0, cap: 100 }
         );
         assert!(resolver.unmeasured().is_empty());
-    }
 
-    #[test]
-    fn resolver_fetches_commits_that_exist_only_on_origin() {
         // The production defect: a server-side rebase publishes the new head
         // on GitHub before any local fetch ran, so the machine's next
         // coverage read found no commit and stored a false stale. The
@@ -1098,10 +1018,7 @@ mod tests {
             "both commits fetchable, identical trees: must carry, got {verdict:?}"
         );
         assert!(resolver.unmeasured().is_empty());
-    }
 
-    #[test]
-    fn resolver_unfetchable_commit_reads_stale_and_is_recorded_once() {
         // A head neither local nor on origin is not evidence of anything: the
         // verdict is stale and the sha is named, so the caller demotes the
         // row instead of storing a false no. The fetch runs at most once per
@@ -1158,7 +1075,60 @@ mod tests {
         );
         assert_eq!(resolver.freshness(&reviewed2), Freshness::Stale);
         assert_eq!(resolver.unmeasured(), vec![head.clone()]);
+
+        // The contract on the resolver itself, as amended by the
+        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
+        // but changed no content keeps the attestation (CarriedBaseSync), and
+        // a tiny conflict resolution carries as CarriedInterdiff with the
+        // measured line count. The expiry boundary itself (>= cap stales) is
+        // the pure tests' in review_freshness; a fixture cannot hit it
+        // without a 100-line conflict edit.
+        let (tmp, reviewed, head) = rebased_repo(false);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        let verdict = resolver.freshness(&reviewed);
+        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
+
+        let (tmp, reviewed, head) = rebased_repo(true);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        let verdict = resolver.freshness(&reviewed);
+        assert_eq!(
+            verdict,
+            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
+            "a 4-line conflict resolution must carry"
+        );
     }
+
+    // ── docs-only PRs ───────────────────────────────────────────────────────
+
+    /// A repo on `main` holding `f.txt`, with `origin/main` pointing at it.
+    fn base_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        (tmp, repo)
+    }
+
+    /// Write `files` into `repo`, commit, and return the new sha.
+    fn commit(repo: &Path, files: &[(&str, &str)]) -> String {
+        for (path, body) in files {
+            let full = repo.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "c"]);
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
     fn facts3(reviewed: Option<&str>, head: Option<&str>, tree: Option<&[&str]>) -> FreshnessFacts {
         FreshnessFacts {
             reviewed_identity: reviewed.map(|h| ident_of(&[h])),
@@ -1258,33 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
-        // The contract on the resolver itself, as amended by the
-        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
-        // but changed no content keeps the attestation (CarriedBaseSync), and
-        // a tiny conflict resolution carries as CarriedInterdiff with the
-        // measured line count. The expiry boundary itself (>= cap stales) is
-        // the pure tests' in review_freshness; a fixture cannot hit it
-        // without a 100-line conflict edit.
-        let (tmp, reviewed, head) = rebased_repo(false);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
-
-        let (tmp, reviewed, head) = rebased_repo(true);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert_eq!(
-            verdict,
-            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
-            "a 4-line conflict resolution must carry"
-        );
-    }
-
-    #[test]
-    fn freshness_base_sync_carries() {
+    fn fresh_rows() {
         // PR 829's specimen: a 153-file rebase whose PR code diff is identical.
         assert_eq!(
             review_freshness(
@@ -1298,20 +1242,14 @@ mod tests {
             ),
             Freshness::CarriedBaseSync
         );
-    }
 
-    #[test]
-    fn freshness_identical_trees_carry_as_base_sync() {
         // An empty tree diff must not fall through the "all paths are docs"
         // branch, which is vacuously true over an empty list.
         assert_eq!(
             review_freshness("aaa", "bbb", &facts3(Some("i"), Some("i"), Some(&[]))),
             Freshness::CarriedBaseSync
         );
-    }
 
-    #[test]
-    fn freshness_docs_only_carries_with_its_reason() {
         // PR 830's specimen: one documentation file moved the head.
         assert_eq!(
             review_freshness(
@@ -1325,10 +1263,7 @@ mod tests {
             ),
             Freshness::CarriedDocsOnly
         );
-    }
 
-    #[test]
-    fn freshness_code_change_dies() {
         // 20 of the 22 measured transitions are this: genuine code change, and
         // no rule that refuses to guess can absorb them.
         assert_eq!(
@@ -1339,10 +1274,7 @@ mod tests {
             ),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn freshness_missing_identity_dies() {
         // Git failure on either side: fail closed, re-review.
         assert_eq!(
             review_freshness("aaa", "bbb", &facts3(None, Some("i"), Some(&[]))),
@@ -1352,10 +1284,7 @@ mod tests {
             review_freshness("aaa", "bbb", &facts3(Some("i"), None, Some(&[]))),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn freshness_two_absent_identities_never_match() {
         // THE regression guard. A first measurement pass reported 63%
         // carry-forward and was wrong: merged PRs' three-dot diff against
         // current origin/main is empty, e3b0c442 is the SHA-256 of the empty
@@ -1366,10 +1295,7 @@ mod tests {
             review_freshness("aaa", "bbb", &facts3(None, None, Some(&[]))),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn freshness_absent_reviewed_sha_dies() {
         // A github_app review object with no `commit.oid`, or an attestation
         // with no head_sha. An empty sha must never match an empty head.
         assert_eq!(
@@ -1380,20 +1306,14 @@ mod tests {
             review_freshness("", "bbb", &facts3(Some("i"), Some("i"), Some(&[]))),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn freshness_unreadable_tree_diff_dies() {
         // Matching identities but no way to name the carry reason: a carry that
         // cannot say why it carried is not auditable.
         assert_eq!(
             review_freshness("aaa", "bbb", &facts3(Some("i"), Some("i"), None)),
             Freshness::Stale
         );
-    }
 
-    #[test]
-    fn freshness_only_stale_stops_counting() {
         assert!(Freshness::Fresh.counts());
         assert!(Freshness::CarriedBaseSync.counts());
         assert!(Freshness::CarriedDocsOnly.counts());
@@ -1401,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn code_diff_identity_drops_docs_and_is_none_when_only_docs_changed() {
+    fn qual_rows() {
         // The identity is computed from `git diff --raw` lines, so exercise the
         // path classifier and the empty-result rule on that exact shape.
         let code = ":100644 100644 aaa bbb M\tcrates/fno/src/lib.rs";
@@ -1409,10 +1329,7 @@ mod tests {
         assert_eq!(raw_diff_line_path(code), "crates/fno/src/lib.rs");
         assert!(!is_documentation_path(raw_diff_line_path(code)));
         assert!(is_documentation_path(raw_diff_line_path(docs)));
-    }
 
-    #[test]
-    fn freshness_resolver_qualifies_a_bare_base_ref() {
         // `gh pr view` returns `main`, not `origin/main`; a bare branch name
         // resolves to the local ref, which in a stale worktree is not the base.
         let cwd = std::env::temp_dir();

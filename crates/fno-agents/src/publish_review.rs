@@ -932,25 +932,19 @@ mod tests {
     }
 
     #[test]
-    fn verdict_maps_pass_and_fail_and_refuses_the_rest() {
+    fn map_rows() {
         assert_eq!(verdict_event("pass"), Some("APPROVE"));
         assert_eq!(verdict_event("fail"), Some("REQUEST_CHANGES"));
         assert_eq!(verdict_event("comment"), None);
         assert_eq!(verdict_event(""), None);
-    }
 
-    #[test]
-    fn strip_bot_compares_app_suffixes_away() {
         assert_eq!(strip_bot("fno-review-bot[bot]"), "fno-review-bot");
         assert_eq!(strip_bot("fno-review-bot"), "fno-review-bot");
         assert_eq!(strip_bot("FNO-BOT[BOT]"), "FNO-BOT");
         // A multibyte login must not panic on a non-char-boundary slice.
         assert_eq!(strip_bot("日本語ボット"), "日本語ボット");
         assert_eq!(strip_bot("[bot]"), "");
-    }
 
-    #[test]
-    fn slug_parses_from_the_pull_segment() {
         assert_eq!(
             slug_from_url("https://github.com/owner/repo/pull/931"),
             "owner/repo"
@@ -961,10 +955,7 @@ mod tests {
         );
         assert_eq!(slug_from_url("https://github.com/owner/repo"), "");
         assert_eq!(slug_from_url(""), "");
-    }
 
-    #[test]
-    fn config_reads_both_keys_and_tolerates_garbage() {
         let (identity, token_env) = review_keys_from(
             "[review]\nbot_identity = \"fno-review-bot\"\nbot_token_env = \"GH_REVIEW_BOT_TOKEN\"\n",
         );
@@ -981,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn attestation_scan_takes_the_newest_head_pinned_row() {
+    fn scan_rows() {
         let dir = temp_repo("scan");
         let journal = dir.join("events.jsonl");
         std::fs::write(
@@ -1000,10 +991,7 @@ mod tests {
         assert_eq!(hit.get("reviewer").and_then(Value::as_str), Some("r2"));
         assert!(newest_head_attestation(&[journal], "nope").is_none());
         assert!(newest_head_attestation(&[dir.join("absent.jsonl")], "abc").is_none());
-    }
 
-    #[test]
-    fn unconfigured_lane_skips_without_any_gh_call() {
         // A temp-dir cwd carries no project config; the test also assumes the
         // running environment's global config layer names no bot keys (true
         // on CI and on any machine that has not configured the lane).
@@ -1019,10 +1007,7 @@ mod tests {
         assert!(answer.reason.contains("bot_identity"));
         // The config check sits BEFORE any gh call: the fake never ran.
         assert!(fake.calls().is_empty());
-    }
 
-    #[test]
-    fn missing_token_env_var_skips_without_any_gh_call() {
         let dir = temp_repo("no-token");
         write_config(&dir, "fno-review-bot", "FNO_PUBLISH_REVIEW_TEST_UNSET");
         let fake = GhFake::new(vec![]);
@@ -1037,10 +1022,7 @@ mod tests {
         assert_eq!(answer.status, "skipped");
         assert!(answer.reason.contains("FNO_PUBLISH_REVIEW_TEST_UNSET"));
         assert!(fake.calls().is_empty());
-    }
 
-    #[test]
-    fn clean_pass_posts_approve_and_reads_the_decision_back() {
         let dir = temp_repo("posted");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![view_answer(), post_ok(), readback("APPROVED")]);
@@ -1062,10 +1044,7 @@ mod tests {
         assert!(calls[1].iter().any(|a| a.contains("event=APPROVE")));
         assert!(calls[1].iter().any(|a| a.contains("commit_id=abc123")));
         assert!(calls[2].contains(&".reviewDecision".to_string()));
-    }
 
-    #[test]
-    fn fail_verdict_posts_request_changes() {
         let dir = temp_repo("fail");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![
@@ -1085,10 +1064,7 @@ mod tests {
         assert!(answer
             .receipt
             .ends_with("(reviewDecision=CHANGES_REQUESTED)"));
-    }
 
-    #[test]
-    fn unreadable_readback_fails_instead_of_claiming_a_clean_post() {
         // The POST receipt is not a positive marker: a verdict nobody can
         // read back must read as failed, never as a clean posted with an
         // empty decision. This is the exact "token GitHub silently demoted"
@@ -1107,10 +1083,7 @@ mod tests {
         assert!(answer.reason.contains("readback was unreadable"));
         assert!(answer.reason.contains("re-run fno do pr publish-review"));
         assert_eq!(answer.exit(), 1);
-    }
 
-    #[test]
-    fn config_keys_in_the_canonical_root_are_found_from_a_linked_worktree() {
         // A real linked worktree: keys live ONLY in the canonical checkout's
         // project config; a publish running from the worktree must still see
         // them, or the lane reads unconfigured where all the work happens.
@@ -1162,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_collision_refuses_before_any_post() {
+    fn refuse_rows() {
         let dir = temp_repo("collision");
         write_config(&dir, "bllshttng", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![view_answer()]);
@@ -1175,10 +1148,7 @@ mod tests {
         assert_eq!(answer.status, "refused");
         assert!(answer.reason.contains("is the PR author"));
         assert_eq!(fake.calls().len(), 1);
-    }
 
-    #[test]
-    fn stale_head_pin_refuses_before_any_post() {
         let dir = temp_repo("stale");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![view_answer()]);
@@ -1193,10 +1163,7 @@ mod tests {
         assert!(answer.reason.contains("attested deadbeef"));
         assert!(answer.reason.contains("PR head is abc123"));
         assert_eq!(fake.calls().len(), 1);
-    }
 
-    #[test]
-    fn unmappable_verdict_refuses_before_any_post() {
         let dir = temp_repo("bad-verdict");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![view_answer()]);
@@ -1209,10 +1176,7 @@ mod tests {
         assert_eq!(answer.status, "refused");
         assert!(answer.reason.contains("unmappable verdict"));
         assert_eq!(fake.calls().len(), 1);
-    }
 
-    #[test]
-    fn dry_run_resolves_and_refuse_checks_but_never_posts() {
         let dir = temp_repo("dry");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![view_answer()]);
@@ -1227,10 +1191,7 @@ mod tests {
         assert!(answer.reason.starts_with("dry-run: would post APPROVE"));
         assert_eq!(answer.exit(), 0);
         assert_eq!(fake.calls().len(), 1);
-    }
 
-    #[test]
-    fn failed_post_carries_stderr_and_never_panics() {
         let dir = temp_repo("post-fail");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
         let fake = GhFake::new(vec![
@@ -1251,10 +1212,7 @@ mod tests {
         assert_eq!(answer.status, "failed");
         assert_eq!(answer.stderr.as_deref(), Some("HTTP 403: Not Allowed"));
         assert_eq!(answer.exit(), 1);
-    }
 
-    #[test]
-    fn exit_codes_carry_the_verb_door_contract() {
         let posted = Answer::done(
             "posted",
             "posted APPROVE as b on #1 (reviewDecision=APPROVED)",
@@ -1306,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn held_findings_post_once_for_the_reviewed_head() {
+    fn held_rows() {
         let dir = temp_repo("held");
         let journal = dir.join("events.jsonl");
         std::fs::write(&journal, held_row("feature/x", "h1sha")).unwrap();
@@ -1348,10 +1306,7 @@ mod tests {
             .calls()
             .iter()
             .any(|c| c.iter().any(|a| a == "-X" || a == "POST")));
-    }
 
-    #[test]
-    fn held_findings_on_a_moved_head_post_with_both_shas() {
         let dir = temp_repo("held-stale");
         let journal = dir.join("events.jsonl");
         std::fs::write(&journal, held_row("feature/x", "h1sha")).unwrap();
@@ -1372,10 +1327,7 @@ mod tests {
         assert!(post_body.contains("reviewed at h1sha; PR head is h2sha"));
         assert!(post_body.contains("does not cover the newer commits"));
         assert!(post_body.contains(&held_marker("feature/x", "h1sha")));
-    }
 
-    #[test]
-    fn held_leg_skips_when_no_attestation_or_no_findings() {
         let dir = temp_repo("held-skip");
         let journal = dir.join("events.jsonl");
         // A pass row with no findings array: the verdict mirror covers it.

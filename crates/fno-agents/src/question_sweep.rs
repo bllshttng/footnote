@@ -84,7 +84,7 @@ fn journals_raw(fno_dir: &Path, cwd: &Path) -> String {
         raw.push_str(&content);
         raw.push('\n');
     }
-    raw
+    crate::event_store::activity_text(&raw)
 }
 /// [`question_sweep`] with the reading injected, so tests drive the stamp,
 /// the fold, and the writes against fixtures instead of the live graph.

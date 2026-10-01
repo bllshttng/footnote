@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
@@ -67,6 +67,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
+mod client_read;
 mod drift_retire;
 mod grid_reconcile;
 mod human_input;
@@ -647,6 +648,14 @@ pub(crate) enum CoreMsg {
         id: u64,
         notice: String,
     },
+    /// The reader refused one undecodable frame from client `id` and kept the
+    /// connection (the frame was fully consumed, so the stream stays on a
+    /// boundary). Routed back so the refusal rides the reliable channel the
+    /// core owns; the read loop itself holds no write half.
+    FrameRefused {
+        id: u64,
+        reason: String,
+    },
     /// (v83, ) One sideline launcher request from client `id`. The
     /// handler validates pre-birth, dedups by request id, and runs exactly
     /// one canonical spawn off-loop; progress returns as
@@ -1169,66 +1178,11 @@ mod argv_facts;
 
 use argv_facts::*;
 
-/// A tab's display label, from spawn-time facts only - no I/O, no
-/// subprocess on the layout path (squad.rs's origin-freeze discipline).
-/// Chain: explicit rename > registered name (`FNO_AGENT_SELF`) >
-/// `FNO_NODE` provenance > spawn-cwd basename when it differs from the squad's
-/// > command basename > the bare 1-based index (so a plain shell tab renders
-/// unchanged). `pane` is the focused pane's `(name, node, cwd, cmd)`; `None`
-/// (a reaped pane racing tree cleanup) falls through to the index - the
-/// derivation never panics on a missing pane.
-#[allow(clippy::type_complexity)]
-fn tab_label(
-    rename: Option<&str>,
-    pane: Option<(Option<&str>, Option<&str>, &str, Option<&str>)>,
-    squad_cwd: &str,
-    i: usize,
-) -> String {
-    if let Some(name) = rename {
-        return name.to_string();
-    }
-    if let Some((name, node, cwd, cmd)) = pane {
-        // Every derived candidate is sanitized like a rename (codex peer
-        // review): FNO_NODE values, dir names, and argv all admit control
-        // bytes, and these strings land in chrome cells. A candidate that
-        // sanitizes to empty (e.g. whitespace-only) falls through to the
-        // next source instead of rendering a blank label.
-        if let Some(name) = name {
-            let clean = sanitize_tab_name(name);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(node) = node {
-            let clean = sanitize_tab_name(node);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        fn base(p: &str) -> &str {
-            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
-        }
-        let cwd_base = base(cwd);
-        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
-            let clean = sanitize_tab_name(cwd_base);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-        if let Some(cmd) = cmd {
-            let clean = sanitize_tab_name(cmd);
-            if !clean.is_empty() {
-                return clean;
-            }
-        }
-    }
-    (i + 1).to_string()
-}
-
 /// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
 /// (file-budget ratchet); re-imported so callers and tests resolve.
-use pane_meta::pane_label;
+use pane_meta::{pane_label, tab_label};
 
+mod osc_reply;
 mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
@@ -2630,7 +2584,7 @@ impl Core {
                 Ok(ok) => ok,
                 Err(keeper_err) => {
                     let fallback_permit =
-                        crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+                        crate::process_admission::admit_fallback().map_err(|e| e.to_string())?;
                     let shell = PtyShell::spawn_cmd_with_permit(
                         argv,
                         rows,
@@ -3191,13 +3145,36 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
+        let theme = osc_reply::theme_at(&cwd);
         let mut spawn_argv = argv.clone();
         if let Some(worker) = worker.as_deref() {
             if agent_self_from_argv(&spawn_argv).is_none() {
-                let mut wrapped = vec!["env".to_string(), format!("FNO_AGENT_SELF={worker}")];
+                let mut wrapped = vec![
+                    "env".to_string(),
+                    format!("COLORFGBG={}", osc_reply::colorfgbg(&theme)),
+                    format!("FNO_AGENT_SELF={worker}"),
+                ];
                 wrapped.extend(spawn_argv);
                 spawn_argv = wrapped;
             }
+        }
+        // A claude pane on a light ground launches with the plugin's shipped
+        // footnote-paper theme: the OSC 11 answer resolves `auto` to light,
+        // and the custom theme keeps the dark prompt band the stock light
+        // theme loses. `--settings` is per-session; settings.json is never
+        // touched. Skipped when the argv already names a settings file - a
+        // duplicate flag would let the theme blob win and drop the user's
+        // file (parsers take the last occurrence). Appended last: claude's
+        // parser takes flags after any positional, and the spawn argv is
+        // never a shell string.
+        if argv_runs_claude(&spawn_argv)
+            && crate::theme::is_light(&theme)
+            && !spawn_argv
+                .iter()
+                .any(|a| a == "--settings" || a.starts_with("--settings="))
+        {
+            spawn_argv.push("--settings".to_string());
+            spawn_argv.push("{\"theme\":\"custom:fno:footnote-paper\"}".to_string());
         }
         // Every spawned pane takes the keeper road in production, worker or
         // not; unit fixtures keep today's split (short-lived fixtures can
@@ -4159,7 +4136,7 @@ impl Core {
         // Exact identity wins; a prefix only resolves when it is unambiguous
         // (hits a single distinct identity). An ambiguous prefix is NOT_FOUND,
         // never a silent pick of the first registry row (codex P2).
-        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| identity_exact(a, id)).collect();
+        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -4468,11 +4445,7 @@ impl Core {
         if held.len() == 1 && self.panes.contains_key(&held[0]) {
             return held.first().copied();
         }
-        let exact: Vec<&RegistryAgent> = self
-            .agents
-            .iter()
-            .filter(|a| identity_exact(a, id))
-            .collect();
+        let exact: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.answers_to(id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
@@ -7811,6 +7784,9 @@ impl Core {
             let _ = c
                 .reliable_tx
                 .try_send(ServerMsg::Notice { text: text.into() });
+            // A refusal with no layout side effect otherwise sits queued
+            // until the next dirty frame wakes the writer.
+            c.notify.notify_one();
         }
     }
 
@@ -8701,50 +8677,69 @@ impl Core {
                     .tabs
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| TabMeta {
-                        id: t.id,
-                        // (US2) An explicit rename is the ONLY chosen
-                        // name; a pane-derived or ordinal label is not. The
-                        // client renders a chosen name without a forced ordinal.
-                        named: t.name.is_some(),
-                        name: tab_label(
-                            t.name.as_deref(),
-                            self.panes.get(&t.focus).map(|e| {
-                                (
-                                    e.name.as_deref(),
-                                    e.node.as_deref(),
-                                    e.cwd.as_str(),
-                                    e.cmd.as_deref(),
-                                )
-                            }),
-                            s.canonical_cwd(),
-                            i,
-                        ),
-                        // (v22) Every leaf pane of the tab, labelled from
-                        // its own entry, so the navigator can goto a pane in any
-                        // tab/squad - not just the active view the client tiles.
-                        panes: tree::leaves(&t.root)
-                            .iter()
-                            .map(|pid| {
-                                let e = self.panes.get(pid);
-                                let ctx = pane_meta::pane_ctx(
-                                    &self.agents,
-                                    &self.session_name,
-                                    &self.ctx_by_session,
-                                    *pid,
-                                );
-                                pane_meta::pane_meta(
-                                    *pid,
-                                    e.and_then(|e| e.name.as_deref()),
-                                    e.and_then(|e| e.node.as_deref()),
-                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
-                                    e.and_then(|e| e.cmd.as_deref()),
-                                    e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
-                                        .map(String::as_str),
-                                    ctx.as_deref(),
-                                )
-                            })
-                            .collect(),
+                    .map(|(i, t)| {
+                        // The registry row hosting the focus pane carries the
+                        // LIVE name (a rename rewrites the row, never the
+                        // pane's spawn-captured env), so it leads the derived
+                        // chain ahead of `FNO_AGENT_SELF`.
+                        let focus_reg = pane_meta::pane_registry_name(
+                            &self.agents,
+                            &self.session_name,
+                            t.focus,
+                        );
+                        TabMeta {
+                            id: t.id,
+                            // (US2) An explicit rename is the ONLY chosen
+                            // name; a pane-derived or ordinal label is not. The
+                            // client renders a chosen name without a forced ordinal.
+                            named: t.name.is_some(),
+                            name: tab_label(
+                                t.name.as_deref(),
+                                self.panes.get(&t.focus).map(|e| {
+                                    (
+                                        focus_reg.as_deref().or(e.name.as_deref()),
+                                        e.node.as_deref(),
+                                        e.cwd.as_str(),
+                                        e.cmd.as_deref(),
+                                    )
+                                }),
+                                s.canonical_cwd(),
+                                i,
+                            ),
+                            // (v22) Every leaf pane of the tab, labelled from
+                            // its own entry, so the navigator can goto a pane in any
+                            // tab/squad - not just the active view the client tiles.
+                            panes: tree::leaves(&t.root)
+                                .iter()
+                                .map(|pid| {
+                                    let e = self.panes.get(pid);
+                                    let ctx = pane_meta::pane_ctx(
+                                        &self.agents,
+                                        &self.session_name,
+                                        &self.ctx_by_session,
+                                        *pid,
+                                    );
+                                    let reg = pane_meta::pane_registry_name(
+                                        &self.agents,
+                                        &self.session_name,
+                                        *pid,
+                                    );
+                                    let name = reg
+                                        .as_deref()
+                                        .or_else(|| e.and_then(|e| e.name.as_deref()));
+                                    pane_meta::pane_meta(
+                                        *pid,
+                                        name,
+                                        e.and_then(|e| e.node.as_deref()),
+                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                        e.and_then(|e| e.cmd.as_deref()),
+                                        e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
+                                            .map(String::as_str),
+                                        ctx.as_deref(),
+                                    )
+                                })
+                                .collect(),
+                        }
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
@@ -8778,6 +8773,7 @@ impl Core {
             backlog_lanes: self.backlog_lanes.clone(),
             backlog_stale: self.backlog_stale,
             sweep_dead_count: self.dead_sweep_count(),
+            proto: Some(crate::proto::PROTO_VERSION),
         }
     }
 
@@ -9422,11 +9418,16 @@ impl Core {
                 .and_then(|row| row.effective_identity())
                 .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            // Identity is the session uuid, never the name: a rename (or a
-            // succession heir renamed after spawn) leaves the pane label
-            // stale while the uuid still names the same live session. The
-            // uuid comparison above is the whole check.
-            if (occupants.len() != 1 && viewer_row.is_none()) || registry_identity != expected {
+            // Identity is the id the pane's row answers to - its own fno_id or
+            // its harness session id, either spelling - never the name: a
+            // rename (or a succession heir renamed after spawn) leaves the
+            // pane label stale while the ids still name the same live session.
+            // The answers_to check is the whole gate.
+            let addressed = occupants
+                .first()
+                .or_else(|| viewer_row.as_ref())
+                .is_some_and(|row| row.answers_to(expected));
+            if (occupants.len() != 1 && viewer_row.is_none()) || !addressed {
                 let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
@@ -10440,8 +10441,7 @@ impl Core {
                         .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
                         .unwrap_or(0);
                     let permit =
-                        match crate::process_admission::admit_pane(pane_count, placement.max_panes)
-                        {
+                        match self.admit_gesture_pane(client_id, pane_count, placement.max_panes) {
                             Ok(permit) => permit,
                             Err(error) => {
                                 self.notice(client_id, format!("attach failed: {error}"));
@@ -10580,7 +10580,8 @@ impl Core {
                 let Some((argv, cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
                     return Flow::Continue;
                 };
-                let permit = match crate::process_admission::admit_pane(
+                let permit = match self.admit_gesture_pane(
+                    client_id,
                     self.placement_pane_count(dest, &effective),
                     effective.max_panes,
                 ) {
@@ -11636,6 +11637,10 @@ impl Core {
                 if !notice.is_empty() {
                     self.notice(id, notice);
                 }
+                Flow::Continue
+            }
+            CoreMsg::FrameRefused { id, reason } => {
+                self.notice(id, reason);
                 Flow::Continue
             }
             CoreMsg::AgentLaunch { id, request } => {
@@ -12704,6 +12709,10 @@ fn drain_pty_output(
                             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         touched.insert(pid);
                     }
+                    // A pane nobody focuses has no terminal to answer its
+                    // palette probes; the mux does, from the pane's own
+                    // ground. Focused panes ride the client loopback.
+                    core.answer_color_queries(pid, &bytes);
                 }
                 PaneChunk::Resized(rows, cols) => {
                     // The keeper's resize round trip landed: apply the VT
@@ -12839,11 +12848,6 @@ fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
         .max()
         .unwrap_or(1);
     persisted.max(registry_floor).max(1)
-}
-
-/// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
-fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
-    a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
 }
 
 /// Does `id` PREFIX either of row `a`'s identity spellings ? The `where`
@@ -13454,214 +13458,7 @@ async fn handle_client(
     }
     let (read_half, write_half) = stream.into_split();
     tokio::spawn(client_writer(write_half, reliable_rx, dirty, notify, stats));
-    client_reader(read_half, core_tx, id).await;
-}
-
-/// Reliable inbound path: every message is awaited into the core channel.
-/// Any read error (including an abruptly killed client) deregisters the
-/// client and leaves every pane untouched (AC4-HP).
-async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id: u64) {
-    loop {
-        match read_msg::<_, ClientMsg>(&mut r).await {
-            Ok(ClientMsg::Input(bytes)) => {
-                if core_tx.send(CoreMsg::Input { id, bytes }).await.is_err() {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Resize { rows, cols }) => {
-                if core_tx
-                    .send(CoreMsg::Resize { id, rows, cols })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Command(cmd)) => {
-                if core_tx.send(CoreMsg::Command { id, cmd }).await.is_err() {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Mouse { pane, event }) => {
-                if core_tx
-                    .send(CoreMsg::Mouse { id, pane, event })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::LinkHover {
-                pane,
-                row,
-                col,
-                seq,
-            }) => {
-                if core_tx
-                    .send(CoreMsg::LinkHover {
-                        id,
-                        pane,
-                        row,
-                        col,
-                        seq,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockJump { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Jump(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockSelect { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Select(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::BlockRerun { pane }) => {
-                if core_tx
-                    .send(CoreMsg::BlockNav {
-                        id,
-                        pane,
-                        op: BlockNavOp::Rerun,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchOpen { pane, query }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Open(query),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchStep { pane, dir }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Step(dir),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::SearchClear { pane }) => {
-                if core_tx
-                    .send(CoreMsg::Search {
-                        id,
-                        pane,
-                        op: SearchOp::Clear,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::PaneAnswer {
-                pane,
-                fingerprint,
-                region_lines,
-                keystroke,
-            }) => {
-                if core_tx
-                    .send(CoreMsg::PaneAnswer {
-                        id,
-                        pane,
-                        fingerprint,
-                        region_lines,
-                        keystroke,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::DispatchNext { account }) => {
-                if core_tx
-                    .send(CoreMsg::DispatchNext { id, account })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::AgentLaunch(request)) => {
-                if core_tx
-                    .send(CoreMsg::AgentLaunch { id, request })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(ClientMsg::Detach) => {
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-            // A second Attach, a pre-Attach-only Query/KillServer, or a
-            // one-shot Control on a live connection is a protocol violation:
-            // log it (this stderr is the session log) and close rather than
-            // acting on a confused stream.
-            Ok(
-                msg @ (ClientMsg::Attach { .. }
-                | ClientMsg::Query
-                | ClientMsg::KillServer
-                | ClientMsg::Control { .. }),
-            ) => {
-                let name = match msg {
-                    ClientMsg::Attach { .. } => "Attach",
-                    ClientMsg::Query => "Query",
-                    ClientMsg::Control { .. } => "Control",
-                    _ => "KillServer",
-                };
-                eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-            Err(e) => {
-                // Includes the abrupt-close case (killed client): routine, but
-                // one log line makes a misbehaving client diagnosable.
-                if !matches!(e, crate::proto::ProtoError::Closed) {
-                    eprintln!("fno mux: client {id} read failed: {e}");
-                }
-                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                break;
-            }
-        }
-    }
+    client_read::client_reader(read_half, core_tx, id).await;
 }
 
 /// Count one `Frame` that actually crossed a client wire. A frame dropped by

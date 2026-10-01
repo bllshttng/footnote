@@ -196,7 +196,7 @@ pub mod heal;
 pub mod heal_pid;
 pub mod honesty_sweep;
 pub mod hook;
-mod identity;
+pub mod identity;
 pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
@@ -222,6 +222,7 @@ pub mod lane_heal;
 pub mod lanes;
 pub mod launch_workdir;
 pub mod law_match;
+pub mod ledger_axes;
 mod lifecycle_child;
 pub mod list_row;
 pub mod live_store_fence;
@@ -243,6 +244,7 @@ pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
@@ -278,6 +280,7 @@ pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
+pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
@@ -331,6 +334,7 @@ pub mod reign_hygiene;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
+pub(crate) mod resolve_tier;
 pub mod restart_run;
 pub mod resume_args;
 pub mod resume_gate;
@@ -355,6 +359,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
 pub mod screen;
@@ -367,6 +372,7 @@ pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod skill_drift;
 pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
@@ -403,6 +409,7 @@ pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
 pub mod test_delta;
+pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
 pub mod tracker;
@@ -416,6 +423,8 @@ pub mod wake_meter;
 pub mod watch_expiry;
 pub mod worktree_reapable;
 pub mod write_queue;
+pub mod zcode;
+pub mod zcode_ask;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -1372,6 +1381,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Spawn coordinator: the durable accepted record written BEFORE
     // any backend launch; not a birth, correlated to it by spawn_id.
     "agent_spawn_accepted",
+    // A launch the spawn gate or the dispatch door refused before any
+    // worker existed; the feed projects it so a refused launch shows.
+    "agent_spawn_refused",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",

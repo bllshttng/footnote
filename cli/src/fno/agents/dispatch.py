@@ -1168,7 +1168,7 @@ def _lane_b_thread_spawn(
             origin="spawn",
             # The keeper-hosted thread lane; the event below spells it
             # "thread" already.
-            substrate="thread", fno_id=session_id,
+            substrate="thread",
         )
         try:
             update_registry(lambda es: es + [new_entry])
@@ -1755,7 +1755,7 @@ def _claude_create_path(
         # dispatch_spawn (mux_spawn owns them) and headless returns above, so
         # every row born here ran the detached thread. The event this path
         # emits already says substrate="thread".
-        substrate="thread", fno_id=session_uuid or short_id,
+        substrate="thread",
         # the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
@@ -5536,12 +5536,6 @@ _MUX_SEND_UNKNOWN = -2
 # `fno.agents.dispatch` stays the import path callers already use.
 from fno.agents.mail_ctx import _MailCtx, _build_mail_ctx  # noqa: E402
 
-# Wake spawns key on the target session uuid, not on a fresh agent name: spawn
-# dedup scopes NAME, so two senders waking one session must derive the same name
-# to collide on its flock. Prefixed because a bare 8-hex name is refused.
-_WAKE_NAME_PREFIX = "wake-"
-
-
 # Poll budget for the mux lane's content confirm (node, change 3),
 # matched to the claude control.sock lane's default (crates/fno-agents/src/
 # mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
@@ -5554,6 +5548,10 @@ _CODEX_QUEUE_MARKER = "tab to queue message"
 # Substring match, so the bare word subsumes every longer spelling that
 # contains it ("queued review", "review queued"); listing those adds nothing.
 _CODEX_QUEUED_MARKERS = ("queued",)
+# Composer read-back (codex panes): extra submit/queue keys, and the
+# settle+read rounds a paste that has not fully rendered gets.
+_CODEX_POST_SUBMIT_RESENDS = 2
+_CODEX_ABSORB_POLLS = 12
 _CODEX_ACTIVE_REVIEW_MARKERS = (
     "review in progress",
     "reviewing",
@@ -5594,56 +5592,21 @@ def _mux_pane_send(
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
-    When ``guarded``, the paste rides the server-side turn-taken interlock: a
-    mid-turn pane refuses with EXIT_TARGET_NOT_IDLE and this returns False, a
-    ``stalled`` demotion to the caller's durable floor. No fno caller opts in
-    any more; the rerun verb still uses the underlying `fno mux pane send
-    --guarded` verb directly.
-
-    ``guarded=False`` is the raw channel the writer-claim holder owns; it holds
-    the claim across the text-then-CR burst so no other writer interleaves. The
-    claim is best-effort (an unclaimed pane refuses the acquire; send proceeds),
-    but a failed send fails closed -> durable.
-
-    ``confirm`` (node, mail-delivery default): the mux lane had no
-    confirm at all before this -- the busy-veto stood in for one, wrongly,
-    since it refused before any byte was written rather than checking whether
-    the byte landed. When set, a bytes-written success from the unguarded paste
-    is not enough: poll the recipient's OWN transcript for the injected turn's
-    content (mirrors the claude control.sock lane's
-    ``confirm_content_after``/``escaped_marker`` pair in
-    ``crates/fno-agents/src/mail_inject.rs``, so both lanes confirm the same
-    way -- content, not growth). No confirmable transcript, or the marker never
-    lands within the poll budget, both report False; a confirm that "passes" on
-    an unreadable transcript is the false-positive shape the pitfalls corpus
-    warns against. Ignored when ``guarded`` (a guarded send's idle check was
-    itself standing in for a confirm, and this flag governs the unguarded path
-    replacing it), and ignored for a non-claude recipient, which has no
-    ~/.claude/projects transcript to confirm against.
-
-    ``review`` is a private review-request lane. It is set by the target
-    final-head producer after it has validated the explicit PR payload, and
-    by the raw mail review send (any parsed review verb), which classifies
-    the submitted frame. On a
-    Codex pane, the submitted payload is then classified from a positive frame:
-    a composer showing ``tab to queue message`` plus the exact payload gets one
-    literal Tab and a second frame must positively show a queued marker plus
-    that same payload; a positive active-review marker returns ``started`` and
-    sends no control key. Markers count only within a few lines of the echoed
-    payload - the same word deep in scrollback does not classify this frame.
-    Any unreadable or unmatched frame returns ``unconfirmed``. Other payloads
-    keep the ordinary boolean contract.
-
-    ``raw`` (default False) is the keystroke opt-out. By default the text is
-    gated and enveloped through :func:`fno.mail.pane_transport.prepare`, so an
-    agent-to-agent pane drive carries the same ``<fno_mail>`` attribution the
-    mail lane produces, and a pane showing an option prompt is refused (a submit
-    there dismisses the payload and selects the highlighted default). Set it for
-    the genuine keystroke cases -- an unwrapped slash payload aimed at the REPL
-    parser, a digit answering a prompt, a bare submit -- where an envelope is
-    nonsense. Already-wrapped text passes the wrap through untouched, so the mail
-    lane's own ``<fno_mail>`` / ``<cross-session-message>`` bodies are unchanged
-    and only gain the gate.
+    ``guarded`` rides the server-side turn-taken interlock (no fno caller opts
+    in; the rerun verb uses the verb directly). ``guarded=False`` holds the
+    best-effort writer claim across the text-then-CR burst; a failed send
+    fails closed -> durable. ``confirm`` polls the recipient's own transcript
+    for the injected content (claude only: other harnesses have no
+    ~/.claude/projects transcript) and reports False on any miss, never a
+    pass on an unreadable transcript. ``review`` classifies a submitted
+    review-request frame: a codex composer showing ``tab to queue message``
+    plus the payload gets one Tab and must then show a queued marker beside
+    the same payload; an active-review marker returns ``started``; markers
+    count only within a few lines of the echoed payload, and an unmatched or
+    unreadable frame returns ``unconfirmed``. ``raw`` opts out of the
+    enveloped gate for genuine keystrokes; already-wrapped mail passes the
+    wrap through untouched. Narrative and node history: docs/backlog-usage
+    and the PR bodies that introduced each flag.
     """
     def _record_failure(reason: str) -> None:
         if failure_out is not None:
@@ -5707,21 +5670,14 @@ def _mux_pane_send(
     # selects the highlighted default). `raw=True` is the keystroke opt-out.
     # Already-wrapped text passes the wrap through, so the mail lane's own bodies
     # are byte-unchanged and only gain the gate.
-    # THREE cases, not two. `prepare` does two jobs -- it wraps, and it refuses
-    # a pane showing a prompt -- and a caller can want either without the other:
-    #
-    #   wrap + gate   default a2a mail
-    #   gate only     an operational payload that must land verbatim (a ritual
-    #                 command or a preframed busy-hold digest). Its producer
-    #                 owns the one envelope, but a submit into a showing prompt
-    #                 discards it exactly the same way.
-    #   neither       a genuine keystroke ANSWERING a prompt (a digit, a control
-    #                 key). Gating this one breaks the caller that needs the
-    #                 prompt to be there.
-    #
-    # Collapsing the middle case into the last is what shipped a hold digest and
-    # a ritual into an ungated pane. `gate` defaults to `not raw`, so every
-    # existing caller keeps its behavior and the middle case says `gate=True`.
+    # `prepare` wraps AND refuses a pane showing a prompt, and a caller can
+    # want either without the other: default a2a mail takes both (wrap+gate),
+    # a gate=True/raw=True operational payload takes the gate only (a submit
+    # into a showing prompt discards it too), and a keystroke answering a
+    # prompt takes neither (gating it breaks the caller that needs the prompt).
+    # Collapsing the middle case into the last shipped a hold digest into an
+    # ungated pane. `gate` defaults to `not raw`, so every caller keeps its
+    # behavior and the middle case says `gate=True`.
     if gate is None:
         gate = not raw
     if not raw or gate:
@@ -5866,11 +5822,8 @@ def _mux_pane_send(
 
     def _paste_then_submit() -> bool:
         nonlocal last_attempt_phase
-        # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
-        # --raw: this function already ran the gate and the wrap above, so the
-        # Rust verb types these bytes verbatim rather than preparing them a
-        # second time (a second pass would re-read the pane and re-decide a
-        # question this one already answered).
+        # PaneSend is bytes; --raw because the gate and wrap above already ran
+        # (a second pass would re-decide a question this one answered).
         send_args = ["send", pane, "--stdin", "--raw"]
         expected_fno_id = (
             getattr(entry, "fno_id", None)
@@ -5908,18 +5861,8 @@ def _mux_pane_send(
         # The CR is unguarded: the guarded paste already proved the pane idle, and
         # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(enter_delay_s)
-        # A submit key is a control byte, never a message: always --raw.
         for key in submit_text:
-            proc = _run(
-                [
-                    "send",
-                    pane,
-                    "--text",
-                    key,
-                    "--raw",
-                    *(["--fno-id", str(expected_fno_id)] if expected_fno_id else []),
-                ]
-            )
+            proc = _send_pane_key(key)
             if proc == _MUX_SEND_UNKNOWN:
                 last_attempt_phase = "unconfirmed"
                 return False
@@ -5958,6 +5901,20 @@ def _mux_pane_send(
         ):
             return None
         return proc.stdout or ""
+
+    def _send_pane_key(key: str):
+        """One raw control key at the pane; the caller classifies the verb's
+        process. A control key is a byte, never a message: always --raw."""
+        return _run(
+            [
+                "send",
+                pane,
+                "--text",
+                key,
+                "--raw",
+                *(["--fno-id", str(expected_fno_id)] if expected_fno_id else []),
+            ]
+        )
 
     def _contains_payload(screen: str) -> bool:
         # Codex may wrap a long slash request across visual lines. Compare the
@@ -6005,10 +5962,7 @@ def _mux_pane_send(
         if screen is None or not _contains_payload(screen):
             return "unconfirmed"
         if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
-            tab_args = ["send", pane, "--text", "\t", "--raw"]
-            if expected_fno_id:
-                tab_args.extend(["--fno-id", str(expected_fno_id)])
-            tab = _run(tab_args)
+            tab = _send_pane_key("\t")
             if tab is None or tab == _MUX_SEND_UNKNOWN or tab.returncode != 0:
                 return "unconfirmed"
             # Same settle the CR gets: reading before the TUI absorbed the Tab
@@ -6030,6 +5984,49 @@ def _mux_pane_send(
             return "started"
         return "unconfirmed"
 
+    def _codex_post_submit_outcome() -> bool | str:
+        # Composer read-back after the submit key: the CR fires after one
+        # settle, so a slow paste absorbs it as a newline and a mid-turn pane
+        # takes Enter as steer only; either way the envelope stays resident.
+        # The queue affordance beside the payload names the composer as still
+        # holding it (Tab moves it); not-yet-rendered polls then one late key;
+        # an affordance-less frame gets one deciding key (no-op when landed);
+        # an unreadable frame keeps the bytes-written verdict, and anything
+        # else resident ends unconfirmed -- never delivered over a composer
+        # that may still hold the envelope.
+        resends = polls = 0
+        seen_payload = hedged = False
+        while True:
+            time.sleep(enter_delay_s)
+            screen = _read_screen()
+            polls += 1
+            if screen is None:
+                return True
+            if _contains_payload(screen):
+                seen_payload = True
+                if any(_marker_near_payload(screen, m) for m in _CODEX_QUEUED_MARKERS):
+                    return "queued"
+                if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
+                    key = "\t"
+                elif not hedged:
+                    hedged, key = True, submit_text[0]
+                else:
+                    return True
+            elif seen_payload:
+                return True
+            elif polls >= _CODEX_ABSORB_POLLS:
+                key = submit_text[0]
+            else:
+                continue
+            if resends >= _CODEX_POST_SUBMIT_RESENDS:
+                _record_failure("post-submit-unconfirmed")
+                return "unconfirmed"
+            resends += 1
+            proc = _send_pane_key(key)
+            if proc is None or proc == _MUX_SEND_UNKNOWN or proc.returncode != 0:
+                _record_failure("post-submit-unconfirmed")
+                return "unconfirmed"
+
     if guarded:
         sent = _paste_then_submit()
         if not sent:
@@ -6042,15 +6039,10 @@ def _mux_pane_send(
     if not _verify_pane_occupant():
         return False
 
-    # Baseline BEFORE the paste (not after): the confirm below scans only lines
-    # appended past this offset, so it never matches something already in the
-    # transcript when we started.
-    #
-    # The transcript confirm is a CLAUDE-lane capability: the resolver reads
-    # ~/.claude/projects only, so a mux-hosted codex/opencode/gemini pane has no
-    # transcript to confirm against and every landed paste would report a miss --
-    # a false durable demotion, and a duplicate once the recipient drains the
-    # durable copy. Those panes keep the bytes-written verdict.
+    # Baseline BEFORE the paste: the confirm scans only lines appended past it.
+    # Transcript confirm is claude-only (the resolver reads ~/.claude/projects);
+    # other panes keep the bytes-written verdict, whose miss would demote a
+    # landed paste to durable and make the recipient drain it twice.
     confirm = confirm and (getattr(entry, "harness", "") or "") == "claude"
     confirm_transcript = _mux_recipient_transcript(entry) if confirm else None
     confirm_baseline: Optional[int] = None
@@ -6061,17 +6053,14 @@ def _mux_pane_send(
             confirm_transcript = None
 
     def _claim_writer() -> tuple[bool, str]:
-        """Acquire the pane writer claim; return (ok, stderr detail).
-
-        The detail carries the server's refusal REASON: the held-claim marker
-        is another live writer mid-burst; anything else (not claim-eligible,
-        dead pane) is a pane with no writer interlock at all."""
+        """Acquire the pane writer claim; return (ok, refusal detail). The
+        detail names the held-claim marker (another writer mid-burst) or the
+        server's own refusal reason."""
         proc = _run(["claim", pane, "--pid", str(os.getpid())])
         if proc == _MUX_SEND_UNKNOWN:
-            # The claim may have reached the server, or another writer may
-            # already own it. Confirm with this PID before releasing: PaneRelease
-            # is pane-wide, so an unconditional cleanup could clear a stranger's
-            # claim and let two bursts interleave.
+            # The claim may have reached the server or another writer may own
+            # it; PaneRelease is pane-wide, so confirm with this PID before
+            # releasing rather than clear a stranger's claim.
             confirmed = _run(["claim", pane, "--pid", str(os.getpid())])
             if (
                 confirmed not in (None, _MUX_SEND_UNKNOWN)
@@ -6093,13 +6082,10 @@ def _mux_pane_send(
         _record_failure("pre-submit")
         return False
     if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
-        # review finding: the settle window between paste and CR is a
-        # single-writer window. A HELD claim means another writer is mid-burst
-        # on this pane; pasting now interleaves two envelopes under one CR,
-        # which submits both concatenated. Wait out the concurrent burst, then
-        # demote to durable rather than interleave. A refusal that is NOT a
-        # held claim falls through to the fail-open send below: a pane
-        # without the writer interlock never had serialization to lose.
+        # A HELD claim is another writer mid-burst: pasting now interleaves two
+        # envelopes under one CR. Wait it out, else demote. Any other refusal
+        # falls through to the fail-open send: a pane without the interlock
+        # never had serialization to lose.
         deadline = time.monotonic() + _MUX_PANE_CLAIM_WAIT_S
         while (
             not claimed
@@ -6131,6 +6117,9 @@ def _mux_pane_send(
         outcome = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
+        elif sent and not review and (getattr(entry, "harness", "") or "") == "codex":
+            # No transcript to confirm against, so the composer is the confirm.
+            outcome = _codex_post_submit_outcome()
         elif sent and confirm:
             # Bytes-written alone is Locked-Decision-4 banned as a hosted
             # verdict; confirm by content against the recipient's own
@@ -6623,13 +6612,14 @@ def wake_and_deliver(
     ``claude -r`` by hand. ``claude -p`` is never reachable from here -- a
     one-shot cannot host the multi-turn session the recipient resumes into.
 
-    The name is derived from the uuid so concurrent wakes of one session collide
-    on the same flock: spawn dedup scopes NAME, so a fresh random name per wake
-    would defeat the serialization this depends on. It is prefixed rather than
-    bare hex because a bare 8-hex name is refused as an id/name collision. That
-    flock plus the same-name collision check is what serializes two senders --
-    the second wake finds the first's row live and is refused as
-    ``wake-already-in-flight``; a gone route file refuses and says wake-unrouted.
+    The revival name is the lineage row's OWN name whenever an exited claude
+    row exists for this uuid: dispatch_spawn then reads the spawn as an
+    in-place revival (Fix 3) and updates the row in place, so the board, mail
+    and user keep the name they knew instead of a ``wake-<shortid>`` alias.
+    Only a rowless session falls back to ``wake-<shortid>``. Both derivations
+    are deterministic, so two wakes still collide on one flock (the loser is
+    refused as ``wake-already-in-flight``); the rung-2 single-writer claim keys
+    on the session uuid, never on this name, and a gone route file is wake-unrouted.
 
     The single-writer claim lives in ``_claude_create_path`` (see there). Every
     revival passes the spawn gate, charged to the revived row's parent, never the sender.
@@ -6650,7 +6640,7 @@ def wake_and_deliver(
     except (RegistryVersionError, ValueError):
         return False, "registry-incomplete"
 
-    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    spawn_name = fork_lineage.wake_spawn_name(entry, session_uuid)
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
     from fno.agents.launch_provenance import launch_account_for_session
@@ -6831,10 +6821,10 @@ def wake_drain_agent(
     removes.
 
     A thin wrapper over ``wake_and_deliver``: waking to drain IS delivering a
-    waking prompt, so the concurrency guarantee comes for free. The name is
-    derived from the uuid (never the envelope msg-id), so two concurrent wakes
-    collide on one flock and the single-writer claim refuses the second - one
-    revival, not two writers on one transcript. Rides the revive-in-place
+    waking prompt, so the concurrency guarantee comes for free. The revival
+    name is deterministic (the row's own name when one exists, else wake-<id>),
+    so two concurrent wakes collide on one flock and the single-writer claim
+    refuses the second - one revival, not two writers on one transcript. Rides the revive-in-place
     substrate rather than a one-shot ``claude -p`` because only the persistent
     substrate holds that claim; a headless one-shot could not make concurrent
     wakes collapse. Returns ``wake_and_deliver``'s ``(delivered, reason)``.
@@ -7112,7 +7102,9 @@ def _deliver_live(
                 failure_out=attempt_failure,
                 source_label=(f"mail:{mail.id}" if mail is not None else None),
             )
-            if mux_delivered:
+            # Name the widened failure values, never truthiness: an
+            # "unconfirmed" composer frame is not a delivery.
+            if mux_delivered not in (False, "unconfirmed"):
                 return True
             failure_reason = attempt_failure[0] if attempt_failure else "unknown"
             _record(f"mux-send-failed-attempt-{attempt}:{failure_reason}")

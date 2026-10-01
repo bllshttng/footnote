@@ -4160,32 +4160,20 @@ def cmd_view() -> None:
     import subprocess
 
     from fno.graph._constants import GRAPH_HTML
-    from fno.graph.render_html import load_render_entries, render_graph_html
 
-    try:
-        entries = load_render_entries(_display_entries("view", strict=True))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-    # Honor the configured row for this path rather than overwriting it with
-    # the whole-graph private board. An operator who scopes their board to one
-    # project got it silently widened by every `view`; one who points a PUBLIC
-    # projection here got the full-detail board written to a path the mux
-    # /backlog route serves. canonical_target() returns the default
-    # whole-graph local row when nothing else claims the path, so the plain
-    # case is unchanged.
-    try:
-        from fno.graph.roadmap_public import canonical_target, render_one_target
+    # The board is the native front binary's snapshot render: it re-gathers
+    # the store itself and writes every configured local target, the
+    # canonical board among them.
+    from fno.graph.roadmap_public import render_local_targets
 
-        row = canonical_target()
-    except Exception:
-        row = None
-    if row is not None:
-        render_one_target(row, entries)
-    else:
-        render_graph_html(entries, GRAPH_HTML)
+    failures = render_local_targets()
+    if failures:
+        typer.echo(
+            f"Error: local board render failed ({failures} target(s)); "
+            "see the warnings above",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":
@@ -4268,16 +4256,12 @@ def cmd_roadmap(
 
     from fno.graph._intake import detect_project_from_settings, repo_root
     from fno.graph.roadmap_public import (
-        public_projection_entries,
-        render_public_backlog_html,
-        render_public_roadmap_html,
-        render_public_roadmap_md,
-    )
-    from fno.graph.render_html import (
         atomic_write_documents,
         leak_refusal_report,
         load_render_entries,
+        public_projection_entries,
         public_title_leaks,
+        render_public_roadmap_md,
     )
 
     resolved_project = project or detect_project_from_settings(repo_root())
@@ -4302,28 +4286,28 @@ def cmd_roadmap(
 
     md = render_public_roadmap_md(entries, resolved_project)
 
+    if html or backlog_html:
+        # The public HTML pages were the second board this surface retired;
+        # refuse BY NAME so a script fails loudly instead of silently
+        # rendering nothing.
+        typer.echo(
+            "Error: --html/--backlog-html are retired; the web backlog page "
+            "is the one board (fno mux serve --web / fno backlog view). "
+            "The markdown roadmap still renders.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     documents: dict[Path, str] = {}
     out_path = Path(os.path.expanduser(out)) if out else None
     if out_path:
         documents[out_path] = md
-    if html:
-        documents[Path(os.path.expanduser(html))] = render_public_roadmap_html(
-            entries, resolved_project
-        )
-    if backlog_html:
-        documents[Path(os.path.expanduser(backlog_html))] = render_public_backlog_html(
-            entries, resolved_project
-        )
     atomic_write_documents(documents)
 
     if out_path:
         typer.echo(str(out_path))
     else:
         typer.echo(md, nl=False)
-    if html:
-        typer.echo(f"written public roadmap: {os.path.expanduser(html)}")
-    if backlog_html:
-        typer.echo(f"written public backlog: {os.path.expanduser(backlog_html)}")
 
 
 # -- tree --
@@ -4773,7 +4757,7 @@ def cmd_pick(
     from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import filter_by_project, _find_node, _graph_sort_key_fn
     from fno.graph._constants import has_node_id_prefix
-    from fno.graph.render_html import _load_obsidian_vault, _obsidian_url
+    from fno.graph.roadmap_public import _load_obsidian_vault, obsidian_url as _obsidian_url
 
     fzf = shutil.which("fzf")
     if not fzf:

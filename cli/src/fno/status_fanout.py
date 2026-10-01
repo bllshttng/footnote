@@ -172,48 +172,11 @@ def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str
 
 
 def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """One read pass: all events with ts >= since_ts.
+    """Read actionable status rows through the native stream owner."""
+    from fno.events.store_client import read_projection
 
-    SQL authority first: when a store exists beside the journal, committed
-    rows answer in commit order (which the cursor's per-second occurrence
-    index counts correctly), every retained generation included, so the
-    rotated-generation drain below is a store-less fallback only."""
-    try:
-        from fno.events.store_client import query_rows, store_db_path
-
-        # A store-less journal (fixture or pre-cutover bytes) reads raw below;
-        # an absent store is not an empty history.
-        rows = query_rows(active) if store_db_path(active).exists() else None
-    except Exception:
-        rows = None
-    if rows is not None:
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            ev = _parse_line(json.dumps(row))
-            if ev is None:
-                continue
-            if since_ts is not None and _timestamp_key(ev["ts"]) < _timestamp_key(since_ts):
-                continue
-            events.append(ev)
-        return events, 0
-    active_events, active_skipped = _read_events(active, since_ts)
-    rotated = active.with_name(active.name + ".1")
-    if not rotated.exists():
-        return active_events, active_skipped
-    active_first = _first_ts(active)
-    # Skip .1 only when the cursor is STRICTLY inside the active file. On equality
-    # (since_ts == active_first) a second was split across the rotation boundary,
-    # so .1 still holds same-ts events whose occurrence index must be counted
-    # ahead of the active file's - dropping .1 here would reset the index to 0 and
-    # mis-align it against the cursor's n, losing same-second events (codex peer).
-    if (
-        since_ts is not None
-        and active_first is not None
-        and _timestamp_key(since_ts) > _timestamp_key(active_first)
-    ):
-        return active_events, active_skipped
-    rotated_events, rotated_skipped = _read_events(rotated, since_ts)
-    return rotated_events + active_events, active_skipped + rotated_skipped
+    rows, skipped = read_projection(active, "--status-stream", {"since_ts": since_ts})
+    return rows, skipped
 
 
 def _eof_cursor(active: Path) -> "tuple[str, int]":

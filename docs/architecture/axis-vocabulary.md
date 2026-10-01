@@ -201,6 +201,12 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | `observed_model` | model | the sole answer to "what is this worker actually running" |
 | agent row `requested_model`, `requested_provider`, `requested_effort` | model, provider, effort | the REQUEST verbatim as typed, stamped once at birth (registry v24) |
 | agent row `model_substituted` | model | the emission-time marker naming both values when request and observation disagree |
+| reap receipt `model_provenance` | model, provider, effort | carries provider and effort beside model; a value rides only when its row had it, never inferred |
+| ledger execution row `harness` | harness | |
+| ledger execution row `provider` | provider | the vendor axis, from the registry row or the reap receipt, never inferred from a harness or model value |
+| ledger execution row `model` | model | the finalize row's model is the transcript's primary model or the registry's; the fill takes the session's answer |
+| ledger execution row `effort` | effort | |
+| ledger row `provider_id` | legacy | a rotation account id or a harness value; read only by review routing and the cost breakdown, never the provider axis |
 
 ## Lane names are keys, not axis values
 

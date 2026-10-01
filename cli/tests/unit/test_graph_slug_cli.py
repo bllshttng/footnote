@@ -88,16 +88,10 @@ def test_roadmap_only_public_no_leaks(tmp_graph):
     assert "## Now" in out
 
 
-def test_roadmap_writes_both_public_views_from_one_clean_gate(tmp_graph, tmp_path):
+def test_roadmap_refuses_the_retired_html_flags(tmp_graph, tmp_path):
     _seed(tmp_graph, [
         {"id": "ab-11111111", "title": "Roadmap now marker", "status": "ready",
-         "priority": "p1", "size": "M", "project": "fno",
-         "details": "PRIVATE-DETAIL-MARKER", "plan_path": "/Users/alice/private.md",
-         "session_id": "PRIVATE-SESSION-MARKER"},
-        {"id": "ab-22222222", "title": "Backlog idea marker", "status": "idea",
-         "priority": "p2", "size": "S", "project": "fno"},
-        {"id": "ab-33333333", "title": "Deferred marker", "status": "deferred",
-         "priority": "p2", "project": "fno"},
+         "priority": "p1", "size": "M", "project": "fno"},
     ])
     roadmap = tmp_path / "roadmap.html"
     backlog = tmp_path / "backlog.html"
@@ -108,29 +102,10 @@ def test_roadmap_writes_both_public_views_from_one_clean_gate(tmp_graph, tmp_pat
          "--backlog-html", str(backlog)],
     )
 
-    assert result.exit_code == 0, result.output
-    assert f"written public roadmap: {roadmap}" in result.stdout
-    assert f"written public backlog: {backlog}" in result.stdout
-    assert "Roadmap now marker" in roadmap.read_text()
-    for private_value in (
-        "ab-11111111",
-        "PRIVATE-DETAIL-MARKER",
-        "/Users/alice/private.md",
-        "PRIVATE-SESSION-MARKER",
-    ):
-        assert private_value not in roadmap.read_text()
-    public_body = backlog.read_text()
-    assert "Roadmap now marker" in public_body
-    assert "Backlog idea marker" in public_body
-    assert "Deferred marker" not in public_body
-    assert "ready" in public_body and "idea" in public_body
-    for private_value in (
-        "ab-11111111",
-        "PRIVATE-DETAIL-MARKER",
-        "/Users/alice/private.md",
-        "PRIVATE-SESSION-MARKER",
-    ):
-        assert private_value not in public_body
+    assert result.exit_code != 0
+    assert "retired" in (result.stdout + (result.stderr or ""))
+    assert not roadmap.exists()
+    assert not backlog.exists()
 
 
 def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):
@@ -150,24 +125,21 @@ def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):
     assert "Archive shipped marker" in result.stdout
 
 
-def test_view_refuses_named_when_canonical_loader_is_unreadable(tmp_graph, monkeypatch):
-    def _unreadable(*_args):
-        raise RuntimeError("READ-FAIL-MARKER")
+def test_view_refuses_when_the_board_render_fails(tmp_graph, monkeypatch):
+    def _failing():
+        return 1
 
-    monkeypatch.setattr("fno.graph.render_html.load_render_entries", _unreadable)
+    monkeypatch.setattr("fno.graph.roadmap_public.render_local_targets", _failing)
 
     result = runner.invoke(app, ["backlog", "view"])
 
     assert result.exit_code != 0
-    assert "canonical graph read failed: READ-FAIL-MARKER" in (
-        result.stdout + (result.stderr or "")
-    )
+    assert "local board render failed" in (result.stdout + (result.stderr or ""))
 
 
 @pytest.mark.parametrize(
     "argv",
     [
-        ["backlog", "view"],
         ["backlog", "roadmap", "--project", "fno"],
     ],
 )
@@ -191,7 +163,6 @@ def test_html_views_refuse_stale_local_graph_under_external_tracker(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["backlog", "view"],
         ["backlog", "roadmap", "--project", "fno"],
     ],
 )
@@ -257,21 +228,6 @@ def test_public_title_gate_reports_every_class_and_preserves_both_files(
     assert backlog.read_text() == "BACKLOG-SENTINEL"
 
 
-def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
-    _seed(tmp_graph, [
-        {"id": "ab-44444444", "title": "Shipped <b>X</b>", "slug": "sx",
-         "status": "ready", "priority": "p1", "project": "fno", "public": True,
-         "completed_at": "2026-01-01T00:00:00Z"},
-    ])
-    hp = tmp_path / "roadmap.html"
-    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
-    assert result.exit_code == 0, result.output
-    body = hp.read_text()
-    assert r"\u003c b\u003eX\u003c/b\u003e" not in body
-    assert r"\u003cb\u003eX\u003c/b\u003e" in body
-    assert "Shipped" in body
-
-
 def test_roadmap_uses_live_epic_priority_and_shared_order(
     tmp_graph, tmp_path
 ):
@@ -304,53 +260,6 @@ def test_roadmap_uses_live_epic_priority_and_shared_order(
     assert "Active epic" in md_now
     assert "Claimed later" in md_now
     assert "Unpromoted child" in md_next
-
-    hp = tmp_path / "roadmap-order.html"
-    result = runner.invoke(
-        app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)]
-    )
-    assert result.exit_code == 0, result.output
-    body = hp.read_text()
-    # One document now, so assert POSITION within it. Aliasing two names to the
-    # same body turned the three checks below into presence checks, and the
-    # last one was the only proof a dead-epic child is not promoted.
-    def _at(needle: str) -> int:
-        index = body.find(needle)
-        assert index >= 0, f"{needle!r} missing from the rendered board"
-        return index
-
-    assert _at("Promoted child") < _at("Loose now")
-    assert _at("Active epic") < _at("Unpromoted child"), (
-        "a child of a dead epic must not outrank a live epic"
-    )
-    assert _at("Claimed later") < _at("Unpromoted child")
-
-
-def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
-    # Public HTML must not leak live-board workflow flags (codex P2 on PR #48):
-    # a blocked / plan-less node would otherwise render `blocked`/`needs plan`.
-    _seed(tmp_graph, [
-        {"id": "ab-aaaa0001", "title": "Blocker", "slug": "blk", "status": "ready",
-         "priority": "p1", "project": "fno", "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-aaaa0002", "title": "Public blocked plan-less", "slug": "pbp",
-         "priority": "p1", "project": "fno", "public": True,
-         "blocked_by": ["ab-aaaa0003"]},  # open blocker -> would flag "blocked"
-        {"id": "ab-aaaa0003", "title": "Open dep", "slug": "dep", "status": "ready",
-         "priority": "p2", "project": "fno"},
-    ])
-    hp = tmp_path / "roadmap.html"
-    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
-    assert result.exit_code == 0, result.output
-    body = hp.read_text().lower()
-    assert "public blocked plan-less" in body  # the node still shows
-    # The flag markers this test used to grep for went with the card
-    # projection, so their absence proves nothing now. Assert the live rule
-    # instead: the operator's spec makes title, status, priority, size and
-    # group public, and DERIVED workflow flags public in neither.
-    for derived in ("needs plan", "no plan", "orphan", "stale claim", "over cap"):
-        assert derived not in body, f"derived workflow flag leaked: {derived}"
-    # Positive control, so the absences above cannot pass on an empty page.
-    assert 'class="pill"' in body, "the status pill is public by spec and must render"
 
 
 def test_roadmap_folds_triage_into_later(tmp_graph):

@@ -619,7 +619,9 @@ def pane_identity_crosscheck(
         state = pane.get("fno_id_state") or (
             "resolved" if actual else "unresolved:spawned-name"
         )
-        if state != "resolved" or actual != expected:
+        # State only: the pane fno_id is the row's own mint now, never the
+        # harness id the row records, so equality would flag every healthy row.
+        if state != "resolved":
             row_mismatches.append(
                 {
                     "row": r.name,
