@@ -264,10 +264,17 @@ fi
 # is producing tool activity. `refresh` can extend; it cannot acquire or steal.
 _HANDOVER_NODE="${FNO_NODE:-}"
 _HANDOVER_HOLDER="${FNO_NODE_CLAIM_HOLDER:-}"
+# HOME-as-repo guard (law d-8ddaba56): when the cwd is $HOME outside git,
+# $CWD/.fno IS the state root and the handover stamp would land at its top
+# level. A HOME-cwd session holds no repo binding, so the leg skips.
+_handover_repo_fno_phys="$(cd "$CWD/.fno" 2>/dev/null && pwd -P || true)"
+_handover_state_phys="$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P || true)"
 if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       && "$_HANDOVER_HOLDER" == spawn-handover:* \
       && "$_HANDOVER_HOLDER" != "spawn-handover:" ]] \
-      && command -v fno >/dev/null 2>&1; then
+      && command -v fno >/dev/null 2>&1 \
+      && [[ -z "$_handover_repo_fno_phys" \
+            || "$_handover_repo_fno_phys" != "$_handover_state_phys" ]]; then
   _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
   _HANDOVER_THROTTLE="${FNO_CLAIM_HANDOVER_HEARTBEAT_THROTTLE:-300}"
   _handover_due=1

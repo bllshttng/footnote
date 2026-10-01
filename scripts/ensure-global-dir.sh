@@ -12,8 +12,11 @@ set -uo pipefail
 # Sanctioned fallback: honors an already-exported STATE_DIR (e.g. a caller
 # that sourced the shell stub) without requiring this bootstrap script to
 # source anything itself - it runs before fno may even be installed.
+# Nothing below needs a directory pre-created: the root itself is made by
+# the first writer that resolves through the state-dir resolver, and the
+# empty signals/ and hooks/ dirs this script used to mkdir here sat
+# undocumented at the root until the layout table parked them.
 GLOBAL_DIR="${STATE_DIR:-$HOME/.fno}"
-mkdir -p "$GLOBAL_DIR/signals" "$GLOBAL_DIR/hooks"
 
 echo "[ok] Global directory: $GLOBAL_DIR"
 
