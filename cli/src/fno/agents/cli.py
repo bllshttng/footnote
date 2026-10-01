@@ -2868,13 +2868,11 @@ def cmd_retask(
 ) -> None:
     """Retask one finished worker (pane or thread) onto the node's next verb."""
     from fno.agents.retask import run_retask
-    from fno.config import load_settings
 
     try:
         receipt = run_retask(
             worker,
             node=node,
-            settings=load_settings(),
             model=model,
             effort=effort,
         )

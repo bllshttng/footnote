@@ -10,7 +10,7 @@ repo="$(git rev-parse --show-toplevel 2>/dev/null)" || repo="$PWD"
 cd "$repo" || exit 1
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-fno-py doctor lint field-coverage --live --json >"$tmp"
+fno doctor lint field-coverage --live --json >"$tmp"
 status=$?
 if [ "$status" -ne 0 ]; then
   # exit 1 with a measurable report still lets the contract probe run;

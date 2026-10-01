@@ -1,0 +1,99 @@
+{
+  "apply_permission_builtin": false,
+  "argv": [
+    "spawn",
+    "--name",
+    "w26",
+    "/fno:target x-24"
+  ],
+  "config_toml": "",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--name",
+      "w26",
+      "/fno:target x-24"
+    ],
+    "exit": 0,
+    "journal": {
+      "applied": [],
+      "fingerprint": "",
+      "kind": "spawn_defaults_applied",
+      "name": "w26",
+      "resolved": {
+        "account": {
+          "rung": null,
+          "value": ""
+        },
+        "effort": {
+          "rung": null,
+          "value": ""
+        },
+        "model": {
+          "rung": null,
+          "value": ""
+        },
+        "pane_group": {
+          "rung": null,
+          "value": ""
+        },
+        "permission_mode": {
+          "rung": null,
+          "value": ""
+        },
+        "provider": {
+          "rung": null,
+          "value": ""
+        },
+        "route": {
+          "rung": null,
+          "value": ""
+        },
+        "substrate": {
+          "rung": null,
+          "value": ""
+        }
+      },
+      "seed": "/fno:target x-24",
+      "suppressed": [],
+      "verb": "target"
+    },
+    "stderr": [],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w26",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-24",
+    "seed_form": "positional",
+    "seed_index": 3,
+    "spawn_tokens": [
+      "--name",
+      "w26",
+      "/fno:target x-24"
+    ],
+    "tab_flag_present": false
+  }
+}

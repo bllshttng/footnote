@@ -113,10 +113,11 @@ def test_staleness_and_is_stale(tmp_path):
 
 
 def _declare(monkeypatch, rows):
-    """Pin a declared routing inventory (reachability is inventory-backed)."""
+    """Pin a declared routing inventory (reachability is inventory-backed).
+    The row fold lives in Rust now; the tests shape the verb's answer."""
     from fno import route_resolve as rr
 
-    inv = rr.inventory_from_rows(rows)
+    inv = rr._inventory_from_answer({"rows": rows, "declared": True})
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 

@@ -52,16 +52,12 @@ def _row(**overrides) -> AgentEntry:
     return AgentEntry(**values)
 
 
-def _settings(**target):
-    defaults = SimpleNamespace(
-        provider="", model="", effort="", substrate="", permission_mode="",
-        route="", account="", pane_group="", lanes=[],
-    )
-    profile = SimpleNamespace(**{**vars(defaults), **target})
-    return SimpleNamespace(
-        agents=SimpleNamespace(defaults=defaults, profiles={"target": profile}, max_lanes={}),
-        model_routing=None,
-    )
+def _config_env(monkeypatch, tmp_path, body):
+    """The compose gathers its own config from disk; FNO_CONFIG is the sole
+    candidate, so the profile a test supplies lives in this file."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(body)
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
 
 
 @pytest.fixture(autouse=True)
@@ -88,12 +84,17 @@ def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
     assert retask._resolve_retask_node("bdb9") == "x-bdb9"
 
 
-def test_explicit_model_and_effort_override_target_profile():
+def test_explicit_model_and_effort_override_target_profile(tmp_path, monkeypatch):
     from fno.agents.retask import resolve_target_coordinate
 
+    _config_env(
+        monkeypatch,
+        tmp_path,
+        '[agents.profiles.target]\nprovider = "codex"\n'
+        'model = "gpt-5.6-sol"\neffort = "high"\n',
+    )
     target = resolve_target_coordinate(
         "x-bdb9",
-        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
         model="gpt-5.6-luna",
         effort="xhigh",
         env={},
@@ -117,11 +118,17 @@ def _patch_rename_call(monkeypatch, sink, receipt):
     monkeypatch.setattr("fno.rust_binary.verb_call", fake)
 
 
-def test_run_retask_hands_the_transaction_to_fno_agents(monkeypatch):
+def test_run_retask_hands_the_transaction_to_fno_agents(tmp_path, monkeypatch):
     """The thin front resolves row, coordinate, target_command and the pane
     ref, then hands the whole transaction to the fno-agents rename payload."""
     import fno.agents.retask as retask
 
+    _config_env(
+        monkeypatch,
+        tmp_path,
+        '[agents.profiles.target]\nprovider = "codex"\n'
+        'model = "gpt-5.6-sol"\neffort = "high"\n',
+    )
     row = _row()
     monkeypatch.setattr(
         retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row)
@@ -133,7 +140,6 @@ def test_run_retask_hands_the_transaction_to_fno_agents(monkeypatch):
     got = retask.run_retask(
         "bp-xbdb9-retask",
         node="x-bdb9",
-        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
         env={},
     )
 
@@ -149,7 +155,7 @@ def test_run_retask_hands_the_transaction_to_fno_agents(monkeypatch):
     assert payload["target_command"] == "$fno:target --no-merge x-bdb9"
 
 
-def test_run_retask_renders_a_non_target_verb_command(monkeypatch):
+def test_run_retask_renders_a_non_target_verb_command(tmp_path, monkeypatch):
     import fno.agents.retask as retask
 
     monkeypatch.setattr(
@@ -160,6 +166,7 @@ def test_run_retask_renders_a_non_target_verb_command(monkeypatch):
             "dispatch_verb": "/fno:blueprint",
         }],
     )
+    _config_env(monkeypatch, tmp_path, '[agents.profiles.target]\nprovider = "codex"\n')
     row = _row()
     monkeypatch.setattr(
         retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row)
@@ -170,7 +177,6 @@ def test_run_retask_renders_a_non_target_verb_command(monkeypatch):
     retask.run_retask(
         "bp-xbdb9-retask",
         node="x-bdb9",
-        settings=_settings(provider="codex"),
         env={},
     )
 
@@ -281,7 +287,7 @@ def test_run_retask_thread_door_refusal_carries_the_door_stderr(monkeypatch) -> 
     assert receipt["cleared"] is False
 
 
-def test_planless_blueprint_node_resolves_a_blueprint_coordinate(monkeypatch):
+def test_planless_blueprint_node_resolves_a_blueprint_coordinate(tmp_path, monkeypatch):
     """The node's dispatch_verb drives the profile, so a planless blueprint
     node resolves a blueprint coordinate, not the target profile's tier."""
     import fno.agents.retask as retask
@@ -294,17 +300,17 @@ def test_planless_blueprint_node_resolves_a_blueprint_coordinate(monkeypatch):
             "dispatch_verb": "/fno:blueprint",
         }],
     )
-    settings = _settings(
-        provider="claude",
-        model="claude-opus-5",
-        permission_mode="bypassPermissions",
+    profile = (
+        'provider = "claude"\nmodel = "claude-opus-5"\n'
+        'permission_mode = "bypassPermissions"\n'
     )
-    settings.agents.profiles = {
-        "target": settings.agents.profiles["target"],
-        "blueprint": settings.agents.profiles["target"],
-    }
+    _config_env(
+        monkeypatch,
+        tmp_path,
+        f"[agents.profiles.target]\n{profile}[agents.profiles.blueprint]\n{profile}",
+    )
 
-    target = retask.resolve_target_coordinate("x-bdb9", settings=settings, env={})
+    target = retask.resolve_target_coordinate("x-bdb9", env={})
 
     assert target.verb == "blueprint"
     assert target.harness == "claude"
@@ -421,9 +427,13 @@ def test_ready_target_node_keeps_the_zai_lane_coordinate(tmp_path, monkeypatch):
             "plan_path": "plan.md",
         }],
     )
-    settings = _settings(route="zai/glm-5.3-flash[1m]")
+    _config_env(
+        monkeypatch,
+        tmp_path,
+        '[agents.profiles.target]\nroute = "zai/glm-5.3-flash[1m]"\n',
+    )
 
-    target = retask.resolve_target_coordinate("x-bdb9", settings=settings, env={})
+    target = retask.resolve_target_coordinate("x-bdb9", env={})
 
     assert target.provider == "zai"
     assert target.model == "glm-5.3-flash[1m]"

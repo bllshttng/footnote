@@ -6481,14 +6481,13 @@ pub(crate) fn run_reconcile_sweep(
     // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
-    // The rollout file recorded at spawn is the durable codex thread object
-    // (docs/architecture/codex-thread-driver.md): existence separates an
-    // unhosted thread's Orphaned from Exited; freshness keeps working ones unsettled.
+    let codex_index = crate::client_verbs::codex_rollout_index(None);
     let rollout_exists = |e: &RegistryEntry| -> bool {
-        e.log_path
-            .as_deref()
-            .map(Path::new)
-            .is_some_and(Path::is_file)
+        crate::codex_store::codex_rollout_exists(
+            codex_index.as_deref(),
+            e.log_path.as_deref(),
+            e.harness_session_id.as_deref(),
+        )
     };
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
@@ -6519,7 +6518,7 @@ pub(crate) fn run_reconcile_sweep(
     let prober = live_liveness_prober(
         truth,
         crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
-        crate::client_verbs::codex_rollout_index(None),
+        codex_index.clone(),
     );
     // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
