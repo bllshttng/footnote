@@ -163,22 +163,64 @@ button, select, input { font: inherit; }
 .actwhy { color: var(--yellow); font-size: 11px; flex-basis: 100%; overflow-wrap: anywhere; }
 .planline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 3px 0; }
 .planline code { font: inherit; font-size: 11px; color: var(--yellow); overflow-wrap: anywhere; }
-@media (prefers-reduced-motion: reduce) { .card { transition: none; } }
+/* The search bar: the first thing on the page, full width, pinned over the
+   filter row; the board scrolls beneath it. The focus key rides inside the
+   box and yields while the field holds focus. */
+#searchbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--mantle); border-bottom: 1px solid var(--surface0); }
+#searchbar .slabel { color: var(--overlay1); font-size: 12px; }
+#searchbox { flex: 1 1 auto; position: relative; display: flex; }
+#f-q { flex: 1 1 auto; width: 100%; font-size: 13px; background: var(--base); color: var(--text); border: 1px solid var(--surface1); border-radius: 0; padding: 5px 44px 5px 10px; min-height: 30px; }
+#f-q:focus { border-color: var(--text); outline: none; }
+#searchbox input:focus + kbd { display: none; }
+kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px solid var(--surface1); padding: 1px 5px; line-height: 14px; white-space: nowrap; }
+#searchbox kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); cursor: pointer; background: var(--base); }
+.controls kbd { margin-left: 4px; }
+#f-q-clear { flex: 0 0 auto; font-size: 12px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 30px; }
+#f-q-clear:hover { color: var(--text); border-color: var(--text); }
+#f-q-clear[hidden] { display: none; }
+.controls { transition: background .3s; }
+.controls.pulse { background: var(--surface0); }
+/* A tapped node id copies itself; the row it sits in still opens. */
+.cidcopy { cursor: copy; }
+.cidcopy:hover { text-decoration: underline; color: var(--text); }
+/* The j/k selection reads as a doubled border, so a blocked card's red edge
+   and the selection stay visible at once. */
+.card.sel, .lrow.sel { box-shadow: inset 0 0 0 1px var(--text); }
+#toast { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); background: var(--text); color: var(--base); padding: 6px 14px; font-size: 12px; z-index: 1500; opacity: 0; transition: opacity .15s; pointer-events: none; }
+#toast.show { opacity: 1; }
+#sheet { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--crust); opacity: .92; z-index: 1200; }
+#sheet[hidden] { display: none; }
+#sheetbox { background: var(--mantle); border: 1px solid var(--surface1); padding: 14px 18px 16px; min-width: 280px; max-width: 92vw; }
+#sheetbox h2 { margin: 0 0 10px; font-size: 13px; }
+#sheetbox td { padding: 2px 12px 2px 0; font-size: 12px; color: var(--subtext0); }
+#sheetbox td.k { color: var(--text); white-space: pre; }
+#sheetclose { margin-top: 12px; font-size: 11px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 26px; }
+#sheetclose:hover { color: var(--text); border-color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .card { transition: none; } #toast { transition: none; } }
 @media (max-width: 720px) { #panel { width: auto; left: 0; } .mark { flex-basis: 100%; } }
 </style>
 </head>
 <body>
 <!--fno-nav-->
 <noscript><p>JavaScript is off; this page cannot draw the board.</p></noscript>
+<div id="searchbar">
+  <span class="slabel">find</span>
+  <div id="searchbox">
+    <input id="f-q" type="search" placeholder="search id, title, label" autocomplete="off" spellcheck="false">
+    <kbd id="searchkey" title="focus search (/)">/</kbd>
+  </div>
+  <button id="f-q-clear" type="button" hidden title="clear search">clear</button>
+</div>
 <div class="controls" id="controls">
   <span class="mark">Ｆ<b>[no]</b> backlog</span>
-  <span class="lbl">view</span>
+  <span class="lbl">view <kbd title="switch kanban and list">tab</kbd></span>
   <button type="button" data-view="kanban">kanban</button>
   <button type="button" data-view="list">list</button>
   <span class="lbl">lanes</span>
   <button type="button" data-lanes="project">project</button>
   <button type="button" data-lanes="epic">epic</button>
   <button type="button" data-lanes="none">none</button>
+  <span class="lbl">filters <kbd title="jump to the filters">f</kbd></span>
   <label>project <select id="f-project" multiple size="1"><option value="">any</option></select></label>
   <label>epic <select id="f-epic" multiple size="1"><option value="">any</option></select></label>
   <label>status <select id="f-status" multiple size="1"><option value="">any</option></select></label>
@@ -186,8 +228,8 @@ button, select, input { font: inherit; }
   <label>size <select id="f-size" multiple size="1"><option value="">any</option></select></label>
   <label>kind <select id="f-kind" multiple size="1"><option value="">any</option></select></label>
   <label>lead <select id="f-king" multiple size="1"><option value="">any</option></select></label>
-  <label>find <input id="f-q" type="search" size="14" placeholder="id, slug or title"></label>
   <label><input id="f-all" type="checkbox"> all projects</label>
+  <button type="button" id="sheetbtn" title="keyboard shortcuts (?)">?</button>
 </div>
 <div id="note"></div>
 <div id="hdr"></div>
@@ -198,6 +240,23 @@ button, select, input { font: inherit; }
   <div id="panelhead"><button id="panelclose" type="button">close</button></div>
   <div id="panelbody"></div>
 </aside>
+<div id="sheet" hidden>
+  <div id="sheetbox">
+    <h2>keyboard shortcuts</h2>
+    <table><tbody>
+      <tr><td class="k">/  ctrl/cmd K</td><td>focus search</td></tr>
+      <tr><td class="k">esc</td>  <td>clear search, then close details</td></tr>
+      <tr><td class="k">j / k</td><td>move the selection</td></tr>
+      <tr><td class="k">enter</td><td>open the selected details</td></tr>
+      <tr><td class="k">y</td>    <td>copy the selected id</td></tr>
+      <tr><td class="k">tab</td>  <td>switch kanban and list</td></tr>
+      <tr><td class="k">f</td>    <td>jump to the filters</td></tr>
+      <tr><td class="k">?</td>    <td>this sheet</td></tr>
+    </tbody></table>
+    <button id="sheetclose" type="button">close</button>
+  </div>
+</div>
+<div id="toast" role="status"></div>
 <script>
 "use strict";
 // The pure board helpers. They compute values and touch no DOM, so the Rust
@@ -226,6 +285,40 @@ function mergeBoard(last, next, now) {
 // names. The snapshot page copies it; the served page posts the same argv.
 function voteText(id) {
   return "fno backlog encounter " + id + " --operator --evidence \"REPLACE: what it cost\"";
+}
+// The toast line for one copied node id.
+function copiedToast(id) {
+  return "copied " + id;
+}
+// True when the event target swallows typing: a form field or a content
+// editable. The board shortcuts never fire from inside one.
+function isTypingTarget(target) {
+  if (!target || !target.tagName) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!target.isContentEditable;
+}
+// One keydown resolved to a board action, from plain data so the Rust tests
+// can drive every shortcut without a DOM. Inside a form field nothing fires -
+// Escape still does, because leaving a field or clearing the search is not
+// typing. Escape unwinds in order: the sheet, the search text, the details.
+function shortcutAction(key, mods, ctx) {
+  if (key === "Escape") {
+    if (ctx.sheetOpen) return "close-sheet";
+    if (ctx.query) return "clear-search";
+    if (ctx.panelOpen) return "close-panel";
+    return null;
+  }
+  if (ctx.typing) return null;
+  if (key === "/") return "focus-search";
+  if ((key === "k" || key === "K") && (mods.meta || mods.ctrl)) return "focus-search";
+  if (key === "j") return "sel-next";
+  if (key === "k") return "sel-prev";
+  if (key === "Enter") return ctx.hasSelection ? "open" : null;
+  if (key === "y") return ctx.hasSelection ? "copy" : null;
+  if (key === "Tab") return "toggle-view";
+  if (key === "f") return "filters";
+  if (key === "?") return "sheet";
+  return null;
 }
 // Copy a raw string over plain http or file://, where the clipboard API may
 // be absent: fall back to selecting the text in a hidden helper and saying
@@ -338,6 +431,10 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   let dead = false;
   let openId = initial.get("node") || "";
   let openSeq = 0;
+  // The j/k selection: the id of the held card and the flat draw-order id
+  // list rebuilt on every redraw.
+  let selId = "";
+  let visibleIds = [];
   // The bridge stamps the flag only when it is bound to loopback; the
   // server-side write_guard decides every write, the flag only draws.
   const writable = document.body.dataset.writable === "true";
@@ -350,6 +447,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   const mainEl = document.getElementById("main");
   const gridEl = document.getElementById("board");
   const controls = document.getElementById("controls");
+  const searchInput = document.getElementById("f-q");
+  const searchClear = document.getElementById("f-q-clear");
+  const sheetEl = document.getElementById("sheet");
   const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king", "kind"];
   // The effective write controls: the bridge's flag ANDs with snapshot mode,
   // which has no server to POST to.
@@ -512,6 +612,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     fillSelect("f-kind", (f.kinds || []).map((v) => ({ v: v, l: v })), state.kind);
     fillSelect("f-king", (f.kings || []).map((v) => ({ v: v, l: v })), state.king);
     document.getElementById("f-q").value = state.q;
+    searchClear.hidden = !state.q;
     document.getElementById("f-all").checked = state.all;
   }
   function draw() {
@@ -519,8 +620,10 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     drawHeader();
     drawStats();
     drawTiles();
+    visibleIds = [];
     if (state.view === "list") drawList();
     else drawGrid();
+    if (selId && !visibleIds.includes(selId)) selId = "";
     syncControls();
   }
   function drawNote() {
@@ -661,10 +764,11 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "card" + (card.blocked ? " blocked" : "");
-    const id = document.createElement("span");
-    id.className = "cid";
-    id.textContent = card.id;
-    b.appendChild(id);
+    const cidEl = document.createElement("span");
+    cidEl.className = "cid";
+    cidEl.textContent = card.id;
+    bindIdCopy(cidEl, card.id);
+    b.appendChild(cidEl);
     const title = document.createElement("span");
     title.className = "ct";
     title.textContent = card.title;
@@ -699,6 +803,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       dot.title = "a session joins the roster";
       b.appendChild(dot);
     }
+    b.dataset.id = card.id;
+    if (card.id === selId) b.classList.add("sel");
+    visibleIds.push(card.id);
     b.addEventListener("click", () => openNode(card.id));
     return b;
   }
@@ -769,10 +876,11 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "lrow" + (card.blocked ? " blocked" : "") + (depth ? " lchild" : "");
-    const id = document.createElement("span");
-    id.className = "lid";
-    id.textContent = card.id;
-    b.appendChild(id);
+    const lidEl = document.createElement("span");
+    lidEl.className = "lid";
+    lidEl.textContent = card.id;
+    bindIdCopy(lidEl, card.id);
+    b.appendChild(lidEl);
     const title = document.createElement("span");
     title.className = "ltitle";
     title.textContent = card.title;
@@ -788,6 +896,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     b.appendChild(m);
     addKindTag(b, card.kind);
     addVotePill(b, card);
+    b.dataset.id = card.id;
+    if (card.id === selId) b.classList.add("sel");
+    visibleIds.push(card.id);
     b.addEventListener("click", () => openNode(card.id));
     return b;
   }
@@ -1126,6 +1237,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const idSpan = document.createElement("span");
     idSpan.className = "pid";
     idSpan.textContent = card.id + " ";
+    bindIdCopy(idSpan, card.id);
     h.appendChild(idSpan);
     const t = document.createElement("span");
     t.textContent = card.title;
@@ -1485,8 +1597,9 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     });
   }
   let debounce = 0;
-  document.getElementById("f-q").addEventListener("input", (ev) => {
+  searchInput.addEventListener("input", (ev) => {
     clearTimeout(debounce);
+    searchClear.hidden = !ev.target.value;
     debounce = setTimeout(() => {
       state.q = ev.target.value.trim();
       syncUrl();
@@ -1501,8 +1614,115 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) fetchBoard();
   });
+  // The one copied-id surface: a tap or click on any node id anywhere on
+  // the page copies it, with a short toast; the row behind it still opens.
+  let toastTimer = 0;
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+  }
+  function copyId(id) {
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(id).then(() => toast(copiedToast(id)), () => copyIdBySelect(id));
+    } else {
+      copyIdBySelect(id);
+    }
+  }
+  function copyIdBySelect(id) {
+    const inp = document.createElement("textarea");
+    inp.value = id;
+    document.body.appendChild(inp);
+    inp.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    inp.remove();
+    toast(ok ? copiedToast(id) : "selected " + id + "; copy by hand");
+  }
+  function bindIdCopy(el, id) {
+    el.classList.add("cidcopy");
+    el.title = "copy " + id;
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      copyId(id);
+    });
+  }
+  // The j/k selection: a flat pass over the visible cards in draw order;
+  // j from nothing starts at the first card, k at the last.
+  function setSel(id) {
+    const prev = gridEl.querySelector(".sel");
+    if (prev) prev.classList.remove("sel");
+    selId = id;
+    if (!id) return;
+    const el = gridEl.querySelector('[data-id="' + id + '"]');
+    if (el) {
+      el.classList.add("sel");
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }
+  function moveSel(delta) {
+    if (!visibleIds.length) return;
+    let i = visibleIds.indexOf(selId);
+    if (i < 0) i = delta > 0 ? -1 : 0;
+    i = Math.max(0, Math.min(visibleIds.length - 1, i + delta));
+    setSel(visibleIds[i]);
+  }
+  function setView(v) {
+    state.view = v;
+    syncUrl();
+    fetchBoard();
+  }
+  function focusSearch() {
+    searchInput.focus();
+    searchInput.select();
+  }
+  function clearSearch() {
+    searchInput.value = "";
+    searchClear.hidden = true;
+    state.q = "";
+    syncUrl();
+    fetchBoard();
+    searchInput.focus();
+  }
+  function openFilters() {
+    controls.classList.add("pulse");
+    setTimeout(() => controls.classList.remove("pulse"), 1200);
+    const first = document.getElementById("f-project");
+    if (first) first.focus();
+  }
+  document.getElementById("sheetclose").addEventListener("click", () => { sheetEl.hidden = true; });
+  sheetEl.addEventListener("click", (ev) => {
+    if (ev.target === sheetEl) sheetEl.hidden = true;
+  });
+  document.getElementById("sheetbtn").addEventListener("click", openSheet);
+  document.getElementById("searchkey").addEventListener("click", focusSearch);
+  searchClear.addEventListener("click", clearSearch);
+  function openSheet() { sheetEl.hidden = false; }
+  // The keydown entry: resolve the action, then preventDefault everything
+  // but the Escape unwind (the browser handles Esc natively in fields).
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") closePanel();
+    const action = shortcutAction(ev.key, { meta: ev.metaKey, ctrl: ev.ctrlKey }, {
+      typing: isTypingTarget(ev.target),
+      query: searchInput.value,
+      panelOpen: !panel.hidden,
+      sheetOpen: !sheetEl.hidden,
+      view: state.view,
+      hasSelection: !!selId,
+    });
+    if (!action) return;
+    if (action === "clear-search" || action === "close-panel") return;
+    ev.preventDefault();
+    if (action === "focus-search") focusSearch();
+    else if (action === "close-sheet") sheetEl.hidden = true;
+    else if (action === "sel-next") moveSel(1);
+    else if (action === "sel-prev") moveSel(-1);
+    else if (action === "open") openNode(selId);
+    else if (action === "copy") copyId(selId);
+    else if (action === "toggle-view") setView(state.view === "list" ? "kanban" : "list");
+    else if (action === "filters") openFilters();
+    else if (action === "sheet") openSheet();
   });
   document.getElementById("panelclose").addEventListener("click", closePanel);
   if (!SNAPSHOT) {

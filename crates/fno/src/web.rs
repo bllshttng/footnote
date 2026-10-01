@@ -2437,6 +2437,153 @@ console.log("snapshot page helpers: 16 cases ok");
         }
     }
 
+    /// Every node id on the page copies itself when tapped: the three render
+    /// sites (kanban card, list row, panel title) bind the one copy handler,
+    /// the search bar leads the page with its clear button and focus key,
+    /// and every board row carries its id for the j/k selection.
+    #[test]
+    fn every_node_id_binds_the_copy_handler() {
+        assert!(
+            BACKLOG_PAGE.contains("function bindIdCopy(el, id)"),
+            "the one copy handler exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(cidEl, card.id)"),
+            "kanban card ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(lidEl, card.id)"),
+            "list row ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(idSpan, card.id)"),
+            "the panel id copies"
+        );
+        assert_eq!(
+            BACKLOG_PAGE.matches("bindIdCopy(").count(),
+            4,
+            "the handler binds at exactly the three render sites plus its definition"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("ev.stopPropagation()"),
+            "an id tap must not open the row behind it"
+        );
+        // The search bar is the first control on the page and holds the one
+        // find input, its clear button and the focus key.
+        let bar = BACKLOG_PAGE
+            .find(r#"id="searchbar""#)
+            .expect("the search bar exists");
+        let controls = BACKLOG_PAGE
+            .find(r#"id="controls""#)
+            .expect("controls exist");
+        assert!(bar < controls, "the search bar leads the page");
+        assert!(
+            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            "the placeholder names what search covers"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="f-q-clear""#),
+            "the clear button exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="searchkey""#),
+            "the focus key shows in the box"
+        );
+        assert!(
+            !BACKLOG_PAGE.contains(r#"size="14""#),
+            "the old hidden find input is gone"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("b.dataset.id = card.id;"),
+            "board rows carry their id for the j/k selection"
+        );
+    }
+
+    /// Every board shortcut answers, and the typing guard holds: lift
+    /// shortcutAction / isTypingTarget / copiedToast from the shipped page
+    /// and drive each key the ? sheet advertises, under node.
+    #[test]
+    fn every_board_shortcut_answers_under_node() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (got !== want) { console.error("FAIL " + what + ": got " + got + ", want " + want); process.exit(1); }
+};
+const M = { meta: false, ctrl: false };
+// focus search: the slash, and ctrl/cmd K (plain k is the selection move).
+eq(shortcutAction("/", M, {}), "focus-search", "/ focuses search");
+eq(shortcutAction("k", { meta: true, ctrl: false }, {}), "focus-search", "cmd-K focuses search");
+eq(shortcutAction("K", { meta: false, ctrl: true }, {}), "focus-search", "ctrl-K focuses search");
+eq(shortcutAction("k", { meta: true, ctrl: false }, { typing: true }), null, "cmd-K never fires while typing");
+// selection: j down, k up; j from nothing starts at the first card.
+eq(shortcutAction("j", M, {}), "sel-next", "j moves down");
+eq(shortcutAction("k", M, {}), "sel-prev", "k moves up");
+eq(shortcutAction("j", M, { hasSelection: false }), "sel-next", "j starts the selection");
+// enter and y answer only with a selection on the board.
+eq(shortcutAction("Enter", M, { hasSelection: true }), "open", "enter opens the selection");
+eq(shortcutAction("Enter", M, { hasSelection: false }), null, "enter without a selection is nothing");
+eq(shortcutAction("y", M, { hasSelection: true }), "copy", "y copies the selection");
+eq(shortcutAction("y", M, { hasSelection: false }), null, "y without a selection is nothing");
+// tab toggles the view, f jumps to the filters, ? opens the sheet.
+eq(shortcutAction("Tab", M, { view: "kanban" }), "toggle-view", "tab toggles the view");
+eq(shortcutAction("f", M, {}), "filters", "f opens the filters");
+eq(shortcutAction("?", M, {}), "sheet", "? opens the sheet");
+// the typing guard: no board key fires from inside a form field.
+for (const key of ["/", "j", "k", "y", "Tab", "f", "?", "Enter"]) {
+  eq(shortcutAction(key, M, { typing: true }), null, key + " never fires while typing");
+}
+// escape unwinds in order: sheet, then the search text, then the details;
+// it alone survives the typing guard.
+eq(shortcutAction("Escape", M, { sheetOpen: true }), "close-sheet", "escape closes the sheet first");
+eq(shortcutAction("Escape", M, { query: "abc" }), "clear-search", "escape clears the search before the details");
+eq(shortcutAction("Escape", M, { panelOpen: true }), "close-panel", "escape closes the details");
+eq(shortcutAction("Escape", M, {}), null, "escape with nothing open is nothing");
+eq(shortcutAction("Escape", M, { typing: true, query: "abc" }), "clear-search", "escape clears from inside a field");
+// the typing guard itself.
+eq(isTypingTarget({ tagName: "INPUT" }), true, "input swallows typing");
+eq(isTypingTarget({ tagName: "TEXTAREA" }), true, "textarea swallows typing");
+eq(isTypingTarget({ tagName: "SELECT" }), true, "select swallows typing");
+eq(isTypingTarget({ tagName: "DIV", isContentEditable: true }), true, "content editable swallows typing");
+eq(isTypingTarget({ tagName: "BUTTON" }), false, "a button is a board target");
+eq(isTypingTarget({}), false, "no tag is no target");
+eq(isTypingTarget(null), false, "no target is no target");
+// the toast names what landed on the clipboard.
+eq(copiedToast("x-1234"), "copied x-1234", "the toast carries the id");
+console.log("backlog shortcuts: 35 cases ok");
+"#;
+        let src = format!(
+            "{}\n{}\n{}\n{}",
+            lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
+            lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
+            lift_js_fn(BACKLOG_PAGE, "copiedToast"),
+            asserts
+        );
+        let path = std::env::temp_dir()
+            .join(format!("fno-backlog-shortcuts-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped board shortcuts: {e}"
+                );
+                println!(
+                    "SKIPPED every_board_shortcut_answers_under_node: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                assert!(
+                    stdout.contains("backlog shortcuts: 35 cases ok"),
+                    "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nav_fragment_rows() {
         for (page, name) in [
