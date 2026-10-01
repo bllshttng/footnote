@@ -2065,6 +2065,16 @@ def _execute_steps(
             step_env.pop("FNO_PYTEST_SHARD", None)
             if pytest_shard and name == "Pytest (unit + integration)":
                 step_env["FNO_PYTEST_SHARD"] = pytest_shard
+                if pytest_shard == "1/13":
+                    # TEMPORARY, remove before merge: the keeper lane runs
+                    # first, serial and verbose with long tracebacks, so a
+                    # failing assertion prints from a run that completes
+                    # before the shard's freeze point. The pre-pass is
+                    # non-fatal; the shard's own xdist slice still decides.
+                    cmd = (
+                        "uv run pytest -p no:xdist -v --tb=long "
+                        "tests/unit/test_keeper_lane.py || true; " + cmd
+                    )
             proc = subprocess.run(
                 ["bash", "-eo", "pipefail", "-c", cmd],
                 cwd=str(root / cwd) if cwd != "." else str(root),
