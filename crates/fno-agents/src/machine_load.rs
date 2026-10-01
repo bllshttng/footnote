@@ -742,7 +742,7 @@ mod tests {
             .find(|r| r.pid == child.id())
             .expect("specimen row");
         assert_ne!(row.state, 'T', "the sleeper runs again: {row:?}");
-        child.kill();
+        let _ = child.kill();
         let _ = child.wait();
         match saved_ask {
             Some(v) => std::env::set_var("FNO_MACHINE_LOAD_ASK", v),
