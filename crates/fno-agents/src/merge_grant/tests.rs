@@ -481,7 +481,11 @@ fn queue_rows() {
     // posture; a legacy manifest without the posture key permits; an
     // ambiguous binding fails closed; an unreadable manifest never reads as
     // permission; the branch-keyed read serves the authority walk.
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (base, repo, wt) = bound_fixture();
+    let _home = HomeGuard::at(base.path());
     write_manifest(
         &wt,
         "---\nauto_merge_approved: false\nauto_merge_source: flag-no-merge\nharness_session_id: w-bound\n---\ngraph_node_id: ab-bound1\n",
@@ -528,8 +532,9 @@ fn queue_rows() {
     );
     assert!(bound_node_posture(&repo, "ab-legacy").is_err());
     // A manifest path that is not a file is unreadable, never permission.
-    std::fs::remove_file(wt.join(".fno").join("target-state.md")).unwrap();
-    std::fs::create_dir_all(wt.join(".fno").join("target-state.md")).unwrap();
+    let manifest = crate::state_path::resolve("target-state", wt).expect("target-state resolves");
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::create_dir_all(&manifest).unwrap();
     assert!(matches!(read_bound_manifest(&wt), BoundRead::Unreadable(_)));
     drop(base);
 
@@ -537,6 +542,7 @@ fn queue_rows() {
     // whose node's bound manifest refuses drops, moving the count, and the
     // queue never widens the merge verb's gates.
     let (base, repo, wt) = bound_fixture();
+    let _home2 = HomeGuard::at(base.path());
     write_manifest(
         &wt,
         "---\nauto_merge_approved: false\n---\ngraph_node_id: ab-qbound\n",
@@ -668,7 +674,45 @@ fn git_worktree(repo: &std::path::Path, wt: &std::path::Path, branch: &str) {
 }
 
 fn write_manifest(wt: &std::path::Path, text: &str) {
-    std::fs::write(wt.join(".fno").join("target-state.md"), text).unwrap();
+    let path = crate::state_path::resolve("target-state", wt).expect("target-state resolves");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// Point the state roots at the fixture base so the canonical resolver
+/// answers inside the tempdir instead of the machine's own spaces. Held
+/// under the test env lock, restored on drop.
+struct HomeGuard {
+    agents_home: Option<std::ffi::OsString>,
+    spaces: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn at(base: &std::path::Path) -> Self {
+        let agents_home = std::env::var_os("FNO_AGENTS_HOME");
+        let spaces = std::env::var_os("FNO_SPACES_DIR");
+        std::env::set_var("FNO_AGENTS_HOME", base.join("home"));
+        std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+        Self {
+            agents_home,
+            spaces,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.agents_home.take() {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match self.spaces.take() {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+    }
 }
 
 /// AC1-HP: the narrowed read keeps the open grant node and the grantless

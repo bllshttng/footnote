@@ -678,8 +678,11 @@ pub(crate) enum BoundRead {
 /// resolution first (live wins), then the newest archived/terminal form in
 /// either the resolved directory or the legacy `.fno` state dir.
 pub(crate) fn read_bound_manifest(wt: &Path) -> BoundRead {
-    let resolved = crate::state_path::resolve("target-state", wt)
-        .unwrap_or_else(|| wt.join(".fno").join("target-state.md"));
+    // `resolve` always answers for `target-state`; the None arm is defense in
+    // depth, never a second path builder.
+    let Some(resolved) = crate::state_path::resolve("target-state", wt) else {
+        return BoundRead::None;
+    };
     if resolved.exists() && !resolved.is_file() {
         return BoundRead::Unreadable(format!("{} is not a regular file", resolved.display()));
     }
