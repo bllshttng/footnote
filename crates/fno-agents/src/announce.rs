@@ -562,6 +562,25 @@ fn send_announcement(
     })
 }
 
+/// One urgent `all`-scope announcement from an in-crate operator door (the
+/// test hold). Same line, rate limit and supersede as `announce send`.
+pub(crate) fn announce_all(from: &str, subject: &str, body: &str) -> Result<String, String> {
+    let paths = AnnouncePaths::from_env_opt().ok_or("no agents home")?;
+    let args = SendArgs {
+        scope: "all".into(),
+        subject: subject.into(),
+        expires_raw: DEFAULT_EXPIRES.into(),
+        urgent: true,
+        from: from.into(),
+        sender_kind: "operator".into(),
+        from_session: None,
+        json_out: false,
+    };
+    send_announcement(&args, body, &paths, None)
+        .map(|receipt| receipt.id)
+        .map_err(|(_, message)| message)
+}
+
 pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
     let parsed = match parse_send_args(args) {
         Ok(p) => p,

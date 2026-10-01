@@ -674,6 +674,13 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+      - name: Build native fno (Python guard rows)
+        # The Python guards commit their guard_decision rows through the
+        # native `fno doctor event emit-envelope` verb. Without this binary
+        # the rows are dropped (best-effort by contract) and the dispatch
+        # fixture sees only the Rust guards' rows. The compiled deps come
+        # from the cached build base, so this pays mostly the final link.
+        run: cargo build --release --manifest-path crates/fno/Cargo.toml --bin fno
       - name: Generated copies match their sources
         run: |
           (cd cli && uv run fno-py doctor harness-matrix --write)
@@ -684,6 +691,7 @@ jobs:
       - name: Run latency budgets
         env:
           FNO_AGENTS_BIN: ${{ github.workspace }}/crates/fno-agents/target/release/fno-agents
+          FNO_BIN: ${{ github.workspace }}/crates/fno/target/release/fno
           FNO_HOOK_LATENCY_OUT: ${{ runner.temp }}/hook-latency
         # The legacy `latency_` fixtures remain quarantined. The Bash hook
         # budget fixture is named separately and measures the consolidated

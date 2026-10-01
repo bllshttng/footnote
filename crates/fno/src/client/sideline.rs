@@ -680,11 +680,15 @@ impl View {
                         // Card line 1: glyph in the status column, the word
                         // in the message column, no age on line 1. List mode
                         // paints the exact pre-card cells.
+                        // A Working row's spin glyph takes the blank lead
+                        // column of the right-aligned word, so the word stays put.
                         rt_cell(
-                            if card {
-                                style.glyph.to_string()
-                            } else {
-                                status_word(lat).to_string()
+                            match (card, lat) {
+                                (true, _) => status_glyph(lat).to_string(),
+                                (false, LatticeState::Working) => {
+                                    format!("{}{}", status_glyph(lat), status_word(lat))
+                                }
+                                (false, _) => status_word(lat).to_string(),
                             },
                             cell_fg,
                             cell_flags_v,

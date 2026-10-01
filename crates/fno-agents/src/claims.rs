@@ -1170,7 +1170,7 @@ pub(crate) fn emit_audit_event(
 ///
 /// Precedence mirrors `fno.paths.project_events_json` and `scripts/lib/events.sh`
 /// exactly: an explicitly named journal wins, then the `FNO_EVENTS_PATH` pin,
-/// then the repo root resolved from `cwd`.
+/// then the space journal `paths::events_path` resolves from `cwd`.
 ///
 /// Reading the pin here is not tidiness. Python and Rust share this journal AND
 /// its `.lock.d` mutex as a wire contract, so a pin only one side honors puts
@@ -1199,7 +1199,15 @@ fn claim_events_path_with(events_dir: Option<&Path>, cwd: &Path, pin: Option<&st
     if let Some(pinned) = pin.filter(|p| !p.is_empty()) {
         return PathBuf::from(pinned);
     }
-    crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl")
+    // The space journal the store and every reader resolve; a raw repo-root
+    // join is how single_flight and claim rows landed in a stray root whose
+    // MOVED-TO pointer nobody followed. An undeclared hermetic run has no
+    // space root to resolve (the fence refuses ambient $HOME), so it keeps
+    // the checkout path and its sandbox.
+    match crate::paths::space_dir_opt(cwd) {
+        Some(space) => space.join("events.jsonl"),
+        None => crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl"),
+    }
 }
 
 /// Age past which a mkdir mutex dir is a corpse left by a killed holder.
@@ -2842,8 +2850,48 @@ mod tests {
             .collect()
     }
 
+    /// Pins FNO_SPACES_DIR (and FNO_AGENTS_HOME, the state_path EnvGuard
+    /// pattern) so the space-journal fallback resolves inside the test root
+    /// instead of ambient $HOME. Restores both on drop; the env lock keeps a
+    /// threaded sibling test from flipping the pins mid-assert.
+    struct SpacesPinGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_spaces: Option<std::ffi::OsString>,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    impl SpacesPinGuard {
+        fn new(td: &Path) -> Self {
+            let lock = crate::claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev_spaces = std::env::var_os("FNO_SPACES_DIR");
+            let prev_home = std::env::var_os("FNO_AGENTS_HOME");
+            std::env::set_var("FNO_SPACES_DIR", td.join("spaces"));
+            std::env::set_var("FNO_AGENTS_HOME", td.join("agents-home"));
+            Self {
+                _lock: lock,
+                prev_spaces,
+                prev_home,
+            }
+        }
+    }
+
+    impl Drop for SpacesPinGuard {
+        fn drop(&mut self) {
+            match self.prev_spaces.take() {
+                Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                None => std::env::remove_var("FNO_SPACES_DIR"),
+            }
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+                None => std::env::remove_var("FNO_AGENTS_HOME"),
+            }
+        }
+    }
+
     #[test]
-    fn default_claim_events_path_resolves_from_repo_subdirectory() {
+    fn default_claim_events_path_resolves_to_the_space_journal() {
         let td = TempDir::new().unwrap();
         assert!(std::process::Command::new("git")
             .args(["init", "-q"])
@@ -2853,13 +2901,18 @@ mod tests {
             .success());
         let nested = td.path().join("crates/fno/src");
         std::fs::create_dir_all(&nested).unwrap();
+        let _guard = SpacesPinGuard::new(td.path());
 
-        // The pure core with no pin, so this asserts the root branch it is named
-        // for rather than whatever FNO_EVENTS_PATH the test harness has set.
-        assert_eq!(
-            claim_events_path_with(None, &nested, None),
-            td.path().canonicalize().unwrap().join(".fno/events.jsonl")
-        );
+        // The pure core with no pin, so this asserts the resolver branch
+        // rather than whatever FNO_EVENTS_PATH the test harness has set. The
+        // fallback is the SPACE journal: a raw repo-root join is how
+        // single_flight and claim rows landed in a stray root whose
+        // MOVED-TO pointer nobody followed.
+        let root = td.path().canonicalize().unwrap();
+        let expected = crate::paths::spaces_root()
+            .join(crate::paths::space_slug(&root))
+            .join("events.jsonl");
+        assert_eq!(claim_events_path_with(None, &nested, None), expected);
     }
 
     #[test]
@@ -2882,9 +2935,14 @@ mod tests {
         );
         // An empty pin is not a pin, which is what an exported-but-empty
         // FNO_EVENTS_PATH looks like, and what the other two writers do.
+        // A non-git cwd slugs the raw path: worktree_repo_root canonicalizes
+        // only a resolved git root.
+        let _guard = SpacesPinGuard::new(cwd);
         assert_eq!(
             claim_events_path_with(None, cwd, Some("")),
-            crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl"),
+            crate::paths::spaces_root()
+                .join(crate::paths::space_slug(cwd))
+                .join("events.jsonl"),
         );
     }
 

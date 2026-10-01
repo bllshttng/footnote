@@ -93,7 +93,7 @@ fn verdict(
 // --- AC10-HP: the granted path -------------------------------------------
 
 #[test]
-fn granted_when_receipt_unheld_and_config_dispatches() {
+fn verdict_rows() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -110,10 +110,7 @@ fn granted_when_receipt_unheld_and_config_dispatches() {
         v.grant.expect("grant rides a granted verdict")["approved"],
         json!(true)
     );
-}
 
-#[test]
-fn free_claim_is_also_positively_not_live() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -123,10 +120,7 @@ fn free_claim_is_also_positively_not_live() {
         )],
     )];
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, GRANTED);
-}
 
-#[test]
-fn below_floor_posture_holds_even_a_valid_grant() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -139,10 +133,7 @@ fn below_floor_posture_holds_even_a_valid_grant() {
     assert_eq!(v.state, HELD);
     assert!(v.reason.contains("below the merge floor"), "{}", v.reason);
     assert!(v.reason.contains("no_review"), "{}", v.reason);
-}
 
-#[test]
-fn non_canonical_receipt_stamp_reads_unknown() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -154,12 +145,7 @@ fn non_canonical_receipt_stamp_reads_unknown() {
     let v = verdict(&entries, &stale_claims(), &live);
     assert_eq!(v.state, UNKNOWN);
     assert!(v.reason.contains("canonical"), "{}", v.reason);
-}
 
-// --- AC9-EDGE: newest explicit receipt wins, by recorded_at not row order -
-
-#[test]
-fn newer_refusal_outranks_older_grant() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -174,10 +160,7 @@ fn newer_refusal_outranks_older_grant() {
     let v = verdict(&entries, &stale_claims(), &live);
     assert_eq!(v.state, REFUSED);
     assert!(v.reason.contains("no-merge-flag"), "{}", v.reason);
-}
 
-#[test]
-fn newer_grant_outranks_older_refusal() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -190,10 +173,7 @@ fn newer_grant_outranks_older_refusal() {
         ],
     )];
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, GRANTED);
-}
 
-#[test]
-fn row_order_never_decides() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -206,10 +186,7 @@ fn row_order_never_decides() {
         ],
     )];
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, REFUSED);
-}
 
-#[test]
-fn disagreeing_newest_receipts_at_one_instant_never_grant() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -221,10 +198,12 @@ fn disagreeing_newest_receipts_at_one_instant_never_grant() {
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, UNKNOWN);
 }
 
+// --- AC9-EDGE: newest explicit receipt wins, by recorded_at not row order -
+
 // --- AC10-CON: liveness and standing config hold the merge ----------------
 
 #[test]
-fn live_or_suspect_claim_holds() {
+fn claim_rows() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -243,10 +222,7 @@ fn live_or_suspect_claim_holds() {
             v.reason
         );
     }
-}
 
-#[test]
-fn corrupt_claim_is_unknown_not_held() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -259,10 +235,7 @@ fn corrupt_claim_is_unknown_not_held() {
         verdict(&entries, &claims_of(vec![(NODE, Corrupted)]), &live).state,
         UNKNOWN
     );
-}
 
-#[test]
-fn config_switched_off_holds_even_with_receipt() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -272,10 +245,7 @@ fn config_switched_off_holds_even_with_receipt() {
         )],
     )];
     assert_eq!(verdict(&entries, &stale_claims(), &cfg_off).state, HELD);
-}
 
-#[test]
-fn non_dispatch_grant_holds() {
     let entries = vec![node_with(
         NODE,
         PR,
@@ -293,29 +263,18 @@ fn non_dispatch_grant_holds() {
 // --- Absence and ambiguity never grant ------------------------------------
 
 #[test]
-fn no_graph_node_is_absent() {
+fn node_rows() {
     assert_eq!(verdict(&[], &stale_claims(), &live).state, ABSENT);
-}
 
-#[test]
-fn node_without_receipts_is_absent() {
     let entries = vec![node_with(NODE, PR, vec![do_row(None, "w1")])];
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, ABSENT);
-}
 
-#[test]
-fn two_nodes_on_one_pr_is_unknown() {
     let entries = vec![
         json!({"id": "ab-grantunit1", "title": "a", "pr_number": PR}),
         json!({"id": "ab-grantunit2", "title": "b", "pr_number": PR}),
     ];
     assert_eq!(verdict(&entries, &stale_claims(), &live).state, UNKNOWN);
-}
 
-// --- AC12-ERR: malformed receipts are loud unknowns ------------------------
-
-#[test]
-fn malformed_receipt_is_unknown() {
     let bads = [
         json!({"approved": true, "source": "config", "recorded_by": "s"}),
         json!({"approved": true, "source": "config", "recorded_by": "s",
@@ -331,6 +290,8 @@ fn malformed_receipt_is_unknown() {
         assert_eq!(v.state, UNKNOWN, "{bad}");
     }
 }
+
+// --- AC12-ERR: malformed receipts are loud unknowns ------------------------
 
 // --- The queue --------------------------------------------------------------
 
@@ -358,7 +319,7 @@ fn drain(entries: &[Value], claims: &dyn Fn(&str) -> ClaimState) -> Value {
 }
 
 #[test]
-fn queue_holds_only_granted_rows_and_counts_every_verdict() {
+fn queue_rows() {
     let entries = vec![
         queue_node("ab-grantone", 1, json!({})),
         queue_node("ab-grantlive", 2, json!({})),
@@ -392,10 +353,7 @@ fn queue_holds_only_granted_rows_and_counts_every_verdict() {
         ],
         "grant carries exactly the three writer keys"
     );
-}
 
-#[test]
-fn queue_skips_superseded_merged_closed_and_grantless_nodes() {
     let entries = vec![
         queue_node("ab-sup", 1, json!({"status": "superseded"})),
         queue_node("ab-merged", 2, json!({"merge_status": "merged"})),
@@ -407,10 +365,7 @@ fn queue_skips_superseded_merged_closed_and_grantless_nodes() {
     let out = drain(&entries, &stale_claims());
     assert_eq!(out["candidates"], json!(0), "{out}");
     assert_eq!(out["queue"], json!([]), "{out}");
-}
 
-#[test]
-fn queue_counts_a_missing_slug_or_checkout_as_unknown() {
     let entries = vec![
         json!({"id": "ab-noslug", "title": "t", "pr_number": 1, "cwd": "/checkouts/one",
                "sessions": [do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w1")]}),
@@ -422,10 +377,7 @@ fn queue_counts_a_missing_slug_or_checkout_as_unknown() {
     assert_eq!(out["candidates"], json!(2), "{out}");
     assert_eq!(out["verdicts"]["unknown"], json!(2), "{out}");
     assert_eq!(out["queue"], json!([]), "{out}");
-}
 
-#[test]
-fn queue_skips_done_nodes() {
     let entries = vec![
         queue_node("ab-done", 1, json!({"status": "done"})),
         queue_node("ab-open", 2, json!({"status": "in_review"})),
@@ -435,10 +387,7 @@ fn queue_skips_done_nodes() {
     let queue = out["queue"].as_array().expect("queue is an array");
     assert_eq!(queue.len(), 1, "{out}");
     assert_eq!(queue[0]["pr"], json!(2), "{out}");
-}
 
-#[test]
-fn queue_reads_root_and_config_once_per_checkout() {
     let entries = vec![
         queue_node("ab-one", 1, json!({})),
         queue_node("ab-two", 2, json!({})),
@@ -463,10 +412,7 @@ fn queue_reads_root_and_config_once_per_checkout() {
     assert_eq!(out["queue"].as_array().expect("queue").len(), 3, "{out}");
     assert_eq!(roots.get(), 1, "root_of runs once per checkout");
     assert_eq!(configs.get(), 1, "cfg_of runs once per checkout");
-}
 
-#[test]
-fn queue_rotates_its_head_by_the_tick_index() {
     let entries = vec![
         queue_node("ab-rot1", 1, json!({})),
         queue_node("ab-rot2", 2, json!({})),
@@ -489,10 +435,7 @@ fn queue_rotates_its_head_by_the_tick_index() {
     assert_eq!(order(0), vec![1, 2, 3]);
     assert_eq!(order(1), vec![2, 3, 1]);
     assert_eq!(order(5), vec![3, 1, 2]);
-}
 
-#[test]
-fn repo_slug_from_pr_url_reads_owner_and_repo() {
     assert_eq!(
         repo_slug_from_pr_url("https://github.com/owner/repo/pull/7").as_deref(),
         Some("owner/repo")
@@ -506,12 +449,7 @@ fn repo_slug_from_pr_url_reads_owner_and_repo() {
         None
     );
     assert_eq!(repo_slug_from_pr_url("nope"), None);
-}
 
-// --- The ops ----------------------------------------------------------------
-
-#[test]
-fn unreadable_graph_reads_unknown_and_the_queue_reads_error() {
     let verdict = verdict_op(
         Err("bad json".to_string()),
         &json!({"pr": PR, "cwd": "/tmp"}),
@@ -529,21 +467,17 @@ fn unreadable_graph_reads_unknown_and_the_queue_reads_error() {
     let q = queue_op(Err("bad json".to_string()), 0, std::time::Instant::now());
     assert_eq!(q["error"], json!("graph unreadable: bad json"));
     assert!(q["elapsed_ms"].is_u64(), "{q}");
-}
 
-#[test]
-fn queue_receipt_carries_elapsed_ms() {
     let q = queue_op(Ok(vec![]), 0, std::time::Instant::now());
     assert_eq!(q["candidates"], json!(0), "{q}");
     assert!(q["elapsed_ms"].is_u64(), "{q}");
-}
 
-#[test]
-fn an_unknown_grant_op_returns_an_error_receipt() {
     let out = run_op("grant-nope", &json!({"cwd": "/tmp"}));
     let o: Value = serde_json::from_str(&out).expect("receipt is json");
     assert_eq!(o["error"], json!("unknown op grant-nope"));
 }
+
+// --- The ops ----------------------------------------------------------------
 
 // --- narrowed store reads (AC1-AC4) ----------------------------------------
 
@@ -605,7 +539,7 @@ fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 /// PR-11 carrier, in ordinal order, each equal to its full-read row on the
 /// keys the grant ops read.
 #[test]
-fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
+fn narrow_rows() {
     let (_dir, graph) = grant_sqlite_fixture();
     let narrowed = crate::graph_store::read_pr_rows(&graph, None).unwrap();
     let ids: Vec<&str> = narrowed
@@ -632,11 +566,7 @@ fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
             assert_eq!(row.get(key), want.and_then(|e| e.get(key)), "{key} of {id}");
         }
     }
-}
 
-/// AC3-HP: the queue receipt is identical over the narrowed and full reads.
-#[test]
-fn queue_receipt_is_identical_over_the_narrowed_read() {
     let (_dir, graph) = grant_sqlite_fixture();
     let full = Ok(crate::graph_store::read_rows(&graph).unwrap());
     let narrowed = Ok(crate::graph_store::read_pr_rows(&graph, None)
@@ -649,12 +579,7 @@ fn queue_receipt_is_identical_over_the_narrowed_read() {
         receipt
     };
     assert_eq!(strip(a), strip(b));
-}
 
-/// AC4-ERR: two open grant nodes carrying the same PR stay ambiguous over
-/// the narrowed read, naming both ids, as the full read does.
-#[test]
-fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     let entries = json!([
@@ -672,6 +597,11 @@ fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
     }
 }
 
+/// AC3-HP: the queue receipt is identical over the narrowed and full reads.
+
+/// AC4-ERR: two open grant nodes carrying the same PR stay ambiguous over
+/// the narrowed read, naming both ids, as the full read does.
+
 // ── the head-scoped operator merge grant ──────────────────────────────────
 
 fn law_row(authority: &str, decision: Option<&str>) -> Value {
@@ -687,7 +617,7 @@ fn decisions_payload(rows: Vec<Value>) -> Vec<u8> {
 }
 
 #[test]
-fn parse_head_grant_subject_round_trips_the_minted_shape() {
+fn op_rows() {
     let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
     assert_eq!(
         parse_head_grant_subject(&format!("merge-grant:o/r#42@{sha}")),
@@ -713,40 +643,25 @@ fn parse_head_grant_subject_round_trips_the_minted_shape() {
             "{bad} must not parse as a merge-grant subject"
         );
     }
-}
 
-#[test]
-fn attended_grant_command_names_subject_decision_and_authority() {
     let cmd = attended_grant_command("o/r", 42, "abc");
     assert!(cmd.starts_with("fno backlog decide '"), "{cmd}");
     assert!(cmd.contains("'merge-grant:o/r#42@abc'"), "{cmd}");
     assert!(cmd.contains("'merge authorized for this head'"), "{cmd}");
     assert!(cmd.ends_with("--authority operator"), "{cmd}");
-}
 
-#[test]
-fn one_affirmative_operator_row_reads_granted() {
     let payload = decisions_payload(vec![law_row("operator", Some(MERGE_GRANT_DECISION))]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
-}
 
-#[test]
-fn identical_affirmative_rows_read_granted_once() {
     let payload = decisions_payload(vec![
         law_row("operator", Some(MERGE_GRANT_DECISION)),
         law_row("operator", Some(MERGE_GRANT_DECISION)),
     ]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
-}
 
-#[test]
-fn no_operator_rows_read_absent() {
     let payload = decisions_payload(vec![]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
-}
 
-#[test]
-fn chat_attested_and_unattributed_rows_are_not_grants() {
     // AC2-ERR: only a person at a terminal carries the grant. Rows recorded
     // through the law door by a harness session (`chat_attested`) or without
     // an authority read as no operator row at all: Absent, never granted.
@@ -755,25 +670,16 @@ fn chat_attested_and_unattributed_rows_are_not_grants() {
         law_row("unknown", Some(MERGE_GRANT_DECISION)),
     ]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
-}
 
-#[test]
-fn a_differing_decision_reads_conflict() {
     let payload = decisions_payload(vec![
         law_row("operator", Some(MERGE_GRANT_DECISION)),
         law_row("operator", Some("not this head")),
     ]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
-}
 
-#[test]
-fn an_operator_row_without_a_readable_decision_reads_conflict() {
     let payload = decisions_payload(vec![law_row("operator", None)]);
     assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
-}
 
-#[test]
-fn unreadable_decisions_reads_never_grant() {
     // AC2-ERR fail-closed polarity: a dead probe is not "no grant", and a
     // payload without the decisions array is a shape the CLI never emits.
     assert_eq!(

@@ -111,13 +111,10 @@ fn run(row: &RetaskRow, target: &RetaskTarget, seams: &mut Fake) -> Value {
 }
 
 #[test]
-fn test_same_tier_builds_target_payload_without_executable_switch_commands() {
+fn payload_rows() {
     let receipt = detect_retask(&row(), &codex_target(), None);
     assert_eq!(receipt.outcome, "retask_ready");
-}
 
-#[test]
-fn test_tier_mismatch_builds_mechanism_neutral_switch_pending_payload() {
     let target = RetaskTarget {
         model: Some("gpt-5.6-luna".to_string()),
         effort: Some("xhigh".to_string()),
@@ -125,10 +122,7 @@ fn test_tier_mismatch_builds_mechanism_neutral_switch_pending_payload() {
     };
     let receipt = detect_retask(&row(), &target, None);
     assert_eq!(receipt.outcome, "switch_pending");
-}
 
-#[test]
-fn test_unrouted_lane_model_never_inherits_the_blueprint_row_tier() {
     let bare_target = RetaskTarget {
         model: None,
         ..codex_target()
@@ -140,10 +134,7 @@ fn test_unrouted_lane_model_never_inherits_the_blueprint_row_tier() {
             reason: Some("model_unrouted".into())
         }
     );
-}
 
-#[test]
-fn test_default_target_vendor_preserves_the_registry_vendor_axis() {
     let mut target = codex_target();
     target.provider = Some("codex".to_string());
     let mut openai_row = row();
@@ -156,10 +147,7 @@ fn test_default_target_vendor_preserves_the_registry_vendor_axis() {
     };
     let receipt = detect_retask(&openai_row, &neutral, None);
     assert_eq!(receipt.outcome, "retask_ready");
-}
 
-#[test]
-fn test_incompatible_axis_requires_spawn_before_any_payload_per_axis() {
     // One table test per the audit Keep rule: one row per axis value, not
     // one declaration per value.
     let cases: &[(&str, RetaskTarget, Option<&str>)] = &[
@@ -222,10 +210,7 @@ fn test_incompatible_axis_requires_spawn_before_any_payload_per_axis() {
             "axis {axis}"
         );
     }
-}
 
-#[test]
-fn test_matching_live_permission_and_account_retasks_ready() {
     let target = RetaskTarget {
         harness: "claude".to_string(),
         provider: None,
@@ -247,7 +232,7 @@ fn test_matching_live_permission_and_account_retasks_ready() {
 }
 
 #[test]
-fn test_non_mux_worker_is_refused_without_a_target_payload() {
+fn refuse_rows() {
     let no_mux = RetaskRow { mux: None, ..row() };
     let receipt = detect_retask(&no_mux, &codex_target(), None);
     assert_eq!(
@@ -257,10 +242,7 @@ fn test_non_mux_worker_is_refused_without_a_target_payload() {
             reason: Some("worker_has_no_mux_ref".into())
         }
     );
-}
 
-#[test]
-fn test_unusable_worker_is_refused_with_a_named_positive_verdict_not_live() {
     let stopped = RetaskRow {
         status_live: false,
         ..row()
@@ -272,10 +254,7 @@ fn test_unusable_worker_is_refused_with_a_named_positive_verdict_not_live() {
             reason: Some("worker_not_live".into())
         }
     );
-}
 
-#[test]
-fn test_unusable_worker_is_refused_with_a_named_positive_verdict_no_session() {
     let no_session = RetaskRow {
         harness_session_id: None,
         ..row()
@@ -287,10 +266,7 @@ fn test_unusable_worker_is_refused_with_a_named_positive_verdict_no_session() {
             reason: Some("worker_has_no_session_id".into())
         }
     );
-}
 
-#[test]
-fn test_detect_retask_reads_thread_identity_without_a_mux_pane() {
     let target = RetaskTarget {
         substrate: Some("thread".to_string()),
         ..codex_target()
@@ -305,10 +281,7 @@ fn test_detect_retask_reads_thread_identity_without_a_mux_pane() {
         detect_retask(&thread_row, &target, None).outcome,
         "retask_ready"
     );
-}
 
-#[test]
-fn test_thread_identity_missing_refuses_by_name() {
     let target = RetaskTarget {
         substrate: Some("thread".to_string()),
         ..codex_target()
@@ -326,10 +299,7 @@ fn test_thread_identity_missing_refuses_by_name() {
             reason: Some("worker_has_no_thread_ref".into())
         }
     );
-}
 
-#[test]
-fn test_zero_mux_sentinel_is_not_a_thread_reference() {
     let target = RetaskTarget {
         substrate: Some("thread".to_string()),
         ..codex_target()
@@ -349,7 +319,7 @@ fn test_zero_mux_sentinel_is_not_a_thread_reference() {
 }
 
 #[test]
-fn test_execute_retask_same_tier_orders_clear_rename_status_then_target() {
+fn exec_rows() {
     let mut seams = Fake {
         frames: VecDeque::from(vec![
             CODEX_PROMPT.to_string(),
@@ -382,10 +352,7 @@ fn test_execute_retask_same_tier_orders_clear_rename_status_then_target() {
         seams.tiers,
         [("gpt-5.6-sol".to_string(), "high".to_string())]
     );
-}
 
-#[test]
-fn test_execute_retask_refuses_source_pr_before_clear() {
     let mut seams = Fake {
         preflight: Some(json!({
             "status": "refused",
@@ -403,10 +370,7 @@ fn test_execute_retask_refuses_source_pr_before_clear() {
     assert_eq!(receipt["reason"], json!("source_pr_not_green"));
     assert_eq!(receipt["pr"], json!(1168));
     assert!(seams.sends.is_empty());
-}
 
-#[test]
-fn test_execute_retask_accepts_succession_receipt_and_names_one_row() {
     let mut seams = Fake {
         frames: VecDeque::from(vec![
             CODEX_PROMPT.to_string(),
@@ -429,10 +393,7 @@ fn test_execute_retask_accepts_succession_receipt_and_names_one_row() {
     assert_eq!(receipt["registry_rows"], json!(1));
     assert_eq!(receipt["lineage_recorded"], json!(true));
     assert_eq!(receipt["target_submit_confirmed"], json!(true));
-}
 
-#[test]
-fn test_execute_retask_refuses_a_branch_transition() {
     let restamp = json!({
         "classification": "branch",
         "reason": "session_transition_not_succession",
@@ -454,10 +415,7 @@ fn test_execute_retask_refuses_a_branch_transition() {
         seams.rename_calls, 0,
         "rename must wait for succession proof"
     );
-}
 
-#[test]
-fn test_execute_retask_refuses_a_predecessor_mismatch_transition() {
     let restamp = json!({
         "classification": "succession",
         "predecessor_session_id": "other-session",
@@ -475,10 +433,7 @@ fn test_execute_retask_refuses_a_predecessor_mismatch_transition() {
     assert_eq!(receipt["status"], json!("refused"));
     assert_eq!(receipt["cleared"], json!(true));
     assert_eq!(seams.sends, [("/clear".to_string(), true)]);
-}
 
-#[test]
-fn test_execute_retask_refuses_two_successor_rows() {
     let restamp = json!({
         "classification": "succession",
         "predecessor_session_id": "old-session",
@@ -496,10 +451,7 @@ fn test_execute_retask_refuses_two_successor_rows() {
     assert_eq!(receipt["status"], json!("refused"));
     assert_eq!(receipt["reason"], json!("successor_row_count_invalid"));
     assert_eq!(seams.sends, [("/clear".to_string(), true)]);
-}
 
-#[test]
-fn test_execute_retask_refuses_live_busy_even_when_cached_snapshot_is_idle() {
     let mut seams = Fake {
         frames: VecDeque::from(["painted but busy".to_string()]),
         ready: Some(json!({"matched": true, "rule_id": "working", "state": "working"})),
@@ -510,10 +462,7 @@ fn test_execute_retask_refuses_live_busy_even_when_cached_snapshot_is_idle() {
     assert_eq!(receipt["reason"], json!("pane_not_idle"));
     assert_eq!(receipt["cleared"], json!(false));
     assert_eq!(receipt["target_submit_confirmed"], json!(false));
-}
 
-#[test]
-fn test_execute_retask_names_readable_unmatched_frame_as_unobserved() {
     let mut seams = Fake {
         frames: VecDeque::from(["painted but no known manifest rule".to_string()]),
         ready: Some(json!({"matched": false})),
@@ -524,10 +473,7 @@ fn test_execute_retask_names_readable_unmatched_frame_as_unobserved() {
     assert_eq!(receipt["reason"], json!("pane_state_unobserved"));
     assert_eq!(receipt["cleared"], json!(false));
     assert!(seams.sends.is_empty());
-}
 
-#[test]
-fn test_execute_retask_names_missing_live_verdict_as_unobserved() {
     let mut seams = Fake {
         frames: VecDeque::from(["readable pane frame".to_string()]),
         ready: None,
@@ -537,10 +483,7 @@ fn test_execute_retask_names_missing_live_verdict_as_unobserved() {
 
     assert_eq!(receipt["reason"], json!("pane_state_unobserved"));
     assert_eq!(receipt["cleared"], json!(false));
-}
 
-#[test]
-fn test_execute_retask_keeps_empty_frame_unreadable_distinct() {
     let mut seams = Fake {
         frames: VecDeque::from([String::new()]),
         ..Fake::default()
@@ -553,7 +496,7 @@ fn test_execute_retask_keeps_empty_frame_unreadable_distinct() {
 }
 
 #[test]
-fn test_execute_retask_codex_menu_walk_verifies_each_target_before_submit() {
+fn menu_rows() {
     let target = RetaskTarget {
         model: Some("gpt-5.6-luna".to_string()),
         effort: Some("xhigh".to_string()),
@@ -597,10 +540,7 @@ fn test_execute_retask_codex_menu_walk_verifies_each_target_before_submit() {
             ("gpt-5.6-luna".to_string(), "xhigh".to_string()),
         ]
     );
-}
 
-#[test]
-fn test_execute_retask_claude_uses_direct_strategy_commands() {
     let target = RetaskTarget {
         harness: "claude".to_string(),
         model: Some("new-model".to_string()),
@@ -634,10 +574,7 @@ fn test_execute_retask_claude_uses_direct_strategy_commands() {
         .filter(|(text, _)| text.starts_with("/model"))
         .collect();
     assert_eq!(model_sends.len(), 1);
-}
 
-#[test]
-fn test_execute_retask_uses_verified_tier_when_target_axes_are_omitted() {
     let bare_target = RetaskTarget {
         model: None,
         effort: None,
@@ -659,10 +596,7 @@ fn test_execute_retask_uses_verified_tier_when_target_axes_are_omitted() {
 
     assert_eq!(receipt["status"], json!("retasked"));
     assert_eq!(receipt["switch"], json!("skipped_same_tier"));
-}
 
-#[test]
-fn test_execute_retask_refuses_unrouted_lane_model_before_any_clear() {
     let bare_target = RetaskTarget {
         model: None,
         ..codex_target()
@@ -674,18 +608,12 @@ fn test_execute_retask_refuses_unrouted_lane_model_before_any_clear() {
     assert_eq!(receipt["reason"], json!("model_unrouted"));
     assert_eq!(receipt["cleared"], json!(false));
     assert!(seams.sends.is_empty());
-}
 
-#[test]
-fn test_menu_delta_exact_match_beats_substring_and_shortest_wins() {
     let frame = "› 1. gpt-5.6-sol-mini\n  3. gpt-5.6-sol\n";
     assert_eq!(menu_delta(frame, "gpt-5.6-sol"), Some(2));
     assert_eq!(menu_delta(frame, "sol"), Some(2));
     assert_eq!(menu_delta(frame, "luna"), None);
-}
 
-#[test]
-fn test_execute_retask_refuses_missing_positive_menu_row_before_target() {
     let target = RetaskTarget {
         model: Some("gpt-5.6-luna".to_string()),
         effort: Some("xhigh".to_string()),
@@ -704,10 +632,7 @@ fn test_execute_retask_refuses_missing_positive_menu_row_before_target() {
     assert_eq!(receipt["status"], json!("refused"));
     assert_eq!(receipt["reason"], json!("model_row_missing"));
     assert_eq!(receipt["target_submit_confirmed"], json!(false));
-}
 
-#[test]
-fn test_execute_retask_refuses_unsupported_harness_before_clear() {
     let target = RetaskTarget {
         harness: "gemini".to_string(),
         model: None,

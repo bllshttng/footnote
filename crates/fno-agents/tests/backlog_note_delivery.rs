@@ -321,8 +321,11 @@ fn ac7_terminal_node_note_is_history_only() {
     assert!(receipt["replaced"].is_null());
 }
 
+/// The cross-session surface: the receipt names the state a take-over
+/// replaced, the guard holds a foreign note (or clear) before anything is
+/// written, the same session walks through free, and --replace is the door.
 #[test]
-fn a_note_names_the_state_it_replaced() {
+fn a_note_names_the_state_it_replaced_and_holds_authorship() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("t-1", "ready")]);
@@ -352,12 +355,15 @@ fn a_note_names_the_state_it_replaced() {
         "{stdout}"
     );
     // Second note: the receipt names revision 1, its size and its author.
+    // The writer differs from the prior author, so --replace marks the
+    // take-over deliberate.
     let (code, stdout, stderr) = note_captured(
         &[
             "t-1",
             "probe",
             "--self-session",
             "sess-bbbb2222",
+            "--replace",
             "--json",
             "--quiet",
             &g[0],
@@ -385,6 +391,7 @@ fn a_note_names_the_state_it_replaced() {
             "probe",
             "--self-session",
             "sess-cccc3333",
+            "--replace",
             "--quiet",
             &g[0],
             &g[1],
@@ -398,14 +405,124 @@ fn a_note_names_the_state_it_replaced() {
         "{stdout}"
     );
     assert!(stdout.contains("fno backlog notes history t-1"), "{stdout}");
-    // AC6: the replaced body reads back whole from history.
-    let (records, _) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
+    // AC6: the replaced body reads back whole from history, and the
+    // journal is why: one state_replaced record per take-over, each
+    // carrying the exact outgoing revision.
+    let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
     assert!(
         records
             .iter()
             .any(|r| r["original"]["body"] == json!("first line\nsecond line")),
         "the two-line body must read back whole"
     );
+    assert_eq!(total, 2);
+    assert_eq!(records[0]["reason"], json!("state_replaced"));
+    assert_eq!(records[0]["prior_revision"], json!(1));
+    assert_eq!(records[1]["prior_revision"], json!(2));
+    // The guard: a note over a revision this session cannot prove it wrote
+    // refuses before anything is written, and --quiet does not bypass it.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "vellum replacement",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("note refused"), "{stderr}");
+    assert!(
+        stderr.contains("--replace"),
+        "names the explicit door: {stderr}"
+    );
+    assert!(
+        stderr.contains("notes history t-1"),
+        "names the history readback: {stderr}"
+    );
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("t-1"))
+        .unwrap()
+        .clone();
+    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(3));
+    assert_eq!(node_state::history_page(&graph, "t-1", 0, 10).unwrap().1, 2);
+    // The same session replaces its own state without the flag.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "own update",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-cccc3333",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // An unidentified writer over an authored state is held too.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "anonymous overwrite",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    // The clear route holds under the same guard; --clear --replace is the
+    // door, and the emptied state lands in history.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "--clear",
+            "--stdin",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "--clear",
+            "--stdin",
+            "--replace",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-vellum",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "the explicit door clears: stderr: {stderr}");
+    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
+    let row = entries
+        .iter()
+        .find(|r| r["id"] == json!("t-1"))
+        .unwrap()
+        .clone();
+    assert!(row[node_state::STATE_KEY].is_null(), "state cleared");
+    let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
+    assert_eq!(total, 4, "the clear journaled the outgoing state");
+    assert_eq!(records[3]["reason"], json!("state_cleared"));
 }
 
 #[test]
@@ -518,12 +635,15 @@ fn a_repeat_note_names_encounter_once_until_one_exists() {
     assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
 
     // A different session never gets the hint, whatever the prior author.
+    // --replace names the cross-session take-over deliberate; the hint is
+    // about the encounter verb, not authorship.
     let (code, stdout, stderr) = note_captured(
         &[
             "t-1",
             "fourth",
             "--self-session",
             "sess-bbbb2222",
+            "--replace",
             "--quiet",
             &g[0],
             &g[1],

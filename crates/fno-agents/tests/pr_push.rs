@@ -200,7 +200,7 @@ fn tmpdir() -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
-fn pushes_once_with_the_behind_receipt() {
+fn behind_rows() {
     let (_t, d) = tmpdir();
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "{out}\n{err}");
@@ -224,10 +224,7 @@ fn pushes_once_with_the_behind_receipt() {
         d.join("stamps").join("feature_x.stamp").exists(),
         "the hook's stamp is written"
     );
-}
 
-#[test]
-fn a_behind_clean_pr_pushes_without_integrating_main() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("clean-pr"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -251,7 +248,7 @@ fn a_behind_clean_pr_pushes_without_integrating_main() {
 }
 
 #[test]
-fn a_run_in_flight_refuses_with_exit_2_and_names_the_check() {
+fn inflight_rows() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("pending"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -262,10 +259,7 @@ fn a_run_in_flight_refuses_with_exit_2_and_names_the_check() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-#[test]
-fn an_in_flight_run_refuses_before_preflight() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("pending"), "").unwrap();
     std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
@@ -278,10 +272,7 @@ fn an_in_flight_run_refuses_before_preflight() {
     assert_eq!(code, 2, "{out}\n{err}");
     assert!(!d.join("preflight.log").exists(), "preflight did not run");
     assert!(!log_of(&d, "git.log").contains("git push"));
-}
 
-#[test]
-fn the_in_flight_probe_emits_true_false_and_error_shapes_without_mutating_git() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("pending"), "").unwrap();
     let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
@@ -303,20 +294,14 @@ fn the_in_flight_probe_emits_true_false_and_error_shapes_without_mutating_git() 
     assert_eq!(code, 4, "{out}\n{err}");
     assert!(out.contains("\"error\""), "{out}");
     assert!(!out.contains("\"in_flight\""), "{out}");
-}
 
-#[test]
-fn an_in_flight_probe_without_a_remote_ref_answers_false() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("no-remote-branch"), "").unwrap();
     let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("\"in_flight\":false"), "{out}");
     assert!(!log_of(&d, "gh.log").contains("check-runs"));
-}
 
-#[test]
-fn a_conflict_refuses_with_exit_3_and_names_the_rebase_door() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("conflict"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -330,10 +315,7 @@ fn a_conflict_refuses_with_exit_3_and_names_the_rebase_door() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-#[test]
-fn a_dirty_tree_refuses_before_anything_moves() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("dirty"), "").unwrap();
     let (code, _out, err) = run_verb(&d, &[]);
@@ -346,7 +328,7 @@ fn a_dirty_tree_refuses_before_anything_moves() {
 }
 
 #[test]
-fn force_ci_cancel_pushes_and_records_the_bypass() {
+fn preflight_rows() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("pending"), "").unwrap();
     let (code, out, err) = run_verb(&d, &["--force-ci-cancel"]);
@@ -357,10 +339,7 @@ fn force_ci_cancel_pushes_and_records_the_bypass() {
         "the journal row"
     );
     assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
-}
 
-#[test]
-fn no_preflight_is_recorded_in_the_receipt() {
     let (_t, d) = tmpdir();
     std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
     write_exec(
@@ -372,10 +351,7 @@ fn no_preflight_is_recorded_in_the_receipt() {
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("preflight=skipped"), "{out}");
     assert!(!d.join("preflight.log").exists(), "runner did not run");
-}
 
-#[test]
-fn default_push_skips_an_installed_preflight_runner() {
     let (_t, d) = tmpdir();
     std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
     write_exec(
@@ -387,10 +363,7 @@ fn default_push_skips_an_installed_preflight_runner() {
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("preflight=skipped"), "{out}");
     assert!(!d.join("preflight.log").exists(), "runner did not run");
-}
 
-#[test]
-fn a_red_preflight_refuses_the_push() {
     let (_t, d) = tmpdir();
     std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
     write_exec(
@@ -405,10 +378,7 @@ fn a_red_preflight_refuses_the_push() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-#[test]
-fn a_first_push_sets_the_upstream() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("no-upstream"), "").unwrap();
     std::fs::write(d.join("no-remote-branch"), "").unwrap();
@@ -426,7 +396,7 @@ fn a_first_push_sets_the_upstream() {
 }
 
 #[test]
-fn a_second_push_inside_the_registration_window_is_refused() {
+fn window_rows() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("no-runs"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -442,10 +412,7 @@ fn a_second_push_inside_the_registration_window_is_refused() {
         1,
         "exactly one push across both runs"
     );
-}
 
-#[test]
-fn a_recent_stamp_with_registered_settled_rows_still_pushes() {
     let (_t, d) = tmpdir();
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "{out}\n{err}");
@@ -454,10 +421,7 @@ fn a_recent_stamp_with_registered_settled_rows_still_pushes() {
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "settled rows outrank the stamp: {out}\n{err}");
     assert_eq!(log_of(&d, "git.log").matches("git push").count(), 2);
-}
 
-#[test]
-fn force_ci_cancel_pushes_through_the_registration_window() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("no-runs"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -469,7 +433,7 @@ fn force_ci_cancel_pushes_through_the_registration_window() {
 }
 
 #[test]
-fn a_remote_only_commit_refuses_with_exit_3_before_preflight() {
+fn remote_rows() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("remote-only"), "").unwrap();
     // A passing preflight runner must never run: the refusal fires before
@@ -500,10 +464,7 @@ fn a_remote_only_commit_refuses_with_exit_3_before_preflight() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-#[test]
-fn a_remote_hand_resolved_merge_refuses_with_exit_3() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("remote-only-merge"), "").unwrap();
     std::fs::write(d.join("dirty-merge"), "").unwrap();
@@ -522,10 +483,7 @@ fn a_remote_hand_resolved_merge_refuses_with_exit_3() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-#[test]
-fn a_clean_remote_merge_still_leases_and_pushes() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("remote-only-merge"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
@@ -536,6 +494,40 @@ fn a_clean_remote_merge_still_leases_and_pushes() {
         "the validated merge leaves the lease on: {:?}",
         log_of(&d, "git.log")
     );
+
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    // main moves from clone B, then clone A commits again.
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    commit_file(&a, "two.txt", "2\n", "two");
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "the leased second push: {out}\n{err}");
+    assert!(out.contains("pushed=1"), "{out}");
+    let remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let head = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        remote.trim(),
+        head.trim(),
+        "the remote branch equals the rebased HEAD"
+    );
+
+    let (_t, root, a, _b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    commit_file(&a, "two.txt", "2\n", "two");
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let head = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(remote.trim(), head.trim());
 }
 
 // ── real-git regression: the second push against a moved base ───────────────
@@ -622,47 +614,7 @@ fn run_verb_real(a: &Path, root: &Path) -> (i32, String, String) {
 }
 
 #[test]
-fn a_second_push_after_main_moved_lands() {
-    let (_t, root, a, b) = real_repo();
-    let (code, out, err) = run_verb_real(&a, &root);
-    assert_eq!(code, 0, "first push: {out}\n{err}");
-    // main moves from clone B, then clone A commits again.
-    commit_file(&b, "main.txt", "m\n", "main moves");
-    git_in(&b, &["push", "origin", "main"]);
-    commit_file(&a, "two.txt", "2\n", "two");
-    let (code, out, err) = run_verb_real(&a, &root);
-    assert_eq!(code, 0, "the leased second push: {out}\n{err}");
-    assert!(out.contains("pushed=1"), "{out}");
-    let remote = git_in(
-        &root.join("remote.git"),
-        &["rev-parse", "refs/heads/feature/x"],
-    );
-    let head = git_in(&a, &["rev-parse", "HEAD"]);
-    assert_eq!(
-        remote.trim(),
-        head.trim(),
-        "the remote branch equals the rebased HEAD"
-    );
-}
-
-#[test]
-fn a_second_push_with_main_unchanged_still_fast_forwards() {
-    let (_t, root, a, _b) = real_repo();
-    let (code, out, err) = run_verb_real(&a, &root);
-    assert_eq!(code, 0, "first push: {out}\n{err}");
-    commit_file(&a, "two.txt", "2\n", "two");
-    let (code, out, err) = run_verb_real(&a, &root);
-    assert_eq!(code, 0, "{out}\n{err}");
-    let remote = git_in(
-        &root.join("remote.git"),
-        &["rev-parse", "refs/heads/feature/x"],
-    );
-    let head = git_in(&a, &["rev-parse", "HEAD"]);
-    assert_eq!(remote.trim(), head.trim());
-}
-
-#[test]
-fn a_merge_bearing_branch_merges_main_instead_of_rebasing() {
+fn merge_rows() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -701,10 +653,7 @@ fn a_merge_bearing_branch_merges_main_instead_of_rebasing() {
         .trim(),
         "2"
     );
-}
 
-#[test]
-fn a_merge_bearing_branch_at_behind_zero_is_not_rewritten() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -727,10 +676,7 @@ fn a_merge_bearing_branch_at_behind_zero_is_not_rewritten() {
         .trim(),
         before.trim()
     );
-}
 
-#[test]
-fn a_merge_conflict_aborts_and_names_the_merge_door() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -750,10 +696,7 @@ fn a_merge_conflict_aborts_and_names_the_merge_door() {
     assert!(err.contains("Merge origin/main by hand"), "{err}");
     assert_eq!(before.trim(), git_in(&a, &["rev-parse", "HEAD"]).trim());
     assert!(!a.join(".git/MERGE_HEAD").exists());
-}
 
-#[test]
-fn a_remote_only_commit_is_refused_and_kept() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -789,10 +732,7 @@ fn a_remote_only_commit_is_refused_and_kept() {
         after.trim(),
         "the remote branch still holds the other writer's commit"
     );
-}
 
-#[test]
-fn a_remote_merge_with_manual_resolution_is_refused() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -832,10 +772,7 @@ fn a_remote_merge_with_manual_resolution_is_refused() {
         after.trim(),
         "the remote branch still holds the merge and its hand content"
     );
-}
 
-#[test]
-fn a_clean_remote_merge_still_lands() {
     let (_t, root, a, b) = real_repo();
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "first push: {out}\n{err}");
@@ -902,7 +839,7 @@ fn run_verb_with_fno_home(dir: &Path, fno_home: &Path) -> (i32, String, String) 
 
 // AC4-ERR: the scan refuses before anything moves and names commit + id.
 #[test]
-fn a_commit_message_citing_an_unknown_id_refuses_the_push() {
+fn cite_rows() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("bad-commit-msg"), "").unwrap();
     let home = seed_fno_home(&d);
@@ -915,11 +852,7 @@ fn a_commit_message_citing_an_unknown_id_refuses_the_push() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
-}
 
-// AC4-HP: live ids read clean and the push path continues unchanged.
-#[test]
-fn commit_messages_citing_only_live_ids_push_unchanged() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("live-commit-msg"), "").unwrap();
     let home = seed_fno_home(&d);
@@ -928,3 +861,5 @@ fn commit_messages_citing_only_live_ids_push_unchanged() {
     assert!(out.contains("pushed=1"), "{out}");
     assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
 }
+
+// AC4-HP: live ids read clean and the push path continues unchanged.

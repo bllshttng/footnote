@@ -21,14 +21,16 @@ fn agents_home(scratch: &Scratch) -> PathBuf {
 
 const HOLD_SID: &str = "eeeeeeee-1111-2222-3333-444455556666";
 
-/// The `operator_submit` rows the mux appended to the agents journal.
+/// The `operator_submit` rows the mux committed to the agents journal's store.
 fn submits(scratch: &Scratch) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(agents_home(scratch).join("events.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|v| v["type"] == "operator_submit")
-        .collect()
+    fno::event_store::query_events(
+        &agents_home(scratch).join("events.jsonl"),
+        &fno::event_store::EventQuery::of_types(&["operator_submit"]),
+    )
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|row| serde_json::from_str(&row.line).ok())
+    .collect()
 }
 
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {

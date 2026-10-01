@@ -562,11 +562,11 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     v.sideline_width = 80;
     let frame = v.compose();
 
-    // Re-frozen when the band change (x-b5b8) moved the lane color off the
-    // name row and the Ｆ[no] mark was pinned at the strip's top-left.
+    // Re-frozen when a Working row's still spin glyph took the blank lead
+    // column of its status word.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        828733737252577218,
+        4078828234167703822,
         "List frame-cell snapshot"
     );
 }

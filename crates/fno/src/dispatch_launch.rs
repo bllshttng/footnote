@@ -768,11 +768,18 @@ mod tests {
             "fno agents spawn: applied slot=operator-pin-override (routing)\n\
              fno agents spawn: --route owns the model; not injecting agents.profiles.target.lanes",
         );
-        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        // The door row commits to the store beside the anchored journal, so
+        // the reads go through the store reader, never the raw file.
+        let journal = dir.join("events.jsonl");
+        let rows = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["agent_spawn_refused"]),
+        )
+        .expect("the store beside the journal opened");
         let row: serde_json::Value = serde_json::from_str(
-            events
-                .lines()
-                .find(|l| l.contains("agent_spawn_refused"))
+            rows.iter()
+                .map(|r| r.line.as_str())
+                .next()
                 .expect("one refusal row"),
         )
         .unwrap();
@@ -786,25 +793,35 @@ mod tests {
             .contains("--route owns the model"));
         // A gate refusal: the verdict marker is on the stderr and the gate
         // already wrote the row; a door row would double the feed.
-        std::fs::write(dir.join("events.jsonl"), "").unwrap();
+        for suffix in ["db", "db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(dir.join(format!("events.{suffix}")));
+        }
         note_spawn_refused(
             &argv,
             79,
             "",
             "spawn-gate: refused on permissions (mappability)",
         );
-        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let rows = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["agent_spawn_refused"]),
+        )
+        .unwrap_or_default();
         assert!(
-            events.is_empty(),
-            "a gate refusal writes no door row: {events}"
+            rows.is_empty(),
+            "a gate refusal writes no door row: {rows:?}"
         );
         // A born worker (exit 0) rows nothing: its acceptance is the spawn
         // row the child itself writes.
         note_spawn_refused(&argv, 0, r#"{"pane_id":7}"#, "");
-        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let rows = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["agent_spawn_refused"]),
+        )
+        .unwrap_or_default();
         assert!(
-            events.is_empty(),
-            "a successful launch writes no door row: {events}"
+            rows.is_empty(),
+            "a successful launch writes no door row: {rows:?}"
         );
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);

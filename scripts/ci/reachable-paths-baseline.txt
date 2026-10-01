@@ -1,5 +1,5 @@
-A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/render_html.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
-A	(?i)(?:pr(?:*#?*|-)+|#+)	py=cli/src/fno/graph/render_html.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
+A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
+A	(?i)(?:pr(?:*#?*|-)+|#+)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	(`fno agents spawn --provider <vendor> --model <m>`).	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# CLASSIFY protocol|msg-twin|data
 A	(it landed via merged pr #{merged})	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	(not yet implemented; planned for a future story)	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
@@ -233,7 +233,7 @@ A	this message runs {count} words. the cap is {cap} words.	py=cli/src/fno/style.
 A	this refusal does that with every word it names.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	torn final line (mid-write)	py=cli/src/fno/provenance/observed.py;rs=crates/fno-agents/src/backlog/session_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	truth-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
-A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
+A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno-agents/src/ledger_axes.rs|crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	warning: force flag set on advisory node {task_id} (reason: {reason}); no pr refs to check.	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	was superseded by {superseder}	py=cli/src/fno/graph/_contain.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
@@ -249,3 +249,4 @@ A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agent
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# offender - carry a reason or fix in this PR
 A	decision probe: conflicting law rows for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# msg-twin: the draft guard's law read ports the coverage gate's three-state probe wording so a refused draft names the same fault in either runtime
 A	decision probe: single law row carries no decision for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# msg-twin: the draft guard's law read ports the coverage gate's three-state probe wording so a refused draft names the same fault in either runtime
+A	base directory for this skill:	py=scripts/save-session.py;rs=crates/fno-agents/src/skill_drift.rs	# msg-twin: both runtimes parse the transcript invoked_skills attachment prefix; the literal belongs to the harness transcript format, not to either codebase
