@@ -53,6 +53,29 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     assert!(texts[3].contains("first"));
     assert!(texts[4].contains("x-2"));
     assert!(b.footer().starts_with("leads 1 · current 3"));
+    assert!(texts[0].starts_with("Tree │ Table │ Graph · current"));
+    assert!(
+        texts[3].starts_with("│ └ "),
+        "a worker hangs under its node"
+    );
+    assert!(
+        texts[4].starts_with("└ ▾ x-2"),
+        "the last node closes the branch"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|t| ["{", "claim:", " Q", "age ", "PR-", "unobserved"]
+                .iter()
+                .any(|j| t.contains(j))),
+        "rows read in words: {texts:?}"
+    );
+    assert_eq!(
+        counts_line(&json!({"ready": 3, "done": 0, "in_review": 2, "in_progress": 4})),
+        "4 working · 2 in review · 3 ready"
+    );
+    assert!(b.footer_hints(false).starts_with("tap to focus · j/k move"));
+    assert!(b.footer_hints(true).starts_with("j/k move"));
     b.filter = OrgSessions::Former;
     assert_eq!(
         b.rows()
@@ -84,6 +107,10 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
         "dependency edge has a visible endpoint"
     );
     assert!(first[0].contains('▶'), "selected Lead is marked");
+    assert!(
+        b.lines(100, 20)[0].text.ends_with("· ▶ finch L1 team"),
+        "the header names the selected box without its border"
+    );
     b.move_graph_cursor(true);
     let moved = b.graph_lines(100, 20);
     assert!(!moved[0].contains('▶'));
@@ -173,6 +200,36 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     assert!(b.rows().iter().any(|r| r.text.contains("last-run")));
     b.departures.clear();
     assert!(!b.rows().iter().any(|r| r.text.contains("last-run")));
+    b.cursor = 0;
+    let prefs = tempfile::tempdir().unwrap();
+    crate::view_store::set_test_path(prefs.path());
+    view.term = (24, 100);
+    view.board_full = true;
+    let tap = |row, col| crate::mouse::MouseReport {
+        row,
+        col,
+        kind: MouseKind::Press(MouseButton::Left),
+        shift: false,
+    };
+    runtime.block_on(async {
+        let (mut socket, _receiver) = tokio::io::duplex(4096);
+        mouse(view, tap(3, 4), &mut socket).await.unwrap();
+        assert_eq!(view.org_board.as_ref().unwrap().cursor, 2, "a tap selects");
+        mouse(view, tap(0, 8), &mut socket).await.unwrap();
+        assert_eq!(
+            view.org_board.as_ref().unwrap().mode,
+            OrgMode::Table,
+            "a tab tap switches mode"
+        );
+        view.org_board.as_mut().unwrap().mode = OrgMode::Tree;
+        mouse(view, tap(2, 4), &mut socket).await.unwrap();
+        assert!(view.org_board.is_some(), "a tap on a node only selects it");
+        mouse(view, tap(2, 4), &mut socket).await.unwrap();
+        assert!(view.org_board.is_none(), "a second tap acts like Enter");
+    });
+    crate::view_store::clear_test_path();
+    view.term = saved_term;
+    view.board_full = saved_full;
     let generation = view.org_generation;
     view.org_board = None;
     open(view);

@@ -1323,7 +1323,7 @@ mod tests {
 
     #[test]
     fn send_writes_exactly_one_line_with_the_audience_snapshot() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("one-line");
         let rows = vec![
             agent_row("red", "AAAA1111-1111-1111-1111-111111111111", json!({})),
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn uncrowned_agent_sender_is_refused_and_the_bus_is_unchanged() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("authority");
         let rows = vec![agent_row(
             "worker",
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn crowned_agent_sender_is_accepted() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("crown");
         let rows = vec![
             agent_row(
@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn crowned_agent_sender_is_excluded_and_stamped_with_full_id() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("sender-full-id");
         let king = "eeee5555-5555-5555-5555-555555555555";
         let other = "ffff5555-5555-5555-5555-555555555555";
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn crowned_agent_sender_alone_is_refused_without_a_bus_line() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("sender-alone");
         let rows = vec![agent_row(
             "king",
@@ -1454,7 +1454,7 @@ mod tests {
 
     #[test]
     fn rate_limit_refuses_the_seventh_announcement_in_the_rolling_hour() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("rate");
         let rows = vec![agent_row(
             "red",
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn same_subject_and_scope_supersedes_the_standing_announcement() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("supersede");
         let rows = vec![agent_row(
             "red",
@@ -1519,7 +1519,7 @@ mod tests {
         // The hook scripts drive these exact flags; a rename here must fail
         // loudly here, not degrade every boundary to stderr refusal at the
         // boundary the caller parses.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("argv");
         assert_eq!(run_announce_read(&[], &f.paths), 2, "missing --session-id");
         assert_eq!(run_announce_read(&["--bogus".to_string()], &f.paths), 2);
@@ -1556,7 +1556,7 @@ mod tests {
         assert!(parse_send_args(&["-j".to_string()]).is_err());
 
         // status: -J is accepted (1 = id not on the bus), never "unknown flag" (2).
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("jsonflag");
         assert_eq!(
             run_announce_status(&["no-such-id".to_string(), "-J".to_string()], &f.paths),
@@ -1605,7 +1605,7 @@ mod tests {
 
     #[test]
     fn reader_prints_once_then_cursor_silences() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("read-once");
         let session = "cccc9999-9999-9999-9999-999999999999";
         let rows = vec![agent_row("red", session, json!({}))];
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[test]
     fn legacy_short_audience_key_still_reaches_full_session_reader() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("legacy-audience");
         let session = "cccc9999-9999-9999-9999-999999999999";
         let rows = vec![agent_row("red", session, json!({}))];
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn compact_re_renders_seen_standing_announcements() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("compact");
         let session = "dddd0000-0000-0000-0000-000000000000";
         let rows = vec![agent_row("red", session, json!({}))];
@@ -1665,7 +1665,7 @@ mod tests {
 
     #[test]
     fn expired_and_superseded_announcements_render_nothing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("stale");
         let session = "eeee1111-1111-1111-1111-111111111111";
         let rows = vec![agent_row("red", session, json!({}))];
@@ -1684,7 +1684,7 @@ mod tests {
 
     #[test]
     fn a_late_session_matching_the_scope_reads_a_standing_announcement() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("late");
         let snapshot_session = "ffff2222-2222-2222-2222-222222222222";
         let late_session = "aaaa3333-3333-3333-3333-333333333333";
@@ -1702,7 +1702,7 @@ mod tests {
 
     #[test]
     fn the_sender_does_not_read_its_own_announcement() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("self");
         let king_session = "bbbb4444-4444-4444-4444-444444444444";
         let rows = vec![agent_row(
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn status_counts_landed_pending_unverified_and_never_rescans_landed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("status");
         let home = std::env::temp_dir().join(format!(
             "fno-announce-home-{}-{}",
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn legacy_short_status_key_is_unverified_not_landed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("status-legacy");
         let session = "cccc5555-5555-5555-5555-555555555555";
         let rows = vec![agent_row("one", session, json!({}))];

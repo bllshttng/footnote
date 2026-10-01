@@ -252,6 +252,10 @@ fn identify_names_cwd_and_argv() {
             serde_json::json!(["sleep", "60"]),
             "the provider argv rides the reply: {reply}"
         );
+        assert!(
+            reply["session_id"].is_null(),
+            "no id in the argv means null in the reply: {reply}"
+        );
         reply["child_pid"].as_u64().unwrap() as u32
     });
 }
@@ -316,25 +320,6 @@ fn keeper_lane_flag_runs_and_answers_the_session_id() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// AC2-HP's negative half: an argv that carries no session id answers null,
-/// never a guess. A pane's argv (`sleep 60`) is the everyday case.
-#[test]
-fn keeper_lane_identify_answers_null_when_the_argv_carries_no_id() {
-    let sock = scratch_sock("identify-nosid");
-    let _ = std::fs::remove_file(&sock);
-    let keeper_pid = spawn_via_launcher(&format!(
-        "--sock {} --session ident --pane-key 12 --cwd /tmp -- sleep 60",
-        sock.display()
-    ));
-    let _keeper = KillGuard(keeper_pid);
-    let reply = identify(&sock);
-    assert!(
-        reply["session_id"].is_null(),
-        "no id in the argv means null in the reply: {reply}"
-    );
-    let _child = KillGuard(reply["child_pid"].as_u64().unwrap() as u32);
-}
-
 #[test]
 fn identify_reports_drift_and_the_pane_survives_a_rewritten_binary() {
     // AC3-EDGE: a pane keeper whose binary was rewritten answers Identify
@@ -386,4 +371,134 @@ fn identify_reports_drift_and_the_pane_survives_a_rewritten_binary() {
         libc::kill(child as libc::pid_t, libc::SIGKILL);
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The self-exit contract: a keeper spawned with SIGTERM blocked (the mask
+/// the mux server gives a real keeper) dies to SIGTERM, and a keeper whose
+/// socket DIRECTORY is deleted ends itself and its child once two polls
+/// pass with no subscriber seated. A keeper whose dir still exists stays
+/// up and answers Identify - the re-adoption contract. Exit is read with
+/// `try_wait`, never `kill(pid, 0)`, which reads a zombie as alive.
+#[test]
+fn keeper_ends_itself_on_sigterm_and_when_its_socket_dir_is_deleted() {
+    use std::os::unix::process::CommandExt;
+
+    fn spawn_blocked_keeper(sock: &PathBuf, pane_key: u32) -> std::process::Child {
+        let mut cmd = Command::new(keeper_bin());
+        cmd.arg("--pane")
+            .arg("--sock")
+            .arg(sock)
+            .arg("--session")
+            .arg("t")
+            .arg("--pane-key")
+            .arg(pane_key.to_string())
+            .arg("--cwd")
+            .arg("/tmp")
+            .arg("--")
+            .arg("sleep")
+            .arg("300")
+            .env("FNO_KEEPER_ORPHAN_POLL_MS", "200")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // The same mask the mux server gives a real keeper: SIGTERM blocked
+        // in the child before exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        cmd.spawn().expect("keeper spawns")
+    }
+
+    fn wait_exit(child: &mut std::process::Child, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if child.try_wait().expect("try_wait").is_some() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn wait_child_gone(pid: u32, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while alive(pid) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        true
+    }
+
+    let scratch = std::env::temp_dir().join(format!("fno-keeper-orphan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let dir_a = scratch.join("a/panes");
+    let dir_b = scratch.join("b/panes");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let sock_a = dir_a.join("k.sock");
+    let sock_b = dir_b.join("k.sock");
+
+    let mut a = spawn_blocked_keeper(&sock_a, 31);
+    let mut b = spawn_blocked_keeper(&sock_b, 32);
+    let child_a = identify(&sock_a)["child_pid"].as_u64().unwrap() as u32;
+    let child_b = identify(&sock_b)["child_pid"].as_u64().unwrap() as u32;
+    let _child_a = KillGuard(child_a);
+    let _child_b = KillGuard(child_b);
+    let _keeper_a = KillGuard(a.id());
+    let _keeper_b = KillGuard(b.id());
+
+    // Orphan leg: A's whole tree gone. The Identify probe's seat clears
+    // when its connection drops; one short sleep lets that land before the
+    // first poll. Two 200 ms polls later the keeper ends its child, exits,
+    // and the main wait unlinks nothing (the dir is already gone).
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::remove_dir_all(scratch.join("a")).unwrap();
+    assert!(
+        wait_exit(&mut a, 10),
+        "keeper A must end itself once its socket dir is gone"
+    );
+    assert!(
+        wait_child_gone(child_a, 10),
+        "keeper A must end its child when its socket dir is gone"
+    );
+
+    // Survival control: B's dir still exists and no server attached - it
+    // stays up and answers Identify. One sleep covers five polls, so a
+    // keeper miscounting dir-gone would already be out.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        b.try_wait().expect("try_wait").is_none(),
+        "keeper B must stay alive while its socket dir exists"
+    );
+    identify(&sock_b);
+
+    // SIGTERM leg: the blocked signal is delivered to the sigwait thread;
+    // the child dies, the keeper exits, and its socket file is unlinked.
+    // SAFETY: SIGTERM to the test's own keeper.
+    unsafe {
+        libc::kill(b.id() as libc::pid_t, libc::SIGTERM);
+    }
+    assert!(wait_exit(&mut b, 10), "keeper B must die to SIGTERM");
+    assert!(
+        wait_child_gone(child_b, 10),
+        "keeper B must end its child on SIGTERM"
+    );
+    assert!(
+        !sock_b.exists(),
+        "keeper B unlinks its socket on the SIGTERM exit"
+    );
+
+    std::fs::remove_dir_all(&scratch).ok();
 }

@@ -1,3 +1,4 @@
+use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::org_model::{OrgInputs, OrgSession, OrgSnapshot};
 use crate::view_store::{OrgMode, OrgSessions, SidelineView};
@@ -13,7 +14,27 @@ pub(crate) enum Selected {
 struct Row {
     key: String,
     text: String,
+    segs: Vec<BSeg>,
+    depth: usize,
     selected: Selected,
+}
+fn row(key: String, depth: usize, segs: Vec<BSeg>, selected: Selected) -> Row {
+    Row {
+        key,
+        text: segs.iter().map(|s| s.text.as_str()).collect(),
+        segs,
+        depth,
+        selected,
+    }
+}
+fn seg(text: impl Into<String>, role: BRole) -> BSeg {
+    BSeg {
+        text: text.into(),
+        role,
+    }
+}
+fn fold_mark(collapsed: bool) -> BSeg {
+    seg(if collapsed { "▸ " } else { "▾ " }, BRole::Meta)
 }
 type GraphMemo = (
     u64,
@@ -105,41 +126,33 @@ impl OrgBoard {
                     if !self.session_shown(current) {
                         continue;
                     }
-                    let label = session_line(session, now());
+                    let segs = session_segs(session, now());
+                    let label: String = segs.iter().map(|s| s.text.as_str()).collect();
                     if node_match || label.to_lowercase().contains(&query) {
-                        sessions.push(Row {
-                            key: format!("session:{}:{}", node.view.card.id, sessions.len()),
-                            text: format!("    {label}"),
-                            selected: Selected::Session(session.clone()),
-                        });
+                        sessions.push(row(
+                            format!("session:{}:{}", node.view.card.id, sessions.len()),
+                            2,
+                            segs,
+                            Selected::Session(session.clone()),
+                        ));
                     }
                 }
                 if !node_match && sessions.is_empty() {
                     continue;
                 }
                 let key = format!("node:{}", node.view.card.id);
-                children.push(Row {
-                    key: key.clone(),
-                    text: format!(
-                        "  {} {} {} {} PR{} claim:{} {}",
-                        if self.collapsed.contains(&key) {
-                            "▸"
-                        } else {
-                            "▾"
-                        },
-                        node.view.card.id,
-                        node.view.card.status.as_deref().unwrap_or("unobserved"),
-                        node.view.card.title,
-                        node.view
-                            .prs
-                            .first()
-                            .map(|p| p.number.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        node.claim_state,
-                        node.claim_holder.as_deref().unwrap_or("-")
-                    ),
-                    selected: Selected::Node(node.view.clone()),
-                });
+                let mut segs = vec![
+                    fold_mark(self.collapsed.contains(&key)),
+                    seg(node.view.card.id.clone(), BRole::Label),
+                ];
+                if let Some(status) = &node.view.card.status {
+                    segs.push(seg(format!(" {status}"), BRole::Pill));
+                }
+                segs.push(seg(format!(" {}", node.view.card.title), BRole::Body));
+                if let Some(pr) = node.view.prs.first() {
+                    segs.push(seg(format!(" #{}", pr.number), BRole::Meta));
+                }
+                children.push(row(key.clone(), 1, segs, Selected::Node(node.view.clone())));
                 if self.mode != OrgMode::Tree || !self.collapsed.contains(&key) {
                     children.extend(sessions);
                 }
@@ -148,40 +161,42 @@ impl OrgBoard {
                 continue;
             }
             let key = format!("lead:{}", lead.holder.name);
-            rows.push(Row {
-                key: key.clone(),
-                text: format!(
-                    "{} {} L{} {} {} owned:{} {}",
-                    if self.collapsed.contains(&key) {
-                        "▸"
-                    } else {
-                        "▾"
-                    },
-                    lead.holder.name,
-                    lead.level,
-                    lead.scope,
-                    lead.counts,
-                    lead.owned_counts,
-                    lead.stuck_line.as_deref().unwrap_or("")
-                ),
-                selected: Selected::Lead(lead.holder.clone()),
-            });
+            let mut segs = vec![
+                fold_mark(self.collapsed.contains(&key)),
+                seg(lead.holder.name.clone(), BRole::Head),
+                seg(format!(" L{} {}", lead.level, lead.scope), BRole::Meta),
+            ];
+            let counts = counts_line(&lead.owned_counts);
+            for part in [
+                Some(counts).filter(|c| !c.is_empty()),
+                lead.stuck_line.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                segs.push(seg(format!(" · {part}"), BRole::Meta));
+            }
+            rows.push(row(
+                key.clone(),
+                0,
+                segs,
+                Selected::Lead(lead.holder.clone()),
+            ));
             if self.mode != OrgMode::Tree || !self.collapsed.contains(&key) {
                 rows.extend(children);
                 if !lead.left.is_empty() {
-                    rows.push(Row {
-                        key: format!("left-team:{}", lead.scope),
-                        text: format!(
-                            "  {} left the team (24h): {}",
-                            if self.departures.contains(&lead.scope) {
-                                "▾"
-                            } else {
-                                "▸"
-                            },
-                            lead.left.len()
-                        ),
-                        selected: Selected::Lead(lead.holder.clone()),
-                    });
+                    rows.push(row(
+                        format!("left-team:{}", lead.scope),
+                        1,
+                        vec![
+                            fold_mark(!self.departures.contains(&lead.scope)),
+                            seg(
+                                format!("left the team (24h): {}", lead.left.len()),
+                                BRole::Meta,
+                            ),
+                        ],
+                        Selected::Lead(lead.holder.clone()),
+                    ));
                     for node in lead
                         .left
                         .iter()
@@ -190,17 +205,20 @@ impl OrgBoard {
                         let last = node.current.iter().chain(&node.former).max_by_key(|s| {
                             s.view.ended_at.as_deref().or(s.view.started_at.as_deref())
                         });
-                        rows.push(Row {
-                            key: format!("left:{}", node.view.card.id),
-                            text: format!(
-                                "    {} {} · last session: {}",
-                                node.view.card.id,
-                                node.view.card.title,
-                                last.map(|s| session_line(s, now()))
-                                    .unwrap_or_else(|| "unobserved".into())
-                            ),
-                            selected: Selected::Node(node.view.clone()),
-                        });
+                        let mut segs = vec![
+                            seg(node.view.card.id.clone(), BRole::Label),
+                            seg(format!(" {}", node.view.card.title), BRole::Body),
+                        ];
+                        if let Some(last) = last {
+                            segs.push(seg(" · last session: ", BRole::Meta));
+                            segs.extend(session_segs(last, now()));
+                        }
+                        rows.push(row(
+                            format!("left:{}", node.view.card.id),
+                            2,
+                            segs,
+                            Selected::Node(node.view.clone()),
+                        ));
                     }
                 }
             }
@@ -224,17 +242,28 @@ impl OrgBoard {
                 },
                 agent: Some(agent.clone()),
             };
-            let text = format!("Unowned · {}", session_line(&session, now()));
-            if text.to_lowercase().contains(&query) {
-                rows.push(Row {
-                    key: super::org_graph::unowned_key(agent, unowned_index),
-                    text,
-                    selected: Selected::Session(session),
-                });
+            let mut segs = vec![seg("Unowned · ", BRole::Meta)];
+            segs.extend(session_segs(&session, now()));
+            let unowned = row(
+                super::org_graph::unowned_key(agent, unowned_index),
+                0,
+                segs,
+                Selected::Session(session),
+            );
+            if unowned.text.to_lowercase().contains(&query) {
+                rows.push(unowned);
                 unowned_index += 1;
             }
         }
         rows
+    }
+    /// Key hints lead so a narrow pane cuts the counts first.
+    pub(crate) fn footer_hints(&self, focused: bool) -> String {
+        format!(
+            "{}j/k move · enter act · tab mode · s sessions · / find · F full · ? keys · esc close · {}",
+            if focused { "" } else { "tap to focus · " },
+            self.footer()
+        )
     }
     pub(crate) fn footer(&self) -> String {
         let error = self
@@ -363,8 +392,7 @@ impl OrgBoard {
             self.cursor = *index;
         }
     }
-    pub(crate) fn lines(&self, width: usize, height: usize) -> Vec<super::backlog_style::BLine> {
-        use super::backlog_style::BLine;
+    pub(crate) fn lines(&self, width: usize, height: usize) -> Vec<BLine> {
         if let Some(detail) = &self.detail {
             return detail.lines(width);
         }
@@ -374,41 +402,61 @@ impl OrgBoard {
                 "hjkl/arrows move · h/l fold/open",
                 "Tab tree/table/graph · s current/former/all",
                 "F full screen · / find · esc agents",
-                "enter row · space peek · x stop · P portal · d detail",
+                "enter or a second tap acts · space peek · x stop · P portal · d detail",
             ]
             .into_iter()
             .map(BLine::plain)
             .collect();
         }
-        let mut lines = vec![BLine::meta(format!(
-            "Org {:?} · {:?} · {}",
-            self.mode,
-            self.filter,
-            self.input.as_deref().unwrap_or(&self.query)
-        ))];
+        let mut header = Vec::new();
+        for (i, (_, mode)) in mode_tabs().into_iter().enumerate() {
+            if i > 0 {
+                header.push(seg(" │ ", BRole::Meta));
+            }
+            let role = if mode == self.mode {
+                BRole::Head
+            } else {
+                BRole::Meta
+            };
+            header.push(seg(format!("{mode:?}"), role));
+        }
+        header.push(seg(
+            format!(" · {}", format!("{:?}", self.filter).to_lowercase()),
+            BRole::Meta,
+        ));
+        let query = self.input.as_deref().unwrap_or(&self.query);
+        if self.input.is_some() || !query.is_empty() {
+            header.push(seg(format!(" · /{query}"), BRole::Meta));
+        }
         if self.mode == OrgMode::Graph {
             let graph = self.graph_lines(width, height.saturating_sub(2));
             let memo = self.graph.borrow();
             if let Some(cached) = memo.as_ref() {
                 if let Some((_, key)) = cached.5.iter().find(|(i, _)| *i == self.cursor) {
                     if let Some(placed) = cached.4.boxes.iter().find(|p| &p.key == key) {
-                        lines[0] = BLine::meta(format!("▶ {} · Org Graph", placed.text));
+                        let label = placed.text.trim_matches(['┌', '┐', '├', '└', ' ']);
+                        header.push(seg(format!(" · ▶ {label}"), BRole::Meta));
                     }
                 }
             }
+            let mut lines = vec![BLine::of(&header)];
             lines.extend(graph.into_iter().map(BLine::plain));
             return lines;
         }
+        let mut lines = vec![BLine::of(&header)];
         if self.mode == OrgMode::Table {
             lines.push(BLine::meta(table_header(width)));
         }
-        for (i, row) in self.rows().iter().enumerate() {
-            let text = if self.mode == OrgMode::Table {
-                table_row(row, width)
+        let rows = self.rows();
+        let guides = tree_guides(&rows);
+        for (i, row) in rows.iter().enumerate() {
+            let mut line = if self.mode == OrgMode::Table {
+                BLine::plain(table_row(row, width))
             } else {
-                row.text.clone()
+                let mut segs = vec![seg(guides[i].clone(), BRole::Meta)];
+                segs.extend(row.segs.iter().cloned());
+                BLine::of(&segs)
             };
-            let mut line = BLine::plain(text);
             line.band = i == self.cursor;
             lines.push(line);
         }
@@ -426,35 +474,111 @@ fn status(a: &AgentRow) -> &'static str {
         Some(AgentBadge::Working) => "working",
         Some(AgentBadge::Blocked) => "blocked",
         Some(AgentBadge::Done) => "done",
-        None => "unobserved",
+        None => "",
     }
 }
-fn session_line(session: &OrgSession, now: u64) -> String {
-    match &session.agent {
-        Some(a) => format!(
-            "{} {} {} {} {} up {} age {}s Q{} {}",
-            if a.exited { "former" } else { status(a) },
-            a.name,
-            a.harness.as_deref().unwrap_or("unobserved"),
-            a.model.as_deref().unwrap_or("unobserved"),
-            super::row_meter::ctx_cell(a.context_used_pct),
-            super::row_meter::up_cell(a.started_at, now),
-            a.last_activity_age_s
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".into()),
-            a.mail_unread
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".into()),
-            a.tail.as_deref().unwrap_or("")
-        ),
-        None => format!(
-            "former {} {} {} {}",
-            session.view.phase.as_deref().unwrap_or("unobserved"),
-            session.view.session_id.as_deref().unwrap_or("unobserved"),
-            session.view.harness.as_deref().unwrap_or("unobserved"),
-            session.view.model.as_deref().unwrap_or("unobserved")
-        ),
+/// The header's mode tabs: one list feeds both the paint and the tap target.
+fn mode_tabs() -> [(std::ops::Range<usize>, OrgMode); 3] {
+    let mut col = 0;
+    [OrgMode::Tree, OrgMode::Table, OrgMode::Graph].map(|mode| {
+        let end = col + format!("{mode:?}").len();
+        let tab = (col..end, mode);
+        col = end + " │ ".chars().count();
+        tab
+    })
+}
+/// Owned counts as words, busiest state first: `4 working · 2 in review`.
+fn counts_line(counts: &serde_json::Value) -> String {
+    const ORDER: [&str; 4] = ["in_progress", "in_review", "ready", "blocked"];
+    let Some(map) = counts.as_object() else {
+        return String::new();
+    };
+    let mut items: Vec<(&str, u64)> = map
+        .iter()
+        .filter_map(|(k, v)| v.as_u64().filter(|n| *n > 0).map(|n| (k.as_str(), n)))
+        .collect();
+    items.sort_by_key(|(k, _)| (ORDER.iter().position(|o| o == k).unwrap_or(ORDER.len()), *k));
+    items
+        .into_iter()
+        .map(|(k, n)| match k {
+            "in_progress" => format!("{n} working"),
+            k => format!("{n} {}", k.replace('_', " ")),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+/// `├ `/`└ ` per row from depth alone, so a filtered or folded tree still
+/// closes each branch on its real last child.
+fn tree_guides(rows: &[Row]) -> Vec<String> {
+    // Walk back once: a row is last when no later sibling precedes its parent's end.
+    let mut sibling_after = [false; 3];
+    let mut last = vec![true; rows.len()];
+    for (i, r) in rows.iter().enumerate().rev() {
+        let d = r.depth.min(2);
+        last[i] = !sibling_after[d];
+        sibling_after[d] = true;
+        sibling_after[d + 1..].fill(false);
     }
+    let mut parent_last = true;
+    rows.iter()
+        .zip(last)
+        .map(|(r, last)| {
+            let tee = if last { "└ " } else { "├ " };
+            match r.depth {
+                0 => String::new(),
+                1 => {
+                    parent_last = last;
+                    tee.into()
+                }
+                _ => format!("{}{tee}", if parent_last { "  " } else { "│ " }),
+            }
+        })
+        .collect()
+}
+fn session_segs(session: &OrgSession, now: u64) -> Vec<BSeg> {
+    let Some(a) = &session.agent else {
+        let view = &session.view;
+        let runtime = [view.harness.as_deref(), view.model.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("/");
+        let parts = [
+            Some("former".to_string()),
+            view.phase.clone(),
+            Some(runtime).filter(|r| !r.is_empty()),
+            view.session_id
+                .as_deref()
+                .map(|id| id.chars().take(8).collect()),
+        ];
+        return vec![seg(
+            parts.into_iter().flatten().collect::<Vec<_>>().join(" · "),
+            BRole::Meta,
+        )];
+    };
+    let glyph = crate::lattice::status_glyph(agent_lattice_state(a));
+    let mut text = format!("{glyph} {}", a.name);
+    let parts = [
+        super::card_line::harness_model(a),
+        a.context_used_pct
+            .map(|p| super::row_meter::ctx_bar(Some(p)).trim_end().to_string()),
+        a.last_activity_age_s.map(|age| {
+            format!(
+                "{} ago",
+                super::row_meter::up_cell(Some(now.saturating_sub(age)), now)
+            )
+        }),
+        a.mail_unread
+            .filter(|n| *n > 0)
+            .map(|n| format!("{n} unread")),
+        a.pr.map(|n| format!("#{n}")),
+        a.tail.clone().filter(|t| !t.is_empty()),
+    ];
+    for part in parts.into_iter().flatten() {
+        text.push_str(" · ");
+        text.push_str(&part);
+    }
+    vec![seg(text, BRole::Meta)]
 }
 const COLUMNS: [(&str, usize); 12] = [
     ("LEAD", 12),
@@ -466,7 +590,7 @@ const COLUMNS: [(&str, usize); 12] = [
     ("STATE", 12),
     ("UP", 6),
     ("AGE", 7),
-    ("Q", 4),
+    ("MAIL", 4),
     ("PR", 7),
     ("LAST", 36),
 ];
@@ -499,7 +623,7 @@ fn table_row(row: &Row, width: usize) -> String {
         }
         Selected::Node(n) => {
             values[1] = n.card.id.clone();
-            values[6] = n.card.status.clone().unwrap_or_else(|| "unobserved".into());
+            values[6] = n.card.status.clone().unwrap_or_default();
             values[10] = n
                 .prs
                 .first()
@@ -513,17 +637,13 @@ fn table_row(row: &Row, width: usize) -> String {
                 .as_ref()
                 .map(|a| a.name.clone())
                 .or(s.view.session_id.clone())
-                .unwrap_or_else(|| "unobserved".into());
-            values[3] = s
-                .view
-                .harness
-                .clone()
-                .unwrap_or_else(|| "unobserved".into());
-            values[4] = s.view.model.clone().unwrap_or_else(|| "unobserved".into());
+                .unwrap_or_default();
+            values[3] = s.view.harness.clone().unwrap_or_default();
+            values[4] = s.view.model.clone().unwrap_or_default();
             values[6] = "former".into();
             if let Some(a) = &s.agent {
                 values[1] = a.node.clone().unwrap_or_default();
-                values[4] = a.model.clone().unwrap_or_else(|| "unobserved".into());
+                values[4] = a.model.clone().unwrap_or_default();
                 values[5] = super::row_meter::ctx_cell(a.context_used_pct);
                 values[6] = if a.exited {
                     "former".into()
@@ -534,11 +654,8 @@ fn table_row(row: &Row, width: usize) -> String {
                 values[8] = a
                     .last_activity_age_s
                     .map(|n| format!("{n}s"))
-                    .unwrap_or_else(|| "-".into());
-                values[9] = a
-                    .mail_unread
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "-".into());
+                    .unwrap_or_default();
+                values[9] = a.mail_unread.map(|n| n.to_string()).unwrap_or_default();
                 values[10] = a.pr.map(|n| n.to_string()).unwrap_or_default();
                 values[11] = a.tail.clone().unwrap_or_default();
             }
@@ -641,7 +758,10 @@ pub(crate) fn paint(
         height - 1,
         width,
         1,
-        &[super::backlog_style::BLine::meta(b.footer())],
+        &[BLine::meta(b.footer_hints(matches!(
+            view.input_owner(),
+            super::region_focus::RegionOwner::Board
+        )))],
         None,
         &view.theme,
     );
@@ -851,7 +971,26 @@ pub(crate) async fn mouse(
     }
     if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
         let rows = b.rows();
-        if b.mode == OrgMode::Graph {
+        let offset = if b.mode == OrgMode::Table { 2 } else { 1 };
+        let len = rows.len() + offset;
+        let start = if b.mode == OrgMode::Graph || len <= height {
+            0
+        } else {
+            (b.cursor + offset)
+                .saturating_sub(height.saturating_sub(1))
+                .min(len - height)
+        };
+        if rep.row as usize + start == 0 {
+            if let Some((_, mode)) = mode_tabs()
+                .into_iter()
+                .find(|(cols, _)| cols.contains(&(rep.col as usize)))
+            {
+                b.mode = mode;
+                crate::view_store::save_org_prefs(b.mode, b.filter);
+            }
+            return Ok(());
+        }
+        let index = if b.mode == OrgMode::Graph {
             b.graph_lines(width, height.saturating_sub(1));
             let memo = b.graph.borrow();
             let x = rep.col as usize + b.pan.0;
@@ -864,22 +1003,18 @@ pub(crate) async fn mouse(
             let Some(index) = hit.and_then(|p| rows.iter().position(|r| r.key == p.key)) else {
                 return Ok(());
             };
-            b.cursor = index;
+            index
         } else {
-            let offset = if b.mode == OrgMode::Table { 2 } else { 1 };
-            let len = rows.len() + offset;
-            let start = if len > height {
-                (b.cursor + offset)
-                    .saturating_sub(height.saturating_sub(1))
-                    .min(len - height)
-            } else {
-                0
-            };
             let clicked = rep.row as usize + start;
             if clicked < offset || clicked - offset >= rows.len() {
                 return Ok(());
             }
-            b.cursor = clicked - offset;
+            clicked - offset
+        };
+        // A tap selects; a tap on the row already selected acts like Enter.
+        if index != b.cursor {
+            b.cursor = index;
+            return Ok(());
         }
         if let Some(selected) = b.selected() {
             dispatch(view, selected, b'\r', sock).await?;
