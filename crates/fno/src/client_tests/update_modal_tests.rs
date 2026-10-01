@@ -119,15 +119,26 @@ fn release_degraded_and_current_render_one_header_and_no_action() {
 }
 
 /// A tap queues the upgrade once; a second tap says one is running; the
-/// verdict lands as a notice and re-arms the probe.
+/// verdict lands as a notice and re-arms the probe. The restart tap queues
+/// nothing: nothing inflight, it detaches with the restart armed (run_inner
+/// runs the foreground restart); anything inflight, it says so and stays.
 #[tokio::test]
 async fn upgrade_tap_queues_once_and_verdict_rearms_probe() {
     let mut v = view_with_agents(vec![]);
     let mut buf = Vec::new();
+    assert!(matches!(
+        execute_aux_action(&mut v, AuxAction::RestartAgents, &mut buf)
+            .await
+            .unwrap(),
+        DispatchFlow::Detach
+    ));
+    assert!(v.restart_pending, "the clean tap arms the restart unwind");
+    assert_eq!(v.update_verb_want, None, "the restart never queues");
+    v.restart_pending = false;
     execute_aux_action(&mut v, AuxAction::UpgradeRelease(Channel::Uv), &mut buf)
         .await
         .unwrap();
-    assert_eq!(v.update_verb_want, Some(UpdateVerb::Upgrade(Channel::Uv)));
+    assert_eq!(v.update_verb_want, Some(Channel::Uv));
     v.update_verb_want = None;
     v.update_verb_inflight = true;
     execute_aux_action(&mut v, AuxAction::RestartAgents, &mut buf)
@@ -287,6 +298,12 @@ fn update_modal_names_stale_processes_and_offers_restart() {
             "restart keeps every pane. pane keepers stay on the old build until their pane ends."
         ),
         "{body}"
+    );
+    assert!(
+        body.contains(
+            "restart detaches, runs `fno agents restart --mux` in the foreground, then reattaches."
+        ),
+        "the modal names the flow the tap starts: {body}"
     );
     assert!(
         modal.actions.contains(&AuxAction::RestartAgents),
