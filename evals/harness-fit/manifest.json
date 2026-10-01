@@ -77,5 +77,14 @@
     "dollars": "the pilot spend counts against the 200 USD ceiling",
     "pilot_spend_usd": 7.0,
     "pilot_spend_basis": "Run 0 Harbor jobs 2.54 + Run 1 priced rows 2.36 + 2.00 floor for 8 unmeasured opencode stalls (0.25 each) = 6.90, rounded up"
+  },
+  "amendment_7": {
+    "declared_at": "2026-10-01T01:40:00Z",
+    "scope": "the move waits; no grade or rule changes",
+    "machine": "both runs continue on the arm64 Mac from where they paused (user, 2026-10-01)",
+    "rows": "the arm64 rows count as the study, not a pilot; if the iMac runs later, the results report each machine apart and the iMac rows decide",
+    "emulation": "every Terminal-Bench 2 task runs under amd64 emulation here; run-0.md names it beside every rate",
+    "guard": "both runs pause when the 5-minute load stays at 150 or more for 10 minutes",
+    "concurrency": "4 Run 0 trials; Run 1 one attempt at a time"
   }
 }

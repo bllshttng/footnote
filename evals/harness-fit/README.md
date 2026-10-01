@@ -102,6 +102,15 @@ The user moved the study to an Intel iMac with 128 GB of RAM. Every Terminal-Ben
 - Dollars. The pilot spend counts against the $200 ceiling.
 - Results reach this branch by push from the iMac.
 
+## Amendment 7 (2026-10-01, the move waits, before any results commit)
+
+The user deferred the move: "For now let's continue here." Both runs continue on the arm64 Mac from where they paused.
+
+- Rows. The arm64 rows count as the study again, not as a pilot. If the iMac run happens later, run-0.md and run-1.md report each machine apart, and the iMac rows decide.
+- Emulation. Every Terminal-Bench 2 task runs under amd64 emulation on this machine. run-0.md names this beside every rate.
+- Load. The sampler keeps a load reading beside each result. If the 5-minute load stays at 150 or more for 10 minutes, a guard pauses both runs. The fleet's line of 48 cannot hold while the study runs.
+- Concurrency stays at 4 Run 0 trials. Every other rule stays.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
