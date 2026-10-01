@@ -103,6 +103,17 @@ def test_resolve_self_identity_refuses_unproven_mixed_harnesses(monkeypatch):
 
 
 def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
+    """The stamped pair rides the collide callback into the registry's
+    agreement check (AC10-HP, post-x-0992): this layer computes nothing about
+    self on its own, and a row the registry reads as the caller's OWN is never
+    contention. A stamped id a live stranger owns is refused, named."""
+    captured: dict = {}
+
+    def fake_detector(session_id, *, self_binding, walk_harness=None):
+        captured["self_binding"] = self_binding
+        captured["walk_harness"] = walk_harness
+        return "victim-king" if session_id == "victim-session" else None
+
     env = {
         "FNO_HARNESS_NAME": "claude",
         "FNO_HARNESS_SESSION_ID": "victim-session",
@@ -112,14 +123,13 @@ def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
         lambda from_pid=None: "claude",
     )
     monkeypatch.setattr(
-        "fno.agents.registry.row_owning_session_id",
-        lambda session_id, *, self_binding: (
-            "victim-king" if session_id == "victim-session" else None
-        ),
+        "fno.agents.registry.row_owning_session_id", fake_detector
     )
 
     identity = self_stamp.resolve_self_identity(env)
 
+    assert captured["self_binding"] == ("claude", "victim-session")
+    assert captured["walk_harness"] == "claude"
     assert identity.disposition == "ambiguous"
     assert identity.session_id is None
     assert identity.harness is None
@@ -142,7 +152,7 @@ def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch)
     )
     monkeypatch.setattr(
         "fno.agents.registry.row_owning_session_id",
-        lambda session_id, *, self_binding: (
+        lambda session_id, *, self_binding, walk_harness=None: (
             "own-worker" if session_id == "own-session" else None
         ),
     )
@@ -154,35 +164,6 @@ def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch)
     assert identity.harness == "claude"
 
 
-def test_self_stamp_forwards_the_completed_canonical_pair(monkeypatch):
-    """AC10-HP, post-x-0992: the pair a stamp completes rides the collide
-    callback into the registry's agreement check. This layer computes nothing
-    about self on its own (the pair comes from claims.self_identity), and a
-    row the registry reads as the caller's OWN is never contention."""
-    captured: dict = {}
-
-    def fake_detector(session_id, *, self_binding):
-        captured["self_binding"] = self_binding
-        return "some-row" if session_id == "victim-session" else None
-
-    env = {
-        "FNO_HARNESS_NAME": "claude",
-        "FNO_HARNESS_SESSION_ID": "victim-session",
-    }
-    monkeypatch.setattr(
-        "fno.claims.session_pid.resolve_session_harness",
-        lambda from_pid=None: "claude",
-    )
-    monkeypatch.setattr(
-        "fno.agents.registry.row_owning_session_id", fake_detector
-    )
-
-    identity = self_stamp.resolve_self_identity(env)
-
-    assert captured["self_binding"] == ("claude", "victim-session")
-    assert identity.rejected[0]["owner"] == "some-row"
-
-
 def test_self_stamp_passes_the_explicit_sentinel_without_an_id(monkeypatch):
     """The sentinel rides exactly where nothing proves self: a name_only stamp
     completes no pair, so the detector stays self-blind and a foreign row is
@@ -192,7 +173,7 @@ def test_self_stamp_passes_the_explicit_sentinel_without_an_id(monkeypatch):
     colliding there read their own registered row as contention."""
     captured: dict = {}
 
-    def fake_detector(session_id, *, self_binding):
+    def fake_detector(session_id, *, self_binding, walk_harness=None):
         captured["self_binding"] = self_binding
         return "some-row" if session_id == "victim-session" else None
 
@@ -247,6 +228,50 @@ def test_self_stamp_variant_f_resolves_to_the_thread_id(monkeypatch):
     assert identity.harness == "codex"
     assert identity.rejected == ()
     assert self_stamp.stamp_from(None) == thread[:8]
+
+
+def test_restarted_session_resolves_through_its_own_row(monkeypatch):
+    """After a restart the same session id meets its own re-registered
+    live row (same name, refreshed in place). A name_only stamp with a stale
+    FNO_AGENT_SELF and an env_only attester used to refuse ("owned by live row
+    <name>"), mailing as "fno" and answering holder_unattributable; the walk's
+    family ground resolves the row as self and the mail handle follows."""
+    sid = "9a063cd3-aaaa-bbbb-cccc-dddddddddddd"
+
+    class _Row:
+        name = "kestrel"
+        harness = "claude"
+        status = "live"
+        harness_session_id = sid
+        aliases = ()
+
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda _env: ("", "env_only"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda registry_path=None: [_Row()]
+    )
+
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_AGENT_SELF": "stale-worker-name",
+        "CLAUDE_CODE_SESSION_ID": sid,
+    }
+    identity = self_stamp.resolve_self_identity(env)
+    assert identity.disposition == "single"
+    assert identity.session_id == sid
+    assert identity.harness == "claude"
+    assert identity.rejected == ()
+    # The mail leg: the same env in os.environ resolves the handle, not "fno".
+    monkeypatch.setenv("FNO_HARNESS_NAME", "claude")
+    monkeypatch.setenv("FNO_AGENT_SELF", "stale-worker-name")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+    assert self_stamp.stamp_from(None) == sid[:8]
 
 
 def test_ambiguity_message_names_the_owned_row(monkeypatch):

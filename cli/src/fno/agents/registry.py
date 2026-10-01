@@ -1618,6 +1618,7 @@ def row_owning_session_id(
     registry_path: Optional[Path] = None,
     *,
     self_binding: Optional[Tuple[str, str]],
+    walk_harness: Optional[str] = None,
 ) -> Optional[str]:
     """Name of an active registry row whose ``harness_session_id`` is
     ``session_id``, or None.
@@ -1640,6 +1641,13 @@ def row_owning_session_id(
     or the id belongs to a different session and is reported. Only rows in
     an ownership-live status count; an exited row's id is free.
 
+    ``walk_harness`` is the process-tree walk's harness answer. A restart
+    re-registers the same row in place, so the env id then meets its OWN row;
+    the self-blind posture refused every restarted named row. A row of the
+    walked family holding the id is self, never contention; the None default
+    keeps the round-1 P1 refusal for a walk that is silent or names another
+    family.
+
     Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
     registry returns None (cannot prove a collision) rather than raising, so an
     unreadable registry never blocks init. Callers that must know whether the
@@ -1659,11 +1667,11 @@ def row_owning_session_id(
     entry = live_row_holding_session_id(session_id, registry_path)
     if entry is None:
         return None
-    if (
-        own
-        and own[1] == needle
-        and own[0] == (getattr(entry, "harness", "") or "").strip().lower()
-    ):
+    row_harness = (getattr(entry, "harness", "") or "").strip().lower()
+    if own and own[1] == needle and own[0] == row_harness:
+        return None
+    walked = (walk_harness or "").strip().lower()
+    if walked and walked == row_harness:
         return None
     return entry.name
 
