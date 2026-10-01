@@ -233,11 +233,14 @@ def _live_pane_for(target: str, session_id: Optional[str]) -> Optional[int]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if (
-            (session_id and row.get("fno_id") == session_id)
-            or (session_id and row.get("harness_session_id") == session_id)
-            or (target and row.get("name") == target)
-        ):
+        # The session id is the stable join; the label matches only when no
+        # session id exists, so a shell pane that happens to share the
+        # recipient's name can never produce a wrong pane number.
+        if session_id:
+            hit = row.get("fno_id") == session_id or row.get("harness_session_id") == session_id
+        else:
+            hit = bool(target) and row.get("name") == target
+        if hit:
             pane = row.get("pane_id")
             if isinstance(pane, int):
                 return pane

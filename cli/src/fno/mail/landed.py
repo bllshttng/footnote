@@ -20,6 +20,7 @@ from fno.bus.log import (
 from fno.mail.reply_resolve import _transcript_path, mail_ids_in_transcript
 # The nag renders inside hooks/inject-mail-notify.sh's 2s timeout; bound reads.
 _LANDED_READ_BUDGET_S = 0.5
+_VERIFY_TAIL_BYTES = 4 << 20  # the just-sent id sits in the tail; peek bounds the same read
 _REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 
 
@@ -149,8 +150,15 @@ def post_send_landed(
     if to_harness and to_session:
         path = _transcript_path(to_harness, to_session)
         if path is not None:
+            # A just-sent id sits at the tail, so a 4MiB tail answers like the
+            # full read without paying a multi-MB rollout on every unconfirmed
+            # send (the bound peek's reader uses).
             try:
-                text = path.read_text(encoding="utf-8", errors="replace")
+                with path.open("rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    fh.seek(max(0, size - _VERIFY_TAIL_BYTES))
+                    text = fh.read().decode("utf-8", "replace")
             except OSError:
                 text = ""
             # The raw substring is the whole test: msg ids carry no quotes, so

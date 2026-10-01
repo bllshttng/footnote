@@ -4305,9 +4305,11 @@ def cmd_send(
         ))
         # Post-send verify : a durable receipt is not a landing. NOT LANDED
         # exits non-zero so a last-line reader cannot record it as delivered.
+        # A self-send is a designed durable note (the name lane exempts it
+        # too), not a miss.
         from fno.mail.receipts import NOT_LANDED_EXIT, report_landing
 
-        if not report_landing(
+        if _self_recipient(name) is None and not report_landing(
             result.msg_id,
             target=name,
             to=result.to,
