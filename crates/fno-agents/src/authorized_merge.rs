@@ -632,8 +632,8 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         // stamping the node's merge status failed.
         match checks.verdict.as_str() {
             "green" => {
-                // Arm is gated too: main has no branch protection, so GitHub
-                // merges an armed green PR at once, stale or not.
+                // Arm is gated too: without a ruleset that demands an
+                // up-to-date branch, GitHub merges an armed green PR at once.
                 if request.effect != Effect::Preview && probes.require_fresh_ci(cwd) {
                     let stale = match probes.ci_base(cwd, &facts) {
                         ProbeOutcome::Inconclusive(reason) => {
@@ -736,7 +736,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                                 return Err(Outcome::Held {
                                                     reason: format!(
                                                         "{reason}; {}",
-                                                        stale_remedy(n)
+                                                        stale_remedy(n, &facts.base_ref)
                                                     ),
                                                 });
                                             }
@@ -1017,7 +1017,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         match probes.ci_base(cwd, facts) {
             ProbeOutcome::Refused(reason) => blockers.push(Blocker::held(
                 "ci_base_stale",
-                format!("{reason}; {}", stale_remedy(n)),
+                format!("{reason}; {}", stale_remedy(n, &facts.base_ref)),
             )),
             ProbeOutcome::Inconclusive(reason) => {
                 blockers.push(Blocker::unknown("ci_base_unreadable", reason))
@@ -1847,9 +1847,9 @@ fn is_terminal_state(state: &str) -> bool {
 
 /// The `ci_base_stale` remedy, shared by every `Held` reason that ends in it.
 /// A merge, never a rebase: the branch is already pushed.
-fn stale_remedy(n: u64) -> String {
+fn stale_remedy(n: u64, base: &str) -> String {
     format!(
-        "remedy: merge origin/main into the branch and push (fno do pr merge {n} does this \
+        "remedy: merge origin/{base} into the branch and push (fno do pr merge {n} does this \
          once it holds the merge slot), then fno do pr wait {n} --until settled, then retry"
     )
 }
@@ -1876,9 +1876,12 @@ fn retest_on_current_base<P: Probes>(probes: &P, cwd: &Path, facts: &PrFacts) ->
         Ok((false, output)) => format!(
             "update-branch failed ({}); {}",
             first_line(&output),
-            stale_remedy(n)
+            stale_remedy(n, &facts.base_ref)
         ),
-        Err(error) => format!("update-branch failed ({error}); {}", stale_remedy(n)),
+        Err(error) => format!(
+            "update-branch failed ({error}); {}",
+            stale_remedy(n, &facts.base_ref)
+        ),
     }
 }
 
@@ -2281,8 +2284,13 @@ pub fn ci_base_verdict(
     base_tip_at: &str,
     runs: &[(String, String)],
 ) -> ProbeOutcome {
-    if behind_by == 0 || runs.is_empty() {
+    if behind_by == 0 {
         return ProbeOutcome::Clear;
+    }
+    if runs.is_empty() {
+        return ProbeOutcome::Refused(format!(
+            "ci_base_stale: no pull_request run at the head proves its CI base; PR is {behind_by} behind"
+        ));
     }
     if !valid_github_timestamp(base_tip_at)
         || runs
@@ -3523,10 +3531,10 @@ mod tests {
             ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-        assert_eq!(
+        assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
-            ProbeOutcome::Clear
-        );
+            ProbeOutcome::Refused(reason) if reason.contains("no pull_request run")
+        ));
         let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
         assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
