@@ -7,7 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 REGISTER_TASK_PATH = REPO_ROOT / "cli" / "src" / "fno" / "cost" / "_register.py"
 
 _spec = importlib.util.spec_from_file_location("register_task_x88df", REGISTER_TASK_PATH)

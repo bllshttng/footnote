@@ -17,6 +17,15 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP"
 mkdir -p "$HOME/.fno"
 
+# The shim forwards through the `fno` front door; stage a stub `fno` on PATH
+# that delegates to the in-tree CLI so the harness is hermetic against the
+# machine's installed binary.
+mkdir -p "$TMP/bin"
+printf '#!/usr/bin/env bash\nexec uv run --project "%s/cli" python -m fno.cli "$@"\n' \
+  "$REPO_ROOT" > "$TMP/bin/fno"
+chmod +x "$TMP/bin/fno"
+export PATH="$TMP/bin:$PATH"
+
 PASS=0
 FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }

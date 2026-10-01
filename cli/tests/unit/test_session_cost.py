@@ -2,14 +2,12 @@
 """Tests for the in-package fno.cost._session_cost module (the former
 scripts/metrics/session-cost.py).
 
-Run: python3 tests/test_session_cost.py   OR   pytest tests/test_session_cost.py
+Run: fno doctor test cli/tests/unit/test_session_cost.py
 """
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-# session-cost.py moved into the fno package as fno.cost._session_cost.
-sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
+# Family goldens live under cli/tests (the cost family child owns them);
+# fno resolves through the pinned worktree PYTHONPATH.
 from fno.cost import _session_cost as session_cost  # noqa: E402
 
 

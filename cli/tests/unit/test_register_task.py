@@ -11,8 +11,8 @@ import tempfile
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-# register-task.py moved into the fno package as fno.cost._register.
+# Family goldens live under cli/tests (the cost family child owns them).
+REPO_ROOT = Path(__file__).resolve().parents[3]
 REGISTER_TASK_PATH = REPO_ROOT / "cli" / "src" / "fno" / "cost" / "_register.py"
 
 _spec = importlib.util.spec_from_file_location("register_task", REGISTER_TASK_PATH)

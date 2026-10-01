@@ -26,11 +26,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-# Make cli/src available when this test runs from the repo root.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CLI_SRC = REPO_ROOT / "cli" / "src"
-if str(CLI_SRC) not in sys.path:
-    sys.path.insert(0, str(CLI_SRC))
+# Family goldens live under cli/tests (the providers family child owns them);
+# fno resolves through the pinned worktree PYTHONPATH.
 
 
 def _baseline_settings(active: str = "claude-anthropic") -> dict:
