@@ -337,7 +337,7 @@ If a documentation-only PR's own diff is readable and non-empty, the PR has an e
 
 The carry rule cannot save a review bought by an avoidable rebase. Measured one night: a king ordered about ten rebases on one PR. It requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time. It still cannot help here, because the carry only ever compares the CURRENT head against the LAST reviewed one. It has nothing to say about a review that was requested and completed before the next rebase moved the head again.
 
-Any dispatcher (a king, `/fno:pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them. Batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake. It is the same mistake, since the next review request pays for it again.
+Any dispatcher (a king, `/fno:ship pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them. Batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake. It is the same mistake, since the next review request pays for it again.
 
 ### Named, not closed: the derivation-latency window
 
@@ -606,7 +606,7 @@ GitHub refuses an approving review from the PR author. With one account authorin
 
 The mirror is fail-closed inside the producer (`crates/fno-agents/src/publish_review.rs`), which the emit chokepoint and the hidden verb drive through one JSON contract. An unconfigured lane or token skips. A bot that is the PR author refuses. A stale head pin refuses. An unmappable verdict refuses. The result carries the `reviewDecision` GitHub reports back, never the POST receipt. One stderr receipt line prints on every branch: `bot-review: posted ...`, `bot-review: skipped (...)`, `bot-review: refused (...)`. The backfill door is the hidden verb `fno do pr publish-review --pr-number N`. Its verdict defaults to the newest head-pinned attestation for HEAD.
 
-One ordering fact: the first review of a branch runs BEFORE its PR exists, so the emit-time mirror skips with no open PR. The `/pr create` flow closes that gap. Its step 2d runs `fno do pr publish-review --pr-number <n>` the moment the PR opens. The verb mirrors only a verdict the local gate already accepted. If a flow bypasses `/pr` and skips the mirror, branch protection makes the miss visible: the PR cannot merge until the approve exists.
+One ordering fact: the first review of a branch runs BEFORE its PR exists, so the emit-time mirror skips with no open PR. The `/fno:ship pr create` flow closes that gap. Its step 2d runs `fno do pr publish-review --pr-number <n>` the moment the PR opens. The verb mirrors only a verdict the local gate already accepted. If a flow bypasses `/pr` and skips the mirror, branch protection makes the miss visible: the PR cannot merge until the approve exists.
 
 ### Operator setup, in order
 

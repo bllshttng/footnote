@@ -1147,13 +1147,39 @@ fn authority_refusal<P: Probes>(
     request: &Request,
     facts: &PrFacts,
 ) -> Option<(&'static str, String)> {
-    let source = request
-        .auto_merge_source
+    // The PR's own bound target manifest folds first when the caller carried
+    // no posture: a status read never read it, and the merge verb's
+    // spaces-aware read arrives here as `approved` when it did. A manifest
+    // false is a per-run refusal like any caller-supplied one; a present but
+    // unreadable manifest at the PR's branch fails closed. The exact-head
+    // operator grant below stays the one sanctioned remedy.
+    let mut approved = request.approved;
+    let mut folded_source = request.auto_merge_source.clone();
+    if approved.is_none() {
+        match crate::merge_grant::branch_bound_manifest(cwd, &facts.head_ref) {
+            crate::merge_grant::BoundRead::Read(bound) => {
+                approved = bound.approved;
+                folded_source = bound.source;
+            }
+            crate::merge_grant::BoundRead::Unreadable(why) => {
+                return Some((
+                    "manifest_unreadable",
+                    format!(
+                        "the PR's bound target manifest is present but unreadable ({why}); \
+                         refusing without a readable posture"
+                    ),
+                ));
+            }
+            crate::merge_grant::BoundRead::None => {}
+        }
+    }
+    let source = folded_source
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("unknown (pre-provenance manifest)");
-    if request.approved == Some(false) {
+        .unwrap_or("unknown (pre-provenance manifest)")
+        .to_string();
+    if approved == Some(false) {
         let slug = crate::finalize::slug_from_git_remote(&repo_root(cwd)).unwrap_or_default();
         let subject =
             crate::merge_grant::head_grant_subject(&slug, facts.number as i64, &facts.head_sha);
@@ -1205,7 +1231,7 @@ fn authority_refusal<P: Probes>(
             }
         }
     }
-    let env_grant = request.approved == Some(true) && source == "env-target-auto-merge";
+    let env_grant = approved == Some(true) && source == "env-target-auto-merge";
     if !env_grant && !probes.auto_merge_enabled(cwd) {
         return Some((
             "auto_merge_disabled",

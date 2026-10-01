@@ -145,7 +145,7 @@ INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "do": 20, "backlog next": 10}
 # Verbs reachable ONLY through shell command substitution, where the binary
 # name is glued to a variable assignment and is not a bare token:
 #   hooks/helpers/init-target-state.sh   _OWNED_OUT="$(fno do target resolve-owned-identity
-#   skills/pr/SKILL.md                   policy_json="$(candidate_fno do pr evidence-required
+#   skills/ship/SKILL.md                   policy_json="$(candidate_fno do pr evidence-required
 # Both scored zero and sat in the dead set until an independent whole-repo walk
 # contradicted it. They are controls now: a tokenizer change that loses this
 # shape emits no candidate list instead of a wrong one.

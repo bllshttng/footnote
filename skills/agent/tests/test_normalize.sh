@@ -600,7 +600,7 @@ out="$(run 'continue the quarterly outreach work')"
 check_eq 'continue-shaped -> seed'   "$(field "$out" payload_mode)" 'seed'
 
 # --- a slash COMMAND is a passthrough, not a seed -----------------------------
-out="$(run '/pr check 42')"
+out="$(run '/fno:ship pr check 42')"
 check_eq 'slash command is passthrough' "$(field "$out" payload_mode)" 'passthrough'
 
 # --- a resolved node-id is a build (the ONE surviving implicit /target) -------

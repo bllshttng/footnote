@@ -1,7 +1,7 @@
 //! `fno-agents pr-push` -- the one guarded push: fetch, integrate origin/main
 //! only when GitHub reports a reason (the PR reads dirty, or its base
 //! requires an up-to-date branch), preflight, read the in-flight state, push
-//! exactly once, print one receipt. Every push site in `skills/pr` calls
+//! exactly once, print one receipt. Every push site in `skills/ship` calls
 //! this through `fno do pr push`, so a queued CI run is never cancelled by a
 //! second push, and a green, mergeable PR is never moved by a routine
 //! refresh (ruling 2026-09-28: each merge-only commit restarts CI and voids

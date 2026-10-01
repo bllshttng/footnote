@@ -1591,7 +1591,7 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     Resolution order:
       1. ``config.paths.inbox_path`` explicit override (template-expanded).
       2. ``config.post_merge.parking_lot_path`` when set - the per-project queue
-         the producer (``/fno:pr merged``) writes its narrative to. The
+         the producer (``/fno:ship pr merged``) writes its narrative to. The
          design unifies the two: the capture-tier inbox and the post-merge prose
          file are ONE file, so honoring this keeps ``fno backlog capture
          add/list/tidy/promote/dismiss`` and the producer pointed at the same

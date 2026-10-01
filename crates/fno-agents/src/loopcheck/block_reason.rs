@@ -84,7 +84,9 @@ pub(super) fn build_block_reason(
             PrState::Closed => {
                 "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`"
             }
-            PrState::None => "No PR for HEAD yet. Create one: `/fno:pr create`, or `gh pr create`",
+            PrState::None => {
+                "No PR for HEAD yet. Create one: `/fno:ship pr create`, or `gh pr create`"
+            }
             _ => "PR state is not open or merged - verify on GitHub and update locally",
         };
         return format!(

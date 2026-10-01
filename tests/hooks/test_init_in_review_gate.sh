@@ -122,7 +122,7 @@ OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999); EC=
 [[ $EC -ne 0 ]] && pass "AC1-HP: non-zero exit ($EC)" || fail "AC1-HP: expected non-zero exit, got 0"
 grep -q "REFUSED: node $NODE is in_review" <<<"$OUT" && pass "AC1-HP: refusal names node" || fail "AC1-HP: refusal message missing. Got: $OUT"
 grep -q "#999" <<<"$OUT" && pass "AC1-HP: refusal names open PR number" || fail "AC1-HP: PR number missing. Got: $OUT"
-grep -q "/pr check" <<<"$OUT" && pass "AC1-HP: refusal points at /pr check" || fail "AC1-HP: /pr check hint missing. Got: $OUT"
+grep -q "/fno:ship pr check" <<<"$OUT" && pass "AC1-HP: refusal points at /fno:ship pr check" || fail "AC1-HP: /fno:ship pr check hint missing. Got: $OUT"
 grep -q "TARGET_ALLOW_IN_REVIEW=1" <<<"$OUT" && pass "AC1-HP: refusal documents override env" || fail "AC1-HP: override env hint missing. Got: $OUT"
 [[ ! -f "$T/space/target-state.md" ]] && pass "AC1-HP: no state file written" || fail "AC1-HP: target-state.md written despite refusal"
 

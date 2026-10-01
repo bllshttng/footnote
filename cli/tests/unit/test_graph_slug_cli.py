@@ -197,35 +197,31 @@ def test_html_views_refuse_corrupt_live_graph_even_with_healthy_archive(
     assert "ARCHIVE-ONLY-SUCCESS-MARKER" not in output
 
 
-def test_public_title_gate_reports_every_class_and_preserves_both_files(
-    tmp_graph, tmp_path
-):
-    dirty_title = (
-        "PR #123 x-deadbeef /Users/alice/secret "
-        "01a03a85-c6b7-7f43-9bc4-ce4ca02f07fe"
-    )
+def test_public_title_gate_omits_leaky_rows_and_publishes_the_rest(tmp_graph):
     _seed(tmp_graph, [
-        {"id": "ab-11111111", "title": dirty_title, "status": "ready",
-         "priority": "p1", "project": "fno", "details": dirty_title},
+        {"id": "ab-11111111", "title": "Clean row publishes", "status": "ready",
+         "priority": "p1", "project": "fno"},
+        # Node ids and PR numbers are ruled public; the row publishes.
+        {"id": "ab-22222222", "title": "Closes PR #123 for ab-deadbeef", "status": "ready",
+         "priority": "p2", "project": "fno"},
+        # Machine-revealing classes cost the row, not the page.
+        {"id": "ab-33333333", "title": "crashed for /Users/alice/secret ses-kv3H",
+         "status": "ready", "priority": "p2", "project": "fno"},
     ])
-    roadmap = tmp_path / "roadmap.html"
-    backlog = tmp_path / "backlog.html"
-    roadmap.write_text("ROADMAP-SENTINEL", encoding="utf-8")
-    backlog.write_text("BACKLOG-SENTINEL", encoding="utf-8")
 
-    result = runner.invoke(
-        app,
-        ["backlog", "roadmap", "--project", "fno", "--html", str(roadmap),
-         "--backlog-html", str(backlog)],
-    )
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"])
 
-    assert result.exit_code != 0
-    diagnostic = result.stdout + (result.stderr or "")
-    assert "ab-11111111" in diagnostic
-    for leak_class in ("pr-reference", "node-id", "home-path", "session-id"):
-        assert leak_class in diagnostic
-    assert roadmap.read_text() == "ROADMAP-SENTINEL"
-    assert backlog.read_text() == "BACKLOG-SENTINEL"
+    assert result.exit_code == 0, result.output
+    assert "Clean row publishes" in result.stdout
+    assert "Closes PR #123 for ab-deadbeef" in result.stdout
+    assert "ab-33333333" not in result.stdout
+    assert "/Users/alice/secret" not in result.stdout
+    assert "ses-kv3H" not in result.stdout
+    # One counted warning names the classes, never the offending title.
+    output = result.stdout + (result.stderr or "")
+    assert "omitted 1 public row" in output
+    assert "home-path" in output
+    assert "session-id" in output
 
 
 def test_roadmap_uses_live_epic_priority_and_shared_order(

@@ -3,7 +3,7 @@
 
 Poll for external code review on a PR, process inline comments, apply suggestions, and reply.
 
-**Prerequisites:** PR must exist (use `/pr create` first)
+**Prerequisites:** PR must exist (use `/fno:ship pr create` first)
 
 ## Step 0: Determine Reviewers
 

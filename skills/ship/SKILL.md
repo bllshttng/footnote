@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (= today's /pr), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target."
+description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (create, check, merged), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target."
 argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
 metadata:
   requires:
@@ -12,11 +12,11 @@ metadata:
 
 # Ship
 
-**One verb for delivering anything.** `/ship <type>` drives a deliverable to its finish line, dispatching on the *deliverable type* the way `/target` dispatches on task type. `/pr` only names the code branch; `/ship` names the whole family.
+**One verb for delivering anything.** `/ship <type>` drives a deliverable to its finish line, dispatching on the *deliverable type* the way `/target` dispatches on task type. `pr` only names the code branch. `/ship` names the whole family.
 
 | Type | Finish line (the mechanical "green") | What runs |
 |------|--------------------------------------|-----------|
-| `pr` | PR exists + CI green + required bot reviewed, no unaddressed blocking finding (`DonePRGreen`) | the `/pr` router (`create` / `check` / `merged`) |
+| `pr` | PR exists + CI green + required bot reviewed, no unaddressed blocking finding (`DonePRGreen`) | the `pr` router ([pr.md](references/pr.md); `create` / `check` / `merged`) |
 | `doc` (alias `artifact`) | brief written to `config.research.output_dir` + `fno doctor evals grade` green (`DoneAdvisory`) | [doc.md](references/doc.md), in this same context |
 
 ## The membership test (load-bearing)
@@ -29,9 +29,9 @@ A thing is a ship type ONLY if it has a definable **green** - a finish line read
 
 One owner decides every merge. `fno do pr merge` asks it, and so do `fno do pr verify --kind merged` and the `fno-agents finalize` queue arm. It answers merge or arm for one exact head, and it never emits an unpinned request. See [authorized-merge](../../docs/architecture/authorized-merge.md).
 
-## Composition, not self-containment
+## Self-contained
 
-`/ship` is a **composing umbrella**, deliberately NOT a self-contained, liftable-in-isolation skill. `/ship pr` routes to the co-installed `/pr` skill (which stays the real implementation and permanent alias - the plan's no-forced-migration rule); `/pr` is therefore a hard companion dependency, not reimplemented here. Only the genuinely-new `doc` mode is local to this folder ([doc.md](references/doc.md), loaded via Read). This skill is intentionally excluded from the marketplace self-containment lint, because folding `/pr`'s ~400 lines of mode bodies in would tax the dominant code path for no payoff.
+Both mode bodies are local to this folder. The PR lifecycle router is [pr.md](references/pr.md), with `create.md`, `check.md`, `merged.md`, and `scripts/` beside it. The doc deliverable is [doc.md](references/doc.md). Each loads via Read. The former top-level `/fno:pr` skill retired into `references/pr.md` on 2026-09-30. `/fno:ship pr` is the one spelling and no alias survives.
 
 ## Step 1: Resolve the type (ALWAYS announce it)
 
@@ -45,7 +45,7 @@ This is a **router**, not a monolith. Parse the first argument token:
     doc    ship a research brief to output_dir and grade it
   ```
 
-- **`pr`** -> the PR lifecycle. Print `running ship pr (PR lifecycle)`. The remaining tokens are the `/pr` mode + its arguments. Defer to the `/pr` skill: run `/pr <remaining tokens>` and follow it. (`/pr` is the retained, permanent alias - `/pr create` and `/ship pr create` are the same thing, byte-for-byte. `/ship pr` does not reimplement the PR flow; it routes to the one implementation in the `pr` skill.)
+- **`pr`** -> the PR lifecycle. Print `running ship pr (PR lifecycle)`. The remaining tokens are the pr mode + its arguments. Load [pr.md](references/pr.md) and execute it in this same context. It resolves the mode (`create` / `check` / `merged`) and runs the matching body here.
 - **`doc`** or **`artifact`** -> the research-doc deliverable. Print `running ship doc (research brief + grade)`. Load [doc.md](references/doc.md) and execute it in full in this context. The remaining tokens are doc's arguments.
 - **`budget`** or **`community`** -> NOT a ship type. Print and stop with a non-zero result:
 
@@ -76,4 +76,4 @@ This is a **router**, not a monolith. Parse the first argument token:
 
 ## Multi-CLI
 
-Claude-Code primary. `ship pr` needs everything `/pr` needs: `fno`, `gh`, `git`, and the `create` worker from `/pr`'s configured role routing (`/pr` owns that contract, not this skill). `ship doc` needs `fno` (the `research` + `evals grade` verbs). If a dependency is missing, the type fails loud and reports it - it never fakes a PR, a brief, or a grade.
+Claude-Code primary. `ship pr` needs `fno`, `gh`, `git`, and the `create` worker from the configured role routing (the `pr` router owns that contract). `ship doc` needs `fno` (the `research` + `evals grade` verbs). If a dependency is missing, the type fails loud and reports it - it never fakes a PR, a brief, or a grade.

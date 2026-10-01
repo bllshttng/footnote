@@ -202,6 +202,64 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         "the menu names the stale count: {labels:?}"
     );
 
+    // Twenty stale pane keepers fold into one count line; full revs cut to
+    // ten characters; no row runs past the popup width.
+    let mut wide = outcome.clone();
+    if let UpdateOutcome::Ok(r) = &mut wide {
+        r.installed_rev = Some("a".repeat(40));
+        r.source_rev = Some("b".repeat(40));
+        let keeper = r.running[1].clone();
+        r.running.extend(std::iter::repeat_n(keeper, 19));
+        r.changelog
+            .push(format!("feat: {}", "a long subject ".repeat(8)));
+    }
+    let wide = build_update_modal(Some(&wide.into()));
+    let headers: Vec<&str> = wide
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"aaaaaaaaaa -> bbbbbbbbbb"), "{headers:?}");
+    assert_eq!(
+        headers.iter().filter(|h| h.contains("pane keeper")).count(),
+        2,
+        "the count line and the promise: {headers:?}"
+    );
+    assert!(
+        headers.contains(&"20 pane keepers on the old build"),
+        "{headers:?}"
+    );
+    // The modal grows to its widest row up to the screen, then wraps: no
+    // rendered row ends in an ellipsis on a wide screen or a narrow one, and
+    // the restart entry keeps its action.
+    for cols in [200u16, 50] {
+        let fitted = AuxPopup {
+            popup: wide.popup.clone(),
+            actions: wide.actions.clone(),
+        }
+        .fit(cols);
+        let r = fitted.popup.render((80, cols));
+        for line in &r.lines {
+            assert!(
+                !line.text.contains('\u{2026}'),
+                "no ellipsis at {cols} columns: {:?}",
+                line.text
+            );
+        }
+        assert!(r.width <= cols as usize, "fits the screen at {cols}");
+        if cols == 200 {
+            assert!(
+                r.width > crate::popup::WIDTH_CAP + 4,
+                "grows past the old cap"
+            );
+        }
+        assert_eq!(fitted.actions, wide.actions, "actions follow at {cols}");
+    }
+
     let modal = build_update_modal(Some(&outcome.clone().into()));
     let text: Vec<String> = modal
         .popup
@@ -214,15 +272,12 @@ fn update_modal_names_stale_processes_and_offers_restart() {
             _ => String::new(),
         })
         .collect();
-    let body = text.join("\n");
+    let body = text.join(" ");
     assert!(
         body.contains("daemon agents home: restarts; keeps workers and panes"),
         "each stale row names what restart does: {body}"
     );
-    assert!(
-        body.contains("pane-keeper main-1991: kept; keeps its pane"),
-        "{body}"
-    );
+    assert!(body.contains("1 pane keeper on the old build"), "{body}");
     assert!(
         !body.contains("store-keeper"),
         "current rows are not listed: {body}"
@@ -435,7 +490,7 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
     assert_eq!(labels[1], "sweep threads");
     assert_eq!(labels[2], "new agent");
     assert_eq!(labels[3], "experimental: backlog view");
-    assert_eq!(labels[4], "keybinds");
+    assert_eq!(labels[4], "Keybindings");
     assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
 }
 

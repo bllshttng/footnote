@@ -7,6 +7,7 @@
 //! them.
 
 use crate::loopcheck::{resolve_review_inputs, ReviewInputs};
+use crate::merge_grant::{parse_worktree_list, read_bound_manifest, BoundRead};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -970,53 +971,9 @@ fn worktree_probe(
     };
     reading["path"] = json!(matched.path);
     reading["head"] = json!(matched.head.clone().unwrap_or_default());
-    let state_dir = std::path::Path::new(&matched.path).join(".fno");
-    reading["manifest_path"] = Value::Null;
-    reading["harness_session_id"] = Value::Null;
-    reading["authority_note"] = json!("matched worktree; no readable target manifest");
-    let mut manifests: Vec<std::path::PathBuf> = Vec::new();
-    let live = state_dir.join("target-state.md");
-    let live_is_file = live.is_file();
-    if live_is_file {
-        manifests.push(live.clone());
-    }
-    for pattern in [
-        "target-state.terminal.*.md",
-        "target-state.md.archived.*.md",
-    ] {
-        let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&state_dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| glob_match(pattern, n))
-                            .unwrap_or(false)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        hits.sort();
-        hits.reverse();
-        if let Some(first) = hits.first() {
-            manifests.push(first.clone());
-            break;
-        }
-    }
-    for manifest in manifests {
-        let Ok(text) = std::fs::read_to_string(&manifest) else {
-            continue;
-        };
-        if let Some(owner) = crate::loopcheck::scan_manifest_field(&text, "harness_session_id") {
-            reading["manifest_path"] = json!(manifest.display().to_string());
-            reading["harness_session_id"] = json!(owner);
-            reading["authority_note"] = json!(if manifest == live {
-                "live target manifest"
-            } else {
-                "newest archived target manifest"
-            });
-            break;
+    if let Some(fields) = bound_manifest_reading(&matched.path).as_object() {
+        for (key, value) in fields {
+            reading[key.as_str()] = value.clone();
         }
     }
     let Ok(status) = std::process::Command::new("git")
@@ -1075,51 +1032,42 @@ fn worktree_probe(
     (None, String::new(), reading)
 }
 
-struct WorktreeEntry {
-    path: String,
-    head: Option<String>,
-    branch: Option<String>,
-}
-
-fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
-    let mut entries: Vec<WorktreeEntry> = Vec::new();
-    let mut current: Option<WorktreeEntry> = None;
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            if let Some(done) = current.take() {
-                entries.push(done);
-            }
-            current = Some(WorktreeEntry {
-                path: path.to_string(),
-                head: None,
-                branch: None,
+/// The matched worktree's bound target manifest, through the shared reader:
+/// canonical state-path resolution plus the hardened finalize parse, with
+/// the trusted merge posture as additive provenance.
+fn bound_manifest_reading(matched_path: &str) -> Value {
+    let mut reading = json!({
+        "manifest_path": Value::Null,
+        "harness_session_id": Value::Null,
+        "authority_note": json!("matched worktree; no readable target manifest"),
+        "auto_merge_approved": Value::Null,
+        "auto_merge_source": Value::Null,
+    });
+    match read_bound_manifest(Path::new(matched_path)) {
+        BoundRead::None => {}
+        BoundRead::Unreadable(why) => {
+            reading["authority_note"] = json!(format!("bound target manifest unreadable: {why}"));
+        }
+        BoundRead::Read(bound) => {
+            reading["manifest_path"] = json!(bound.manifest_path.display().to_string());
+            reading["harness_session_id"] = bound
+                .session
+                .clone()
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null);
+            reading["authority_note"] = json!(if bound.live {
+                "live target manifest"
+            } else {
+                "newest archived target manifest"
             });
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            if let Some(c) = current.as_mut() {
-                c.head = Some(head.to_string());
-            }
-        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-            if let Some(c) = current.as_mut() {
-                c.branch = Some(branch.to_string());
-            }
+            reading["auto_merge_approved"] =
+                bound.approved.map(|b| json!(b)).unwrap_or(Value::Null);
+            reading["auto_merge_source"] = bound
+                .source
+                .clone()
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null);
         }
     }
-    if let Some(done) = current.take() {
-        entries.push(done);
-    }
-    entries
-}
-
-/// `fnmatch`-lite for the archived-manifest patterns; the only glob
-/// metachar the names carry is `*`.
-fn glob_match(pattern: &str, name: &str) -> bool {
-    fn inner(p: &[u8], n: &[u8]) -> bool {
-        match (p.first(), n.first()) {
-            (None, None) => true,
-            (Some(b'*'), _) => inner(&p[1..], n) || (!n.is_empty() && inner(p, &n[1..])),
-            (Some(a), Some(b)) if a == b => inner(&p[1..], &n[1..]),
-            _ => false,
-        }
-    }
-    inner(pattern.as_bytes(), name.as_bytes())
+    reading
 }

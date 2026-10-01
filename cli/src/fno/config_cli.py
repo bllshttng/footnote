@@ -94,7 +94,7 @@ PostMergeStatus = Literal["ready", "unconfigured", "opted_out", "dormant", "erro
 
 @dataclass(frozen=True)
 class PostMergeVerdict:
-    """Whether the /fno:pr merged ritual can run for a repo, and why."""
+    """Whether the /fno:ship pr merged ritual can run for a repo, and why."""
 
     status: PostMergeStatus
     enabled: bool
@@ -124,7 +124,7 @@ class PostMergeVerdict:
         if self.status == "unconfigured":
             return (
                 "[doctor] post-merge: unconfigured - "
-                "config.post_merge.parking_lot_path is unset; the /fno:pr merged "
+                "config.post_merge.parking_lot_path is unset; the /fno:ship pr merged "
                 "prose+triage will be skipped. Set it with: fno config setup post-merge"
             )
         if self.status == "opted_out":
@@ -576,7 +576,7 @@ def doctor_cmd(
 
     With ``--post-merge`` (or ``--json``), instead report whether
     ``config.post_merge.parking_lot_path`` is set for this repo - the gate the
-    /fno:pr merged ritual needs. With ``--review``, report whether every
+    /fno:ship pr merged ritual needs. With ``--review``, report whether every
     configured local reviewer can run in this session. Bare ``fno config
     doctor`` runs the path diagnostic and appends a one-line post-merge
     readiness summary plus the resolved ship gates (each probe with its source,

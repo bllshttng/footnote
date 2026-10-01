@@ -506,7 +506,7 @@ def ship_batch(
     if pr_url is None:
         # Stale-base guard parity: the batch lane is the third
         # gh-pr-create site, so it runs the same check_stale_base the
-        # /pr create + worker/ship.py paths run. The batch worktree is born off
+        # /fno:ship pr create + worker/ship.py paths run. The batch worktree is born off
         # origin/main by `fno agents workspace worktree ensure`, so this is defense-in-depth for a
         # future refactor - refuse via the EXISTING abandon path (never a wedged
         # `refuse`: a batch left open would re-hit the same stale worktree every
@@ -539,7 +539,7 @@ def ship_batch(
                 reason=f"git push failed: {(push.stderr or push.stdout or '').strip()[:200]}",
                 members=members,
             )
-        # Same producer the /pr create and worker/ship.py paths run, but with
+        # Same producer the /fno:ship pr create and worker/ship.py paths run, but with
         # NO head ref. The members are the delivery, and they are known here
         # exactly; deriving from the branch adds nothing and got it wrong.
         # A batch minted before the '.' rename still carries

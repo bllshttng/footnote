@@ -12,8 +12,8 @@ domains:
       execute: {skill-name}     # default: fno:execute waves
       review: {skill-name}      # default: the in-session fno lane (/fno:review <size> --comment; the rounds run before the PR opens)
       validate: {bash-command}  # default: detected from project
-      ship: {skill-name}        # default: fno:pr create
-      external: {skill-name}    # default: fno:pr check
+      ship: {skill-name}        # default: fno:ship pr create
+      external: {skill-name}    # default: fno:ship pr check
       docs: {skill-name}        # default: fno:ship-docs
     allow_claw: true|false      # default: true — set false to block autonomous mode
 ```
@@ -31,8 +31,8 @@ The `code` domain is never declared — it's the implicit fallback. These are it
 | execute | `fno:execute waves` | Wave orchestration with TDD |
 | review | `/fno:review <size> --comment` on the final local HEAD, before the PR, in this session (Codex `$fno:review`) | Code quality + integration tests |
 | validate | the tests covering the changed files (`fno doctor test <files>` / `npm run build` / etc.) | Never the whole suite: CI runs it. A whole-suite run that is truly needed starts as a background task so the test:suite queue never blocks the turn |
-| ship | `fno:pr create` | Create GitHub PR |
-| external | `fno:pr check` | External AI review (Gemini, etc.) |
+| ship | `fno:ship pr create` | Create GitHub PR |
+| external | `fno:ship pr check` | External AI review (Gemini, etc.) |
 | docs | `fno:ship-docs` | Architecture + how-to docs |
 
 ## Resolution Chain
