@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn one_closed_row_is_a_real_acted_count() {
+    fn count_rows() {
         // The verb's ACTUAL pretty-printed shape: many lines, one object.
         let stdout = r#"{
   "dry_run": false,
@@ -293,18 +293,12 @@ mod tests {
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
         assert_eq!(o.detail, "closed=1 promise_unmet=2 failures=0");
-    }
 
-    #[test]
-    fn a_failed_run_is_an_error_never_a_zero() {
         let o = outcome_from_reconcile(Err("exit 1: boom".to_string()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("error"));
         assert_eq!(o.detail, "reconcile: exit 1: boom");
-    }
 
-    #[test]
-    fn stdout_without_a_closed_array_is_an_error_never_a_zero() {
         for stdout in ["some other output\n", "{\"held\": false}", "[1, 2, 3]"] {
             let o = outcome_from_reconcile(Ok(stdout.to_string()));
             assert_eq!(o.acted, 0, "stdout {stdout:?}");
@@ -320,28 +314,19 @@ mod tests {
                 o.detail
             );
         }
-    }
 
-    #[test]
-    fn unreadable_empty_stdout_names_itself_empty_not_blank() {
         let o = outcome_from_reconcile(Ok(String::new()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("error"));
         assert_eq!(o.detail, "unreadable reconcile json: <empty>");
-    }
 
-    #[test]
-    fn a_held_receipt_names_the_holder_and_never_errors() {
         let stdout =
             r#"{"held": true, "requests": 3, "holder": "single-flight:42:ab", "held_for_s": 91}"#;
         let o = outcome_from_reconcile(Ok(stdout.to_string()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("held"));
         assert_eq!(o.detail, "flight held by single-flight:42:ab for 91s");
-    }
 
-    #[test]
-    fn a_held_receipt_with_a_key_names_the_key() {
         let stdout =
             r#"{"held":true,"key":"flight:k","holder":"single-flight:42:ab","held_for_s":91}"#;
         let o = outcome_from_reconcile(Ok(stdout.to_string()));
@@ -350,10 +335,7 @@ mod tests {
             o.detail,
             "flight flight:k held by single-flight:42:ab for 91s"
         );
-    }
 
-    #[test]
-    fn an_empty_close_with_failures_reads_failures_not_none() {
         let stdout = r#"{
   "closed": [],
   "promise_unmet": [],
@@ -366,10 +348,7 @@ mod tests {
             o.detail,
             "closed=0 promise_unmet=0 failures=1; first: x-1 PR #1: gh down"
         );
-    }
 
-    #[test]
-    fn a_reverse_map_failure_without_a_pr_reads_pr_dash_not_pr_zero() {
         let stdout = r#"{
   "closed": [],
   "promise_unmet": [],
@@ -382,10 +361,7 @@ mod tests {
             o.detail,
             "closed=0 promise_unmet=0 failures=1; first: x-1 PR -: reverse-map gh query failed: not a git repository"
         );
-    }
 
-    #[test]
-    fn an_empty_close_in_sync_reads_none_to_close() {
         let stdout = "{\n  \"closed\": [],\n  \"promise_unmet\": [],\n  \"failures\": []\n}";
         let o = outcome_from_reconcile(Ok(stdout.to_string()));
         assert_eq!(o.acted, 0);
@@ -394,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_reconcile_names_the_first_failure_and_a_stuck_catchup() {
+    fn reconcile_rows() {
         let stdout = r#"{
   "closed": [],
   "promise_unmet": [],
@@ -409,10 +385,7 @@ mod tests {
             o.detail,
             "closed=0 promise_unmet=0 failures=1; first: x-1 PR #7: gh pr view refused; sync_catchup=unknown: gh unavailable or unauthenticated"
         );
-    }
 
-    #[test]
-    fn a_fresh_catchup_adds_nothing_to_the_counts() {
         // A fresh or not-run catch-up is health, not a finding.
         let stdout = r#"{
   "closed": [],
@@ -423,10 +396,7 @@ mod tests {
         let o = outcome_from_reconcile(Ok(stdout.to_string()));
         assert_eq!(o.skip_reason.as_deref(), Some("none_to_close"));
         assert_eq!(o.detail, "closed=0 promise_unmet=0 failures=0");
-    }
 
-    #[test]
-    fn evidence_failures_alone_read_failures_not_none_to_close() {
         // A supersession-evidence-only run exits 4 too.
         let stdout = r#"{
   "closed": [],
@@ -445,51 +415,36 @@ mod tests {
     }
 
     #[test]
-    fn an_exit_4_payload_is_kept_not_discarded() {
+    fn exit_rows() {
         let stdout = r#"{"closed": [], "failures": [{"node_id": "x-1", "pr_number": 7}]}"#;
         let got = reconcile_result(Some(4), stdout.as_bytes(), b"skipping\n");
         assert_eq!(got.unwrap(), stdout);
-    }
 
-    #[test]
-    fn an_exit_4_without_a_payload_keeps_the_stderr_tail() {
         let got = reconcile_result(Some(4), b"", b"noise\nsync catch-up: gh unavailable\n");
         assert_eq!(got.unwrap_err(), "exit 4: sync catch-up: gh unavailable");
-    }
 
-    #[test]
-    fn an_exit_1_is_an_error_even_with_a_payload() {
         // Only exit 4 is a partial; a crash keeps the stderr tail.
         let got = reconcile_result(Some(1), br#"{"closed": []}"#, b"boom\n");
         assert_eq!(got.unwrap_err(), "exit 1: boom");
-    }
 
-    #[test]
-    fn a_killed_run_reports_exit_minus_one() {
         let got = reconcile_result(None, b"", b"");
         assert_eq!(got.unwrap_err(), "exit -1: ");
     }
 
     #[test]
-    fn a_young_cadence_stamp_gates_the_child_and_the_row() {
+    fn gate_rows() {
         let arm = Arm::default();
         let h = home();
         *arm.last_tick.lock().unwrap() = Some(Instant::now());
         maybe_tick_with(&arm, h.clone(), || panic!("arm must be gated"));
         assert!(!h.events_jsonl().exists(), "a gated tick wrote no row");
-    }
 
-    #[test]
-    fn an_in_flight_run_gates_the_child_and_the_row() {
         let arm = Arm::default();
         let h = home();
         arm.in_flight.store(true, Ordering::SeqCst);
         maybe_tick_with(&arm, h.clone(), || panic!("arm must be gated"));
         assert!(!h.events_jsonl().exists(), "a gated tick wrote no row");
-    }
 
-    #[test]
-    fn a_dispatch_pause_skips_the_child_and_still_writes_its_row() {
         let h = home();
         let pause = DispatchPause::Manual {
             state: "paused".to_string(),
@@ -505,10 +460,7 @@ mod tests {
             log.contains("\"skip_reason\":\"loops_paused\""),
             "log: {log}"
         );
-    }
 
-    #[test]
-    fn a_real_run_writes_exactly_one_row_on_a_temp_home() {
         let h = home();
         let pause = DispatchPause::Clear;
         let o = emit_one(&h, &pause, || {

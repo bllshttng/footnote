@@ -4128,7 +4128,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
     // extended window instead of respecting its own 10s bound.
     let is_wait = matches!(verb, ControlVerb::PaneWait { .. });
     let stream = if is_run {
-        match crate::client::connect_or_spawn(sock) {
+        match crate::client::connect_or_spawn(sock, false) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("fno mux pane: {e}");

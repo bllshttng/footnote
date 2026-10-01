@@ -177,7 +177,7 @@ pub(super) fn gate_inside_leg_onto_row(
         .iter_mut()
         .find(|e| entry_holds_session(e, session_uuid))
     {
-        let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
+        let newer = e.inside_leg.as_ref().is_none_or(|cur| cur.yields_to(&rep));
         if newer {
             let prev_state = e.inside_leg.as_ref().map(|r| r.state);
             let body = rep_reason.unwrap_or_else(|| state_str.to_string());

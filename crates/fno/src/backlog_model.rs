@@ -68,7 +68,7 @@ pub struct Query {
     kind: Vec<String>,
     tag: Vec<String>,
     q: Option<String>,
-    all: bool,
+    pub all: bool,
 }
 
 impl View {
@@ -163,6 +163,41 @@ pub struct Card {
     pub live: bool,
     /// The row's `created_at`, for the list view's date column.
     pub created_at: Option<String>,
+    /// The row's `completed_at`, for the client-side epic-lane rule (a card
+    /// sits in its parent's lane only while the parent row is open).
+    pub completed_at: Option<String>,
+    /// Distinct encounter voters (demand's `encounter_voters` rule).
+    pub encounters: usize,
+    /// The operator subset (`voter_kind == "operator"`).
+    pub encounters_operator: usize,
+}
+
+/// One encounter record's voter identity: `voter_key`, falling back to
+/// `session_id` for rows written before the key existed. Mirrors
+/// `fno.graph.demand.voter_key` so the board and the demand read can never
+/// disagree about what one voter is.
+fn voter_key(e: &Value) -> Option<&str> {
+    e.get("voter_key")
+        .and_then(Value::as_str)
+        .or_else(|| e.get("session_id").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+}
+
+/// Distinct encounter voters and the operator subset, per row.
+fn encounter_counts(e: &Value) -> (usize, usize) {
+    let mut voters: HashSet<&str> = HashSet::new();
+    let mut operators: HashSet<&str> = HashSet::new();
+    if let Some(items) = e.get("encounters").and_then(Value::as_array) {
+        for v in items {
+            if let Some(key) = voter_key(v) {
+                voters.insert(key);
+                if v.get("voter_kind").and_then(Value::as_str) == Some("operator") {
+                    operators.insert(key);
+                }
+            }
+        }
+    }
+    (voters.len(), operators.len())
 }
 
 /// A link to another node the read holds; an id-only link names a node the
@@ -322,6 +357,9 @@ pub struct NodeView {
     pub kind: Option<String>,
     pub created_at: Option<String>,
     pub completed_at: Option<String>,
+    /// The row's `source_kind` (who asked for it) and its evidence line.
+    pub origin: Option<String>,
+    pub origin_evidence: Option<String>,
     pub children: Vec<Link>,
     pub contained: Vec<Link>,
     pub blocked_by: Vec<Link>,
@@ -445,6 +483,7 @@ pub(crate) fn card_of(
         underway,
         inp.effective_priority.get(&id).map(String::as_str),
     )?;
+    let (encounters, encounters_operator) = encounter_counts(e);
     Some(Card {
         order: order.get(&id).copied().unwrap_or(usize::MAX),
         rank: e.get("rank").and_then(Value::as_f64),
@@ -489,6 +528,12 @@ pub(crate) fn card_of(
             .get("created_at")
             .and_then(Value::as_str)
             .map(str::to_string),
+        completed_at: e
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        encounters,
+        encounters_operator,
     })
 }
 
@@ -1182,6 +1227,8 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
         kind: e.get("type").and_then(Value::as_str).map(str::to_string),
         created_at: str_field("created_at"),
         completed_at: str_field("completed_at"),
+        origin: str_field("source_kind"),
+        origin_evidence: str_field("origin_evidence"),
     })
 }
 

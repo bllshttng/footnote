@@ -50,6 +50,7 @@ use row_menu::{build_row_menu, build_tab_menu};
 // The placement pickers (attach `p`, portal `P`) and the launch moment
 // (terminal guard + splash) live in their own modules; client.rs is
 // shrink-only under the file-budget gate.
+pub(crate) mod attach_handshake;
 mod launch;
 mod placement_pickers;
 
@@ -84,6 +85,7 @@ use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
+#[cfg(test)]
 use sideline::sideline_column_rects;
 
 mod row_stamp;
@@ -100,9 +102,9 @@ pub(crate) use name_fit::{fit_name, pad_to};
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Connect bound for the attach path. Longer than the scriptable verbs'
-/// probe (a human is willing to wait a beat) but never infinite: a wedged
-/// server must produce a clear line, not a hang.
+/// One connect attempt on the attach path. Longer than the scriptable verbs'
+/// probe. A script refuses when it expires; a human attach says it is still
+/// waiting and tries again.
 const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sideline width in columns at [`Density::Regular`], divider column included.
@@ -132,7 +134,7 @@ const COL_TIME: u16 = 6;
 
 /// The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
-const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 7 + 4 + 2 + 1;
 /// The narrowest useful extended panel: fixed status/PR/age cells, a readable
 /// agent cell, and the divider. The message cell is omitted only below its
 /// eight-column floor; age is never dropped from an admitted table.
@@ -406,7 +408,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     }
     let path = proto::socket_path(session)?;
 
-    let stream = connect_or_spawn(&path)?;
+    let stream = connect_or_spawn(&path, true)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
@@ -430,34 +432,40 @@ fn client_log_append(path: &Path, msg: &str) {
 /// server's stale socket gets a one-line notice and a fresh server - never a
 /// hang on a dead socket (the spawned server's bind unlinks it). Shared with
 /// `mux_cli::pane run`, which must self-spawn a server for a script-only
-/// session (AC1-EDGE).
-pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+/// session (AC1-EDGE). `patient` is the human attach: a slow or starved
+/// server gets one "still waiting" line and more time, never a refusal.
+pub(crate) fn connect_or_spawn(
+    path: &Path,
+    patient: bool,
+) -> Result<std::os::unix::net::UnixStream, String> {
     // spawn_server opens a log file in the mux dir, so the dir must exist first.
     // pane run reaches here without going through run_inner's ensure (AC1-EDGE).
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
-    match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
-        Ok(s) => {
-            e2e_client_log(format_args!(
-                "connected to live server at {}",
-                path.display()
-            ));
-            return Ok(s);
-        }
-        // A connect timeout means something holds the socket but never
-        // accepted: a wedged server. Spawning over it would just lose the
-        // bind race, so report instead - never hang, never clobber.
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(format!(
-                "server at {} is not accepting connections (connect timed out); it is \
-                 wedged. Run `fno mux kill-server` for this session: it escalates to \
-                 SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
-                 then retry.",
-                path.display(),
+    let mut said = false;
+    let mut still_waiting = |what: &str| {
+        if !std::mem::replace(&mut said, true) {
+            eprintln!(
+                "fno: {what}, still waiting (Ctrl-C to stop; check {})",
                 log_path(path).display()
-            ));
+            );
         }
-        Err(e) => {
-            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+    };
+    loop {
+        match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
+            Ok(s) => {
+                e2e_client_log(format_args!(
+                    "connected to live server at {}",
+                    path.display()
+                ));
+                return Ok(s);
+            }
+            // Something holds the socket but is not accepting: a starved or
+            // wedged server. A human waits it out; spawning over it would
+            // only lose the bind race.
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut && patient => {
+                still_waiting("server is busy");
+            }
+            Err(e) => break connect_failed(path, e)?,
         }
     }
     if path.exists() {
@@ -468,6 +476,10 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
     loop {
         match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
             Ok(s) => return Ok(s),
+            Err(_) if Instant::now() >= deadline && patient => {
+                still_waiting("server is slow to start");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!(
                     "server did not come up at {} ({e}); check {}",
@@ -476,6 +488,25 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
                 ));
             }
             Err(_) => std::thread::sleep(Duration::from_millis(30)),
+        }
+    }
+}
+
+/// A first connect that failed: a timeout refuses (the non-patient caller
+/// never clobbers a wedged server), anything else means spawn a server.
+fn connect_failed(path: &Path, e: std::io::Error) -> Result<(), String> {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => Err(format!(
+            "server at {} is not accepting connections (connect timed out); it is \
+             wedged. Run `fno mux kill-server` for this session: it escalates to \
+             SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
+             then retry.",
+            path.display(),
+            log_path(path).display()
+        )),
+        _ => {
+            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+            Ok(())
         }
     }
 }
@@ -1024,6 +1055,8 @@ struct View {
     server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
+    org_board: Option<org_board::OrgBoard>,
+    org_generation: u64,
     sideline_view: crate::view_store::SidelineView,
     /// The board's full-screen toggle (persisted in the view store).
     board_full: bool,
@@ -1385,6 +1418,7 @@ mod questions;
 mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
+mod frame_tick;
 mod pane_paint;
 // Region input ownership + the mouse pre-pass, moved out of handle_stdin
 // under the file-budget ratchet.
@@ -1854,9 +1888,13 @@ pub(crate) enum AuxAction {
 
 mod backlog_board;
 mod backlog_style;
+mod chrome_hit;
 mod config_set;
 mod lane_entry;
 mod node_detail;
+mod org_board;
+mod org_detail;
+mod org_graph;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
@@ -2063,6 +2101,8 @@ impl View {
             backlog: Vec::new(),
             server_proto: None,
             backlog_board: None,
+            org_board: None,
+            org_generation: 0,
             sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
@@ -2859,6 +2899,7 @@ impl View {
             || self.peek.is_some()
             || self.digest.is_some()
             || self.backlog_board.is_some()
+            || self.org_board.is_some()
     }
 
     /// The narrower guard for the ROW/TAB menu paths (right-press
@@ -2893,6 +2934,7 @@ impl View {
             || self.yard.is_some()
             || self.digest.is_some()
             || self.backlog_board.is_some()
+            || self.org_board.is_some()
     }
 
     /// Open the owning agent's row menu for the pane under
@@ -4151,112 +4193,6 @@ impl View {
         (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
     }
 
-    /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
-    /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
-    /// for a row that isn't directly actionable (a work-only agent, a card).
-    /// `None` = not a chrome cell (the caller falls through to [`hit_test`]), so
-    /// clicking anywhere off the panel still reaches the pane underneath.
-    fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
-        let panel_w = self.panel_w();
-        if let Some(hit) = self.chrome_hit_feed(row, col) {
-            return Some(hit);
-        }
-        // The questions block pins above the court block: a click on its
-        // rows opens the full questions view on that question; the `+N more`
-        // row opens the list. The header toggles nothing here (the key does).
-        if col < panel_w {
-            match questions::hit_at(self, self.term.0 as usize, row) {
-                Some(questions::QuestionHit::Row(id)) => {
-                    return Some(ChromeHit::OpenQuestionDetail(id));
-                }
-                Some(questions::QuestionHit::More) => {
-                    return Some(ChromeHit::OpenQuestionsList);
-                }
-                None => {}
-            }
-        }
-        // Tab strip (row 0, scoped to the content columns since US1): it
-        // begins at `panel_w`, walking the same spans the renderer paints (with
-        // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
-        // belongs to the sideline's reclaimed row 0 and falls through below.
-        // `panel_w == 0` (no sideline) -> strip from col 0, unchanged.
-        if row < TAB_BAR_ROWS && col >= panel_w {
-            let col = col as usize;
-            if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
-                if col >= start && col < start + text.chars().count() {
-                    return None;
-                }
-            }
-            let mut c = panel_w as usize;
-            for span in self.tab_bar_window() {
-                let w = tab_text_cols(&span.text);
-                if col >= c && col < c + w {
-                    return match span.hit? {
-                        TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
-                        TabHit::NewTab => Some(ChromeHit::Cmds(vec![Command::NewTab])),
-                    };
-                }
-                c += w;
-            }
-            return None;
-        }
-        // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel. Under the docked
-        // board the column is the board's own surface: no agents rows, no
-        // footer, no density button - a click must resolve nothing here or
-        // it acts on a phantom row.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
-            return None;
-        }
-        let paint_w = self.sideline_paint_w();
-        if paint_w == 0 || col as usize >= paint_w - 1 {
-            return None;
-        }
-        // Full-screen sideline paints below the strip; invert the same
-        // offset the painter used.
-        let top = self.sideline_top();
-        if (row as usize) < top {
-            return None;
-        }
-        // The bottom row is overlaid by the status / which-key / search chrome
-        // (draw_bottom_row paints last), so a click there belongs to that chrome,
-        // not the sideline row drawn underneath it (codex P2).
-        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
-            return None;
-        }
-        // The density button rides the sideline's top painted row, over
-        // whatever display row is scrolled to it. It is chrome pinned to the
-        // first PAINTED row, not a property of that row, so the check is on
-        // the painted row and must precede the display-row resolution below.
-        if row == top as u16 && !self.sideline_full {
-            // In full-screen the button is not painted, so a hit there would
-            // cycle a density the screen does not show.
-            if let Some(range) = self.density_button_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::CycleDensity);
-                }
-            }
-        }
-        // Display row i is painted at `i - offset` (draw_sideline, since
-        // the sideline owns the top painted row), so invert with the paint
-        // offset - else a click on a scrolled row activates the wrong row.
-        // Mirrors sideline_row_at.
-        let i = row as usize - top + self.sideline_offset();
-        if let Some(hit) = self.table_header_hit(i, col) {
-            return Some(hit);
-        }
-        // US4: a click on the footer's `☰ menu` region opens the sideline
-        // MENU popup; the rest of the footer row keeps its `+ new` create action.
-        if matches!(self.painted_rows().get(i), Some(DisplayRow::NewSquad)) {
-            if let Some(range) = self.footer_menu_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::OpenSidelineMenu { row, col });
-                }
-            }
-        }
-        self.row_action(i)
-    }
-
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
         if (self.density != Density::Extended && !self.sideline_full)
             || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
@@ -4264,7 +4200,7 @@ impl View {
             return None;
         }
         let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = sideline_column_rects(text_w as u16);
+        let rects = self.worker_column_rects(text_w as u16);
         let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
         if hit(rects[0]) {
             Some(ChromeHit::SortColumn(AgentSortColumn::Status))
@@ -5251,12 +5187,15 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
 
+        let agents_full =
+            self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
+
         // Full-screen sideline: the agent table takes the terminal width
         // with the composer at the bottom, and the panes do not paint. The
         // strip still owns row 0, so the sideline composes below it (the
         // click mappers invert the same offset via `sideline_top`), and the
         // server's viewport is untouched - no `Resize` travels either way.
-        if self.sideline_full {
+        if agents_full {
             self.draw_tab_bar(&mut cells, cols);
             let top = TAB_BAR_ROWS as usize;
             self.draw_sideline(&mut cells[top * cols..], rows - top, cols, cols);
@@ -5267,7 +5206,7 @@ impl View {
             }
         }
 
-        if !self.sideline_full {
+        if !agents_full {
             let origin_r = TAB_BAR_ROWS as usize;
             let origin_c = panel_w as usize;
             // Blit, frames, underline, grips, indicator, letterbox +
@@ -5498,6 +5437,8 @@ impl View {
                 // drive the selection below the fold. +1 for the query line.
                 Some(nav.cursor + 1),
             );
+        } else if self.org_board.is_some() && self.board_full {
+            org_board::paint(self, &mut cells, rows, cols, cols, rows);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -5517,6 +5458,8 @@ impl View {
             && self.row_menu.is_none()
             && self.aux.is_none()
             && self.backlog_board.is_none()
+            && !(self.org_board.is_some()
+                && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
         {
             if let Some((_, rect)) = self
                 .layout
@@ -6224,22 +6167,6 @@ impl View {
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
         out.into_iter().unzip()
-    }
-
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
-        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
-        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
-        rows.insert(0, DisplayRow::TableHead);
-        depths.insert(0, 0);
-        if !has_agent {
-            rows.insert(1, DisplayRow::TableEmpty);
-            depths.insert(1, 0);
-        }
-        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -7540,7 +7467,9 @@ const NAV_OVERLAY_W: usize = 54;
 // every `use super::*` renderer and test reading the same paths as before.
 #[cfg(test)]
 pub(crate) use crate::lattice::LATTICE_ACCENT;
-pub(crate) use crate::lattice::{lattice_glyph, lattice_style, status_word, LatticeState};
+pub(crate) use crate::lattice::{
+    lattice_glyph, lattice_style, status_glyph, status_word, LatticeState,
+};
 
 /// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
@@ -7975,6 +7904,7 @@ async fn attach_and_run(
             focus_node: None,
         },
     );
+    org_board::restore(&mut view);
     // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
@@ -8010,8 +7940,8 @@ async fn attach_and_run(
     }
     crate::keys::install(keymap);
     // Held, not stamped. The TTL is an absolute instant, and everything between
-    // here and the first paint - a handshake allowed ten seconds, then a
-    // catch-up fold - happens before anyone could read it. Stamped at the point
+    // here and the first paint - a handshake that may wait on a busy server,
+    // then a catch-up fold - happens before anyone could read it. Stamped at the point
     // the notice can first be SEEN, or a slow server turns "your config was
     // refused" back into the silence this notice exists to break.
     let key_notice = key_warnings
@@ -8034,108 +7964,8 @@ async fn attach_and_run(
     .await
     .map_err(|e| format!("attach failed: {e}"))?;
 
-    // The first Layout (or refusal) decides everything, BEFORE the terminal
-    // is taken over, so a refusal prints as a plain one-liner (AC1-ERR,
-    // version skew). ModeSync may precede it on the reliable channel - stash
-    // and apply once the TUI owns the terminal.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stashed_modesync: Vec<u8> = Vec::new();
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| format!("server did not answer the attach; {log_hint}"))?;
-        let msg = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
-            .await
-            .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
-        match msg {
-            Ok(ServerMsg::Layout {
-                squads,
-                active_squad,
-                panes,
-                focus,
-                area,
-                agents,
-                focus_node,
-                backlog,
-                ..
-            }) => {
-                view.set_layout(LayoutView {
-                    squads,
-                    active_squad,
-                    panes,
-                    focus,
-                    area,
-                    agents,
-                    focus_node,
-                });
-                // The launcher's node picker composes over the feed even
-                // though the sidebar no longer renders it.
-                view.backlog = backlog;
-                break;
-            }
-            Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
-            Ok(ServerMsg::Bye { reason }) => return Err(reason),
-            Ok(ServerMsg::Frame { pane_id, frame }) => {
-                // Tolerated out-of-order preamble: keep it; the Layout names
-                // its rect a message later. The wire trust boundary holds
-                // even here: a geometry-inconsistent frame is refused loudly
-                // (like a malformed message), never skipped or drawn.
-                if !frame.geometry_ok() {
-                    return Err(format!(
-                        "malformed frame from server: {}x{} but {} cells",
-                        frame.rows,
-                        frame.cols,
-                        frame.cells.len()
-                    ));
-                }
-                view.frames.insert(pane_id, frame);
-            }
-            // Info answers a pre-Attach Query; the v4 control-verb replies
-            // answer one-shot `fno mux pane` connections. Neither belongs on
-            // an attached connection - ignore rather than desync.
-            Ok(
-                ServerMsg::Notice { .. }
-                | ServerMsg::Info { .. }
-                | ServerMsg::PaneList { .. }
-                | ServerMsg::PaneText { .. }
-                | ServerMsg::PaneSpawned { .. }
-                | ServerMsg::Ok
-                | ServerMsg::WaitDone { .. }
-                | ServerMsg::Err { .. }
-                // Copy and OpenLink answer a mouse-release, and SearchResult
-                // answers a search - all can only follow attach: stray in the
-                // preamble, ignore rather than desync. LinkHover answers a
-                // hover probe (same class).
-                | ServerMsg::Copy { .. }
-                | ServerMsg::OpenLink { .. }
-                | ServerMsg::SearchResult { .. }
-                | ServerMsg::LinkHover { .. }
-                // PeekBody answers a post-attach PeekAgent: impossible
-                // in the preamble, ignore rather than desync.
-                | ServerMsg::PeekBody { .. }
-                // (v41) Script-layout control-verb replies: only ever sent on a
-                // one-shot control connection, never to an attached client.
-                | ServerMsg::TabList { .. }
-                | ServerMsg::LayoutTree { .. }
-                | ServerMsg::PaneLocation { .. }
-                | ServerMsg::TabSpawned { .. }
-                | ServerMsg::PaneFocused { .. }
-                | ServerMsg::LayoutApplied { .. }
-                | ServerMsg::LayoutGrafted { .. }
-                | ServerMsg::TabLocation { .. }
-                | ServerMsg::TabClosed { .. }
-                // (v60/v71/v75/v78) one-shot control-verb replies: never
-                // attached-client traffic.
-                | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
-                | ServerMsg::ServerStats { .. },
-            ) => {}
-            // A launch update cannot precede attach; ignore a misaddressed
-            // one rather than failing the handshake.
-            Ok(ServerMsg::AgentLaunch(_)) => {}
-            Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
-        }
-    }
+    let stashed_modesync =
+        attach_handshake::read_preamble(&mut sock_r, &mut view, &log_hint).await?;
 
     // Socket reads get their own task. `read_msg` is NOT cancellation-safe
     // (a select! that drops it between the length prefix and the body loses
@@ -8242,6 +8072,7 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<theme_import_ui::ImportMsg>();
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
+    let (org_tx, mut org_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, org_detail::OrgMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -8348,7 +8179,7 @@ async fn attach_and_run(
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
-
+    crate::lattice::start_spin();
     let exit: Result<i32, String> = loop {
         // kick a wanted event-fold off the UI loop, at most ONE in
         // flight (P2-5). Runs at loop top so a want re-armed from either the
@@ -8374,6 +8205,7 @@ async fn attach_and_run(
         theme_import_ui::maybe_kick(&mut view, &theme_import_tx);
         // the backlog board's probe/gather kick, the same single-flight.
         backlog_board::maybe_kick(&mut view, &board_tx);
+        org_board::maybe_kick(&mut view, &org_tx);
         // a queued board write verb runs off the UI loop too.
         if let Some(action) = view
             .backlog_board
@@ -8587,23 +8419,9 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
         // Refresh timer; the deadline is None while a fold runs.
         let court_tick = view.court.refresh_deadline();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
-        let yard_tick = view.yard.as_ref().map(|yv| {
-            let step = YARD_FRAME_MS as u64;
-            let elapsed = yv.opened_at.elapsed().as_millis() as u64;
-            yv.opened_at + Duration::from_millis((elapsed / step + 1) * step)
-        });
+        let frame_tick = view.frame_deadline();
         // The meter's one-shot spawn: the settings toggle sets
         // `resource_meter_sampling`, and the loop - which owns meter_tx -
         // starts the sampler here, exactly once per toggle-on. A fresh
@@ -9035,6 +8853,12 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((gen, msg)) = org_rx.recv() => {
+                org_detail::apply(&mut view, gen, msg);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -9300,11 +9124,11 @@ async fn attach_and_run(
                 }
             }
             _ = async {
-                match yard_tick {
+                match frame_tick {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
                 }
-            }, if yard_tick.is_some() => {
+            }, if frame_tick.is_some() => {
                 // Frame advance only: compose() uses the elapsed time, so the
                 // wake repaints (and re-arms the next deadline next pass).
                 if let Err(e) = compositor.draw(&view.compose()) {
@@ -12442,6 +12266,7 @@ mod court_block;
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
 
+mod row_meter;
 #[path = "client/sideline.rs"]
 mod sideline;
 

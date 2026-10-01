@@ -1270,6 +1270,17 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // The one delivery classifier (scoreboard.rs): graph nodes + ledger
         // rows in, a per-node delivery classification out.
         "scoreboard_classify" => crate::scoreboard::classify(&params).map_err(StoreError::Invalid),
+        // The ledger axis fill + reconcile backstop (ledger_axes.rs): the
+        // LEDGER path is the caller's (Python passes paths.ledger_json());
+        // the graph rows come from the keeper's own cache.
+        "ledger_backstop" => {
+            crate::ledger_axes::ledger_backstop(state, &params).map_err(StoreError::Invalid)
+        }
+        // The ported by-provider fold (scoreboard_provider.rs): client-shipped
+        // entries + rows in, the view plus its rendered text out.
+        "scoreboard_by_provider" => {
+            crate::scoreboard_provider::view(&params).map_err(StoreError::Invalid)
+        }
         // The lifecycle verb decision (backlog_ready::serve_effective_verb):
         // one answer per shipped row; a refusal rides its own row.
         "effective_verb" => {

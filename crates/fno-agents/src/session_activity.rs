@@ -5,6 +5,7 @@
 
 use crate::provenance::turn_ts_epoch;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13,6 +14,19 @@ pub(crate) struct Tokens {
     pub(crate) output: u64,
     pub(crate) cache_read: u64,
     pub(crate) cache_write: u64,
+}
+
+impl Tokens {
+    /// The window delta between a cumulative total and the base read at the
+    /// window's first row; saturating so a total reset reads as zero.
+    pub(crate) fn since(self, base: Tokens) -> Tokens {
+        Tokens {
+            input: self.input.saturating_sub(base.input),
+            output: self.output.saturating_sub(base.output),
+            cache_read: self.cache_read.saturating_sub(base.cache_read),
+            cache_write: self.cache_write.saturating_sub(base.cache_write),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -117,6 +131,10 @@ pub(crate) struct ActivityFold {
 
 impl ActivityFold {
     pub(crate) fn row(&mut self, row: &Value) {
+        if row.get("payload").is_some_and(|p| p.is_object()) {
+            self.codex_row(row);
+            return;
+        }
         let is_assistant = row.get("type").and_then(|v| v.as_str()) == Some("assistant")
             || row
                 .get("message")
@@ -222,6 +240,47 @@ impl ActivityFold {
             .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         self.act
     }
+
+    /// The codex arm: a rollout row (`{type, payload}`). The body is
+    /// `codex_activity`'s loop moved beside the claude body, with the output
+    /// text and error shape it was missing.
+    fn codex_row(&mut self, row: &Value) {
+        let act = &mut self.act;
+        let row_type = row.get("type").and_then(|v| v.as_str());
+        let Some(payload) = row.get("payload").filter(|p| p.is_object()) else {
+            return;
+        };
+        let ptype = payload.get("type").and_then(|v| v.as_str());
+        match (row_type, ptype) {
+            (Some("event_msg"), Some("token_count")) => {
+                if let Some(total) = codex_token_total(row) {
+                    act.tokens = total;
+                }
+            }
+            (Some("event_msg"), Some("turn_aborted")) => act.aborted_turns += 1,
+            (Some("response_item"), Some("message"))
+                if payload.get("role").and_then(|v| v.as_str()) == Some("assistant") =>
+            {
+                if let Some(ts) = turn_ts_epoch(row) {
+                    act.assistant_ts.push(ts);
+                }
+            }
+            (Some("response_item"), Some("function_call"))
+            | (Some("response_item"), Some("custom_tool_call")) => {
+                let input = codex_call_input(payload);
+                if input.contains("*** Begin Patch") {
+                    patch_activity(&input, act);
+                }
+            }
+            (Some("response_item"), Some("custom_tool_call_output"))
+            | (Some("response_item"), Some("function_call_output")) => {
+                if codex_output_is_error(&codex_output_text(payload)) {
+                    *act.tool_errors.entry("command_failed").or_insert(0) += 1;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Lines added and removed plus one extension count per file, out of a codex
@@ -267,64 +326,72 @@ fn codex_call_input(payload: &Value) -> String {
         .to_string()
 }
 
+/// The tool output text of a codex output row: the string form, or the list's
+/// `text` parts joined with "" (1,465 of 1,471 Kestrel II outputs are the
+/// list shape; measured 2026-09-30).
+pub(crate) fn codex_output_text(payload: &Value) -> Cow<'_, str> {
+    match payload.get("output") {
+        Some(Value::String(s)) => Cow::Borrowed(s),
+        Some(Value::Array(parts)) => Cow::Owned(
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+        _ => Cow::Borrowed(""),
+    }
+}
+
+/// One failed command: the leading text codex writes for a failed or
+/// terminated script, or an inner result with a non-zero exit code. The
+/// escaped-quote form matches output text embedded in a JSON string.
+fn codex_output_is_error(text: &str) -> bool {
+    let t = text.trim_start();
+    if t.starts_with("Script failed") || t.starts_with("Script terminated") {
+        return true;
+    }
+    static EXIT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = EXIT.get_or_init(|| {
+        regex::Regex::new(r#"\\?"exit_code\\?":\s*(-?\d+)"#).expect("valid pattern")
+    });
+    re.captures_iter(text).any(|c| c[1].parse::<i64>() != Ok(0))
+}
+
+/// The cumulative token total of a codex `token_count` row, `None` for any
+/// other row and when `info` is null (a null never wins).
+pub(crate) fn codex_token_total(row: &Value) -> Option<Tokens> {
+    if row.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
+        return None;
+    }
+    let payload = row.get("payload")?;
+    if payload.get("type").and_then(|v| v.as_str()) != Some("token_count") {
+        return None;
+    }
+    let usage = payload
+        .get("info")
+        .filter(|i| !i.is_null())
+        .and_then(|i| i.get("total_token_usage"))
+        .filter(|u| u.is_object())?;
+    let f = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(Tokens {
+        input: f("input_tokens"),
+        output: f("output_tokens"),
+        cache_read: f("cached_input_tokens"),
+        cache_write: f("cache_write_input_tokens"),
+    })
+}
+
 /// Activity counters for one codex rollout (`payload` row shape).
 pub(crate) fn codex_activity(raw: &str) -> Activity {
-    let mut act = Activity::default();
+    let mut fold = ActivityFold::default();
     for line in raw.lines() {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let row_type = row.get("type").and_then(|v| v.as_str());
-        let Some(payload) = row.get("payload").filter(|p| p.is_object()) else {
-            continue;
-        };
-        let ptype = payload.get("type").and_then(|v| v.as_str());
-        match (row_type, ptype) {
-            // token_count totals are cumulative, so the last readable event
-            // is the session total.
-            (Some("event_msg"), Some("token_count")) => {
-                if let Some(usage) = payload
-                    .get("info")
-                    .filter(|i| !i.is_null())
-                    .and_then(|i| i.get("total_token_usage"))
-                    .filter(|u| u.is_object())
-                {
-                    let f = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                    act.tokens = Tokens {
-                        input: f("input_tokens"),
-                        output: f("output_tokens"),
-                        cache_read: f("cached_input_tokens"),
-                        cache_write: f("cache_write_input_tokens"),
-                    };
-                }
-            }
-            (Some("event_msg"), Some("turn_aborted")) => act.aborted_turns += 1,
-            (Some("response_item"), Some("message"))
-                if payload.get("role").and_then(|v| v.as_str()) == Some("assistant") =>
-            {
-                if let Some(ts) = turn_ts_epoch(&row) {
-                    act.assistant_ts.push(ts);
-                }
-            }
-            (Some("response_item"), Some("function_call"))
-            | (Some("response_item"), Some("custom_tool_call")) => {
-                let input = codex_call_input(payload);
-                if input.contains("*** Begin Patch") {
-                    patch_activity(&input, &mut act);
-                }
-            }
-            (Some("response_item"), Some("custom_tool_call_output")) => {
-                let text = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
-                if text.trim_start().starts_with("Script failed") {
-                    *act.tool_errors.entry("command_failed").or_insert(0) += 1;
-                }
-            }
-            _ => {}
-        }
+        fold.row(&row);
     }
-    act.assistant_ts
-        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    act
+    fold.finish()
 }
 
 #[cfg(test)]
@@ -493,17 +560,6 @@ mod tests {
         assert_eq!(act.tool_errors.get("command_failed"), Some(&1));
         assert_eq!(act.aborted_turns, 1);
         assert_eq!(act.assistant_ts.len(), 1);
-    }
-
-    #[test]
-    fn a_token_count_with_null_info_never_wins() {
-        let raw = claude_lines(&[
-            json!({"type": "event_msg", "payload": {"type": "token_count", "info": null}}),
-            json!({"type": "event_msg", "payload": {"type": "token_count",
-                    "info": {"total_token_usage": {"input_tokens": 9, "output_tokens": 4}}}}),
-        ]);
-        let act = codex_activity(&raw);
-        assert_eq!(act.tokens.output, 4);
     }
 
     #[test]

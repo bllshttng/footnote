@@ -123,7 +123,7 @@ To change only the node's board rank, an operator runs `fno backlog rank <id> --
 
 ## Events
 
-All transitions are emitted through the loop `Journal` (project journal fatal, global mirror best-effort). An auditor can reconstruct the full drain history from `events.jsonl` alone:
+All transitions are emitted through the loop `Journal` (project journal fatal, global mirror best-effort), committed into the `events.db` beside each journal (event-log-storage.md). An auditor can reconstruct the full drain history from that store alone:
 
 | Event | When |
 |-------|------|

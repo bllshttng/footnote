@@ -615,6 +615,94 @@ pub(crate) fn mode_writes_status(mode: &SweepMode, ch: &ReconcileChange) -> bool
     }
 }
 
+struct WorkerReading {
+    name: String,
+    key: (String, Option<String>),
+    context: Option<serde_json::Value>,
+    unread: Option<u32>,
+}
+
+fn measure_worker(
+    entry: &RegistryEntry,
+    transcript: Option<&std::path::Path>,
+    bus_dir: &std::path::Path,
+    msgs: Option<&[serde_json::Value]>,
+) -> WorkerReading {
+    let context = transcript.and_then(|path| {
+        crate::context_run::transcript_reading(
+            path,
+            entry.harness_session_id.as_deref().unwrap_or(""),
+            std::path::Path::new(&entry.cwd),
+        )
+        .ok()
+    });
+    WorkerReading {
+        name: entry.name.clone(),
+        key: state::registry_write_key(entry),
+        context,
+        unread: msgs.map(|msgs| {
+            crate::mail_control_drain::unread_count(bus_dir, msgs, &entry.name)
+                .min(u32::MAX as usize) as u32
+        }),
+    }
+}
+
+fn apply_worker_readings(registry: &mut state::Registry, readings: &[WorkerReading], now: &str) {
+    for reading in readings {
+        let row = registry.entries.iter_mut().find(|e| {
+            state::registry_write_key(e) == reading.key
+                && (reading.key.1.is_some() || e.name == reading.name)
+        });
+        let Some(row) = row.filter(|e| e.status != AgentStatus::Exited) else {
+            continue;
+        };
+        if let Some(context) = &reading.context {
+            row.context_used_pct = context["used_pct"]
+                .as_u64()
+                .map(|pct| pct.min(u8::MAX as u64) as u8);
+            row.context_used_tokens = context["used_tokens"].as_u64();
+            row.context_window_tokens = context["window_tokens"].as_u64();
+            row.context_measured_at = Some(now.to_string());
+        }
+        row.mail_unread = reading.unread;
+    }
+}
+
+pub(crate) fn persist_reconcile_changes(
+    home: &crate::paths::AgentsHome,
+    entries: &[RegistryEntry],
+    changes: &[crate::daemon::ReconcileChange],
+    titles: &std::collections::HashMap<String, Option<String>>,
+    mode: &SweepMode,
+    now: &str,
+) -> Result<(), state::StateError> {
+    let log = crate::intel::bus_log_path(home.root().parent().unwrap_or(home.root()));
+    let bus_dir = log.parent().unwrap_or(home.root());
+    let msgs = std::fs::read_to_string(&log).ok().and_then(|text| {
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    });
+    let transcripts = crate::context_run::SessionTranscripts::default();
+    let readings: Vec<_> = entries
+        .iter()
+        .filter(|e| e.status != AgentStatus::Exited)
+        .map(|entry| {
+            let transcript = entry
+                .harness_session_id
+                .as_deref()
+                .and_then(|sid| transcripts.find(sid, entry.harness_name()));
+            measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
+        })
+        .collect();
+    state::update_registry(&home.registry_json(), |r| {
+        apply_reconcile_changes(r, entries, changes, titles, mode, now);
+        apply_worker_readings(r, &readings, now);
+    })
+}
+
 /// The one batched registry write both modes share: apply every planned
 /// change and the batch's title readings in one lock window. ServeOnly
 /// writes a status only when the row's own pid proved it (`pid_proven`), so a
@@ -860,6 +948,61 @@ mod tests {
         assert_eq!(row.status, AgentStatus::Exited);
         assert_eq!(row.pid, None, "Exited clears the pid (Locked Decision #7)");
         assert_eq!(row.exited_at.as_deref(), Some("2026-09-10T12:00:00Z"));
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("usage.jsonl");
+        fs::write(&transcript, r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":258687}}}"#).unwrap();
+        let mut entry = mk("worker", None);
+        entry.harness = Some("claude".into());
+        entry.harness_session_id = Some("fixture".into());
+        entry.cwd = dir.path().to_string_lossy().into_owned();
+        entry.context_used_pct = Some(40);
+        entry.context_measured_at = Some("T0".into());
+        entry.mail_unread = Some(5);
+        let mut registry = state::Registry::default();
+        registry.entries.push(entry.clone());
+        let missing = dir.path().join("missing.jsonl");
+        let reading = measure_worker(&entry, Some(&missing), dir.path(), None);
+        apply_worker_readings(&mut registry, &[reading], "T1");
+        assert_eq!(registry.entries[0].context_used_pct, Some(40));
+        assert_eq!(registry.entries[0].mail_unread, None);
+        assert_eq!(
+            registry.entries[0].context_measured_at.as_deref(),
+            Some("T0")
+        );
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "[[routing.models]]\nmodel = \"claude-opus-5\"\ncontext = 1000000\ncontext_measured_at = 2026-09-01\n").unwrap();
+        let previous = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", &config);
+        let reading = measure_worker(&entry, Some(&transcript), dir.path(), Some(&[]));
+        match previous {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        apply_worker_readings(&mut registry, &[reading], "T1");
+        assert_eq!(registry.entries[0].context_used_pct, Some(26));
+        assert_eq!(registry.entries[0].context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            registry.entries[0].context_measured_at.as_deref(),
+            Some("T1")
+        );
+        assert_eq!(registry.entries[0].mail_unread, Some(0));
+        fs::remove_file(&transcript).unwrap();
+        let reading = measure_worker(&entry, Some(&transcript), dir.path(), None);
+        apply_worker_readings(&mut registry, &[reading], "T2");
+        assert_eq!(registry.entries[0].context_used_pct, Some(26));
+        assert_eq!(
+            registry.entries[0].context_measured_at.as_deref(),
+            Some("T1")
+        );
+        assert_eq!(registry.entries[0].mail_unread, None);
+        let reading = measure_worker(&entry, Some(&transcript), dir.path(), Some(&[]));
+        registry.entries[0].harness_session_id = Some("successor".into());
+        registry.entries[0].mail_unread = Some(7);
+        apply_worker_readings(&mut registry, &[reading], "T3");
+        assert_eq!(registry.entries[0].mail_unread, Some(7));
     }
 
     #[test]

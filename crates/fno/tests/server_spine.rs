@@ -409,6 +409,16 @@ fn server_spine_echo_roundtrips_and_owner_lifecycle() {
     );
 }
 
+fn spine_event_rows(events_path: &Path) -> Vec<serde_json::Value> {
+    // The daemon rows commit into the store beside the journal; the raw
+    // file is legacy bytes the writer no longer touches.
+    fno::event_store::query_events(events_path, &fno::event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| serde_json::from_str(&row.line).ok())
+        .collect()
+}
+
 #[test]
 fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
     let scratch = Scratch::new("human-touch-latency");
@@ -432,11 +442,7 @@ fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
     );
 
     let events_path = scratch.0.join("iso-agents").join("events.jsonl");
-    let rows: Vec<serde_json::Value> = std::fs::read_to_string(events_path)
-        .expect("the input event journal is isolated under the scratch home")
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
+    let rows = spine_event_rows(&events_path);
     let touch = rows
         .iter()
         .find(|row| row["type"] == "human_touch")
@@ -463,11 +469,7 @@ fn server_spine_touch_kill_switch_preserves_operator_witnesses() {
     });
 
     let events_path = scratch.0.join("iso-agents").join("events.jsonl");
-    let rows: Vec<serde_json::Value> = std::fs::read_to_string(events_path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
+    let rows = spine_event_rows(&events_path);
     assert_eq!(
         rows.iter()
             .filter(|row| row["type"] == "operator_typing")

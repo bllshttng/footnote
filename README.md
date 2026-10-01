@@ -41,6 +41,15 @@ npx skills add bllshttng/footnote --skill tdd
 
 Other harnesses (opencode, agy, gemini, pi): see [docs/HARNESSES.md](docs/HARNESSES.md). Then run `/fno:setup` (or `fno config setup wizard`), and point `/fno:target` at a feature.
 
+## Uninstall
+
+```
+fno uninstall --dry-run
+fno uninstall
+```
+
+The first command lists what it found and changes nothing. The second removes the plugins, the hooks fno added to harness config, the launchd agents and the binaries. It also stops the daemon and the mux. It keeps `~/.fno`. Add `--purge` to delete that too, after you type the confirmation word. Run it from a plain terminal, not from inside an fno mux pane.
+
 ## How it works
 
 Named stages, one sentence each:
