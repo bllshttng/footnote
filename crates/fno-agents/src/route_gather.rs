@@ -796,27 +796,37 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    fn pinned_sandbox(name: &str, config: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+    type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
+
+    fn pinned_sandbox(
+        name: &str,
+        config: &str,
+    ) -> (std::sync::MutexGuard<'static, ()>, PathBuf, Saved) {
         let guard = lock();
         let tmp = sandbox(name);
         std::fs::write(tmp.join(".fno/config.toml"), config).unwrap();
+        // Config-path pins only, snapshot-then-restore: the state roots are
+        // the world every sibling test resolves through, and a test that
+        // moves them (set, removal or restore) sends that sibling down a
+        // branch its assertions refuse.
+        let saved: Saved = vec![
+            (
+                "FNO_GLOBAL_SETTINGS_PATH",
+                std::env::var_os("FNO_GLOBAL_SETTINGS_PATH"),
+            ),
+            ("CODEX_HOME", std::env::var_os("CODEX_HOME")),
+        ];
         std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", tmp.join("absent-global.json"));
-        std::env::set_var("FNO_AGENTS_HOME", tmp.join("ah"));
-        std::env::set_var("FNO_STATE_DIR", tmp.join("state"));
-        (guard, tmp)
+        (guard, tmp, saved)
     }
 
-    /// The pins pinned_sandbox (and the CODEX_HOME seed) leave in the
-    /// process env: remove them, or a later test in this binary reads this
-    /// test's world.
-    fn clear_sandbox_env() {
-        for key in [
-            "FNO_GLOBAL_SETTINGS_PATH",
-            "FNO_AGENTS_HOME",
-            "FNO_STATE_DIR",
-            "CODEX_HOME",
-        ] {
-            std::env::remove_var(key);
+    /// Restore the pins pinned_sandbox (and the CODEX_HOME seed) snapshot.
+    fn clear_sandbox_env(saved: Saved) {
+        for (key, value) in saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
     }
 
@@ -842,7 +852,7 @@ mod tests {
             "task_difficulty": "HIGH",
             "plan_model": "fallback-m",
         });
-        let (guard, tmp) = pinned_sandbox("dispatch-precedence", "");
+        let (guard, tmp, saved) = pinned_sandbox("dispatch-precedence", "");
         // The tier leg consults the codex catalog when it resolves a codex
         // model; a seeded empty catalog keeps the chain free of the
         // catalog-unreadable notice this sandbox cannot fetch.
@@ -863,29 +873,29 @@ mod tests {
         let out = run_mode(&json!({"mode": "dispatch_model"}), &tmp);
         assert_eq!(out["source"], "provider-default(no-difficulty)");
         drop(guard);
-        clear_sandbox_env();
+        clear_sandbox_env(saved);
     }
 
     #[test]
     fn policy_mode_answers_both_flags_ac8_hp() {
-        let (guard, tmp) = pinned_sandbox(
+        let (guard, tmp, saved) = pinned_sandbox(
             "policy",
             "[routing]\nenforce_inventory = true\noperator_access = \"Local\"\n",
         );
         let out = run_mode(&json!({"mode": "policy"}), &tmp);
         drop(guard);
-        clear_sandbox_env();
+        clear_sandbox_env(saved);
         assert_eq!(out["enforce_inventory"], json!(true));
         assert_eq!(out["operator_access"], "local");
     }
 
     #[test]
     fn unparseable_config_answers_empty_ac8_err() {
-        let (guard, tmp) = pinned_sandbox("unparseable", "not [ valid {{{{");
+        let (guard, tmp, saved) = pinned_sandbox("unparseable", "not [ valid {{{{");
         let inv = run_mode(&json!({"mode": "inventory"}), &tmp);
         let pol = run_mode(&json!({"mode": "policy"}), &tmp);
         drop(guard);
-        clear_sandbox_env();
+        clear_sandbox_env(saved);
         assert_eq!(inv["declared"], json!(false));
         assert_eq!(inv["objective"], "cheapest-that-clears");
         // An unparseable config degrades to the BUILT-IN rows (a tier

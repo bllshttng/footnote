@@ -1664,47 +1664,52 @@ mod tests {
 
     type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
 
+    /// The per-process fake world the state roots pin to, for the whole
+    /// run. Pins are SET-FOREVER and the dir is never deleted: a restored
+    /// pin reopens live-$HOME reads (the runner's world), a deleted dir
+    /// starves later readers of a readable-empty world, and both shipped
+    /// 28 and 6 CI failures before this shape landed.
+    fn fake_root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("fno-fake-world-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        });
+        root.as_path()
+    }
+
     fn hermetic() -> (
         std::sync::MutexGuard<'static, ()>,
-        std::path::PathBuf,
+        &'static std::path::Path,
         Saved,
     ) {
         let guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let root = std::env::temp_dir().join(format!("spawn-compose-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&root);
-        // Snapshot-then-pin, restore in clear_hermetic: a pin left set at a
-        // deleted dir sends a later test down its unreadable branch (the
-        // slot_cutover stamp lie), and removal without CI's declared ambient
-        // trips the paths.rs guard. FNO_TEST_HERMETIC is never touched: CI
-        // declares "0" for the process and the value must survive.
-        let keys = [
-            "FNO_CONFIG",
-            "FNO_CLAIMS_ROOT",
-            "FNO_STATE_DIR",
-            "FNO_AGENTS_HOME",
-        ];
-        let saved: Saved = keys.map(|k| (k, std::env::var_os(k))).into_iter().collect();
+        let root = fake_root();
+        // Snapshot only the config path: the state roots are SET-FOREVER
+        // (see fake_root), and FNO_TEST_HERMETIC is never touched, so CI's
+        // declared ambient ("0") survives the whole process.
+        let saved: Saved = vec![("FNO_CONFIG", std::env::var_os("FNO_CONFIG"))];
         // The consult arm reads the declared rows, the policy and the lanes
         // from DISK (the gather's own read); pin an empty config or the
         // test process's ambient config answers the walk.
         std::fs::write(root.join("config.toml"), "").unwrap();
         std::env::set_var("FNO_CONFIG", root.join("config.toml"));
-        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        std::env::set_var("FNO_CLAIMS_ROOT", root);
         std::env::set_var("FNO_STATE_DIR", root.join("state"));
         std::env::set_var("FNO_AGENTS_HOME", root.join("agents-home"));
         (guard, root, saved)
     }
 
-    fn clear_hermetic(root: &std::path::Path, saved: Saved) {
+    fn clear_hermetic(_root: &std::path::Path, saved: Saved) {
         for (key, value) in saved {
             match value {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
             }
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The role gate: a config model, a free axis and a role with no
