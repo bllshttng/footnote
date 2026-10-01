@@ -284,7 +284,10 @@ pub fn prepare(req: &Request, cwd: &Path) -> Receipt {
     // a new delivery; only the explicit allowance forks from there.
     if !req.allow_in_review && req.phase == Phase::Init {
         if let (Some(n), Some(b)) = (pr, branch()) {
-            if adoption_proven(read_pr(cwd, n, str_field(source, "pr_url")).as_ref(), Some(&b)) {
+            if adoption_proven(
+                read_pr(cwd, n, str_field(source, "pr_url")).as_ref(),
+                Some(&b),
+            ) {
                 return adopted(&id, n, &b);
             }
         }
@@ -305,7 +308,10 @@ fn adopted(id: &str, pr: i64, branch: &str) -> Receipt {
 fn adopt_or_refuse(source: &Value, pr: Option<i64>, cwd: &Path, branch: Option<&str>) -> Receipt {
     let id = id_of(source);
     if let (Some(n), Some(b)) = (pr, branch) {
-        if adoption_proven(read_pr(cwd, n, str_field(source, "pr_url")).as_ref(), Some(b)) {
+        if adoption_proven(
+            read_pr(cwd, n, str_field(source, "pr_url")).as_ref(),
+            Some(b),
+        ) {
             return adopted(&id, n, b);
         }
     }
