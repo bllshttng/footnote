@@ -143,7 +143,14 @@ fn parse_size(v: &str) -> Option<(u16, u16)> {
 }
 
 pub fn run(args: SnapshotArgs) -> i32 {
-    let frame = live_frame(&args.server, args.squad.as_deref(), args.size, args.fit);
+    // The chrome paints the mux theme a live client in this ground would run,
+    // so its chips and badges carry that theme's own pairs.
+    let chrome = match args.theme.name {
+        "dark" => crate::theme::theme_footnote_superscript(),
+        "light" => crate::theme::theme_footnote_paper(),
+        _ => crate::theme::Theme::default_theme(),
+    };
+    let frame = live_frame(&args.server, args.squad.as_deref(), args.size, args.fit, chrome);
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
             println!("{}", args.out.display());
@@ -235,6 +242,7 @@ fn live_frame(
     squad: Option<&str>,
     size: Option<(u16, u16)>,
     fit: bool,
+    chrome: crate::theme::Theme,
 ) -> Result<Frame, String> {
     let socket = proto::socket_path(server)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
@@ -276,6 +284,7 @@ fn live_frame(
     }
     let area = seen.layout.area;
     let mut view = View::new(area, server.into(), seen.layout);
+    view.theme = chrome;
     view.frames = seen.frames;
     view.term = match size {
         Some(t) => t,
