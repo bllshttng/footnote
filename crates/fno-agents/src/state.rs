@@ -490,8 +490,9 @@ pub enum InsideLegState {
 /// The stored form of one inside-leg report (contract v2: X2). The wire payload
 /// the daemon receives is `{session_id, seq, state, reason?, ttl_ms?}`; the
 /// daemon adds `received_at` and stores the rest here on the [`RegistryEntry`].
-/// `seq` is per-`session_id` monotonic so a reordered/duplicate report can be
-/// dropped (`seq <= last_seq`); `ttl_ms` bounds how long the badge stays live
+/// `seq` is per-`session_id` monotonic within one host boot so a reordered or
+/// duplicate report can be dropped ([`InsideLegReport::yields_to`] has the
+/// rule and its reboot horizon); `ttl_ms` bounds how long the badge stays live
 /// before it ages to unknown. NOTE (E3.1 scope): this struct is the storage
 /// CONTRACT only -- the seq-drop, TTL-aging, and 3-tier authority BEHAVIOUR that
 /// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
