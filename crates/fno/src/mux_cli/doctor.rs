@@ -199,7 +199,6 @@ pub(super) fn canonical_venv_check() -> Check {
 /// `/private/tmp` alias never reads as an offender and a shebang spelled
 /// through a symlink into `root` never reads as clean.
 pub(super) fn venv_shebang_offenders(bin: &Path, root: &Path) -> Vec<(String, String)> {
-    use std::io::Read;
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(bin) else {
         return out;
@@ -216,8 +215,9 @@ pub(super) fn venv_shebang_offenders(bin: &Path, root: &Path) -> Vec<(String, St
             Ok(f) => f,
             Err(_) => continue,
         };
+        use std::io::Read as _;
         let mut head = [0u8; 512];
-        let n = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
+        let n = file.read(&mut head).unwrap_or(0);
         if !head[..n].starts_with(b"#!") {
             continue;
         }
