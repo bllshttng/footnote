@@ -1267,22 +1267,16 @@ fn cargo_slot_keys(worktree: &Path) -> Vec<String> {
 /// Whether this cargo's admission family holds a run slot right now: its
 /// exact holder string on some slot key, or a slot whose holder pid is this
 /// cargo or its ancestor (one admitted cargo covers its nested children).
-/// Suspect counts as held, like `holder_rows`: the slot is still occupied
-/// and unstealable (the steal reads Live only), so counting it never masks
-/// a real theft, and a detached cargo whose recorded pid died keeps its
-/// build wait instead of cycling slotless through re-admission.
-/// The build door re-checks this before it may take `build:cargo`, so a
-/// waiter whose slot was stolen leaves the build wait instead of taking the
-/// lock while holding no slot.
+/// Any state counts while the row exists: a detached cargo whose recorded
+/// pid died reads Stale (Suspect on a refused probe), and only a real theft
+/// removes the row entirely, so the state gate would turn the door's own
+/// stale slot into a forever-false precondition and a hot re-admission
+/// cycle. The build door re-checks this before it may take `build:cargo`,
+/// so a waiter whose slot was stolen leaves the build wait instead of
+/// taking the lock while holding no slot.
 fn holds_run_slot(cargo_pid: u32, holder: &str, keys: &[String], root: Option<&Path>) -> bool {
     keys.iter().any(|key| {
-        if let (state, Some(rec)) = crate::claims::status(key, root) {
-            if !matches!(
-                state,
-                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
-            ) {
-                return false;
-            }
+        if let (_state, Some(rec)) = crate::claims::status(key, root) {
             rec.holder == holder
                 || rec
                     .pid
@@ -2746,9 +2740,10 @@ mod tests {
             b.is_none(),
             "the freed build lock must stay free, not taken by the slotless waiter"
         );
-        // A suspect slot (recorded pid dead) still counts as held: the
-        // detached cargo keeps its build wait instead of cycling slotless
-        // through re-admission (the 2026-10-01 CI wedge).
+        // A slot whose recorded pid is dead reads Stale (Suspect behind a
+        // refused probe) and still counts as held: the detached cargo keeps
+        // its build wait instead of cycling slotless through re-admission
+        // (the 2026-10-01 CI wedge).
         let _ = crate::claims::release(
             "test:cargo-run:0",
             &holder_of(100),
