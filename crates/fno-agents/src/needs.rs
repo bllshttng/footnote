@@ -543,6 +543,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
     let mut fires_floor = DEFAULT_FIRES_FLOOR;
     let mut json = false;
     let mut items = false;
+    let mut clear_settled = false;
     let mut answer: Option<String> = None;
     let mut option: Option<u32> = None;
     let mut words: Option<String> = None;
