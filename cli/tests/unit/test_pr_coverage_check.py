@@ -17,6 +17,7 @@ the read to raise, never by an empty read.
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2518,12 +2519,13 @@ def test_coverage_verdict_and_the_slug_read_share_one_cwd_guard(monkeypatch, tmp
 
 # ---- the operator-law exit: one standing subject, one head-pinned command ----
 #
-# The gate had two authority surfaces that disagreed: `fno.decide.current_law`
+# The gate had two authority surfaces that disagreed: the decisions engine
 # recovered a live operator ruling for an exact subject and nothing consumed
 # it, while the merge predicate recognized only a non-author approval or the
 # `coverage-override` label. These tests hold the join: the deciding list is
-# `current_law` (through the gate's one seam, `law_authority`), only `single`
-# is authority, and every other answer keeps the ordinary verdict.
+# the native decisions door (through the gate's one seam, `law_authority`),
+# only `single` is authority, and every other answer keeps the ordinary
+# verdict.
 
 
 def _waive_env(monkeypatch, tmp_path):
@@ -2533,8 +2535,6 @@ def _waive_env(monkeypatch, tmp_path):
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(_journal(tmp_path)))
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
-    from types import SimpleNamespace
-
     from fno.agents import self_stamp
 
     # No harness identity + a terminal is the one state the superuser lane
@@ -2544,7 +2544,6 @@ def _waive_env(monkeypatch, tmp_path):
         "resolve_self_identity",
         lambda: SimpleNamespace(session_id=None, harness=None),
     )
-    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
 
 
 def _law_law(monkeypatch, scoped="none", standing="none"):
@@ -2563,6 +2562,45 @@ def _law_law(monkeypatch, scoped="none", standing="none"):
 
 
 WAIVE_HEAD = "f" * 40
+
+# The decisions door's per-test answer: flattened rows the gate reads, plus
+# the damaged count the door reports. The door-side counting and lifecycle
+# derivation are Rust-tested; this stub holds the gate's fold.
+_DOOR_ROWS: list[dict] = []
+_DOOR_DAMAGED = 0
+
+
+@pytest.fixture(autouse=True)
+def _decisions_door(monkeypatch):
+    """Serve the decisions listing from the module's captured rows."""
+    global _DOOR_ROWS, _DOOR_DAMAGED
+    _DOOR_ROWS = []
+    _DOOR_DAMAGED = 0
+
+    def answer(payload):
+        assert payload["mode"] == "decisions", payload
+        argv = payload.get("argv") or []
+        subject = next((a for a in argv if not a.startswith("-")), None)
+        rows = [r for r in _DOOR_ROWS if subject is None or r["subject"] == subject]
+        return {"decisions": rows, "damaged": _DOOR_DAMAGED}
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", answer)
+
+
+def _seed_door_row(subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"):
+    """One flattened law-lane row in the door's answer."""
+    _DOOR_ROWS.append(
+        {
+            "decision_id": decision_id,
+            "decision": decision,
+            "subject": subject,
+            "authority_source": authority_source,
+            "ts": ts,
+            "lane": "law",
+            "lifecycle": "live",
+        }
+    )
+
 
 
 @pytest.fixture(autouse=True)
@@ -2586,73 +2624,86 @@ def _sandbox_decision_graph(tmp_path, monkeypatch):
         "fno.paths.decisions_jsonl",
         lambda: tmp_path / ".decision-index" / "decisions.jsonl",
     )
-    monkeypatch.setattr(
-        "fno.decide._decisions_index_path",
-        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
-    )
 
 
-def test_law_authority_reads_the_real_index_three_ways(tmp_path):
-    """The seam is the engine's law-lane live read, not a second deciding
-    list: none, single (affirmative value only), damaged -> unknown. Seeded
-    straight into the sandboxed index the conftest pins, so the statuses come
-    from the real reader."""
-    from fno import paths
-
-    def _seed(*rows):
-        p = paths.decisions_jsonl()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Each scenario is a fresh history: the store beside the index
-        # accumulates, so a leftover db would resurrect earlier rows.
-        from fno.events.store_client import store_db_path
-
-        store_db_path(p).unlink(missing_ok=True)
-        p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+def test_law_authority_folds_the_door_answer_three_ways():
+    """The seam is the door's law-lane live answer, not a second deciding
+    list: none, single (affirmative value only), damaged -> unknown."""
+    import fno.pr._coverage_gate as gate
 
     def _row(decision):
         return {
-            "type": "operator_decision",
+            "decision_id": "d-law0001",
+            "decision": decision,
+            "subject": _coverage_gate.scoped_waiver_subject(
+                "acme/widgets", 42, WAIVE_HEAD
+            ),
+            "authority_source": "operator",
             "ts": "2026-08-29T00:00:00Z",
-            "data": {
-                "decision_id": "d-law0001",
-                "decision": decision,
-                "subject": _coverage_gate.scoped_waiver_subject(
-                    "acme/widgets", 42, WAIVE_HEAD
-                ),
-                "authority_source": "operator",
-            },
+            "lane": "law",
+            "lifecycle": "live",
         }
 
     subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
-    _seed()
+    _DOOR_ROWS.clear()
     assert _coverage_gate.law_authority(subject) == ("none", "")
-    _seed(_row(_coverage_gate.WAIVER_DECISION))
+    _DOOR_ROWS.append(_row(_coverage_gate.WAIVER_DECISION))
     assert _coverage_gate.law_authority(subject) == ("single", "")
     # Row existence carries no polarity: a denial recorded at the waiver
     # subject is a single law row whose text is not the affirmative value.
-    _seed(_row("coverage waiver DENIED for this head"))
+    _DOOR_ROWS[0] = _row("coverage waiver DENIED for this head")
     assert _coverage_gate.law_authority(subject) == ("none", "")
     # A single row with NO decision field at all is malformed authority, not
     # a clean no: unknown, with the dead field nameable in the probe.
     row_no_decision = _row(_coverage_gate.WAIVER_DECISION)
-    del row_no_decision["data"]["decision"]
-    _seed(row_no_decision)
+    del row_no_decision["decision"]
+    _DOOR_ROWS[0] = row_no_decision
     status, probe = _coverage_gate.law_authority(subject)
     assert status == "unknown"
     assert "no decision" in probe, probe
-    _seed(_row(_coverage_gate.WAIVER_DECISION), "not json at all")
+    global _DOOR_DAMAGED
+    _DOOR_ROWS[0] = _row(_coverage_gate.WAIVER_DECISION)
+    _DOOR_DAMAGED = 1
     status, probe = _coverage_gate.law_authority(subject)
     assert status == "unknown"
     assert "damaged" in probe
+
+
+
+def _stub_decide_door(monkeypatch, *, exit_code=0, stdout="d-door0001", stderr=""):
+    """The native decide door, stubbed at the subprocess seam. A zero exit
+    lands the operator row in the door stub's answer, exactly as the real
+    write would make it readable."""
+
+    import subprocess as subprocess_mod
+
+    real_run = subprocess_mod.run
+
+    def run(argv, **kwargs):
+        if "decide" not in argv:
+            return real_run(argv, **kwargs)
+        subject = argv[argv.index("decide") + 1]
+        if exit_code == 0:
+            _seed_door_row(
+                subject,
+                stdout.strip(),
+                decision=_coverage_gate.WAIVER_DECISION,
+                authority_source="operator",
+            )
+        return SimpleNamespace(returncode=exit_code, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr("fno.rust_binary.resolve_front_binary", lambda: "/stub/fno")
+    monkeypatch.setattr("subprocess.run", run)
 
 
 def test_coverage_waive_records_one_head_scoped_operator_law(
     monkeypatch, tmp_path, capsys
 ):
     """The attended command records ONE live law row at the exact
-    head-scoped subject and prints the positive receipt only after the index
+    head-scoped subject and prints the positive receipt only after the door
     write lands."""
     _waive_env(monkeypatch, tmp_path)
+    _stub_decide_door(monkeypatch)
     monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
     rc = _coverage_gate.run_coverage_waive(
@@ -2674,6 +2725,7 @@ def test_coverage_waive_publishes_the_status_positively(monkeypatch, tmp_path, c
     existing. A recorder pins the one call that must fire, and the failure
     branch must keep the receipt and name the cause on stderr."""
     _waive_env(monkeypatch, tmp_path)
+    _stub_decide_door(monkeypatch)
     monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
     calls = []
@@ -2710,18 +2762,11 @@ def test_coverage_waive_refuses_an_agent_session_positively(
     refusal marker that says who was refused, and no row any gate could read
     as a waiver."""
     _waive_env(monkeypatch, tmp_path)
-    from types import SimpleNamespace
-
-    from fno.agents import self_stamp
-
-    monkeypatch.setattr(
-        self_stamp,
-        "resolve_self_identity",
-        lambda: SimpleNamespace(
-            session_id="20260829T000000Z-cl71578-d947a1ff00aa", harness="claude"
-        ),
+    _stub_decide_door(
+        monkeypatch,
+        exit_code=3,
+        stderr="decide: refused. agent cl71578 cannot record under superuser authority",
     )
-    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
     monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
     rc = _coverage_gate.run_coverage_waive(42, "because", cwd=str(tmp_path))
@@ -2764,6 +2809,7 @@ def test_recorded_scoped_waiver_covers_only_its_head(
     because the new head's subject matches nothing."""
     _waive_env(monkeypatch, tmp_path)
     _specimen_gates(monkeypatch)
+    _stub_decide_door(monkeypatch)
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
     _seed_row(tmp_path, coverage="uncovered", count=0, head=WAIVE_HEAD)
     monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
@@ -2771,7 +2817,7 @@ def test_recorded_scoped_waiver_covers_only_its_head(
         42, "operator reviewed this head by hand", cwd=str(tmp_path)
     )
     assert rc == 0
-    # The real current_law read, not the pinned seam: the recorded row is the
+    # The door stub's answer, not the pinned seam: the recorded row is the
     # authority the gate consumed.
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
@@ -2794,33 +2840,9 @@ def test_recorded_scoped_waiver_covers_only_its_head(
 def _seed_waiver_law_row(
     subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"
 ):
-    """One live law-lane row at an exact subject, in the sandboxed index.
-
-    The store beside the index imports the jsonl ONCE per store, and the
-    conftest sandbox is shared across every test in a worker process: a
-    leftover db resurrects an earlier test's rows under the same fixed ids
-    and the fresh seed reads as already-seen. Reset it with the file.
-    """
-    from fno import paths
-    from fno.events.store_client import store_db_path
-
-    index = paths.decisions_jsonl()
-    index.parent.mkdir(parents=True, exist_ok=True)
-    store_db_path(index).unlink(missing_ok=True)
-    index.open("a", encoding="utf-8").write(
-        json.dumps(
-            {
-                "type": "operator_decision",
-                "ts": ts,
-                "data": {
-                    "decision_id": decision_id,
-                    "decision": decision,
-                    "subject": subject,
-                    "authority_source": authority_source,
-                },
-            }
-        )
-        + "\n"
+    """One live law-lane row at an exact subject, in the door stub's answer."""
+    _seed_door_row(
+        subject, decision_id, decision=decision, authority_source=authority_source, ts=ts
     )
 
 
@@ -2869,13 +2891,11 @@ def test_an_agent_row_cannot_muddy_an_operator_waiver(monkeypatch, tmp_path):
     assert _coverage_gate.law_authority(subject) == ("single", "")
 
 
-def test_waiver_subjects_are_one_spelling_across_decide_and_the_gate():
-    """The write guard keys on fno.decide's prefix; the gate keys on its own
-    standing subject. Two spellings of one family is two drift traps unless a
-    test holds them equal."""
-    from fno.decide import WAIVER_SUBJECT_PREFIX
-
-    assert WAIVER_SUBJECT_PREFIX == _coverage_gate.STANDING_WAIVER_SUBJECT
+def test_waiver_subjects_are_one_spelling_across_the_doors():
+    """The native decide door's guard and the gate key on one prefix. Two
+    spellings of one family is two drift traps unless a test holds them
+    equal (the Rust side pins the same literal beside its waiver guard)."""
+    assert "review-coverage-waiver" == _coverage_gate.STANDING_WAIVER_SUBJECT
 
 
 def test_standing_law_waives_an_uncovered_head_on_the_real_merge(

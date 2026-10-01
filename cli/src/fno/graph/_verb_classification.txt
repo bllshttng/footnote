@@ -60,10 +60,6 @@ join
 # footnote-owned DATA with a graph-resident write path (refused until the
 # write moves to the sidecar seam)
 cost
-decide
-decisions
-decide-retract
-decide-reindex
 # sub-app mutations
 triage apply
 capture promote

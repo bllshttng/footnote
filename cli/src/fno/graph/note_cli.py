@@ -14,13 +14,95 @@ from typing import Optional
 
 import typer
 
-from fno.decide import READ_HELP
 from fno.graph import cli as graph_cli
 from fno.graph.cli import cli
 
 
 # Registered through graph_cli's namespace so the tests' existing
 # `monkeypatch.setattr("fno.graph.cli._graph_path", ...)` seam keeps working.
+READ_HELP = (
+    "The command that produced a code fact in this ruling. It is RUN at "
+    "record time and its output stored on the row. Repeatable; pair a zero "
+    "with a control: a second read aimed at something known to be present."
+)
+
+
+class UnresolvableCitationError(ValueError):
+    """A citation the repo contradicts."""
+
+
+class UnmeasuredClaimError(ValueError):
+    """A code fact stated with no read attached."""
+
+
+def _note_gate_error(answer):
+    kind = answer.get("kind")
+    message = answer.get("message") or "the evidence gate refused without a reason"
+    if kind == "citation":
+        return UnresolvableCitationError(message)
+    return UnmeasuredClaimError(message)
+
+
+def note_evidence(text, reads):
+    """Note-lane gate: (rows, claims), each None when not applicable.
+
+    A contradicted citation RAISES (a note is a fact on the node even when
+    --quiet); a claim with no read only reports - the note verb advises,
+    never refuses a body.
+    """
+    from fno.paths import resolve_repo_root
+    from fno.rust_binary import verb_call
+
+    answer = verb_call(
+        "evidence-gate",
+        {
+            "lane": "note",
+            "text": text,
+            "reads": list(reads) if reads else None,
+            "root": str(resolve_repo_root()),
+            "timeout": 20,
+        },
+        timeout=120,
+    )
+    if not answer.get("ok"):
+        raise _note_gate_error(answer)
+    return answer.get("rows") or None, answer.get("claims") or None
+
+
+def unmeasured_note_warning(claims):
+    return (
+        f"note appended with an unmeasured code fact ('{claims[0]}'): a reader "
+        "cannot tell measured from assumed. Attach --read <command> - it runs "
+        "at record time and its output is stored; pair a zero with a control."
+    )
+
+
+def warn_if_note_is_long(text, *, stream=None):
+    """Advise on a long note, never refuse one.
+
+    Why uncapped, and why the blunt multiplier:
+    docs/architecture/backlog-graph-verb-contracts.md.
+    """
+    import sys
+
+    from fno import style
+
+    try:
+        from fno.config import load_settings
+
+        cap = load_settings().style.word_cap.encounter
+    except Exception:  # noqa: BLE001 - an advisory must never break a write
+        cap = style.MESSAGE_WORD_CAP
+    count = style.word_count(text)
+    if count <= cap * 4:
+        return
+    print(
+        f"note appended ({count} words). Long evidence belongs in a plan doc; "
+        "a note carrying a path is cheaper for every later reader.",
+        file=stream or sys.stderr,
+    )
+
+
 @cli.command("note", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_note(
     ctx: typer.Context,
@@ -46,13 +128,6 @@ def cmd_note(
     bound refuses BEFORE the write: exit 3. No send confirmed: exit 4.
     ``--quiet`` writes anyway; it never bypasses the cross-session guard.
     """
-    from fno.decide import (
-        UnmeasuredClaimError,
-        UnresolvableCitationError,
-        note_evidence,
-        unmeasured_note_warning,
-        warn_if_note_is_long,
-    )
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 

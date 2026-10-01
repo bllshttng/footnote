@@ -224,7 +224,7 @@ _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 def classify_origin(explicit_origin: str | None = None) -> str:
     """Classify the sender once, before a mail lane can narrow behavior."""
     from fno.agents.self_stamp import resolve_self_identity
-    from fno.decide import MAIL_ORIGINS, enforce_origin_floor
+    from fno.mail.origins import MAIL_ORIGINS, enforce_origin_floor
 
     ident = resolve_self_identity()
     agent_identity = bool(ident.session_id and ident.harness)

@@ -3,10 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _receipt(monkeypatch, tmp_path: Path, seed: str, fake_list_decisions):
+def _receipt(monkeypatch, tmp_path: Path, seed: str, fake_decisions):
     from fno.think_inspect import build_receipt
 
-    monkeypatch.setattr("fno.decide.list_decisions", fake_list_decisions)
+    # The fakes keep the old list_decisions shape (subject, rows, damaged);
+    # the adapter unwraps the rows the decisions door answers with.
+    monkeypatch.setattr(
+        "fno.rust_binary.call_front_json",
+        lambda payload: {"decisions": fake_decisions(payload["argv"][0])[1]},
+    )
     repo = tmp_path / "repo"
     repo.mkdir()
     graph = [
@@ -72,7 +77,7 @@ def test_superseded_ruling_is_dropped_by_the_derived_field(monkeypatch, tmp_path
             "lane": "coord",
             "subject": "x-38d3",
             # Prose claims supersession, but the derived field is what the reader
-            # trusts. list_decisions computes superseded_by from `supersedes`
+            # trusts. The decisions door derives superseded_by from `supersedes`
             # ACROSS the index, so a withdrawn row carries it here even though
             # its own text never says so.
             "decision": "HYBRID",
@@ -160,7 +165,10 @@ def test_no_decisions_result_is_not_a_shared_mutable_list(monkeypatch, tmp_path:
     def fake(subject, limit=None, lane=None, state=None):
         return subject, [], 0
 
-    monkeypatch.setattr("fno.decide.list_decisions", fake)
+    monkeypatch.setattr(
+        "fno.rust_binary.call_front_json",
+        lambda payload: {"decisions": fake(payload["argv"][0])[1]},
+    )
 
     first = build_receipt(
         "no-such-node", repo=repo, graph_entries=[], archive_entries=[],
