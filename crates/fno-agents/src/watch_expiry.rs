@@ -18,7 +18,7 @@ const WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_EVENTS: u32 = 10_000;
 const MAX_LIVE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const WATCH_IDLE: &str = "loop_check_watch_idle";
-const WAKE_EVENT: &str = "loop_check_watch_expiry_wake";
+pub(crate) const WAKE_EVENT: &str = "loop_check_watch_expiry_wake";
 const ACTIVITY_AND_TERMINAL: &[&str] = &[
     "loop_check",
     "termination",

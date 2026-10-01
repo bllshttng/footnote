@@ -1061,7 +1061,7 @@ mod tests {
         .unwrap();
         crate::events::EventEmitter::new(global_events.clone(), "daemon")
             .emit(
-                "loop_check_watch_expiry_wake",
+                crate::watch_expiry::WAKE_EVENT,
                 &serde_json::json!({
                     "session_id": "s-genuine",
                     "node": "x-genuine",
