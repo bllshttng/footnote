@@ -916,7 +916,13 @@ impl View {
             format!("{FOOTER_NEW_LABEL}   {} marked \u{b7}R", self.marks.len())
         };
         let label = match self.footer_menu_range(panel_w) {
-            Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
+            Some(range) => format!(
+                "{}{FOOTER_MENU}",
+                pad_to(
+                    &crate::chrome::fit_ellipsis(&base, range.start),
+                    range.start
+                )
+            ),
             None => base,
         };
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
