@@ -130,7 +130,7 @@ pub(super) fn legacy_mux_root_check() -> Check {
     }
 }
 
-/// `fno mux doctor`'s canonical-venv check (x-0242): a worktree install once
+/// `fno mux doctor`'s canonical-venv check: a worktree install once
 /// rewrote the CANONICAL checkout's `cli/.venv` console scripts with the
 /// worktree's interpreter, and every deployed script died with the pruned
 /// worktree. Every script shebang in the canonical venv's bin must name an
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(Verdict::Fail.word(), "fail");
         assert_eq!(Verdict::Na.word(), "n/a");
 
-        // The canonical-venv scan (x-0242): a shebang inside the root passes,
+        // The canonical-venv scan: a shebang inside the root passes,
         // any absolute shebang outside is named (even a system shim, which
         // factually points outside the checkout), env-form skips.
         let td = tempfile::tempdir().unwrap();

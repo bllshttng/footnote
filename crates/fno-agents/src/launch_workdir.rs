@@ -121,8 +121,7 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
             // The venv guard runs before any worker lands: a tree whose venv
             // aliases the canonical checkout rewrites the canonical venv's
             // scripts on its first install, and those scripts die with this
-            // tree (x-0242). Holding is the refusal the accident never gets
-            // past.
+            // tree. Holding is the refusal the accident never gets past.
             let worktree = PathBuf::from(&stdout);
             if let Some(risk) = canonical_venv_risk(
                 &worktree,
@@ -144,14 +143,16 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
 }
 
 /// The worktree-venv guard: a worktree session must never install into the
-/// CANONICAL checkout's `cli/.venv`. Two aliasing mechanisms produced x-0242:
+/// CANONICAL checkout's `cli/.venv`. Two aliasing mechanisms are known:
 /// the worktree's `cli/.venv` is a symlink resolving into the canonical
 /// checkout, or `UV_PROJECT_ENVIRONMENT` points there - an `uv sync` under
 /// either rewrites the canonical venv's console scripts with this worktree's
 /// interpreter, and every deployed script dies when the worktree is pruned.
 /// `canonical` is the main checkout behind `worktree` (None when `worktree`
 /// sits outside a repo); a canonical `worktree` passes, since an install
-/// there belongs there. `Some` is the hold reason.
+/// there belongs there. `Some` is the hold reason. The guard covers the
+/// spawn door only: a manual install in an already-open session is what the
+/// mux doctor's canonical-venv check catches after the fact.
 fn canonical_venv_risk(
     worktree: &Path,
     canonical: Option<&Path>,
