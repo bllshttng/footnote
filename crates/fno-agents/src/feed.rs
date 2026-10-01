@@ -501,27 +501,6 @@ pub fn project(
             });
             continue;
         }
-        let name = s_field(data, "name").unwrap_or_default();
-        let pane = data
-            .get("pane")
-            .and_then(Value::as_u64)
-            .map(|p| p.to_string())
-            .unwrap_or_default();
-        let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
-        let title = if name.is_empty() {
-            format!("pane {pane} closed: {reason}")
-        } else {
-            format!("pane {name} ({pane}) closed: {reason}")
-        };
-        rows.push(FeedRow {
-            ts: ts.to_string(),
-            kind: "pane_closed".into(),
-            session_id: s_field(data, "harness_session"),
-            harness: s_field(data, "harness"),
-            title,
-            reason: Some(reason),
-            ..FeedRow::default()
-        });
         if kind == "composer_shell_ran" {
             let cwd = s_field(data, "cwd").unwrap_or_default();
             let line = s_field(data, "line").unwrap_or_default();
@@ -545,6 +524,28 @@ pub fn project(
             });
             continue;
         }
+
+        let name = s_field(data, "name").unwrap_or_default();
+        let pane = data
+            .get("pane")
+            .and_then(Value::as_u64)
+            .map(|p| p.to_string())
+            .unwrap_or_default();
+        let reason = s_field(data, "reason").unwrap_or_else(|| "no reason recorded".into());
+        let title = if name.is_empty() {
+            format!("pane {pane} closed: {reason}")
+        } else {
+            format!("pane {name} ({pane}) closed: {reason}")
+        };
+        rows.push(FeedRow {
+            ts: ts.to_string(),
+            kind: "pane_closed".into(),
+            session_id: s_field(data, "harness_session"),
+            harness: s_field(data, "harness"),
+            title,
+            reason: Some(reason),
+            ..FeedRow::default()
+        });
     }
 
     // Spawn rows: `agent_spawned` (agents journal, already window-bounded by

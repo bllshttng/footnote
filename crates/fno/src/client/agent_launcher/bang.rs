@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{close, open, write_msg, ClientMsg, Phase, View};
+use super::{close, write_msg, ClientMsg, Phase, View};
 use crate::mux_cli::{control_roundtrip_with_timeouts, ControlError};
 use crate::pane_send_audit::{append_agents_event, pane_send_audit_events_path};
 use crate::proto::{socket_path, Command, ControlVerb, PanePlacement, ServerMsg};
@@ -195,6 +195,7 @@ pub(super) async fn run_with(
 
 #[cfg(test)]
 mod tests {
+    use super::super::open;
     use super::*;
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
@@ -216,9 +217,16 @@ mod tests {
         let l = v.launcher.as_mut().unwrap();
         l.shell = true;
         l.draft.message = line.to_string();
-        if let Some(cwd) = cwd {
-            l.draft.projects = vec![cwd.to_string()];
-            l.draft.project_idx = 0;
+        match cwd {
+            Some(cwd) => {
+                l.draft.projects = vec![cwd.to_string()];
+                l.draft.project_idx = 0;
+            }
+            // A fresh draft seeds the client's own cwd; an empty project
+            // case clears it explicitly.
+            None => {
+                l.draft.projects.clear();
+            }
         }
         v
     }
@@ -238,7 +246,7 @@ mod tests {
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("hi\n"), "line ran: {stdout:?}");
+        assert!(stdout.starts_with("hi"), "line ran: {stdout:?}");
         assert!(
             stdout.contains(dir.to_str().unwrap()),
             "pwd names the cwd: {stdout:?}"
