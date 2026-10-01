@@ -1756,14 +1756,18 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       s.className = "rq";
       s.textContent = q;
       b.appendChild(s);
-      b.addEventListener("click", () => {
-        hideRecent();
+      // Activate on mousedown, not click: the press would blur the input
+      // and the hide timer could swallow the click. preventDefault keeps
+      // the focus in the input, so no timer race exists.
+      b.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        recordRecent(q);
         searchInput.value = q;
         state.q = q;
         searchClear.hidden = false;
+        hideRecent();
         syncUrl();
         fetchBoard();
-        searchInput.focus();
         searchInput.select();
       });
       recentEl.appendChild(b);
@@ -1772,7 +1776,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     clear.type = "button";
     clear.className = "recentrow recentclear";
     clear.textContent = "clear recent searches";
-    clear.addEventListener("click", () => {
+    clear.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
       lsSet(RECENT_KEY, "");
       hideRecent();
     });
