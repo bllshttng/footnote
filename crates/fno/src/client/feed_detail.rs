@@ -115,8 +115,12 @@ pub(crate) enum FeedAction {
     Node(String),
     /// Open the PR in the browser.
     Pr(String),
-    /// Show the removal's recovery line as a notice.
-    Resume(String),
+    /// The removal's recovery row. `name` carries the registry handle when
+    /// the roster still holds the row: Enter then resumes through
+    /// `Command::ResumeAgent` (the fno-owned door) instead of only talking.
+    /// Without it the row is the retirement receipt's revival line, and
+    /// Enter repeats that line as a notice.
+    Resume { line: String, name: Option<String> },
 }
 
 /// The open provenance modal, held on the view: the event, its popup, and the
@@ -302,16 +306,34 @@ pub(crate) fn build(
     info("actor", item.actor.clone(), &mut rows);
     info("phase", item.phase.clone(), &mut rows);
 
-    // A removal's answer: the recovery line, as its own row.
+    // A removal's answer: resume the row through fno when the roster still
+    // holds it, else the retirement receipt's revival line verbatim. The
+    // copied value is the command either way, so `y` never hands over a raw
+    // harness argv when the fno handle exists.
     if let Destination::Recovery(detail) = &dest {
+        let named = item
+            .name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .filter(|n| agents.iter().any(|a| a.name == *n));
+        let (label, name) = match named {
+            Some(n) => {
+                info("revival", Some((*detail).to_string()), &mut rows);
+                (format!("fno agents resume {n}"), Some(n.to_string()))
+            }
+            None => ((*detail).to_string(), None),
+        };
         rows.push(PopupRow::Entry {
             glyph: "resume".to_string(),
-            label: (*detail).to_string(),
+            label: label.clone(),
             hint: String::new(),
             enabled: true,
         });
-        actions.push(FeedAction::Resume((*detail).to_string()));
-        values.push((*detail).to_string());
+        actions.push(FeedAction::Resume {
+            line: label.clone(),
+            name,
+        });
+        values.push(label);
     }
 
     // The footer names every gesture the modal answers, including the
@@ -391,7 +413,23 @@ pub(crate) async fn execute_selected(
                 Err(e) => view.set_notice(format!("open failed: {e}")),
             }
         }
-        FeedAction::Resume(detail) => view.set_notice(detail.clone()),
+        FeedAction::Resume { line, name } => {
+            // Own the strings first: they borrow into the modal, and the
+            // mutable view work below must not hold that borrow.
+            let line = line.clone();
+            let name = name.clone();
+            match name {
+                Some(name) => {
+                    // The verdict arrives on the wire either way: "resumed
+                    // <name>" or the gate's one-line refusal, as a notice.
+                    view.set_notice(format!("resuming {name}"));
+                    write_msg(sock_w, &ClientMsg::Command(Command::ResumeAgent { name }))
+                        .await
+                        .map_err(|e| format!("resume send failed: {e}"))?;
+                }
+                None => view.set_notice(line),
+            }
+        }
     }
     Ok(())
 }
