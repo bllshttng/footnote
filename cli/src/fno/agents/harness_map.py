@@ -530,8 +530,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     # and a roster entry with no capability row is legal (hermes, openclaw).
     # A capability row naming a harness the roster does not carry is not - it
     # would advertise a dispatch lane for a harness no evidence supports.
-    # In-function import: a from-import of the served attr resolves it at
-    # import time, which is the subprocess the door's laziness hides.
+    # In-function: a module-level from-import resolves the served attr at import time.
     from fno.harness_names import KNOWN_HARNESSES
 
     absent = set(harnesses) - set(KNOWN_HARNESSES)

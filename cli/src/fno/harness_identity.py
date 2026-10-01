@@ -561,12 +561,11 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
 # recognize one and refuse it with a message naming the fix, and so `fno
 # doctor` can still report mail queued to one before the flip as the dead
 # letter it is. Never an accepted address, never generated. Built from the
-# roster door, lazily (module __getattr__): an eager build paid a roster
-# subprocess on every import, which broke the binary-less CI lints.
+# roster door, lazily (module __getattr__, lru_cache): an eager build paid a
+# roster subprocess on every import, which broke the binary-less CI lints.
 @lru_cache(maxsize=1)
 def _legacy_handle_re() -> "re.Pattern[str]":
-    # In-function, never module level: a from-import of the served attr
-    # resolves it at import time, which is the subprocess the laziness hides.
+    # In-function: a module-level from-import resolves the attr (the subprocess) at import.
     from fno.harness_names import KNOWN_HARNESSES
 
     return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
