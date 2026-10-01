@@ -1267,12 +1267,22 @@ fn cargo_slot_keys(worktree: &Path) -> Vec<String> {
 /// Whether this cargo's admission family holds a run slot right now: its
 /// exact holder string on some slot key, or a slot whose holder pid is this
 /// cargo or its ancestor (one admitted cargo covers its nested children).
+/// Suspect counts as held, like `holder_rows`: the slot is still occupied
+/// and unstealable (the steal reads Live only), so counting it never masks
+/// a real theft, and a detached cargo whose recorded pid died keeps its
+/// build wait instead of cycling slotless through re-admission.
 /// The build door re-checks this before it may take `build:cargo`, so a
 /// waiter whose slot was stolen leaves the build wait instead of taking the
 /// lock while holding no slot.
 fn holds_run_slot(cargo_pid: u32, holder: &str, keys: &[String], root: Option<&Path>) -> bool {
     keys.iter().any(|key| {
-        if let (crate::claims::ClaimState::Live, Some(rec)) = crate::claims::status(key, root) {
+        if let (state, Some(rec)) = crate::claims::status(key, root) {
+            if !matches!(
+                state,
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+            ) {
+                return false;
+            }
             rec.holder == holder
                 || rec
                     .pid
@@ -2735,6 +2745,23 @@ mod tests {
         assert!(
             b.is_none(),
             "the freed build lock must stay free, not taken by the slotless waiter"
+        );
+        // A suspect slot (recorded pid dead) still counts as held: the
+        // detached cargo keeps its build wait instead of cycling slotless
+        // through re-admission (the 2026-10-01 CI wedge).
+        let _ = crate::claims::release(
+            "test:cargo-run:0",
+            &holder_of(100),
+            Some(&root),
+            Some(&worktree),
+        );
+        let mut doomed = Command::new("true").spawn().unwrap();
+        let dead = doomed.id();
+        doomed.wait().unwrap();
+        let _ = crate::claims::acquire("test:cargo-run:0", &holder_of(dead), opts());
+        assert!(
+            holds_run_slot(dead, &holder_of(dead), &keys, Some(&root)),
+            "a suspect slot still counts as held"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
