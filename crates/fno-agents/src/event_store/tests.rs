@@ -729,21 +729,6 @@ fn journal_text_reads_history_then_live_with_the_type_filter() {
 }
 
 #[test]
-fn journal_text_preserves_append_order_for_equal_timestamps() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "first");
-    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "second");
-    append(&live, &[a, b]);
-    sync(&live).unwrap();
-    let text = journal_text(&live, &["reign_checkin"]);
-    assert!(
-        text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap(),
-        "same-second rows must retain append order: {text}"
-    );
-}
-
-#[test]
 fn journal_text_checked_without_store_reads_a_rotation_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
@@ -757,25 +742,26 @@ fn journal_text_checked_without_store_reads_a_rotation_by_name() {
         text, "{\"n\":2}\n",
         "the rotation's own bytes, not the live file"
     );
-}
-
-#[test]
-fn journal_text_creates_no_store_for_an_absent_journal() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    assert_eq!(journal_text(&live, &["reign_checkin"]), "");
-    assert!(!store_path(&live).exists());
+    // Same branch, absent base journal: the read is empty and creates no
+    // store.
+    let absent = dir.path().join("absent.jsonl");
+    assert_eq!(
+        journal_text_checked(&absent, &EventQuery::of_types(&[])).unwrap(),
+        ""
+    );
+    assert!(!store_path(&absent).exists());
 }
 
 #[test]
 fn journal_text_reads_committed_rows_in_commit_order() {
-    // AC1-HP: an imported row stays ahead of a store-only commit.
+    // AC1-HP: an imported row stays ahead of a store-only commit, and the
+    // two rows share one second so equal timestamps must keep append order.
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
     let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "imported");
     append(&live, &[a]);
     sync(&live).unwrap();
-    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "store-only");
+    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "store-only");
     append_envelope(&live, &b.to_string(), None).unwrap();
     let text = journal_text(&live, &["reign_checkin"]);
     assert!(
