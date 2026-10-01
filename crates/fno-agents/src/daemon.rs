@@ -6483,12 +6483,33 @@ pub(crate) fn run_reconcile_sweep(
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
     // (docs/architecture/codex-thread-driver.md): existence separates an
-    // unhosted thread's Orphaned from Exited; freshness keeps working ones unsettled.
+    // unhosted thread's Orphaned from Exited; freshness keeps working ones
+    // unsettled. Existence answers from the SAME store walk the freshness
+    // rung reads, beside the row's recorded path: a manifest-only adoption
+    // of a Desktop thread records no path, and reading the empty record as
+    // "nothing persisted" settled live threads Exited with an exit stamp
+    // that blinded the freshness rung forever.
+    let codex_index = crate::client_verbs::codex_rollout_index(None);
     let rollout_exists = |e: &RegistryEntry| -> bool {
-        e.log_path
+        if e.log_path
             .as_deref()
             .map(Path::new)
             .is_some_and(Path::is_file)
+        {
+            return true;
+        }
+        let Some(index) = codex_index.as_ref() else {
+            return false;
+        };
+        e.harness_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some_and(|sid| {
+                index
+                    .iter()
+                    .any(|(name, _)| crate::codex_store::codex_rollout_matches(name, sid))
+            })
     };
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
@@ -6519,7 +6540,7 @@ pub(crate) fn run_reconcile_sweep(
     let prober = live_liveness_prober(
         truth,
         crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
-        crate::client_verbs::codex_rollout_index(None),
+        codex_index.clone(),
     );
     // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the

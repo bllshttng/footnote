@@ -37,11 +37,17 @@ fn reconcile_leaves_a_hosted_codex_thread_untouched() {
 
 #[test]
 fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
-    let entries = vec![thread_entry(
-        "t-resumable",
-        AgentStatus::Live,
-        Some("/tmp/r.jsonl".into()),
-    )];
+    let entries = vec![
+        thread_entry(
+            "t-resumable",
+            AgentStatus::Live,
+            Some("/tmp/r.jsonl".into()),
+        ),
+        // The same quiet evidence behind a POSITIVE death proof: a recorded
+        // pid that provably ended. Resumable still, but the served word is
+        // the measured one.
+        thread_entry("t-pid-dead", AgentStatus::Live, Some("/tmp/r.jsonl".into())),
+    ];
     let (changes, _) = plan_reconcile(
         &entries,
         |_| Ok(false),
@@ -50,13 +56,33 @@ fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
         |_| false,
         |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
         |_| true,  // the rollout file exists: the durable object survives
-        |_| RowLiveness::Unknown, // a quiet rollout: no freshness signal
-        true,      // roster readable: the flip needs a successful roster read
+        |e| {
+            if e.name == "t-pid-dead" {
+                RowLiveness::Dead
+            } else {
+                RowLiveness::Unknown // a quiet rollout: no freshness signal
+            }
+        },
+        true, // roster readable: the flip needs a successful roster read
     );
     assert_eq!(
         changes[0].new_status,
         Some(AgentStatus::Orphaned),
         "resumable thread reads Orphaned, never Live-forever"
+    );
+    assert_eq!(
+        changes[0].new_liveness, None,
+        "a quiet rollout is silence: the row reads unmeasured, never dead"
+    );
+    assert_eq!(
+        changes[1].new_status,
+        Some(AgentStatus::Orphaned),
+        "a proven-dead pid with a rollout is still resumable"
+    );
+    assert_eq!(
+        changes[1].new_liveness,
+        Some("dead"),
+        "a POSITIVE death proof serves the dead word"
     );
 }
 
@@ -78,6 +104,10 @@ fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
         changes[0].new_status,
         Some(AgentStatus::Exited),
         "an unhosted thread with no rollout is gone, not Live-forever"
+    );
+    assert_eq!(
+        changes[0].new_liveness, None,
+        "absence of a rollout is not a measured death: the word is unmeasured"
     );
 }
 
@@ -133,6 +163,59 @@ fn an_orphaned_stamp_on_a_fresh_rollout_heals_to_live() {
     assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
     assert_eq!(changes[0].new_liveness, Some("alive"));
     assert_eq!(out.updated, vec!["t-heals".to_string()]);
+}
+
+/// The manifest-only adoption of a Desktop thread records no rollout path:
+/// the row's log_path is empty. The store still holds the rollout - the same
+/// reader the freshness rung walks - so the durable object survives and an
+/// unhosted row with a quiet one settles Orphaned (resumable), never Exited
+/// with an exit stamp that would blind the freshness rung forever.
+#[test]
+fn an_adopted_thread_with_a_store_rollout_settles_resumable_never_exited() {
+    let _guard = crate::path_test_guard();
+    let codex_home = tempfile::tempdir().unwrap();
+    let sessions = codex_home.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let sid = "0198f536-0000-7000-8000-00000000f536";
+    let rollout = sessions.join(format!("rollout-2026-10-01T18-00-00-{sid}.jsonl"));
+    std::fs::write(&rollout, "{}\n").unwrap();
+    // Quiet: written past the freshness window, so only EXISTENCE separates
+    // Orphaned from Exited here.
+    assert!(std::process::Command::new("touch")
+        .args(["-t", "200001010000", &rollout.to_string_lossy()])
+        .status()
+        .expect("touch runs")
+        .success());
+    std::env::set_var("CODEX_HOME", codex_home.path());
+
+    let home = tmp_home("codex-adopted-store-backed-rollout");
+    state::update_registry(&home.registry_json(), |registry| {
+        let mut entry = thread_entry("t-adopted", AgentStatus::Live, None);
+        // A manifest-only adoption records no pid: the row owns no process.
+        entry.pid = None;
+        entry.harness_session_id = Some(sid.into());
+        registry.entries.push(entry);
+    })
+    .unwrap();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let _ = run_reconcile_sweep(&home, &emitter, &|_| false, SweepMode::Full).expect("sweep ok");
+
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    let row = registry.find("t-adopted").unwrap();
+    assert_eq!(
+        row.status,
+        AgentStatus::Orphaned,
+        "the store rollout makes the row resumable, never Exited"
+    );
+    assert_eq!(
+        row.liveness, None,
+        "a quiet rollout is unmeasured: the served word is never dead"
+    );
+    assert_eq!(
+        row.exited_at, None,
+        "an Orphaned stamp writes no exit stamp"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 /// AC15: a row whose startup resume FAILED reads Orphaned after the
