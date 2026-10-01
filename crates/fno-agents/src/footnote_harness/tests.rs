@@ -1,4 +1,5 @@
 use super::*;
+use crate::provenance::TranscriptSource;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -431,6 +432,12 @@ fn readers_see_the_transcript_and_refuse_unknown_types() {
     assert_eq!(src.turns(&raw).len(), 1);
     assert_eq!(src.tool_uses(&raw), 1);
     assert!(transcript::read_records(&w.transcript_path()).is_ok());
+    w.append("model_response", json!({"reported_model": "glm-x"}), false).unwrap();
+    w.append("usage", json!({"input_tokens": 7, "output_tokens": 3}), false).unwrap();
+    let payload = json!({"lane": {"name": "f", "harness": "footnote", "model": "glm-x"},
+        "workdir": fx.p("cwd"), "started_epoch": 0.0, "footnote_sessions_root": fx.p("sessions")});
+    let seen = crate::eval_attempt::observe(&payload);
+    assert_eq!((seen["lane_status"].as_str(), seen["usage"]["input"].as_u64()), (Some("ok"), Some(7)));
     w.append("future_thing", json!({}), false).unwrap();
     assert!(transcript::read_records(&w.transcript_path())
         .unwrap_err()

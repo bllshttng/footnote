@@ -669,6 +669,54 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
     })
 }
 
+/// A footnote session whose header names `workdir` and whose transcript
+/// changed inside the window. A transcript with an unknown non-ignorable
+/// record type is unreadable, so it is skipped rather than counted as zero.
+fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Option<Observed> {
+    let mut best: Option<(f64, PathBuf)> = None;
+    let projects = std::fs::read_dir(root).ok()?.flatten();
+    for session in projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten()) {
+        let path = session.path().join("transcript.jsonl");
+        let Some(mtime) = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+        else {
+            continue;
+        };
+        if in_window(mtime, started, now) && best.as_ref().is_none_or(|(b, _)| mtime > *b) {
+            best = Some((mtime, path));
+        }
+    }
+    let (_, path) = best?;
+    let records = crate::footnote_harness::transcript::read_records(&path).ok()?;
+    let header = &records.first()?["data"];
+    if header["cwd"].as_str() != Some(workdir) {
+        return None;
+    }
+    let mut model = None;
+    let mut usage: Option<UsageSum> = None;
+    for r in &records {
+        let d = &r["data"];
+        match r["type"].as_str() {
+            Some("model_response") => model = d["reported_model"].as_str().map(str::to_string).or(model),
+            Some("usage") => {
+                let n = |k: &str| d[k].as_u64().unwrap_or(0);
+                usage = Some(add_usage(usage, (n("input_tokens"), n("output_tokens"), n("cache_read_tokens"), n("cache_write_tokens"))));
+            }
+            _ => {}
+        }
+    }
+    Some(Observed {
+        harness: "footnote",
+        model,
+        session_id: header["session_id"].as_str().unwrap_or_default().to_string(),
+        usage: usage.map(usage_json),
+        source: "footnote-transcript",
+    })
+}
+
 /// The `{"op": "observe"}` payload's lane evidence. Mirrors the Python
 /// `_lane_evidence` field-for-field and adds `usage`/`usage_source`. The
 /// requested-vs-observed substitution rule is unchanged: a harness or model
@@ -756,6 +804,14 @@ pub fn observe(payload: &Value) -> Value {
                 .unwrap_or_else(crate::opencode_transcript::opencode_stores);
             observe_opencode(&dbs, workdir, started, now)
         }
+        "footnote" => {
+            let root = payload
+                .get("footnote_sessions_root")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(crate::footnote_harness::transcript::sessions_root);
+            observe_footnote(&root, workdir, started, now)
+        }
         _ => None,
     };
     match observed {
@@ -763,6 +819,7 @@ pub fn observe(payload: &Value) -> Value {
             let reason = match requested_harness.as_str() {
                 "claude" => "no claude transcript for this workdir".to_string(),
                 "opencode" => "no opencode session for this workdir".to_string(),
+                "footnote" => "no readable footnote transcript for this workdir".to_string(),
                 other => format!("no transcript reader for harness '{other}'"),
             };
             fields["lane_reason"] = json!(reason);
