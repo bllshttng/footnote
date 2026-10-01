@@ -632,8 +632,21 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         // stamping the node's merge status failed.
         match checks.verdict.as_str() {
             "green" => {
-                if request.effect == Effect::Merge && probes.require_fresh_ci(cwd) {
-                    let stale = probes.ci_base(cwd, &facts).fail_open();
+                // Arm is gated too: without a ruleset that demands an
+                // up-to-date branch, GitHub merges an armed green PR at once.
+                if request.effect != Effect::Preview && probes.require_fresh_ci(cwd) {
+                    let stale = match probes.ci_base(cwd, &facts) {
+                        ProbeOutcome::Inconclusive(reason) => {
+                            return Err(Outcome::Unknown {
+                                reason: format!(
+                                    "{reason}; a merge needs proof its CI tested the current \
+                                     {base}",
+                                    base = facts.base_ref
+                                ),
+                            })
+                        }
+                        outcome => outcome.fail_open(),
+                    };
                     let n = facts.number;
                     match probes.slot_holder(cwd, &facts.base_ref) {
                         // A claims io fault never blocks merges: fall back to
@@ -641,7 +654,10 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                         Err(_) => {
                             if let Some(reason) = stale {
                                 return Err(Outcome::Held {
-                                    reason: format!("{reason}; {}", stale_remedy(n)),
+                                    reason: format!(
+                                        "{reason}; {}",
+                                        retest_on_current_base(probes, cwd, &facts)
+                                    ),
                                 });
                             }
                         }
@@ -696,7 +712,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                         return Err(Outcome::Held {
                                             reason: format!(
                                                 "{reason}; PR {n} holds the merge slot; {}",
-                                                stale_remedy(n)
+                                                retest_on_current_base(probes, cwd, &facts)
                                             ),
                                         });
                                     }
@@ -710,7 +726,9 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                                         "{reason}; PR {n} now holds the merge \
                                                          slot for {ttl}m; {remedy}",
                                                         ttl = MERGE_SLOT_TTL_MINUTES,
-                                                        remedy = stale_remedy(n)
+                                                        remedy = retest_on_current_base(
+                                                            probes, cwd, &facts
+                                                        )
                                                     ),
                                                 });
                                             }
@@ -718,7 +736,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                                 return Err(Outcome::Held {
                                                     reason: format!(
                                                         "{reason}; {}",
-                                                        stale_remedy(n)
+                                                        stale_remedy(n, &facts.base_ref)
                                                     ),
                                                 });
                                             }
@@ -995,13 +1013,16 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     // green) and same eviction readability as the effect path, but take_slot
     // and release_slot have no preview call site.
     if request.require_checks && checks.verdict == "green" && probes.require_fresh_ci(cwd) {
-        let stale = probes.ci_base(cwd, facts).fail_open();
         let n = facts.number;
-        if let Some(reason) = &stale {
-            blockers.push(Blocker::held(
+        match probes.ci_base(cwd, facts) {
+            ProbeOutcome::Refused(reason) => blockers.push(Blocker::held(
                 "ci_base_stale",
-                format!("{reason}; {}", stale_remedy(n)),
-            ));
+                format!("{reason}; {}", stale_remedy(n, &facts.base_ref)),
+            )),
+            ProbeOutcome::Inconclusive(reason) => {
+                blockers.push(Blocker::unknown("ci_base_unreadable", reason))
+            }
+            ProbeOutcome::Clear => {}
         }
         match probes.slot_holder(cwd, &facts.base_ref) {
             Err(_) => {}
@@ -1235,8 +1256,7 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         }
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
-            // decide() takes the slot only under Effect::Merge, so only a
-            // Merge hands it back. Every terminal effect() outcome of a Merge
+            // Only a Merge hands the slot back. Every terminal effect() outcome of a Merge
             // - landed, durably Failed, HeadChanged, or Unknown - releases it
             // here rather than starving the queue for the rest of the lease.
             // An arm leaves GitHub to merge later; a slot dropped here lets a
@@ -1628,45 +1648,9 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
             }
         };
-        let verdict = ci_base_verdict(compare, &base_tip, &runs);
-        let ProbeOutcome::Refused(stale) = verdict else {
-            return verdict;
-        };
-        let pull_head = format!("pull/{}/head", facts.number);
-        let fetch = Command::new("git")
-            .args([
-                "fetch",
-                "--no-tags",
-                "--quiet",
-                "origin",
-                &facts.base_ref,
-                &pull_head,
-            ])
-            .current_dir(cwd)
-            .output();
-        let overlap = match fetch {
-            Ok(output) if output.status.success() => {
-                let Some((_, since)) = oldest_current_run(&runs) else {
-                    return stale_overlap_verdict(
-                        stale,
-                        facts.number,
-                        Err("no current workflow run".to_string()),
-                    );
-                };
-                crate::merge_gates::stale_overlap(
-                    cwd,
-                    &format!("origin/{}", facts.base_ref),
-                    &facts.head_sha,
-                    &since,
-                )
-            }
-            Ok(output) => Err(format!(
-                "fetch failed: {}",
-                first_line(&String::from_utf8_lossy(&output.stderr))
-            )),
-            Err(error) => Err(format!("fetch failed: {error}")),
-        };
-        stale_overlap_verdict(stale, facts.number, overlap)
+        // No disjoint-files waiver: two PRs that share no file still break
+        // main together when one's test reads what the other moved.
+        ci_base_verdict(compare, &base_tip, &runs)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -1888,8 +1872,43 @@ fn is_terminal_state(state: &str) -> bool {
 }
 
 /// The `ci_base_stale` remedy, shared by every `Held` reason that ends in it.
-fn stale_remedy(n: u64) -> String {
-    format!("remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry")
+/// A merge, never a rebase: the branch is already pushed.
+fn stale_remedy(n: u64, base: &str) -> String {
+    format!(
+        "remedy: merge origin/{base} into the branch and push (fno do pr merge {n} does this \
+         once it holds the merge slot), then fno do pr wait {n} --until settled, then retry"
+    )
+}
+
+/// The slot holder's retest: GitHub merges the base into the PR branch (a
+/// merge commit, never a rebase), pinned to the head this decision read, so
+/// CI reruns against the current base. The next attempt reads that run.
+fn retest_on_current_base<P: Probes>(probes: &P, cwd: &Path, facts: &PrFacts) -> String {
+    let n = facts.number;
+    let args = vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "PUT".to_string(),
+        format!("repos/{{owner}}/{{repo}}/pulls/{n}/update-branch"),
+        "-f".to_string(),
+        format!("expected_head_sha={}", facts.head_sha),
+    ];
+    match probes.run_gh(cwd, &args) {
+        Ok((true, _)) => format!(
+            "merged {base} into PR {n}'s branch; CI reruns on the new head; \
+             fno do pr wait {n} --until settled, then retry",
+            base = facts.base_ref
+        ),
+        Ok((false, output)) => format!(
+            "update-branch failed ({}); {}",
+            first_line(&output),
+            stale_remedy(n, &facts.base_ref)
+        ),
+        Err(error) => format!(
+            "update-branch failed ({error}); {}",
+            stale_remedy(n, &facts.base_ref)
+        ),
+    }
 }
 
 /// The merge-slot claim key for a base branch. It is repo-local, so rootless
@@ -2285,51 +2304,19 @@ fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
         .min_by(|(_, left), (_, right)| left.cmp(right))
 }
 
-pub(crate) fn stale_overlap_verdict(
-    stale: String,
-    pr: u64,
-    overlap: Result<crate::merge_gates::StaleOverlap, String>,
-) -> ProbeOutcome {
-    match overlap {
-        Ok(result) if result.shared.is_empty() => {
-            eprintln!(
-                "pr-merge: ci_base_stale waived: {} files landed since CI base {}, none shared with PR {pr}",
-                result.landed,
-                result.ci_base_sha.chars().take(8).collect::<String>()
-            );
-            ProbeOutcome::Clear
-        }
-        Ok(result) => {
-            let shown = result
-                .shared
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            let extra = if result.shared.len() > 3 {
-                format!(" and {} more", result.shared.len() - 3)
-            } else {
-                String::new()
-            };
-            ProbeOutcome::Refused(format!(
-                "{stale}; shares {} files with main since CI base {}: {shown}{extra}",
-                result.shared.len(),
-                result.ci_base_sha.chars().take(8).collect::<String>()
-            ))
-        }
-        Err(error) => ProbeOutcome::Refused(format!("{stale}; file overlap unreadable ({error})")),
-    }
-}
-
 /// Did the green runs test a merge ref that already held the base tip?
 pub fn ci_base_verdict(
     behind_by: u64,
     base_tip_at: &str,
     runs: &[(String, String)],
 ) -> ProbeOutcome {
-    if behind_by == 0 || runs.is_empty() {
+    if behind_by == 0 {
         return ProbeOutcome::Clear;
+    }
+    if runs.is_empty() {
+        return ProbeOutcome::Refused(format!(
+            "ci_base_stale: no pull_request run at the head proves its CI base; PR is {behind_by} behind"
+        ));
     }
     if !valid_github_timestamp(base_tip_at)
         || runs
@@ -3570,10 +3557,10 @@ mod tests {
             ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Clear
         );
-        assert_eq!(
+        assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
-            ProbeOutcome::Clear
-        );
+            ProbeOutcome::Refused(reason) if reason.contains("no pull_request run")
+        ));
         let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
         assert!(matches!(
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
@@ -3596,51 +3583,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_overlap_verdict_reads_each_branch() {
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            2094,
-            Ok(crate::merge_gates::StaleOverlap {
-                ci_base_sha: "abcdefgé".to_string(),
-                landed: 1,
-                shared: Vec::new(),
-            }),
-        );
-        assert_eq!(outcome, ProbeOutcome::Clear);
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            8,
-            Ok(crate::merge_gates::StaleOverlap {
-                ci_base_sha: "abcdef123456".to_string(),
-                landed: 5,
-                shared: vec![
-                    "docs/guide.md".to_string(),
-                    "hooks/a.json".to_string(),
-                    "hooks/b.json".to_string(),
-                    "hooks/c.json".to_string(),
-                ],
-            }),
-        );
-        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-        if reason.starts_with("ci_base_stale")
-            && reason.contains("docs/guide.md")
-            && reason.contains("hooks/a.json")
-            && reason.contains("hooks/b.json")
-            && reason.contains("and 1 more")
-            && !reason.contains("hooks/c.json")));
-        let outcome = stale_overlap_verdict(
-            "ci_base_stale: old run".to_string(),
-            8,
-            Err("fetch failed".to_string()),
-        );
-        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
-        if reason.starts_with("ci_base_stale")
-            && reason.contains("file overlap unreadable (fetch failed)")));
-    }
-
-    #[test]
-    fn a_stale_ci_base_holds_a_checked_merge_with_a_remedy() {
-        let fake = Fake {
+    fn a_green_pr_whose_ci_predates_main_merges_main_in_and_waits_for_the_retest() {
+        // The replay: one PR lands, then a second PR shares no file with it
+        // and is green on a run created before that landing. It holds, takes
+        // the slot, and has main merged into its branch; once the rerun is
+        // green against the current main it merges.
+        let mut fake = Fake {
             ci_base: Some(ProbeOutcome::Refused(
                 "ci_base_stale: run predates base".to_string(),
             )),
@@ -3651,15 +3599,38 @@ mod tests {
         let outcome = run(&fake, &req);
         assert_eq!(outcome.word(), "held");
         assert!(outcome.detail().contains("ci_base_stale"));
-        assert!(outcome.detail().contains("fno do pr rebase"));
-        assert!(fake.gh_calls.borrow().is_empty());
-        assert_eq!(*fake.ci_base_calls.borrow(), 1);
+        assert!(outcome.detail().contains("merged main into PR 7's branch"));
+        assert_eq!(*fake.slot.borrow(), Some(7));
+        assert_eq!(
+            *fake.gh_calls.borrow(),
+            vec![vec![
+                "api".to_string(),
+                "-X".to_string(),
+                "PUT".to_string(),
+                "repos/{owner}/{repo}/pulls/7/update-branch".to_string(),
+                "-f".to_string(),
+                "expected_head_sha=abc123".to_string(),
+            ]]
+        );
+
+        fake.gh_calls.borrow_mut().clear();
+        fake.gh_recovery_ok = Some(false);
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("update-branch failed"));
+        assert!(outcome
+            .detail()
+            .contains("merge origin/main into the branch"));
+
+        fake.checks = Some("pending".to_string());
+        fake.ci_base = Some(ProbeOutcome::Clear);
+        assert_eq!(run(&fake, &req).word(), "held");
+        fake.checks = None;
+        assert_eq!(run(&fake, &req).word(), "merged");
     }
 
     #[test]
-    fn an_arm_or_unchecked_merge_skips_ci_base_freshness() {
-        // One table test, two rows: the effect that owes no freshness probe
-        // skips it, whatever its arm spelling.
+    fn an_unchecked_merge_skips_ci_base_freshness_and_an_arm_does_not() {
         for (effect, require_checks) in [(Effect::Arm, true), (Effect::Merge, false)] {
             let fake = Fake {
                 ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
@@ -3667,16 +3638,16 @@ mod tests {
             };
             let mut req = request(effect);
             req.require_checks = require_checks;
+            let armed = effect == Effect::Arm;
             assert_eq!(
                 run(&fake, &req).word(),
-                if effect == Effect::Arm {
-                    "armed"
-                } else {
-                    "merged"
-                },
+                if armed { "held" } else { "merged" },
                 "{effect:?} require_checks={require_checks}"
             );
-            assert_eq!(*fake.ci_base_calls.borrow(), 0);
+            assert_eq!(*fake.ci_base_calls.borrow(), u32::from(armed));
+            if armed {
+                assert!(!fake.gh_calls.borrow().iter().any(|c| c[0] == "pr"));
+            }
         }
     }
 
@@ -3688,7 +3659,8 @@ mod tests {
         };
         let mut req = request(Effect::Merge);
         req.require_checks = true;
-        assert_eq!(run(&fake, &req).word(), "merged");
+        assert_eq!(run(&fake, &req).word(), "unknown");
+        assert!(fake.gh_calls.borrow().is_empty());
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
             fresh_ci: Some(false),
