@@ -471,7 +471,15 @@ pub fn parse_verb_token(tok: &str) -> Option<(&str, bool)> {
 /// root env hints, then the persisted `~/.fno/install/plugin-root` pointer; empty on
 /// any resolution failure, where pass-through is the safe direction and the
 /// plugin-qualified `/fno:` spelling keeps working on namespace alone.
-fn footnote_verbs() -> std::collections::HashSet<String> {
+/// The roster for out-of-crate callers (the parity tests), sorted so the
+/// order is deterministic.
+pub fn footnote_verbs_public() -> Vec<String> {
+    let mut verbs: Vec<String> = footnote_verbs().into_iter().collect();
+    verbs.sort();
+    verbs
+}
+
+pub(crate) fn footnote_verbs() -> std::collections::HashSet<String> {
     static VERBS: std::sync::OnceLock<std::collections::HashSet<String>> =
         std::sync::OnceLock::new();
     if let Some(verbs) = VERBS.get() {

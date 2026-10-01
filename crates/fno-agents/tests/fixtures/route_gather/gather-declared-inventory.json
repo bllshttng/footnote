@@ -1,0 +1,452 @@
+{
+  "config_toml": "[[routing.models]]\nname = \"a-x\"\nharness = \"claude\"\nmodel = \"m-a\"\nband = \"high\"\neffort = \"high\"\n[[routing.models]]\nname = \"a-x\"\nharness = \"claude\"\nroute = \"zai/m-a\"\n[[routing.models]]\nname = \"b-x\"\nharness = \"codex\"\nmodel = \"m-b\"\nband = \"medium\"\n[routing]\nobjective = \"best-available\"\nprefer_harness = \"codex\"\n[agents.profiles.target]\nlanes = [{provider = \"codex\", model = \"luna-x\", effort = \"low\"}]\n[agents.profiles.target.by_difficulty.high]\nlanes = [{provider = \"claude\", model = \"opus-h\"}]\non_exhausted = \"queue\"\n",
+  "expect_fingerprint": "5e57c9c60be9",
+  "expect_inventory": {
+    "declared": true,
+    "objective": "best-available",
+    "prefer_harness": "codex",
+    "rows": [
+      {
+        "account": "",
+        "band": "max",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "fable",
+        "name": "claude-fable",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "low",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "haiku",
+        "name": "claude-haiku",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "high",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "opus",
+        "name": "claude-opus",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "medium",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "sonnet",
+        "name": "claude-sonnet",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "low",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "codex",
+        "model": "luna",
+        "name": "codex-luna",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "max",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "codex",
+        "model": "sol",
+        "name": "codex-sol",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "medium",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "codex",
+        "model": "terra",
+        "name": "codex-terra",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "low",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "glm-4.7",
+        "name": "glm-4.7",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "medium",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "claude",
+        "model": "glm-5.3[1m]",
+        "name": "glm-5.3[1m]",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      },
+      {
+        "account": "",
+        "band": "high",
+        "cost_per_mtok_in": null,
+        "effort": "high",
+        "harness": "claude",
+        "model": "m-a",
+        "name": "a-x",
+        "operator_view": "",
+        "percentile": null,
+        "route": "zai/m-a"
+      },
+      {
+        "account": "",
+        "band": "medium",
+        "cost_per_mtok_in": null,
+        "effort": "",
+        "harness": "codex",
+        "model": "m-b",
+        "name": "b-x",
+        "operator_view": "",
+        "percentile": null,
+        "route": ""
+      }
+    ]
+  },
+  "expect_payload": {
+    "account_record_vendors": {},
+    "capacity_refresh": true,
+    "constrain_harness": null,
+    "declared_rows": {
+      "a-x": {
+        "account": "",
+        "band": "high",
+        "effort": "high",
+        "harness": "claude",
+        "model": "m-a",
+        "name": "a-x",
+        "operator_view": "",
+        "route": "zai/m-a"
+      },
+      "b-x": {
+        "account": "",
+        "band": "medium",
+        "effort": "",
+        "harness": "codex",
+        "model": "m-b",
+        "name": "b-x",
+        "operator_view": "",
+        "route": ""
+      }
+    },
+    "effort_ok": {
+      "claude": {
+        "high": true
+      }
+    },
+    "explicit_lane": false,
+    "explicit_model_value": null,
+    "explicit_route_value": null,
+    "explicit_vendor_value": null,
+    "gate_bypassed": false,
+    "harness_installed": {
+      "claude": true,
+      "codex": true
+    },
+    "inventory": {
+      "declared": true,
+      "objective": "best-available",
+      "prefer_harness": "codex",
+      "rows": [
+        {
+          "account": "",
+          "band": "max",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "fable",
+          "name": "claude-fable",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "low",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "haiku",
+          "name": "claude-haiku",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "high",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "opus",
+          "name": "claude-opus",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "medium",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "sonnet",
+          "name": "claude-sonnet",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "low",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "codex",
+          "model": "luna",
+          "name": "codex-luna",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "max",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "codex",
+          "model": "sol",
+          "name": "codex-sol",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "medium",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "codex",
+          "model": "terra",
+          "name": "codex-terra",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "low",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "glm-4.7",
+          "name": "glm-4.7",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "medium",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "claude",
+          "model": "glm-5.3[1m]",
+          "name": "glm-5.3[1m]",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        },
+        {
+          "account": "",
+          "band": "high",
+          "cost_per_mtok_in": null,
+          "effort": "high",
+          "harness": "claude",
+          "model": "m-a",
+          "name": "a-x",
+          "operator_view": "",
+          "percentile": null,
+          "route": "zai/m-a"
+        },
+        {
+          "account": "",
+          "band": "medium",
+          "cost_per_mtok_in": null,
+          "effort": "",
+          "harness": "codex",
+          "model": "m-b",
+          "name": "b-x",
+          "operator_view": "",
+          "percentile": null,
+          "route": ""
+        }
+      ]
+    },
+    "lanes_raw": [
+      {
+        "effort": "low",
+        "model": "luna-x",
+        "provider": "codex"
+      }
+    ],
+    "model_occupied": false,
+    "node": null,
+    "permission_mode": null,
+    "policy": {
+      "enforce_inventory": false,
+      "operator_access": "unknown"
+    },
+    "profile": {
+      "by_difficulty": {
+        "high": {
+          "lanes": [
+            {
+              "model": "opus-h",
+              "provider": "claude"
+            }
+          ],
+          "on_exhausted": "queue"
+        }
+      },
+      "on_exhausted": "",
+      "on_low": "",
+      "on_unknown": ""
+    },
+    "protected_role": null,
+    "role": null,
+    "rung_base": "agents.profiles.target",
+    "slot_by_verb": {
+      "blueprint": {
+        "has_overlay": false,
+        "lanes_raw": null,
+        "profile": {
+          "by_difficulty": {},
+          "on_exhausted": "",
+          "on_low": "",
+          "on_unknown": ""
+        },
+        "rung_base": "agents.profiles.blueprint"
+      },
+      "crown": {
+        "has_overlay": false,
+        "lanes_raw": null,
+        "profile": {
+          "by_difficulty": {},
+          "on_exhausted": "",
+          "on_low": "",
+          "on_unknown": ""
+        },
+        "rung_base": "agents.profiles.crown"
+      },
+      "review": {
+        "has_overlay": false,
+        "lanes_raw": null,
+        "profile": {
+          "by_difficulty": {},
+          "on_exhausted": "",
+          "on_low": "",
+          "on_unknown": ""
+        },
+        "rung_base": "agents.profiles.review"
+      },
+      "target": {
+        "has_overlay": true,
+        "lanes_raw": [
+          {
+            "effort": "low",
+            "model": "luna-x",
+            "provider": "codex"
+          }
+        ],
+        "profile": {
+          "by_difficulty": {
+            "high": {
+              "lanes": [
+                {
+                  "model": "opus-h",
+                  "provider": "claude"
+                }
+              ],
+              "on_exhausted": "queue"
+            }
+          },
+          "on_exhausted": "",
+          "on_low": "",
+          "on_unknown": ""
+        },
+        "rung_base": "agents.profiles.target"
+      },
+      "think": {
+        "has_overlay": false,
+        "lanes_raw": null,
+        "profile": {
+          "by_difficulty": {},
+          "on_exhausted": "",
+          "on_low": "",
+          "on_unknown": ""
+        },
+        "rung_base": "agents.profiles.think"
+      }
+    },
+    "substrate": null,
+    "thread_seatable": {
+      "claude": true,
+      "codex": true
+    },
+    "work_verb": "target"
+  },
+  "transport_payload": {
+    "capacity_refresh": true,
+    "constrain_harness": null,
+    "explicit_lane": false,
+    "explicit_model_value": null,
+    "explicit_route_value": null,
+    "explicit_vendor_value": null,
+    "gate_bypassed": false,
+    "model_occupied": false,
+    "node": null,
+    "permission_mode": null,
+    "protected_role": null,
+    "role": null,
+    "rung_base": "agents.profiles.target",
+    "substrate": null,
+    "work_verb": "target"
+  }
+}

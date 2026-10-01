@@ -114,17 +114,6 @@ def test_sample_shows_one_model_two_access_paths():
     assert all(c[0] != c[1] for c in paired)  # two profiles, never averaged
 
 
-def test_routing_model_row_defaults_read_through_the_fold():
-    """An empty declared row reads as empty strings at the seam boundary:
-    row defaults are applied by the reader (_field), never at load time."""
-    from fno import route_resolve as rr
-
-    s = _settings({"routing": {"models": [{"name": "bare"}]}})
-    rows = rr._declared_rows(s)
-    assert rows["bare"]["harness"] == "" and rows["bare"]["band"] == ""
-    assert rows["bare"]["operator_view"] == ""
-
-
 def test_routing_block_tolerates_extra_keys():
     block = RoutingBlock.model_validate({"objective": "best-available", "future_key": 1})
     assert block.objective == "best-available"

@@ -708,7 +708,7 @@ def verb_fired_marker(message: str) -> Optional[str]:
 def render_seed(message: str, harness: str) -> str:
     """Prose verbatim; a verb-shaped seed gate-checked then normalized by the
     one shared fire-test predicate (``is_verb_seed``, x-bbbb)."""
-    from fno.agents.spawn_defaults import is_verb_seed
+    from fno.config._dispatch_verbs import is_verb_seed
 
     if not is_verb_seed(message):
         return message

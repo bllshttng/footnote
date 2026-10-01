@@ -1,0 +1,70 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w14",
+    "--route",
+    "zai/glm-z",
+    "/fno:target x-12"
+  ],
+  "config_toml": "[agents.defaults]\nprovider = \"codex\"\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--name",
+      "w14",
+      "--route",
+      "zai/glm-z",
+      "/fno:target x-12"
+    ],
+    "exit": 2,
+    "journal": null,
+    "stderr": [
+      "fno agents spawn: config.agents.defaults.provider = 'codex' sets the HARNESS axis,",
+      "and a route only the claude harness can carry is already on your command line",
+      "(--route zai/glm-z).",
+      "Nothing you passed set the harness: -P names the model vendor, a different axis,",
+      "so the profile filled it.",
+      "Pass -H claude to keep your route, or clear agents.defaults.provider."
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": true,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w14",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": "zai/glm-z",
+    "seed": "/fno:target x-12",
+    "seed_form": "positional",
+    "seed_index": 5,
+    "spawn_tokens": [
+      "--name",
+      "w14",
+      "--route",
+      "zai/glm-z",
+      "/fno:target x-12"
+    ],
+    "tab_flag_present": false
+  }
+}
