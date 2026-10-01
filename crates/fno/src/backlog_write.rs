@@ -127,7 +127,9 @@ pub fn rank_argv(id: &str, place: Place, anchor: Option<&str>) -> Result<Vec<Str
 /// stderr line on a non-zero exit (the verb's refusal, verbatim), else the
 /// last stdout line, else the updated fallback; the bool is the exit fact
 /// so the web bridge can answer `{"ok": false, ...}` without re-reading the
-/// text. Shaped like [`crate::client::update_menu::run_restart_verb`].
+/// text. Sibling of the foreground restart runner
+/// ([`crate::client::update_menu::run_restart_foreground`]), which instead
+/// inherits stdio so the operator watches the receipts.
 pub(crate) async fn run_verb(args: &[String], stdin: Option<String>) -> (bool, String) {
     use std::process::Stdio;
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());

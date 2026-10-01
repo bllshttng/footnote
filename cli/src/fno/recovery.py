@@ -790,7 +790,7 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
         if kind == "think":
             return bool(str(entry.get("plan_path") or "").strip())
         # A PR existing is the completion floor - red CI and pending bots are
-        # pr_watch's and /fno:pr check's beat, not the watchdog's (LD 4).
+        # pr_watch's and /fno:ship pr check's beat, not the watchdog's (LD 4).
         return bool(entry.get("pr_number") or entry.get("pr_url"))
     except Exception:  # noqa: BLE001 - a probe must never crash the sweep
         return None

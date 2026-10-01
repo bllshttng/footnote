@@ -61,7 +61,8 @@ const NOISE_TYPES: &[&str] = &["guard_decision", "control_plane_tick", "gh_probe
 const LABEL_KEYS: &[&str] = &["reason", "outcome", "verdict", "termination_reason"];
 
 const USAGE: &str = "evals-macro --events <journal.jsonl> [--events ...] [--since 30d] \
-[--topic TYPE:LABEL] [--window 20] [--all] [--json]";
+[--topic TYPE:LABEL] [--window 20] [--all] [--json] | \
+evals-macro --escalation [--since-days <n>] [--json]";
 
 // -- Envelope view -----------------------------------------------------------
 
@@ -733,6 +734,8 @@ pub fn run_evals_macro(args: &[String]) -> i32 {
     let mut window: usize = 20;
     let mut include_all = false;
     let mut json_output = false;
+    let mut escalation = false;
+    let mut since_days: i64 = 28;
     let mut events: Vec<PathBuf> = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
@@ -763,12 +766,22 @@ pub fn run_evals_macro(args: &[String]) -> i32 {
             },
             "--all" | "-A" => include_all = true,
             "--json" | "-J" => json_output = true,
+            "--escalation" => escalation = true,
+            "--since-days" => {
+                match take_value(args, &mut i, inline).and_then(|v| v.parse::<i64>().ok()) {
+                    Some(n) => since_days = n,
+                    None => return usage("evals-macro: --since-days needs a number"),
+                }
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return 0;
             }
             other => return usage(&format!("evals-macro: unknown flag {other:?}")),
         }
+    }
+    if escalation {
+        return crate::scoreboard_escalation::run_escalation_view(since_days, json_output);
     }
     if events.is_empty() {
         return usage(

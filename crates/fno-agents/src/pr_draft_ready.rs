@@ -373,7 +373,9 @@ mod tests {
     use std::fs;
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::claims::test_env_lock().lock().unwrap()
+        crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// A hermetic state root: FNO_HOME and FNO_STATE_DIR at the fixture dir,

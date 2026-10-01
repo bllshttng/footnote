@@ -1463,6 +1463,11 @@ pub(crate) fn work_state_key(session_id: &str) -> String {
 /// over every entry's `sessions[]` rows. Build once per sweep over the
 /// working graph plus the archive; `status` is the entry's stored `status`
 /// field only, never a derived overlay.
+///
+/// Each session's list puts its CURRENT node first: open non-ship rows
+/// before ended or ship rows, then the newest `started_at`. A worker rebound to a new
+/// node keeps its ended row on the old one, and graph order alone made the
+/// old node the one every first-row reader judged it by.
 pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
     sessions_index_with(entries, true)
 }
@@ -1479,7 +1484,7 @@ fn sessions_index_with(
     entries: &[Value],
     include_ship: bool,
 ) -> HashMap<String, Vec<(String, String)>> {
-    let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut index: HashMap<String, Vec<(bool, String, String, String)>> = HashMap::new();
     for entry in entries {
         let Some(node_id) = entry_id(entry) else {
             continue;
@@ -1500,16 +1505,34 @@ fn sessions_index_with(
             if sid.is_empty() {
                 continue;
             }
-            if !include_ship && row.get("phase").and_then(Value::as_str) == Some("ship") {
+            let ship = row.get("phase").and_then(Value::as_str) == Some("ship");
+            if !include_ship && ship {
                 continue;
             }
-            index
-                .entry(work_state_key(sid))
-                .or_default()
-                .push((node_id.to_string(), status.clone()));
+            // No terminal closes a ship row, so it never ranks as current work.
+            let ended = ship || row.as_object().is_some_and(|o| o.contains_key("ended_at"));
+            let started = row
+                .get("started_at")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            index.entry(work_state_key(sid)).or_default().push((
+                ended,
+                started,
+                node_id.to_string(),
+                status.clone(),
+            ));
         }
     }
     index
+        .into_iter()
+        .map(|(sid, mut rows)| {
+            // Stable: equal keys keep graph order.
+            rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+            let rows = rows.into_iter().map(|(_, _, node, status)| (node, status));
+            (sid, rows.collect())
+        })
+        .collect()
 }
 
 /// The WORK-done question for one session against a [`work_index`]: a ship
@@ -2827,7 +2850,8 @@ mod tests {
                     "type": "feature", "status": "ready", "priority": "p2",
                 }),
                 json!({
-                    "id": "ab-titl0002", "title": "fix the bug in x-aaaa", "slug": "fix-the-bug",
+                    "id": "ab-titl0002", "title": "fix the bug in /Users/bb16/notes",
+                    "slug": "fix-the-bug",
                     "type": "feature", "status": "idea", "priority": "p2",
                 }),
             ],
@@ -2840,7 +2864,7 @@ mod tests {
             .expect("a leaky title must refuse at write time");
         assert!(
             matches!(&err, StoreError::Invalid(text)
-                if text.contains("ab-titl0002") && text.contains("node-id") && text.contains("--details")),
+                if text.contains("ab-titl0002") && text.contains("home-path") && text.contains("--details")),
             "expected a refusal naming the id, class and rule, got {err:?}"
         );
         assert_eq!(read_rows(&graph).unwrap(), before);
@@ -2850,13 +2874,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let graph = root.path().join("graph.json");
         let legacy = json!({
-            "id": "ab-titl0003", "title": "legacy title about x-aaaa PR #12",
+            "id": "ab-titl0003", "title": "legacy title about /Users/bb16/notes",
             "slug": "legacy-title", "type": "feature", "status": "idea", "priority": "p2",
         });
         seed_rows(&graph, &[legacy]).unwrap();
         let input = MutateInput {
             entries: vec![json!({
-                "id": "ab-titl0003", "title": "legacy title about x-aaaa PR #12",
+                "id": "ab-titl0003", "title": "legacy title about /Users/bb16/notes",
                 "slug": "legacy-title", "type": "feature", "status": "in_progress",
                 "priority": "p2",
             })],
@@ -2970,7 +2994,7 @@ mod tests {
     }
 
     #[test]
-    fn work_state_folds_every_named_node() {
+    fn work_state_folds_named_nodes_and_reports_the_current_open_one() {
         // AC2-HP: named on two done nodes -> AllDone carrying both.
         let entries = vec![
             json!({
@@ -2996,10 +3020,7 @@ mod tests {
                 nodes: vec!["N1".into(), "N2".into()]
             }
         );
-    }
 
-    #[test]
-    fn work_state_reports_the_first_open_node_and_no_provenance() {
         // AC2-EDGE: one open node among the named -> Open naming it.
         let entries = vec![
             json!({
@@ -3033,6 +3054,23 @@ mod tests {
             }
         );
         assert_eq!(work_state(&index, "ses_casekept"), WorkState::NoProvenance);
+
+        // A rebound session: its ended row on N5 comes first in graph order,
+        // its open row on N7 is the newest. The open row is the current node.
+        let entries = vec![
+            json!({"id": "N5", "status": "in_review", "sessions": [
+                {"session_id": "R", "phase": "execute", "started_at": "2026-10-01T01:00:00Z",
+                 "ended_at": "2026-10-01T03:00:00Z"}]}),
+            json!({"id": "N6", "status": "in_review", "sessions": [
+                {"session_id": "R", "phase": "execute", "started_at": "2026-10-01T02:00:00Z"}]}),
+            json!({"id": "N7", "status": "in_progress", "sessions": [
+                {"session_id": "R", "phase": "execute", "started_at": "2026-10-01T04:00:00Z"}]}),
+        ];
+        let order: Vec<String> = work_index(&entries)["r"]
+            .iter()
+            .map(|(node, _)| node.clone())
+            .collect();
+        assert_eq!(order, ["N7", "N6", "N5"]);
     }
 
     #[test]

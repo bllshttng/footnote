@@ -1,4 +1,4 @@
-"""Tests for config.post_merge - the /fno:pr merged skill config block.
+"""Tests for config.post_merge - the /fno:ship pr merged skill config block.
 
 Covers the mechanical, deterministic half of the post-merge ritual BDD:
 per-project parking-lot-path resolution and the "missing config fails loud /

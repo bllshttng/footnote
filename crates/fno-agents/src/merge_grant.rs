@@ -575,8 +575,311 @@ fn live_config(root: &Path) -> LiveConfig {
     }
 }
 
+// ── the PR's bound target manifest ─────────────────────────────────────────
+
+/// One `git worktree list --porcelain` record.
+pub(crate) struct WorktreeEntry {
+    pub path: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+}
+
+/// Parse the porcelain listing. Shared with the pr_status worktree probe so
+/// both readers match worktrees the same way.
+pub(crate) fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(done) = current.take() {
+                entries.push(done);
+            }
+            current = Some(WorktreeEntry {
+                path: path.to_string(),
+                head: None,
+                branch: None,
+            });
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            if let Some(c) = current.as_mut() {
+                c.head = Some(head.to_string());
+            }
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            if let Some(c) = current.as_mut() {
+                c.branch = Some(branch.to_string());
+            }
+        }
+    }
+    if let Some(done) = current.take() {
+        entries.push(done);
+    }
+    entries
+}
+
+/// `fnmatch`-lite for the archived-manifest patterns; the only glob
+/// metachar the names carry is `*`.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    fn inner(p: &[u8], n: &[u8]) -> bool {
+        match (p.first(), n.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => inner(&p[1..], n) || (!n.is_empty() && inner(p, &n[1..])),
+            (Some(a), Some(b)) if a == b => inner(&p[1..], &n[1..]),
+            _ => false,
+        }
+    }
+    inner(pattern.as_bytes(), name.as_bytes())
+}
+
+/// The worktrees of `cwd` that exist on disk.
+fn worktree_paths(cwd: &Path) -> Vec<PathBuf> {
+    let Ok(listed) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !listed.status.success() {
+        return Vec::new();
+    }
+    parse_worktree_list(&String::from_utf8_lossy(&listed.stdout))
+        .into_iter()
+        .filter(|e| Path::new(&e.path).is_dir())
+        .map(|e| PathBuf::from(e.path))
+        .collect()
+}
+
+/// One worktree's bound target manifest, read through the canonical
+/// state-path owner (`worktree_space_dir` first, legacy `.fno` fallback) and
+/// parsed with the hardened finalize parser, whose trust gate keeps prose
+/// inside a spilled `input` scalar from minting a merge posture. A live
+/// manifest outranks the supported archived/terminal forms; the newest of
+/// those is consulted only when no live manifest exists.
+#[derive(Debug)]
+pub(crate) struct BoundManifestRead {
+    pub node_id: Option<String>,
+    pub approved: Option<bool>,
+    pub source: Option<String>,
+    pub session: Option<String>,
+    pub manifest_path: PathBuf,
+    pub live: bool,
+}
+
+/// The manifest reading for one worktree. `None` = no manifest form lives
+/// there, so a manifest-less historical receipt keeps its legacy behavior.
+/// `Unreadable` = a manifest exists but cannot be read, which never reads as
+/// permission.
+pub(crate) enum BoundRead {
+    None,
+    Read(BoundManifestRead),
+    Unreadable(String),
+}
+
+/// Read the bound manifest of one worktree: the canonical state-path
+/// resolution first (live wins), then the newest archived/terminal form in
+/// either the resolved directory or the legacy `.fno` state dir.
+pub(crate) fn read_bound_manifest(wt: &Path) -> BoundRead {
+    // `resolve` always answers for `target-state`; the None arm is defense in
+    // depth, never a second path builder.
+    let Some(resolved) = crate::state_path::resolve("target-state", wt) else {
+        return BoundRead::None;
+    };
+    if resolved.exists() && !resolved.is_file() {
+        return BoundRead::Unreadable(format!("{} is not a regular file", resolved.display()));
+    }
+    if resolved.is_file() {
+        return match std::fs::read_to_string(&resolved) {
+            Ok(content) => parse_bound_content(&content, &resolved, true),
+            Err(e) => BoundRead::Unreadable(format!("{}: {e}", resolved.display())),
+        };
+    }
+    // Archived/terminal forms, newest first, from the resolved directory
+    // (the space dir) and the legacy `.fno` dir.
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = resolved.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    let legacy = wt.join(".fno");
+    if legacy != resolved.parent().unwrap_or(Path::new("")) {
+        dirs.push(legacy);
+    }
+    let mut hits: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        hits.extend(rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    glob_match("target-state.terminal.*.md", n)
+                        || glob_match("target-state.md.archived.*.md", n)
+                })
+                .unwrap_or(false)
+        }));
+    }
+    hits.sort();
+    hits.dedup();
+    for path in hits.into_iter().rev() {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => return parse_bound_content(&content, &path, false),
+            Err(e) => {
+                return BoundRead::Unreadable(format!("{}: {e}", path.display()));
+            }
+        }
+    }
+    BoundRead::None
+}
+
+/// Parse one manifest's text into the bound reading. `session` rides the
+/// loopcheck scanner because finalize's `harness_session_id` field is private.
+fn parse_bound_content(content: &str, path: &Path, live: bool) -> BoundRead {
+    let fields = crate::finalize::parse_manifest_fields(content);
+    BoundRead::Read(BoundManifestRead {
+        node_id: fields.graph_node_id,
+        approved: fields.auto_merge_approved,
+        source: fields.auto_merge_source,
+        session: crate::loopcheck::scan_manifest_field(content, "harness_session_id"),
+        manifest_path: path.to_path_buf(),
+        live,
+    })
+}
+
+/// The manifest of the worktree on `branch`, for readers that bind by the
+/// PR's head ref. No matching worktree reads as `None` (legacy behavior).
+pub(crate) fn branch_bound_manifest(cwd: &Path, branch: &str) -> BoundRead {
+    if branch.is_empty() {
+        return BoundRead::None;
+    }
+    let Ok(listed) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return BoundRead::None;
+    };
+    if !listed.status.success() {
+        return BoundRead::None;
+    }
+    let matched = parse_worktree_list(&String::from_utf8_lossy(&listed.stdout))
+        .into_iter()
+        .find(|e| e.branch.as_deref() == Some(branch) && Path::new(&e.path).is_dir());
+    match matched {
+        Some(e) => read_bound_manifest(Path::new(&e.path)),
+        None => BoundRead::None,
+    }
+}
+
+/// The node-keyed binding for the durable verdict: the worktrees whose bound
+/// manifest names this node. `Err` = the binding is ambiguous (two or more
+/// live binds) or every candidate is unreadable - either way the verdict
+/// fails closed. `Ok(None)` = no binding: legacy behavior.
+pub(crate) fn bound_node_posture(
+    root: &Path,
+    node_id: &str,
+) -> Result<Option<BoundManifestRead>, String> {
+    let mut live_binds: Vec<BoundManifestRead> = Vec::new();
+    let mut archived_binds: Vec<BoundManifestRead> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for wt in worktree_paths(root) {
+        match read_bound_manifest(&wt) {
+            BoundRead::None => {}
+            BoundRead::Unreadable(why) => unreadable.push(why),
+            BoundRead::Read(r) => {
+                if r.node_id.as_deref() != Some(node_id) {
+                    continue;
+                }
+                if r.live {
+                    live_binds.push(r);
+                } else {
+                    archived_binds.push(r);
+                }
+            }
+        }
+    }
+    // A valid live manifest outranks archives across trees, not only within
+    // one: a re-dispatched node's fresh bind decides over the predecessor's
+    // archived form.
+    if live_binds.len() > 1 || (live_binds.is_empty() && archived_binds.len() > 1) {
+        let binds = if live_binds.is_empty() {
+            &archived_binds
+        } else {
+            &live_binds
+        };
+        return Err(format!(
+            "{} worktrees bind node {node_id}: {}",
+            binds.len(),
+            binds
+                .iter()
+                .map(|b| b.manifest_path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(bound) = live_binds.pop() {
+        return Ok(Some(bound));
+    }
+    if let Some(bound) = archived_binds.pop() {
+        return Ok(Some(bound));
+    }
+    if unreadable.is_empty() {
+        return Ok(None);
+    }
+    Err(format!(
+        "unreadable bound manifests: {}",
+        unreadable.join("; ")
+    ))
+}
+
+/// What the node's bound manifest does to a merge authority.
+#[derive(Debug)]
+enum ManifestFold {
+    /// No worktree binds the node: legacy receipts-and-config behavior.
+    Unbound,
+    /// A binding was read; its posture permits (or says nothing). Provenance
+    /// rides along; the authority stands.
+    Permit(BoundManifestRead),
+    /// A binding was read and refuses: `auto_merge_approved: false`.
+    Refuse(BoundManifestRead),
+    /// The binding is unreadable or ambiguous. Fails closed.
+    Unknown(String),
+}
+
+/// Read the node's bound-manifest posture once for the fold.
+fn bound_fold(root: &Path, node_id: &str) -> ManifestFold {
+    match bound_node_posture(root, node_id) {
+        Ok(Some(bound)) => {
+            if bound.approved == Some(false) {
+                ManifestFold::Refuse(bound)
+            } else {
+                ManifestFold::Permit(bound)
+            }
+        }
+        Ok(None) => ManifestFold::Unbound,
+        Err(why) => ManifestFold::Unknown(why),
+    }
+}
+
+/// The additive provenance a read binding carries onto a verdict receipt or
+/// a queue row: which manifest binds, whose session it is, live or archived,
+/// and the manifest's own fold of the merge posture.
+fn write_provenance(out: &mut Value, bound: &BoundManifestRead) {
+    out["manifest_path"] = json!(bound.manifest_path.display().to_string());
+    out["bound_session"] = bound
+        .session
+        .clone()
+        .map(|s| json!(s))
+        .unwrap_or(Value::Null);
+    out["manifest_state"] = json!(if bound.live { "live" } else { "archived" });
+    out["auto_merge_source"] = bound
+        .source
+        .clone()
+        .map(|s| json!(s))
+        .unwrap_or(Value::Null);
+}
 /// One `grant-verdict` answer over already-read rows. An `Err` rows read is
-/// an unknown verdict naming it - an unread graph never grants.
+/// an unknown verdict naming it - an unread graph never grants. The receipt
+/// rides the graph receipt and the live config, and the folded posture of
+/// the PR's own bound target manifest.
 pub fn verdict_op(rows: Result<Vec<Value>, String>, payload: &Value) -> String {
     let entries = match rows {
         Err(e) => {
@@ -602,20 +905,68 @@ pub fn verdict_op(rows: Result<Vec<Value>, String>, payload: &Value) -> String {
         &|k| claim_status(k, None).0,
         &|| live_config(&root),
     );
-    json!({
+    let mut out = json!({
         "state": verdict.state,
         "reason": verdict.reason,
         "node_id": verdict.node_id,
         "claim_state": verdict.claim_state,
         "grant": verdict.grant,
-    })
-    .to_string()
+    });
+    // The PR's own bound manifest folds over the receipt+config verdict. It
+    // only ever downgrades: `auto_merge_approved: false` refuses, an
+    // unreadable or ambiguous binding reads unknown, and provenance lands
+    // whenever a binding was read. A projection never widens the merge
+    // verb's own gates.
+    if let Some(node_id) = verdict.node_id.clone() {
+        match bound_fold(&root, &node_id) {
+            ManifestFold::Unbound => {}
+            ManifestFold::Permit(bound) => {
+                write_provenance(&mut out, &bound);
+            }
+            ManifestFold::Refuse(bound) => {
+                write_provenance(&mut out, &bound);
+                if verdict.state == GRANTED {
+                    let live_word = if bound.live {
+                        "live"
+                    } else {
+                        "newest archived"
+                    };
+                    out["state"] = json!(REFUSED);
+                    out["downgraded_by_manifest"] = json!(true);
+                    out["reason"] = json!(format!(
+                        "bound target manifest refuses autonomous merge \
+(auto_merge_approved: false, auto_merge_source: {src}, harness_session_id: {sess}, \
+manifest: {path}, {live_word} manifest)",
+                        src = bound.source.as_deref().unwrap_or("unknown"),
+                        sess = bound.session.as_deref().unwrap_or("unattributed"),
+                        path = bound.manifest_path.display(),
+                    ));
+                }
+            }
+            ManifestFold::Unknown(why) => {
+                out["manifest_unreadable_or_ambiguous"] = json!(why);
+                if verdict.state == GRANTED {
+                    out["state"] = json!(UNKNOWN);
+                    out["downgraded_by_manifest"] = json!(true);
+                    out["reason"] = json!(why);
+                }
+            }
+        }
+    }
+    out.to_string()
+}
+
+/// The queued row's node id, empty when absent.
+fn row_node_id(row: &Value) -> &str {
+    row.get("node_id").and_then(Value::as_str).unwrap_or("")
 }
 
 /// One `grant-queue` answer over already-read rows. An `Err` rows read is an
 /// error receipt - the caller refuses its tick's merge work, it never
 /// guesses a queue. The receipt carries `elapsed_ms` so the caller can see
-/// the read's cost.
+/// the read's cost. The bound-manifest fold runs after the pure queue: a
+/// granted row whose node's bound manifest refuses, or whose binding cannot
+/// be read, drops. A queue only ever narrows the merge verb's gates.
 pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant) -> Value {
     match rows {
         Err(e) => json!({
@@ -635,6 +986,40 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
                 &live_config,
                 rotate,
             );
+            let root_of = |row: &Value| {
+                row.get("cwd")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .unwrap_or_default()
+            };
+            let mut refused_drops = 0usize;
+            let mut unknown_drops = 0usize;
+            if let Some(rows) = out["queue"].as_array_mut() {
+                rows.retain_mut(|row| match bound_fold(&root_of(row), row_node_id(row)) {
+                    ManifestFold::Unbound => true,
+                    ManifestFold::Permit(bound) => {
+                        write_provenance(row, &bound);
+                        true
+                    }
+                    ManifestFold::Refuse(_) => {
+                        refused_drops += 1;
+                        false
+                    }
+                    ManifestFold::Unknown(_) => {
+                        unknown_drops += 1;
+                        false
+                    }
+                });
+            }
+            for (key, by) in [
+                ("granted", -(refused_drops as i64 + unknown_drops as i64)),
+                ("refused", refused_drops as i64),
+                ("unknown", unknown_drops as i64),
+            ] {
+                if let Some(c) = out["verdicts"].get_mut(key) {
+                    *c = json!(c.as_i64().unwrap_or(0) + by);
+                }
+            }
             out["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
             out
         }

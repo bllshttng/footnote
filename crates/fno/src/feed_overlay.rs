@@ -40,6 +40,10 @@ pub struct FeedItem {
     pub title: String,
     #[serde(default, rename = "ref")]
     pub r#ref: Option<String>,
+    /// The registry row's worker name, on a removal: the handle the resume
+    /// action and the copied command address.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Who acted, when that is a mechanism rather than a session. Provenance,
     /// never an attach target.
     #[serde(default)]

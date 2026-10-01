@@ -43,17 +43,19 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     // board holds the keyboard. Org is the next view in the three-view cycle.
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE leg1 org-after-V");
-    h.wait_screen(15, |s| s.contains("Org Tree"));
+    h.wait_screen(15, |s| s.contains("Tree │ Table │ Graph"));
 
     h.type_bytes(&[PREFIX, b'?']);
     eprintln!("STAGE org global-keybinds");
-    let screen = h.wait_screen(15, |s| s.contains("keybinds"));
+    let screen = h.wait_screen(15, |s| s.contains("Keybindings"));
     assert!(
         !screen.contains("Org keys"),
         "Org's own keys must not answer the prefix chord:\n{screen}"
     );
     h.type_bytes(&[27]);
-    h.wait_screen(15, |s| s.contains("Org Tree") && !s.contains("keybinds"));
+    h.wait_screen(15, |s| {
+        s.contains("Tree │ Table │ Graph") && !s.contains("Keybindings")
+    });
 
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE leg1 agents-after-second-V");
@@ -61,10 +63,10 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
 
     h.type_bytes(&[PREFIX, b'?']);
     eprintln!("STAGE agents global-keybinds");
-    h.wait_screen(15, |s| s.contains("keybinds"));
+    h.wait_screen(15, |s| s.contains("Keybindings"));
     h.type_bytes(&[27]);
     h.wait_screen(15, |s| {
-        s.contains("+ new workspace") && !s.contains("keybinds")
+        s.contains("+ new workspace") && !s.contains("Keybindings")
     });
 
     // ... and the chord round-trips the view back to the board.
@@ -76,7 +78,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     // own keys overlay (its `?` verb, reachable with the bare key).
     h.type_bytes(&[PREFIX, b'?']);
     eprintln!("STAGE leg2 keybinds-after-^B?");
-    let screen = h.wait_screen(15, |s| s.contains("keybinds"));
+    let screen = h.wait_screen(15, |s| s.contains("Keybindings"));
     assert!(
         !screen.contains("backlog keys"),
         "the board's keys overlay must not answer the prefix chord:\n{screen}"

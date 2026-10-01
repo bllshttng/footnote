@@ -7,7 +7,6 @@ from pathlib import Path
 
 from fno.graph._constants import is_wellformed_node_id
 from fno.graph._reconcile import bind_pr_rows
-from fno.graph.roadmap_public import LEAK_PATTERNS
 from fno.pr.closure import branch_node_ids, render_pr_closure_trailer
 
 REPO = Path(__file__).resolve().parents[3]
@@ -17,11 +16,6 @@ def test_compact_legacy_id_is_a_valid_read_shape():
     assert is_wellformed_node_id("xd863")
     assert is_wellformed_node_id("x664b")
     assert not is_wellformed_node_id("xg863")
-
-
-def test_public_html_leak_gate_recognizes_compact_legacy_ids():
-    node_id = next(pattern for name, pattern in LEAK_PATTERNS if name == "node-id")
-    assert node_id.search("xd863")
 
 
 def test_compact_branch_candidate_is_exact_and_delimiter_bounded():

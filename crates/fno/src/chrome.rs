@@ -84,6 +84,9 @@ pub struct Chrome {
     /// slots instead of the inverse chrome, so a framed surface sits on the
     /// terminal's own bg under every theme.
     flat: bool,
+    /// Whether the top border carries the esc chip. A multi-pane overlay
+    /// shows one chip, on the pane at its top-right corner.
+    closeable: bool,
 }
 
 impl Chrome {
@@ -97,7 +100,15 @@ impl Chrome {
             footer: None,
             level: Self::level_for(anchor),
             flat: false,
+            closeable: true,
         }
+    }
+
+    /// No esc chip on the top border (construction-time): the pane is one of
+    /// several in an overlay whose chip rides another pane.
+    pub fn without_close(mut self) -> Self {
+        self.closeable = false;
+        self
     }
 
     /// The flat frame (construction-time, like [`Self::full`]): border,
@@ -415,6 +426,77 @@ fn flat_role(r: Role) -> Role {
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
+/// Tab `i` of a tab strip hits as `TAB_HIT_BASE + i`; like the esc chip, far
+/// above any body row's real target.
+pub const TAB_HIT_BASE: usize = usize::MAX - 32;
+
+/// The tab index a hit target names, if it is a tab.
+pub fn tab_of_hit(t: usize) -> Option<usize> {
+    (TAB_HIT_BASE..TAB_HIT_BASE + 16)
+        .contains(&t)
+        .then(|| t - TAB_HIT_BASE)
+}
+
+/// Whether a hit target is a body row (not a tab and not an esc span).
+pub fn is_row_hit(t: usize) -> bool {
+    t < TAB_HIT_BASE
+}
+
+/// One painted esc-close span in screen cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseSpan {
+    pub row: usize,
+    pub col: usize,
+    pub len: usize,
+}
+
+thread_local! {
+    /// The esc-close spans one compose painted, collected between
+    /// [`close_chips_begin`] and [`close_chips_end`]; `None` outside them.
+    static CLOSE_CHIPS: std::cell::RefCell<Option<Vec<CloseSpan>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start collecting the esc-close spans the painters put on screen.
+pub fn close_chips_begin() {
+    CLOSE_CHIPS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop collecting and return what the frame painted, top layer last.
+pub fn close_chips_end() -> Vec<CloseSpan> {
+    CLOSE_CHIPS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one painted line: it covers whatever span an earlier layer left
+/// under it, then adds its own esc-close spans, clipped to the screen.
+pub(crate) fn record_close_spans(
+    (rows, cols): (usize, usize),
+    (row, col0): (usize, usize),
+    width: usize,
+    hits: &[(usize, usize, usize)],
+) {
+    if row >= rows {
+        return;
+    }
+    CLOSE_CHIPS.with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(spans) = c.as_mut() else {
+            return;
+        };
+        spans.retain(|s| s.row != row || s.col + s.len <= col0 || s.col >= col0 + width);
+        for &(target, off, len) in hits {
+            let col = col0 + off;
+            if target == ESC_CLOSE_HIT && col < cols {
+                spans.push(CloseSpan {
+                    row,
+                    col,
+                    len: len.min(cols - col),
+                });
+            }
+        }
+    });
+}
+
 /// The `(column offset, column len)` of a footer's close affordance when it
 /// carries one: the words `esc close` when present, else a bare `esc`. Column
 /// offsets, so they compare against `inner_w` and land the hit span on the
@@ -505,6 +587,7 @@ pub fn blit(
             &line.roles,
             theme,
         );
+        record_close_spans((rows, cols), (r0 + i, c0), framed.width, &line.hits);
     }
 }
 
@@ -577,10 +660,17 @@ fn content_row(content: &str, role: Role, inner_w: usize) -> FramedLine {
 /// The section tab strip: `●`/`○` (active gets the accent) + label per tab.
 fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
     let mut inner: Vec<Seg> = vec![(' ', Role::Tab(false))];
+    let mut hits = Vec::new();
     for (i, (label, active)) in tabs.iter().enumerate() {
         if i > 0 {
             inner.push((' ', Role::Tab(false)));
             inner.push((' ', Role::Tab(false)));
+        }
+        // The dot, the space and the label are one tap target; +1 for the
+        // left border.
+        let len = 2 + label.chars().count();
+        if inner.len() + len <= inner_w {
+            hits.push((TAB_HIT_BASE + i, inner.len() + 1, len));
         }
         inner.push((if *active { '●' } else { '○' }, Role::Tab(*active)));
         inner.push((' ', Role::Tab(*active)));
@@ -588,7 +678,9 @@ fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
             inner.push((ch, Role::Tab(*active)));
         }
     }
-    content_row_from_segs(inner, inner_w)
+    let mut row = content_row_from_segs(inner, inner_w);
+    row.hits = hits;
+    row
 }
 
 fn content_row_from_segs(mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
@@ -644,6 +736,7 @@ fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize)
 
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
+        Level::Bare if !chrome.closeable => edge_row('╭', '╮', '─', Vec::new(), inner_w),
         // Bare: `╭─ esc ─╮` - the chip rides the TOP border at every level,
         // so the affordance lives in one corner of every modal.
         Level::Bare => chip_border_row('╭', '╮', vec![('─', Role::Border)], inner_w),
@@ -661,7 +754,11 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
                 inner.push((' ', Role::Title));
                 inner.push(('─', Role::Border));
             }
-            chip_border_row('╭', '╮', inner, inner_w)
+            if chrome.closeable {
+                chip_border_row('╭', '╮', inner, inner_w)
+            } else {
+                edge_row('╭', '╮', '─', inner, inner_w)
+            }
         }
     }
 }
@@ -840,13 +937,30 @@ mod tests {
                 line.text
             );
         }
-        assert!(
-            framed
-                .lines
-                .iter()
-                .any(|l| l.text.contains("colors") && l.text.contains('│')),
-            "the strip row carries the tabs and closes its own border"
+        let strip = framed
+            .lines
+            .iter()
+            .find(|l| l.text.contains("colors") && l.text.contains('│'))
+            .expect("the strip row carries the tabs and closes its own border");
+        // Each tab's dot, space and label is one tap target, and no target
+        // reads as a body row.
+        let chars: Vec<char> = strip.text.chars().collect();
+        let spans: Vec<(Option<usize>, String)> = strip
+            .hits
+            .iter()
+            .map(|&(t, off, len)| (tab_of_hit(t), chars[off..off + len].iter().collect()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                (Some(0), "● general".to_string()),
+                (Some(1), "○ theme".to_string()),
+                (Some(2), "○ keys".to_string()),
+                (Some(3), "○ colors".to_string()),
+            ]
         );
+        assert!(strip.hits.iter().all(|(t, _, _)| !is_row_hit(*t)));
+        assert!(!is_row_hit(ESC_CLOSE_HIT) && is_row_hit(0));
     }
 
     #[test]

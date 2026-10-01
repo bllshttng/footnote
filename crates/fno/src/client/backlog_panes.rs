@@ -94,6 +94,8 @@ pub(crate) fn paint(
             backlog_style::to_body_line(&line)
         })
         .collect();
+    // The filter bar spans the top row, so it holds the board's one esc
+    // chip; the board and details panes below it carry none.
     let bar_chrome = chrome::Chrome::new("filters", crate::popup::Anchor::Center).flat();
     framed_region(
         cells,
@@ -157,7 +159,8 @@ pub(crate) fn paint(
                 b.query.view == crate::backlog_model::View::List,
             ),
         ])
-        .flat();
+        .flat()
+        .without_close();
     if framed {
         framed_region(
             cells,
@@ -233,7 +236,8 @@ pub(crate) fn paint(
         format!("details \u{b7} {node}"),
         crate::popup::Anchor::Center,
     )
-    .flat();
+    .flat()
+    .without_close();
     if framed {
         framed_region(
             cells,

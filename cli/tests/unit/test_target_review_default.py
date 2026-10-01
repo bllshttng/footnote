@@ -2,7 +2,7 @@
 
 The review step is exactly `/fno:review <size> --comment` (Codex
 `$fno:review <size> --comment`), invoked by the model in its own context on
-the final local HEAD before `/fno:pr create`. No mail, no paste, no turn
+the final local HEAD before `/fno:ship pr create`. No mail, no paste, no turn
 boundary. These tests pin that direction across every reachable target
 surface and guard against the prose regrowing the retired
 `request-self-review` round trip or the deleted pre-ship decision helper.
@@ -219,7 +219,7 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
     # The review step is the in-session fno lane with --comment, run BEFORE
-    # /pr create, sized by the diff. The mail round trip is gone from every
+    # /fno:ship pr create, sized by the diff. The mail round trip is gone from every
     # surface, and the deleted decision helper must not regrow in prose.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
@@ -231,7 +231,7 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     spine_start = skill.index("```")
     spine = skill[spine_start : skill.index("```", spine_start + 3)]
     assert "/fno:review" in spine
-    assert spine.index("/fno:review") < spine.index("/pr create")
+    assert spine.index("/fno:review") < spine.index("/fno:ship pr create")
     assert "medium" in skill and "300" in skill and "xhigh" in skill
 
     # Findings hold when no PR exists and post when it opens.

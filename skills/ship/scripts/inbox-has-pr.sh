@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotency guard for /fno:pr merged.
+# Idempotency guard for /fno:ship pr merged.
 #
 # A post-merge inbox section is keyed by an HTML-comment marker that embeds the
 # PR number: `<!-- post-merge:pr-<N> -->`. This script answers "has the ritual

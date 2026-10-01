@@ -264,14 +264,14 @@ def test_output_format_value_is_not_counted_as_a_positional():
         "--substrate", "headless",
         "--harness", "claude",
         "--output-format", "json",
-        "/fno:pr check 7",
+        "/fno:ship pr check 7",
     ])
     assert out[1] == "--name"
     assert out[3:] == [
         "--substrate", "headless",
         "--harness", "claude",
         "--output-format", "json",
-        "/fno:pr check 7",
+        "/fno:ship pr check 7",
     ]
 
 

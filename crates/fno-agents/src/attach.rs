@@ -63,9 +63,39 @@ fn attach_via_mux_thread(name: &str, harness: &str, events_path: &Path) -> Optio
                 &output.stderr
             };
             eprint!("{}", String::from_utf8_lossy(text));
-            Some(other)
+            if claude_falls_through_on_portal_refusal(harness, other) {
+                // The portal lane refused, so it attached nothing. A claude row
+                // owns a second, independent lane (the inline reentry resume by
+                // its session uuid, below) - the proven recovery when a
+                // background session sits blocked on a prompt its portal row
+                // never rendered. The refusal line above stays as context.
+                // The narrow "still resolving" race parks a reach that later
+                // lands while the inline lane attaches the same session; both
+                // converge on one claude session, so nothing corrupts.
+                append_agents_event(
+                    events_path,
+                    "agent_attach_refused",
+                    &[
+                        ("name", Value::String(name.to_string())),
+                        ("provider", Value::String("claude".to_string())),
+                        ("reason", Value::String("portal-reach-refused".to_string())),
+                    ],
+                );
+                None
+            } else {
+                Some(other)
+            }
         }
     }
+}
+
+/// Whether a non-fallthrough `fno mux thread` exit should fall through to the
+/// next attach arm instead of dead-ending. Pure so the rule is testable
+/// without a fake mux: only a claude row falls through - it is the one
+/// harness with a second attach lane of its own - and only on a REFUSAL
+/// (non-zero), never on the portal lane's own success.
+fn claude_falls_through_on_portal_refusal(harness: &str, code: i32) -> bool {
+    harness == "claude" && code != 0
 }
 
 /// The `fno mux thread` exits that mean "no server reached", mirrored from
@@ -686,6 +716,22 @@ mod tests {
         assert_eq!(MUX_THREAD_NO_SERVER, fno::mux_cli::EXIT_NO_SERVER);
         assert_eq!(MUX_THREAD_USAGE, fno::mux_cli::EXIT_USAGE);
         assert_eq!(MUX_THREAD_UNANSWERED, fno::mux_cli::EXIT_CONTROL_UNANSWERED);
+        // A claude row also falls through on a portal REFUSAL (any non-zero
+        // exit): the portal lane attached nothing, and claude owns a second,
+        // independent lane (the inline resume). Every other harness keeps
+        // today's verbatim refusal; a portal success (0) never falls through.
+        for code in [1, 2, 13, 16, 17, 20, 24] {
+            assert!(
+                claude_falls_through_on_portal_refusal("claude", code),
+                "claude falls through on exit {code}"
+            );
+            assert!(
+                !claude_falls_through_on_portal_refusal("opencode", code),
+                "non-claude never falls through on exit {code}"
+            );
+        }
+        assert!(!claude_falls_through_on_portal_refusal("claude", 0));
+        assert!(!claude_falls_through_on_portal_refusal("", 0));
     }
 
     #[test]

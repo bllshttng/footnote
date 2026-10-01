@@ -25,6 +25,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         harness: None,
         title: "PR 1395".into(),
         r#ref: Some("1395".into()),
+        name: None,
         actor: None,
         model: None,
         effort: None,
@@ -48,6 +49,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         harness: Some("claude".into()),
         title: "t-d145 removed by reap".into(),
         r#ref: None,
+        name: None,
         actor: None,
         model: None,
         effort: None,
@@ -339,19 +341,20 @@ fn click_rows() {
         matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
         "the click names the event the top row painted"
     );
-    // And THAT modal's session row carries the same deep link the click used
-    // to fire, resolved against the roster at open.
+    // And THAT modal's session row offers the resume command the session id
+    // answers: the feed id is a session handle, never an attach jobId, so
+    // the row copies `fno agents resume <sid>` instead of a doomed attach.
     v.feed_detail = Some(feed_detail::modal(&v, feed_item(Some("x-c"), Some("s-3"))));
     let m = v.feed_detail.as_ref().unwrap();
-    assert!(m
-        .actions
-        .iter()
-        .any(|a| matches!(a, feed_detail::FeedAction::Session(
-            ChromeHit::Cmds(c)
-        ) if *c == vec![Command::AttachAgent {
-            id: "s-3".into(),
-            placement: PanePlacement { portal: Some(0), ..Default::default() },
-        }])));
+    assert!(m.actions.iter().any(
+        |a| matches!(a, feed_detail::FeedAction::Resume { line, name: None }
+            if line == "fno agents resume s-3")
+    ));
+    assert!(
+        m.values.iter().any(|v| v == "fno agents resume s-3"),
+        "y copies the resume command: {:?}",
+        m.values
+    );
     // Header and footer rows are chrome, not rows: they never deep-link.
     assert!(v.chrome_hit(0, col).is_none());
     assert!(v.chrome_hit((v.term.0 - 1) as u16, col).is_none());
@@ -612,16 +615,54 @@ fn detail_field_rows() {
             .any(|l| l.contains("NOT RECORDED")),
         "an absent field prints nothing: {labels:?}"
     );
-    // The recovery line is its own row: Enter hands it over as a notice,
+    // The recovery line is its own row: with no worker name (the row is
+    // gone from the roster), Enter hands the revival line over as a notice,
     // never an attach of a session that is gone.
     let i = actions
         .iter()
-        .position(
-            |a| matches!(a, feed_detail::FeedAction::Resume(d) if d == "resume: claude --resume x"),
-        )
+        .position(|a| {
+            matches!(a, feed_detail::FeedAction::Resume { line, name: None }
+                if line == "resume: claude --resume x")
+        })
         .expect("the resume row exists");
     assert_eq!(values[i], "resume: claude --resume x");
     assert!(labels.iter().any(|l| l == "resume"), "{labels:?}");
+
+    // A removal whose worker name the roster still holds resumes through
+    // fno: the row reads the fno command (and `y` copies it), Enter sends
+    // ResumeAgent for that name, and the receipt's revival line stays on
+    // the card as an inert field. A name the roster lost keeps the revival
+    // line as the row: the fno handle has nothing left to address.
+    let mut named = reaped_item("sid-1", "resume: claude --resume sid-1");
+    named.name = Some("t-d145".into());
+    let holder = joined_row("t-d145", None, Some(0));
+    let rows = [holder];
+    let (popup, actions, values) = feed_detail::build(&rows, 0, &named);
+    let i = actions
+        .iter()
+        .position(|a| {
+            matches!(a, feed_detail::FeedAction::Resume { line, name: Some(n) }
+                if line == "fno agents resume t-d145" && n == "t-d145")
+        })
+        .expect("the named resume row exists");
+    assert_eq!(values[i], "fno agents resume t-d145");
+    let revival_rows = popup_rows(&popup)
+        .into_iter()
+        .filter(|(l, _)| l.as_deref() == Some("revival"))
+        .count();
+    assert_eq!(revival_rows, 1, "the receipt line stays on the card");
+
+    let (_popup, actions, values) = feed_detail::build(&[], 0, &named);
+    assert!(
+        actions.iter().any(|a| matches!(a,
+            feed_detail::FeedAction::Resume { line, name: None }
+                if line == "resume: claude --resume sid-1")),
+        "a gone row reads its revival form"
+    );
+    assert!(
+        values.iter().all(|v| v != "fno agents resume t-d145"),
+        "no fno command when the row is gone: {values:?}"
+    );
 
     let mut row = joined_row("some-other-name", None, Some(0));
     row.harness_session_id = Some("s-9".into());

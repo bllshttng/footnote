@@ -602,7 +602,7 @@ def _get_active_target_session(prefer_pr=None):
     - prefer_pr given: a session whose external artifact records that exact PR
       wins. Otherwise any session whose artifact records a DIFFERENT PR is
       excluded (typo / wrong-PR protection); only "neutral" sessions whose
-      artifact records no PR (backward compat: /pr check's artifact omits
+      artifact records no PR (backward compat: /fno:ship pr check's artifact omits
       pr_number) may authorize, and only when exactly one remains -> else deny.
 
     The megawalk-state.md file deliberately does NOT authorize gh pr create or
@@ -1068,7 +1068,7 @@ def _check_pr_merge_allowed(command=""):
           (phase: external, session_id matches state file).
 
     State-file-only attestation is NOT sufficient. The artifact is written by
-    /pr check when it completes; its presence proves external review actually
+    /fno:ship pr check when it completes; its presence proves external review actually
     ran this session. The LLM can still write the artifact, but doing so is a
     clear auditable violation rather than a one-line `touch`.
 
@@ -1829,7 +1829,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
     if body_files and not judged:
         return None
     detail = "" if not judged else (f"the body file {judged[0]} exists and carries "
-        f"no Fixes line; or open the whole-path door /fno:pr create.\n")
+        f"no Fixes line; or open the whole-path door /fno:ship pr create.\n")
     # This message NAMES candidates and never prescribes a trailer to paste.
     # A refusal is the highest-trust text a blocked agent reads, so advice here
     # is a PRODUCER of claims, and this producer has no graph to check against.
@@ -2179,7 +2179,7 @@ Auto-merge directly from Claude Code requires ALL of:
         <repo>/.fno/artifacts/external-<session_id>.md
         with matching frontmatter (phase: external, session_id: <sid>)
 
-The artifact proves /pr check actually ran for this session. A stale
+The artifact proves /fno:ship pr check actually ran for this session. A stale
 or missing artifact blocks the merge even if the state flag is true.
 
 Ahead of the two factors above sits a third veto: review coverage. A bare
@@ -2188,7 +2188,7 @@ PR's current head. A missing or stale row is refused here even when both
 factors pass, because nothing reviewed the head that would merge. The
 sanctioned primitive `fno do pr merge` recomputes that row itself.
 
-If /pr check was skipped or failed, the correct recovery is to run it
+If /fno:ship pr check was skipped or failed, the correct recovery is to run it
 again or explicitly configure --no-external. Do not forge the artifact.
 
 ⚠️  Operator escape hatch, when the two-factor path is genuinely broken

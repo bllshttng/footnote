@@ -7,15 +7,10 @@ struct Selection {
     skill_bundles: bool,
 }
 
-fn select_jobs(
-    event: &str,
-    paths: Option<&[String]>,
-    packet_fits: Option<bool>,
-    bundles: Option<&[String]>,
-) -> Selection {
-    // The full lanes run the freshness check from the smoke registry; the
-    // dedicated PR job below only exists for the PR events where the selector
-    // keeps those lanes off.
+fn select_jobs(event: &str, paths: Option<&[String]>, bundles: Option<&[String]>) -> Selection {
+    // A PR runs every lane main runs: a lane a PR skips is a test main can
+    // fail on the merge. Only the bundle freshness job selects; on main it
+    // rides the full lanes, so it stays off there.
     if event != "pull_request" {
         return Selection {
             cargo: true,
@@ -23,37 +18,15 @@ fn select_jobs(
             skill_bundles: false,
         };
     }
-
-    let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
-        return Selection {
-            cargo: true,
-            python_full: true,
-            skill_bundles: true,
-        };
-    };
-
-    let cargo = paths.iter().any(|path| {
-        path == "docs/harnesses/capability-matrix.md"
-            || path == "docs/architecture/product-boundaries.md"
-            || !(path.starts_with("cli/tests/")
-                || path.starts_with("skills/")
-                || path.starts_with("agents/")
-                || path.starts_with(".claude-plugin/")
-                || path.starts_with("docs/"))
-    });
-    let python_full = packet_fits != Some(true)
-        || paths
-            .iter()
-            .any(|path| path == ".github/workflows/cli-ci.yml");
-    // An unreadable manifest fails closed: run the check rather than trust a
-    // selection we could not compute.
-    let skill_bundles = match bundles {
-        None => true,
-        Some(watched) => paths.iter().any(|path| names_a_bundle_path(path, watched)),
+    // An unreadable diff or manifest fails closed: run the check rather than
+    // trust a selection we could not compute.
+    let skill_bundles = match (paths.filter(|paths| !paths.is_empty()), bundles) {
+        (Some(paths), Some(watched)) => paths.iter().any(|path| names_a_bundle_path(path, watched)),
+        _ => true,
     };
     Selection {
-        cargo,
-        python_full,
+        cargo: true,
+        python_full: true,
         skill_bundles,
     }
 }
@@ -134,11 +107,10 @@ fn main() {
             .get(1)
             .zip(args.get(2))
             .and_then(|(base, head)| changed_paths(base, head));
-        let packet_fits = args.get(3).map(|value| value == "true");
         let bundles = bundle_watch_set();
-        select_jobs(event, paths.as_deref(), packet_fits, bundles.as_deref())
+        select_jobs(event, paths.as_deref(), bundles.as_deref())
     } else {
-        select_jobs(event, None, None, None)
+        select_jobs(event, None, None)
     };
     println!("cargo={}", selection.cargo);
     println!("python_full={}", selection.python_full);
@@ -154,83 +126,25 @@ mod tests {
     }
 
     #[test]
-    fn docs_only_pr_skips_cargo_and_full_python_when_packet_fits() {
-        let changed = paths(&["docs/usage.md", "cli/tests/unit/test_example.py"]);
-        assert_eq!(
-            select_jobs("pull_request", Some(&changed), Some(true), Some(&[])),
-            Selection {
-                cargo: false,
-                python_full: false,
-                skill_bundles: false,
-            }
-        );
-    }
-
-    #[test]
-    fn cargo_fence_paths_and_docs_exceptions_keep_cargo_on() {
+    fn every_pr_diff_runs_the_lanes_main_runs() {
+        // Main went red on a test a PR lane had skipped; a PR now runs every
+        // lane main runs, whatever it changed.
         for changed in [
-            "hooks/target-stop-hook.sh",
-            "schemas/event.json",
-            "scripts/ci/check.sh",
-            "generated-artifacts.tsv",
-            "skill-bundles.yaml",
-            ".github/workflows/cli-ci.yml",
-            "crates/fno-agents/src/lib.rs",
-            "cli/src/fno/test_cmd.py",
-            "docs/harnesses/capability-matrix.md",
-            "docs/architecture/product-boundaries.md",
+            paths(&["docs/usage.md", "cli/tests/unit/test_example.py"]),
+            paths(&["skills/target/SKILL.md"]),
+            paths(&["crates/fno-agents/src/lib.rs"]),
+            paths(&[]),
         ] {
-            let changed = paths(&[changed]);
-            assert!(
-                select_jobs("pull_request", Some(&changed), Some(true), Some(&[])).cargo,
-                "cargo must run for {changed:?}"
-            );
+            let sel = select_jobs("pull_request", Some(&changed), Some(&[]));
+            assert!(sel.cargo && sel.python_full, "{changed:?}: {sel:?}");
+            assert_eq!(sel.skill_bundles, changed.is_empty(), "{changed:?}");
         }
-    }
-
-    #[test]
-    fn an_unfit_packet_keeps_full_python_on() {
-        let changed = paths(&["docs/usage.md"]);
         assert_eq!(
-            select_jobs("pull_request", Some(&changed), Some(false), Some(&[])),
-            Selection {
-                cargo: false,
-                python_full: true,
-                skill_bundles: false,
-            }
-        );
-    }
-
-    #[test]
-    fn missing_or_empty_diff_fails_closed() {
-        assert_eq!(
-            select_jobs("pull_request", None, Some(true), Some(&[])),
+            select_jobs("pull_request", None, Some(&[])),
             Selection {
                 cargo: true,
                 python_full: true,
                 skill_bundles: true,
-            }
-        );
-        let empty = paths(&[]);
-        assert_eq!(
-            select_jobs("pull_request", Some(&empty), Some(true), Some(&[])),
-            Selection {
-                cargo: true,
-                python_full: true,
-                skill_bundles: true,
-            }
-        );
-        assert_eq!(
-            select_jobs(
-                "pull_request",
-                Some(&paths(&["docs/usage.md"])),
-                None,
-                Some(&[])
-            ),
-            Selection {
-                cargo: false,
-                python_full: true,
-                skill_bundles: false,
             }
         );
     }
@@ -239,7 +153,7 @@ mod tests {
     fn non_pr_events_always_run_both_lanes() {
         for event in ["push", "schedule", "workflow_dispatch"] {
             assert_eq!(
-                select_jobs(event, None, None, None),
+                select_jobs(event, None, None),
                 Selection {
                     cargo: true,
                     python_full: true,
@@ -260,13 +174,13 @@ mod tests {
             "skills/execute/scripts/validate-plan.sh",
         ]);
         let changed = paths(&["scripts/validate-plan.sh"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        let sel = select_jobs("pull_request", Some(&changed), Some(&watched));
         assert!(
             sel.skill_bundles,
             "a source change must select the freshness check"
         );
         let changed = paths(&["docs/usage.md", "skills/blueprint/scripts/validate-plan.sh"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        let sel = select_jobs("pull_request", Some(&changed), Some(&watched));
         assert!(
             sel.skill_bundles,
             "a destination change must select the freshness check"
@@ -277,14 +191,14 @@ mod tests {
     fn an_unwatched_change_leaves_the_freshness_job_off() {
         let watched = paths(&["scripts/validate-plan.sh"]);
         let changed = paths(&["crates/fno-agents/src/lib.rs"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        let sel = select_jobs("pull_request", Some(&changed), Some(&watched));
         assert!(!sel.skill_bundles);
     }
 
     #[test]
     fn an_unreadable_manifest_fails_the_freshness_job_on() {
         let changed = paths(&["docs/usage.md"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), None);
+        let sel = select_jobs("pull_request", Some(&changed), None);
         assert!(sel.skill_bundles);
     }
 
@@ -292,7 +206,7 @@ mod tests {
     fn a_directory_valued_bundle_path_matches_changes_beneath_it() {
         let watched = paths(&["skills/growth-launch"]);
         let changed = paths(&["skills/growth-launch/SKILL.md"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        let sel = select_jobs("pull_request", Some(&changed), Some(&watched));
         assert!(sel.skill_bundles);
     }
 
@@ -323,7 +237,7 @@ mod tests {
         // no source or dest; the manifest itself must select the check.
         let watched = bundle_watch_set_from("bundles: []\n");
         let changed = paths(&["skill-bundles.yaml"]);
-        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        let sel = select_jobs("pull_request", Some(&changed), Some(&watched));
         assert!(sel.skill_bundles);
     }
 
@@ -354,7 +268,7 @@ mod tests {
     fn bad_git_revision_fails_closed() {
         let Some(paths) = super::changed_paths("missing-pr-base", "missing-pr-head") else {
             assert_eq!(
-                select_jobs("pull_request", None, Some(true), Some(&[])),
+                select_jobs("pull_request", None, Some(&[])),
                 Selection {
                     cargo: true,
                     python_full: true,

@@ -119,9 +119,9 @@ Code quality, testing, and PR management.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `review` | `/fno:review` | The owned lane: one inline reviewer works every angle, verifies findings, and emits a head-pinned attestation; `peer` adds a cross-model second opinion |
-| `pr` | `/fno:pr create` | Opens a PR from your commits inline in the invoking session |
-| `pr` | `/fno:pr check` | Polls for external reviewer feedback and implements changes |
-| `pr` | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, file follow-ups |
+| `ship pr` | `/fno:ship pr create` | Opens a PR from your commits inline in the invoking session |
+| `ship pr` | `/fno:ship pr check` | Polls for external reviewer feedback and implements changes |
+| `ship pr` | `/fno:ship pr merged` | The post-merge ritual: reconcile the backlog, run the retro, file follow-ups |
 
 #### The review specialist agents
 

@@ -444,7 +444,7 @@ The target pipeline runs as a persistent loop until the feature is complete.
 
 **External review polling:**
 
-- The `/pr check` skill no longer uses a bash polling loop
+- The `/fno:ship pr check` skill no longer uses a bash polling loop
 - Two one-shot `CronCreate` checks fire at +5 and +10 minutes after invocation
 - If the review is already present at invocation, it is processed immediately without scheduling crons
 - The required-bot review read is part of `loop-check`'s `done()` check; a session that never satisfies it resolves via the budget / NoProgress backstop

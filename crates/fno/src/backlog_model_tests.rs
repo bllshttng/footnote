@@ -225,7 +225,9 @@ fn node_lists_children_blockers_and_live_sessions() {
     rows[0]["sessions"] = json!([
         {"phase": "execute", "session_id": "s-live"},
         {"phase": "execute", "session_id": "s-dead"},
-        {"phase": "plan"}
+        {"phase": "plan"},
+        {"phase": "ship", "session_id": "s-live"},
+        {"phase": "ship", "session_id": "s-dead"}
     ]);
     rows[3]["blocked_by"] = json!(["x-top"]);
     let mut agents = vec![row(Some("s-live"))];
@@ -236,7 +238,7 @@ fn node_lists_children_blockers_and_live_sessions() {
     assert_eq!(view.children.len(), 2);
     assert_eq!(view.blocked_by.len(), 1);
     assert_eq!(view.blocks.len(), 1, "x-blk is blocked by x-top");
-    assert_eq!(view.sessions.len(), 3);
+    assert_eq!(view.sessions.len(), 5);
     assert_eq!(view.sessions[0].action, "attach");
     assert_eq!(view.sessions[0].agent.as_deref(), Some("w1"));
     assert_eq!(view.sessions[1].action, "none");
@@ -258,8 +260,16 @@ fn node_lists_children_blockers_and_live_sessions() {
     let tree = crate::org_model::derive(&org, 100).unwrap();
     assert_eq!(tree.leads.len(), 1);
     assert_eq!(tree.leads[0].nodes.len(), 2);
-    assert_eq!(tree.leads[0].nodes[0].current.len(), 1);
-    assert_eq!(tree.leads[0].nodes[0].former.len(), 2);
+    assert_eq!(
+        tree.leads[0].nodes[0].current.len(),
+        1,
+        "two phase rows of one live session list one worker"
+    );
+    assert_eq!(
+        tree.leads[0].nodes[0].former.len(),
+        2,
+        "two phase rows of one ended session list once"
+    );
     assert!(tree.leads[0].nodes[1].current.is_empty());
     assert!(tree.unowned.is_empty());
     let mut snapshot = crate::org_model::OrgSnapshot::default();

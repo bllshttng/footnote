@@ -111,9 +111,11 @@ fn import_lockfiles(connection: &mut Connection, directory: &Path) -> Result<(),
     for record in records {
         insert_record(&transaction, &record)?;
     }
+    // Two openers can race the first import of a fresh store; the rows above
+    // are INSERT OR IGNORE, so the marker is too.
     transaction
         .execute(
-            "INSERT INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1')",
+            "INSERT OR IGNORE INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1')",
             [],
         )
         .map_err(|error| error.to_string())?;
@@ -805,6 +807,28 @@ mod tests {
             .unwrap();
         assert_eq!(claims_count, 1);
         assert_eq!(node_claims_count, 1);
+
+        // The board's claims cache busts on a db-only write: its key stats
+        // the resolved store the projection reads, never a hand-built
+        // sibling path.
+        super::lockfile_tests::with_claims_root(temp.path(), || {
+            let first = crate::backlog::nodes::node_claims_by_id().unwrap();
+            assert!(
+                first.contains_key("store-test"),
+                "the projection reads the folded store"
+            );
+            let connection = open(None).unwrap();
+            connection
+                .execute("UPDATE claims SET session_id = 'rescue-session'", [])
+                .unwrap();
+            drop(connection);
+            let second = crate::backlog::nodes::node_claims_by_id().unwrap();
+            assert_eq!(
+                second["store-test"].locked_by.as_deref(),
+                Some("rescue-session"),
+                "a db-only write must bust the claims cache"
+            );
+        });
     }
 
     #[test]
@@ -869,7 +893,7 @@ mod lockfile_tests {
         }
     }
 
-    fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+    pub(super) fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
         let _env_lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

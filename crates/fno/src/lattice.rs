@@ -88,6 +88,12 @@ pub(crate) fn start_spin() {
     }
 }
 
+/// Start the spin whatever the motion gate says: a snapshot draws one still
+/// frame, and a live client's working row is a spin frame, not the rest `●`.
+pub(crate) fn freeze_spin() {
+    SPIN_EPOCH.get_or_init(std::time::Instant::now);
+}
+
 /// When the spin started; `None` while it is off.
 pub(crate) fn spin_epoch() -> Option<std::time::Instant> {
     SPIN_EPOCH.get().copied()
