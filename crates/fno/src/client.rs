@@ -10165,7 +10165,7 @@ async fn execute_aux_action(
             view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
-            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()).fit(view.term.1));
             view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {

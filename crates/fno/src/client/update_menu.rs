@@ -366,12 +366,25 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     ) {
         actions.push(AuxAction::RestartAgents);
     }
-    let (rows, _) = crate::popup::wrap_rows(rows, crate::popup::WIDTH_CAP);
     AuxPopup {
         popup: Popup::new(rows, Anchor::Center)
             .title("update")
-            .footer("esc close"),
+            .footer("esc close")
+            .width_cap(usize::MAX),
         actions,
+    }
+}
+
+impl AuxPopup {
+    /// Fit the update modal to a terminal `cols` wide: it grows to its widest
+    /// row up to the screen, and a row wider than the screen wraps instead of
+    /// ending in an ellipsis. Wrapped continuations are Headers, so the
+    /// selectable entries keep their order and their actions.
+    pub(crate) fn fit(mut self, cols: u16) -> Self {
+        let w = (cols as usize).saturating_sub(chrome::Chrome::FRAME_COLS * 2);
+        let rows = std::mem::take(&mut self.popup.rows);
+        self.popup.rows = crate::popup::wrap_rows(rows, w).0;
+        self
     }
 }
 

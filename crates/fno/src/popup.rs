@@ -130,14 +130,15 @@ pub fn wrap_rows(rows: Vec<PopupRow>, w: usize) -> (Vec<PopupRow>, Vec<usize>) {
                     src.push(i);
                 }
             }
-            // A plain-body Entry: pad + key column + gap + label + air.
+            // An Entry: pad + key column + gap + label + air in a plain body,
+            // glyph + space + label + gap + air otherwise; kw + 5 covers both.
             PopupRow::Entry {
                 glyph,
                 label,
                 hint,
                 enabled,
-            } if 1 + kw + 1 + chrome::str_cols(&label) + 2 > w => {
-                let label_w = w.saturating_sub(kw + 4);
+            } if kw + 5 + chrome::str_cols(&label) > w => {
+                let label_w = w.saturating_sub(kw + 5);
                 let mut lines = wrap(&label, label_w).into_iter();
                 out.push(PopupRow::Entry {
                     glyph,

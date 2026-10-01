@@ -210,6 +210,8 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         r.source_rev = Some("b".repeat(40));
         let keeper = r.running[1].clone();
         r.running.extend(std::iter::repeat_n(keeper, 19));
+        r.changelog
+            .push(format!("feat: {}", "a long subject ".repeat(8)));
     }
     let wide = build_update_modal(Some(&wide.into()));
     let headers: Vec<&str> = wide
@@ -231,12 +233,29 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         headers.contains(&"20 pane keepers on the old build"),
         "{headers:?}"
     );
-    assert!(
-        headers
-            .iter()
-            .all(|h| h.chars().count() + 2 <= crate::popup::WIDTH_CAP),
-        "every header fits the popup: {headers:?}"
-    );
+    // The modal grows to its widest row up to the screen, then wraps: no
+    // rendered row ends in an ellipsis on a wide screen or a narrow one, and
+    // the restart entry keeps its action.
+    for cols in [200u16, 50] {
+        let fitted = AuxPopup {
+            popup: wide.popup.clone(),
+            actions: wide.actions.clone(),
+        }
+        .fit(cols);
+        let r = fitted.popup.render((80, cols));
+        for line in &r.lines {
+            assert!(
+                !line.text.contains('\u{2026}'),
+                "no ellipsis at {cols} columns: {:?}",
+                line.text
+            );
+        }
+        assert!(r.width + 4 <= cols as usize, "fits the screen at {cols}");
+        if cols == 200 {
+            assert!(r.width > crate::popup::WIDTH_CAP, "grows past the old cap");
+        }
+        assert_eq!(fitted.actions, wide.actions, "actions follow at {cols}");
+    }
 
     let modal = build_update_modal(Some(&outcome.clone().into()));
     let text: Vec<String> = modal
