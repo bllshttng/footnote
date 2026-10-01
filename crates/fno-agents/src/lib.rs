@@ -358,6 +358,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_escalation;
 pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
