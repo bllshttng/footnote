@@ -392,6 +392,10 @@ def pytest_configure(config: pytest.Config) -> None:
     if os.environ.get("FNO_PYTEST_SHARD") and config.option.durations is None:
         config.option.durations = 15
         config.option.durations_min = 30.0
+    # TEMPORARY, remove before merge: shard 1 runs verbose so the freeze at
+    # ~74 percent leaves the last completed test's name in the log.
+    if os.environ.get("FNO_PYTEST_SHARD") == "1/13":
+        config.option.verbose = 1
 
 
 @pytest.hookimpl(tryfirst=True)
