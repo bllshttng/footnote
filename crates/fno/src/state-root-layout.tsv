@@ -100,7 +100,7 @@ convo-signals.jsonl	-	park	daemon
 groom-*.md	-	park	daemon
 # The 2026-10-01 residue batch: an empty dir ensure-global-dir.sh created
 # until this table landed (hooks, signals), session scratch (tmp, jobs-tmp),
-# and an April ralph-era foreign drop (.abilities). None had a writer.
+# and an April foreign-tool drop (.abilities). None had a writer.
 .abilities	-	park	daemon
 tmp	-	park	daemon
 jobs-tmp	-	park	daemon
