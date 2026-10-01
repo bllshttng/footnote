@@ -176,8 +176,6 @@ cli/tests/unit/test_keyless_smoke.py::test_keyless_dispatch_to_terminal_reports_
 cli/tests/unit/test_lane_experiment_contract.py::_require_seed_bank::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_law_scope.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/unit/test_law.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_mail_cli.py::test_named_send_ruling_appends_dated_node_block_before_transport::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::mark.xfail  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::pytest.skip  # on main before this ratchet

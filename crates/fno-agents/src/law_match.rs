@@ -4846,5 +4846,4 @@ pub(crate) mod scope_tests {
         assert_eq!(answer["kept"].as_array().expect("kept").len(), 1);
         assert_eq!(answer["note"], "");
     }
-
 }
