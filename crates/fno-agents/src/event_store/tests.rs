@@ -744,6 +744,22 @@ fn journal_text_preserves_append_order_for_equal_timestamps() {
 }
 
 #[test]
+fn journal_text_checked_without_store_reads_a_rotation_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let rotated = dir.path().join("events.jsonl.1");
+    // No store beside the journal: the rotation must yield its own bytes,
+    // never the live file live_journal folds it into.
+    std::fs::write(&live, "{\"n\":1}\n").unwrap();
+    std::fs::write(&rotated, "{\"n\":2}\n").unwrap();
+    let text = journal_text_checked(&rotated, &EventQuery::of_types(&[])).unwrap();
+    assert_eq!(
+        text, "{\"n\":2}\n",
+        "the rotation's own bytes, not the live file"
+    );
+}
+
+#[test]
 fn journal_text_creates_no_store_for_an_absent_journal() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

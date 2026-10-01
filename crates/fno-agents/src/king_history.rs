@@ -742,11 +742,15 @@ fn scan_readings(
     harness_session_id: &str,
     scope: &str,
     crown_start: &str,
-) -> Result<(VerdictReadings, u64, u64, Vec<(String, u64)>), String> {
+) -> Result<(VerdictReadings, u64, u64, u64, Vec<(String, u64, u64)>), String> {
     let mut r = VerdictReadings::default();
     let mut scanned: u64 = 0;
     let mut duplicates: u64 = 0;
-    let mut journals: Vec<(String, u64)> = Vec::new();
+    // Malformed rows skipped, not fatal: one torn write must not kill the
+    // verdict read. Counted per journal, warned once per journal, reported
+    // in the payload.
+    let mut skipped: u64 = 0;
+    let mut journals: Vec<(String, u64, u64)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     // (ts, actionable) pairs for the newest-board read; ts sorted at the end.
     // Every fire for this crown is recorded, even one that names no board,
@@ -760,19 +764,24 @@ fn scan_readings(
         )
         .map_err(|_| format!("{}: unreadable journal", path.display()))?;
         let mut file_scanned: u64 = 0;
+        let mut file_skipped: u64 = 0;
         for raw in content.lines() {
             let line = raw.trim();
             if line.is_empty() {
                 continue;
             }
+            // A torn write can leave a malformed line in a healthy journal;
+            // skipping one must not kill the whole verdict read.
             let event: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
-                Err(e) => {
-                    return Err(format!("{}: corrupt JSON line: {e}", path.display()));
+                Err(_) => {
+                    file_skipped += 1;
+                    continue;
                 }
             };
             if !event.is_object() {
-                return Err(format!("{}: line is not a JSON object", path.display()));
+                file_skipped += 1;
+                continue;
             }
             file_scanned += 1;
             let kind = s_str(&event, "type").unwrap_or("");
@@ -849,8 +858,15 @@ fn scan_readings(
                 _ => {}
             }
         }
-        journals.push((path.display().to_string(), file_scanned));
+        if file_skipped > 0 {
+            eprintln!(
+                "fno-agents king-history --verdict: warning: {}: skipped {file_skipped} malformed JSON line(s)",
+                path.display()
+            );
+        }
+        journals.push((path.display().to_string(), file_scanned, file_skipped));
         scanned += file_scanned;
+        skipped += file_skipped;
     }
     fires_ts.sort_by(|a, b| a.0.cmp(&b.0));
     r.last_actionable = fires_ts.last().and_then(|(_, a)| *a);
@@ -864,7 +880,7 @@ fn scan_readings(
     }
     by_reason.sort();
     r.terminations = by_reason;
-    Ok((r, scanned, duplicates, journals))
+    Ok((r, scanned, duplicates, skipped, journals))
 }
 
 /// `king-history --verdict [--scope SCOPE] [--manifest PATH] --cwd DIR
@@ -960,7 +976,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     let crown_start_ms: Option<i64> = chrono::DateTime::parse_from_rfc3339(&crown_start)
         .ok()
         .map(|dt| dt.timestamp_millis());
-    let (mut readings, scanned, duplicates, journals) = match scan_readings(
+    let (mut readings, scanned, duplicates, skipped, journals) = match scan_readings(
         &events_paths,
         &manifest.fno_id,
         &harness_session_id,
@@ -1086,9 +1102,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         },
         "scanned": scanned,
         "duplicates": duplicates,
-        "journals": journals.iter().map(|(p, n)| json!({
+        "skipped": skipped,
+        "journals": journals.iter().map(|(p, n, s)| json!({
             "path": p,
             "scanned": n,
+            "skipped": s,
         })).collect::<Vec<_>>(),
     });
     if as_json {
@@ -1509,7 +1527,7 @@ mod verdict_tests {
         )
         .unwrap();
         drop(fh);
-        let (r, _, _, _) = scan_readings(
+        let (r, _, _, _, _) = scan_readings(
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
@@ -1661,7 +1679,7 @@ mod verdict_tests {
             writeln!(fh, "{row}").unwrap();
         }
         drop(fh);
-        let (r, scanned, duplicates, journals) = scan_readings(
+        let (r, scanned, duplicates, _skipped, journals) = scan_readings(
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
@@ -1710,7 +1728,7 @@ mod verdict_tests {
         std::fs::write(&first, format!("{old}\n{current}\n{hook}\n")).unwrap();
         std::fs::write(&second, format!("{current}\n")).unwrap();
 
-        let (r, _, _, _) = scan_readings(
+        let (r, _, _, _, _) = scan_readings(
             &[first, second],
             "kg1",
             "hs1",
@@ -1751,7 +1769,7 @@ mod verdict_tests {
         )
         .unwrap();
         drop(fh);
-        let (r, _, _, _) = scan_readings(
+        let (r, _, _, _, _) = scan_readings(
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
@@ -1778,7 +1796,7 @@ mod verdict_tests {
         )
         .unwrap();
         drop(fh);
-        let (r, _, _, _) = scan_readings(
+        let (r, _, _, _, _) = scan_readings(
             std::slice::from_ref(&path),
             "kg1",
             "",
@@ -2431,11 +2449,32 @@ mod tests {
             "data": {"session_id": "crown-1", "actionable": 0}
         });
         crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
-        let (r, scanned, _dupes, journals) =
+        let (r, scanned, _dupes, _skipped, journals) =
             scan_readings(&[journal], "crown-1", "", "fno", "2026-09-10T12:00:00Z").unwrap();
         assert_eq!(r.fires, 1, "{r:?}");
         assert_eq!(scanned, 1);
         assert_eq!(journals.len(), 1);
+    }
+
+    #[test]
+    fn scan_readings_skips_a_malformed_line_and_counts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let good = json!({
+            "ts": "2026-09-10T12:00:01Z", "type": KING_LOOP_CHECK, "source": "hook",
+            "data": {"session_id": "crown-1", "actionable": 0}
+        });
+        // The torn-write shape: after `"source":"daemon",` the parser meets
+        // `{` where a key belongs, the error class the read used to die on.
+        let torn =
+            r#"{"ts":"2026-10-01T00:44:44Z","type":"pane_closed","source":"daemon",{"bad":1}"#;
+        std::fs::write(&journal, format!("{good}\n{torn}\n")).unwrap();
+        let (r, scanned, _dupes, skipped, journals) =
+            scan_readings(&[journal], "crown-1", "", "fno", "2026-09-10T12:00:00Z").unwrap();
+        assert_eq!(r.fires, 1, "{r:?}");
+        assert_eq!(scanned, 1, "only the good line counts as scanned");
+        assert_eq!(skipped, 1);
+        assert_eq!(journals[0].2, 1);
     }
 
     struct EnvRestore {
