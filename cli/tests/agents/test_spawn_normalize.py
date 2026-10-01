@@ -520,13 +520,3 @@ def test_graph_read_supplies_the_slug_when_flag_absent(monkeypatch):
     )
     out = _norm(["spawn", "--node", "x-919abcd", "--model", "glm-5.2", "go"])
     assert out[2] == "t-919abcd-sentinel-glm"
-
-
-def test_ship_payload_classifier_survives_a_bare_ship_token():
-    """A one-word `/ship` message has no second word to inspect; the ship
-    classifier must read it as a menu request, not crash."""
-    from fno.agents.rust_runtime import _is_codex_code_payload
-
-    assert _is_codex_code_payload(["spawn", "w", "/ship"]) is False
-    assert _is_codex_code_payload(["spawn", "w", "/ship doc t"]) is False
-    assert _is_codex_code_payload(["spawn", "w", "/ship pr check 7"]) is True

@@ -608,9 +608,6 @@ _CODE_PAYLOAD_PREFIXES = frozenset(
     "/fno:fix $fno:target $fno:execute $fno:tdd $fno:fix".split()
 )
 
-# ship seeds are two words: ship pr is the code lifecycle, ship doc is not.
-_SHIP_PREFIXES = frozenset({"/ship", "/fno:ship", "$fno:ship"})
-
 
 def _is_codex_code_payload(args: Sequence[str]) -> bool:
     """Recognize a bounded code workflow seed at the spawn seam."""
@@ -628,10 +625,6 @@ def _is_codex_code_payload(args: Sequence[str]) -> bool:
         first = token.split(maxsplit=1)
         if first and first[0] in _CODE_PAYLOAD_PREFIXES:
             return True
-        if first and first[0] in _SHIP_PREFIXES:
-            tail = first[1].split() if len(first) > 1 else []
-            if tail[:1] == ["pr"]:
-                return True
     return False
 
 
