@@ -35,7 +35,7 @@ const ESCALATE_DEFAULT_CONFLICT_MERGES: u32 = 2;
 const ESCALATE_DEFAULT_DIFF_LINES: u64 = 2500;
 const ESCALATE_DEFAULT_HOURS: i64 = 24;
 const ESCALATE_DEFAULT_SLOT_WAIT_MIN: i64 = 60;
-const SENDER: &str = "burn-watch";
+const SENDER: &str = "fno/burn-watch";
 const SENDER_LINE: &str = "Automatic notice from the fno daemon burn-watch arm, not a person. Your operator's hold outranks it.";
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);

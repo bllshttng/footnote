@@ -207,6 +207,11 @@ pub struct JourneyDecl {
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
+    /// Which delivered-mail header form this harness's composer tolerates:
+    /// `true` = the `@name` mention form, `false` = plain `name` (a bare
+    /// `@` can open a composer mention picker or read as an address). The
+    /// composer check's verdict, read as data - never a branch in code.
+    pub mail_header_at: bool,
     /// The mux composer's effort-picker list. `None` = no effort surface at
     /// all; `Some([])` = the axis exists but values are provider passthrough
     /// (free text); a filled list is the enumerable choices. Absent on a row
@@ -559,6 +564,13 @@ impl HarnessCapabilities {
 impl HarnessContract {
     pub fn packaged() -> Result<Self, ContractError> {
         Self::parse(CAPABILITY_TOML)
+    }
+
+    /// The delivered-mail header form a harness's composer takes, from its
+    /// contract row: `Some(true)` = the `@name` mention form, `Some(false)` =
+    /// plain `name`. `None` = unknown harness.
+    pub fn mail_header_at(&self, harness: &str) -> Option<bool> {
+        Some(self.harness.get(harness)?.mail_header_at)
     }
 
     /// Gate ONE merged candidate row (bundled + config override) through the
@@ -1444,6 +1456,17 @@ fn sh_join(tokens: &[String]) -> String {
         .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The packaged contract's header-form verdict for `harness`: `Some(true)` =
+/// the `@name` mention form, `Some(false)` = plain, `None` = unknown harness.
+pub fn packaged_mail_header_at(harness: &str) -> Option<bool> {
+    static CONTRACT: std::sync::OnceLock<HarnessContract> = std::sync::OnceLock::new();
+    CONTRACT
+        .get_or_init(|| {
+            HarnessContract::packaged().expect("the packaged capability contract parses")
+        })
+        .mail_header_at(harness)
 }
 
 pub fn render_session_argv(

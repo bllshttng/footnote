@@ -33,12 +33,16 @@ local command.
 
 `SKILL_DIR` below is `skills/mail` inside this plugin.
 
+## The delivered turn: one header line, then the whole body
+
+Delivered mail opens with one backticked line, `` `@sender · fmail-<12 hex> · summary` ``, and the full message follows, wholly visible. The summary is the body's first sentence capped at 12 words. The `@` lives inside inline code on purpose: a bare `@` in harness text can open a mention picker or read as an address, so each harness's contract row (`mail_header_at` in `harness_capabilities.toml`) rules which spelling its composer gets, set by the composer check. Old `<fno_mail>` turns in existing transcripts still resolve everywhere.
+
 ## The delivery model (so the verbs make sense)
 
 **A send injects into the recipient's live session. The durable queue is what
 happens when that misses, and it is recovery, not delivery.**
 
-`fno agents mail send` tries a live inject first. On success the `<fno_mail>` turn lands in the recipient's session and an audit-only `delivery: hosted` row records it in `messages.jsonl`. Recipient drains ignore that row because delivery already happened. When no live inject confirms, the envelope instead enters the durable queue and waits on a drain the recipient does not reliably run. Both exit 0, so **read the receipt, not the exit code**:
+`fno agents mail send` tries a live inject first. On success the header-framed turn lands in the recipient's session and an audit-only `delivery: hosted` row records it in `messages.jsonl`. Recipient drains ignore that row because delivery already happened. When no live inject confirms, the envelope instead enters the durable queue and waits on a drain the recipient does not reliably run. Both exit 0, so **read the receipt, not the exit code**:
 
 - `msg-<id> delivered (hosted)` - the live inject was accepted. It does not prove the recipient read it.
 - `msg-<id> queued (durable)` - live delivery was not confirmed. This is durable fallback, not delivery.
