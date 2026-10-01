@@ -43,6 +43,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "court-fold",
     "detect",
     "digest",
+    "scoreboard-escalation",
     "distress-scan",
     "drive",
     "drive-authority",
@@ -1034,6 +1035,15 @@ async fn run(args: Vec<String>) -> i32 {
     // ledger.json for a session. Never touches the daemon; exits 0 on empty.
     if verb == "digest" {
         return fno_agents::digest::run_digest(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `scoreboard-escalation`: read-only escalation-vs-stayed fold over the
+    // same sources plus the graph store. Direct dispatch, no daemon RPC.
+    if verb == "scoreboard-escalation" {
+        return fno_agents::scoreboard_escalation::run_scoreboard_escalation(
+            &args[1..],
+            &AgentsHome::from_env(),
+        );
     }
 
     // `distress-scan`: pre-manifest <help> tag read (see distress.rs doc).

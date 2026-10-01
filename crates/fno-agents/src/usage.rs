@@ -54,6 +54,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
     "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
+    "scoreboard-escalation [--since-days <n>] [--json]",
     "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
     "feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json]",
     // `review-coverage` deliberately has NO entry here: the per-verb --help

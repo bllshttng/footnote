@@ -8,7 +8,9 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
+use crate::paths::AgentsHome;
 use crate::scoreboard_provider::{num, parse_local, pct, percentile, round2};
 
 /// The schema's positive escalation marker: a `delegated` event WITHOUT it
@@ -41,6 +43,89 @@ pub(crate) fn view(params: &Value) -> Result<Value, String> {
     let built = build(rows, entries, events, since_days, now);
     let text = render(&built);
     Ok(json!({"view": built, "text": text}))
+}
+
+/// The `fno-agents scoreboard-escalation` verb: the operator door for the
+/// view. Read-only; the sources and defaults mirror `digest` (project
+/// journal first, then the global one, ledger and graph store beside them).
+pub fn run_scoreboard_escalation(rest: &[String], home: &AgentsHome) -> i32 {
+    let mut since_days: i64 = 28;
+    let mut json_out = false;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json_out = true,
+            "--since-days" => match it.next().and_then(|v| v.parse::<i64>().ok()) {
+                Some(n) => since_days = n,
+                None => {
+                    eprintln!("fno-agents: --since-days needs a number");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("fno-agents: unknown argument {other}");
+                return 2;
+            }
+        }
+    }
+    if since_days < 1 {
+        eprintln!("fno-agents: --since-days must be at least 1");
+        return 2;
+    }
+
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    let mut events: Vec<Value> = Vec::new();
+    for p in [
+        PathBuf::from(".fno").join("events.jsonl"),
+        fno_dir.join("events.jsonl"),
+    ] {
+        if let Ok(lines) = crate::loopcheck::event_lines(&p) {
+            for line in lines {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    events.push(v);
+                }
+            }
+        }
+    }
+    let ledger_raw = std::fs::read_to_string(fno_dir.join("ledger.json")).unwrap_or_default();
+    let rows: Vec<Value> = serde_json::from_str::<Value>(&ledger_raw)
+        .ok()
+        .and_then(|v| {
+            v.get("entries")
+                .cloned()
+                .or_else(|| Some(v))
+                .and_then(|e| e.as_array().cloned())
+        })
+        .unwrap_or_default();
+    let entries = match crate::graph_store::read_rows(&fno_dir.join("graph.db")) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("fno-agents: graph store unreadable: {e}");
+            return 1;
+        }
+    };
+    let reply = match view(&json!({
+        "entries": entries,
+        "rows": rows,
+        "events": events,
+        "since_days": since_days,
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno-agents: {e}");
+            return 1;
+        }
+    };
+    if json_out {
+        println!("{}", reply["view"]);
+    } else {
+        print!("{}", reply["text"]);
+    }
+    0
 }
 
 /// One node's ledger-derived stats. `first_model` keys the stayed bucket:
@@ -300,14 +385,14 @@ fn render(built: &Value) -> String {
     let win = built["since_days"].as_i64().unwrap_or(28);
     if built["state"] == "no_data" {
         out.push_str(&format!(
-            "fno whoami scoreboard --by-escalation (last {win}d)\n\n  no node outcomes in window.\n"
+            "fno-agents scoreboard-escalation (last {win}d)\n\n  no node outcomes in window.\n"
         ));
         return out;
     }
     let nodes = built["nodes"].as_u64().unwrap_or(0);
     let esc_n = built["escalated_nodes"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "fno whoami scoreboard --by-escalation (last {win}d)\n\n  nodes in window: {nodes} (escalated {esc_n}, stayed {})\n  model attributed: {}% of nodes\n\n",
+        "fno-agents scoreboard-escalation (last {win}d)\n\n  nodes in window: {nodes} (escalated {esc_n}, stayed {})\n  model attributed: {}% of nodes\n\n",
         nodes - esc_n,
         built["model_pct"]
     ));

@@ -86,9 +86,6 @@ def test_view_flags_mutually_exclusive(tmp_path, monkeypatch):
     res = runner.invoke(_app(), ["--by-provider", "--by-skill"])
     assert res.exit_code != 0
     assert "mutually exclusive" in res.output
-    res = runner.invoke(_app(), ["--by-provider", "--by-escalation"])
-    assert res.exit_code != 0
-    assert "mutually exclusive" in res.output
 
 
 # --- AC3-ERR ------------------------------------------------------------------

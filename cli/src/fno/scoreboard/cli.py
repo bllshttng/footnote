@@ -112,11 +112,6 @@ def scoreboard_command(
         "--lanes",
         help="Lane truth: retrospective provider/model/effort cells plus live occupancy and headroom.",
     ),
-    by_escalation: bool = typer.Option(
-        False,
-        "--by-escalation",
-        help="Escalation outcomes: nodes that escalated (capability_escalation) vs nodes that stayed on their first model, per model: merged or not, hours to merge, spend.",
-    ),
     project: str = typer.Option(
         None,
         "--project",
@@ -134,8 +129,7 @@ def scoreboard_command(
     _views = [
         f for f, on in (("--calibration", calibration), ("--by-skill", by_skill),
                         ("--efficiency", efficiency), ("--plan-fidelity", plan_fidelity),
-                        ("--by-provider", by_provider), ("--lanes", lanes),
-                        ("--by-escalation", by_escalation))
+                        ("--by-provider", by_provider), ("--lanes", lanes))
         if on
     ]
     if len(_views) > 1:
@@ -246,23 +240,6 @@ def scoreboard_command(
                     "redeploy fno-agents so the by-provider view can run",
                     err=True,
                 )
-                raise typer.Exit(code=1) from exc
-            raise
-        return _finish(reply["view"], lambda _v: sys.stdout.write(reply["text"]))
-
-    if by_escalation:
-        from fno.graph.store import GRAPH_JSON, _client_for
-
-        esc_read = _events({"delegated"})
-        try:
-            reply = _client_for(GRAPH_JSON).request(
-                "scoreboard_escalation",
-                {"entries": _nodes(), "rows": rows, "events": esc_read["events"],
-                 "since_days": since, "now": datetime.now(timezone.utc).isoformat()},
-            )
-        except RuntimeError as exc:
-            if "unknown store method" in str(exc) and "scoreboard_escalation" in str(exc):
-                typer.echo("warning: the answering keeper predates scoreboard_escalation; redeploy fno-agents", err=True)
                 raise typer.Exit(code=1) from exc
             raise
         return _finish(reply["view"], lambda _v: sys.stdout.write(reply["text"]))
