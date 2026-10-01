@@ -1635,6 +1635,84 @@ headless = "unsandboxed"
 state = "native"
 measured_by = { reader = "session-id resume journey", version = "3.14.3", date = "2026-09-29" }
 
+# footnote: footnote's own turn loop (crates/fno-agents/src/footnote_harness),
+# run in-process by the client over a borrowed model endpoint. Headless only:
+# no pane, no thread, no TUI. The id is footnote's own fno_id, minted before
+# the first record, so the binding is preassigned.
+[harness.footnote]
+permission_bypass = []
+efforts = []
+permission_modes = []
+resume = "native-session"
+autonomous_pane = false
+route_on_pane = false
+# The loop runs hooks/hooks.json itself, Stop included.
+loop_participation = "native"
+command_surface = "slash"
+slash_prefix = "fno:"
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = []
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "preassigned", required = true, timeout_ms = 1000 }
+
+[harness.footnote.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.footnote.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.footnote.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+# No TUI exists: the loop is a function in the client process.
+[harness.footnote.resume_strategy.forms.interactive_create]
+kind = "unsupported"
+tokens = []
+
+[harness.footnote.resume_strategy.forms.interactive_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.footnote.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+# In-process forms: the client runs the loop; no child argv exists.
+[harness.footnote.resume_strategy.forms.headless_create]
+kind = "flag"
+tokens = ["fno-agents", "spawn", "-H", "footnote", "--substrate", "headless"]
+
+[harness.footnote.resume_strategy.forms.headless_resume]
+kind = "flag"
+tokens = ["fno-agents", "ask", "{session_id}"]
+
+# -m is required and passes through to the endpoint as the request's model.
+[harness.footnote.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
+# Tools run with the user's permissions; there is no sandbox.
+[harness.footnote.state_root_grant]
+pane = "unmeasured"
+thread = "unmeasured"
+headless = "unsandboxed"
+
+[harness.footnote.features.spawn]
+state = "capable"
+
 # PANE-TO-THREAD CONVERSION (`fno agents resume <name> --substrate thread`).
 # One stanza per harness naming HOW a live pane becomes a persistent thread.
 # One stanza per harness naming HOW a live pane becomes a persistent thread.

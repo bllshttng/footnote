@@ -1912,6 +1912,7 @@ pub const KNOWN_HARNESSES: &[&str] = &[
     "cursor-agent",
     "grok",
     "zcode",
+    "footnote",
 ];
 
 /// NAMING SKEW (Discretion 4 — commented, not lockstep-renamed, to keep
@@ -1932,6 +1933,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "cursor-agent",
     "grok",
     "zcode",
+    "footnote",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1955,6 +1957,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
         "grok" => Some(Box::new(GrokProvider)),
         "zcode" => Some(Box::new(crate::zcode::ZcodeProvider)),
+        "footnote" => Some(Box::new(crate::footnote_harness::FootnoteProvider)),
         _ => None,
     }
 }

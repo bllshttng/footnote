@@ -176,6 +176,7 @@ pub mod gc_native;
 pub mod gc_open_pr_guard;
 pub mod gc_sweep;
 pub mod gc_verify;
+pub mod footnote_harness;
 pub mod gemini_ask;
 pub mod gh_budget;
 pub mod gh_cache;
