@@ -1059,6 +1059,7 @@ ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
 
 [harness.cursor-agent]
+mail_header_at = true
 permission_bypass = ["--force"]
 permission_modes = ["force", "yolo"]
 resume = "native-session"

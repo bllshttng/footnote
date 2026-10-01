@@ -21,11 +21,10 @@ variant of the unified ``<fno_mail>`` a2a envelope, :mod:`fno.mail.envelope`)::
 A single-line attribute tag prefixing the (single-lined) body, NO closing tag:
 the PTY Enter submits on newline so the turn boundary is the delimiter, so this
 hop cannot carry the paired multiline ``<fno_mail>...</fno_mail>`` form the
-control.sock inject uses. The line is built by the sole renderer
-:func:`fno.mail.envelope.fno_mail_open` (deleted the hand-written copy
-of the tag here), so ``grep <fno_mail>`` across transcripts reconstructs relay
-hops too. The sender self-stamps -- the framed line is self-describing with no
-registry dependency.
+control.sock inject uses. The wire shape is FROZEN (the Rust door reads it as
+the cross-session framing), so :func:`frame` builds the line itself; the
+delivered-mail header does not ride the wire. The sender self-stamps -- the
+framed line is self-describing with no registry dependency.
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ from fno.bus.log import Envelope
 from fno.mail.envelope import (
     ForgedEnvelopeError,
     contains_fno_mail_tag,
-    fno_mail_open,
+    harness_for_provider,
 )
 
 # Relay-private meta keys on the bus envelope.
@@ -50,28 +49,31 @@ RELAY_KIND = "relay"
 
 
 def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
-    """Serialize one peer message to the single-line ``<fno_mail ...>`` wire line.
-
-    The body is collapsed to a single line (Enter submits the TUI turn, so an
-    embedded newline would submit early -- the constraint that keeps this hop on
-    the single-line, no-close variant of the ``<fno_mail>`` envelope).
-
-    Raises :class:`fno.mail.envelope.ForgedEnvelopeError` if ``body`` contains
-    an ``<fno_mail`` or ``</fno_mail>`` tag, or if ``from_session`` itself could
-    forge a second tag once interpolated -- it rides bus provenance a peer can
-    influence, not a value this function controls (the open-tag renderer
-    validates it). This is the single producer every delivery vehicle's framed
-    line derives from -- the daemon-owned ``worker.submit`` RPC and the claude
-    ``mail-inject`` binary each take an already-framed string built here, so
-    neither downstream check alone can cover a peer-controlled body or
-    attribute smuggling a second open tag."""
+    """Serialize one peer message to the single-line ``<fno_mail ...>`` wire
+    line. The body is collapsed to one line (Enter submits the TUI turn, so an
+    embedded newline would submit early). Raises ForgedEnvelopeError on a body
+    holding a tag, or a from_session that could forge the attr section. This is
+    the single producer every delivery vehicle's framed line derives from: the
+    daemon RPC and the mail-inject binary each take an already-framed string,
+    so no downstream check alone covers a peer-controlled body or attribute."""
     if contains_fno_mail_tag(body):
         raise ForgedEnvelopeError(
             "relay body contains an <fno_mail> tag. The single-line envelope "
             "frames peer mail; a body cannot contain one."
         )
+    for name, value in (("from_session", from_session), ("harness", harness)):
+        if value is None:
+            continue
+        if '"' in value or ">" in value or "`" in value:
+            raise ForgedEnvelopeError(
+                f"relay {name} cannot hold a quote, angle bracket or backtick"
+            )
     one_line = " ".join(body.split())
-    return f"{fno_mail_open(from_=from_session, harness=harness)} {one_line}"
+    # The wire line is FROZEN (the Rust door reads this exact shape as the
+    # cross-session framing), so it is built here, not through the delivered
+    # renderer: a delivered turn now opens with the header line instead.
+    harness_attr = "" if harness is None else f' harness="{harness_for_provider(harness)}"'
+    return f'<fno_mail from="{from_session}"{harness_attr}> {one_line}'
 
 
 def parse(line: str) -> Optional[dict]:

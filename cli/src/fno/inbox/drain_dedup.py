@@ -28,15 +28,15 @@ _CAP = 2000
 
 
 def dedup_key(body: str) -> Optional[str]:
-    """Sha256 of the paired ``<fno_mail>...</fno_mail>`` block when it carries
-    an ``id``; ``None`` otherwise (the caller processes the message normally).
-    The block read lives in the Rust classifier."""
+    """Sha256 of the delivered message id - a header line's middle token, or an
+    old tag's ``id`` attribute; ``None`` when the body names no id (the caller
+    processes the message normally). The id read lives in the Rust classifier."""
     from fno.mail.envelope import mail_shape
 
-    block = mail_shape([body])[0]["envelope_block"]
-    if block is None:
+    ids = mail_shape([body])[0]["ids"]
+    if not ids:
         return None
-    return hashlib.sha256(block.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(ids[0].encode("utf-8")).hexdigest()[:32]
 
 
 def _seen_path(recipient: str) -> Path:

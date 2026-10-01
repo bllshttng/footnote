@@ -245,11 +245,35 @@ fn ascii_lower(text: &str) -> String {
     text.chars().map(|c| c.to_ascii_lowercase()).collect()
 }
 
+/// Every header turn in `text`: `{id, sender}` per line that parses as a
+/// delivered-mail header (the sender without its `@`). The transcript receipt
+/// reader's header-side input, beside `legacy_tags`.
+pub fn header_turns(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !is_header_line(trimmed) {
+                return None;
+            }
+            let inner = trimmed.trim_matches('`');
+            let mut parts = inner.split(" · ");
+            let sender = parts.next()?.trim_start_matches('@').to_string();
+            Some(serde_json::json!({
+                "id": parts.next()?.to_string(),
+                "sender": sender,
+            }))
+        })
+        .collect()
+}
+
 /// True when `text` holds a real legacy `<fno_mail` open tag (boundary-aware,
 /// case-insensitive) or a `</fno_mail>` close, anywhere. The forgery guard and
 /// the one check the Python adapter exposes as `contains_fno_mail_tag`.
 pub fn text_holds_legacy_tag(text: &str) -> bool {
     let low = ascii_lower(text);
+    if low.contains("</fno_mail>") {
+        return true;
+    }
     let mut start = 0;
     while let Some(idx) = low[start..].find("<fno_mail") {
         let abs = start + idx;
@@ -559,5 +583,15 @@ mod tests {
         assert_eq!(both[0]["from_session"], "full");
         assert_eq!(both[0]["from"], "short");
         assert!(legacy_tags("<fno_mailicious>").is_empty());
+
+        // Header turns for the receipt path: id plus sender, no @.
+        let turns = header_turns(
+            "`@candor · fmail-abc123def456 · hi`\nbody\n`quill · fmail-123abc456def · plain`",
+        );
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0]["id"], "fmail-abc123def456");
+        assert_eq!(turns[0]["sender"], "candor");
+        assert_eq!(turns[1]["sender"], "quill");
+        assert!(header_turns("prose\nno headers here").is_empty());
     }
 }

@@ -322,6 +322,7 @@ pub fn run(args: &[String]) -> i32 {
                     "holds_tag": crate::mail_header::text_holds_legacy_tag(text),
                     "envelope_block": crate::mail_header::paired_envelope_block(text),
                     "legacy_tags": crate::mail_header::legacy_tags(text),
+                    "header_turns": crate::mail_header::header_turns(text),
                     "relay_parse": crate::mail_header::relay_parse_line(text)
                         .map(|(from, body)| serde_json::json!({"from_session": from, "body": body})),
                 })

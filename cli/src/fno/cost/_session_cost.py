@@ -260,10 +260,9 @@ def _count_user_vs_mail(metrics: SessionMetrics, texts: list[str]) -> None:
     from fno.mail.envelope import mail_shape
 
     for shape in mail_shape(texts):
-        if shape["framing"] != "bare":
-            metrics.mail_messages += 1
-        else:
-            metrics.user_messages += 1
+        is_mail = shape["framing"] != "bare"
+        metrics.mail_messages += is_mail
+        metrics.user_messages += not is_mail
 
 
 def parse_transcript(

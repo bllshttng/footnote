@@ -64,7 +64,13 @@ def sender_from_transcript_text(
     from fno.mail.envelope import mail_shape
 
     normalized = text.replace('\\"', '"')
-    for tag in mail_shape([normalized])[0]["legacy_tags"]:
+    shapes = mail_shape([normalized])[0]
+    # A header turn names its sender by registry name; no session address
+    # rides the delivered text, so the receipt check applies to tags only.
+    for turn in shapes["header_turns"]:
+        if turn["id"] == msg_id:
+            return turn["sender"]
+    for tag in shapes["legacy_tags"]:
         if tag.get("id") != msg_id:
             continue
         if session_id is not None and not _addressed_here(tag, session_id):
