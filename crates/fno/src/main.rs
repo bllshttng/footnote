@@ -506,6 +506,10 @@ fn run_server(socket: PathBuf) {
     }
     // The owner=mux sidecars move at their long-lived writer's start.
     proto::migrate_mux_sidecars();
+    // A server an agent spawned inherits its worker identity and a
+    // background policy; strip both so the brake never holds the user's
+    // taps and the server never runs demoted.
+    fno::process_admission::claim_server_priority();
     std::process::exit(fno::server::run(socket));
 }
 
