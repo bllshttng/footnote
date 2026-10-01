@@ -424,12 +424,8 @@ mod tests {
             decisions.iter().all(|r| r["subject"] != "x-0000"),
             "no row may land at the node from an agent clear"
         );
-    }
-
-    #[test]
-    fn the_recommended_options_echo_becomes_the_merge_grant() {
-        let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
-        let subject = format!("merge-grant:subject@{sha}");
+        let board_sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let board_subject = format!("merge-grant:footnote#2911@{board_sha}");
         let ask_board = |req: &ClearRequest, qid: &str| {
             seed_question(
                 req,
@@ -442,7 +438,7 @@ mod tests {
                         "question": "May PR 2911 merge?",
                         "asker": "test-agent",
                         "node": "x-0000",
-                        "subject": subject,
+                        "subject": board_subject,
                         "options": [
                             {"n": 1, "text": "Yes, merge PR 2911."},
                             {"n": 2, "text": "No, keep it held."},
@@ -474,7 +470,7 @@ mod tests {
         );
         let rows: Vec<Value> = graph_decisions(&req)
             .into_iter()
-            .filter(|r| r["subject"] == subject.as_str())
+            .filter(|r| r["subject"] == board_subject.as_str())
             .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -496,7 +492,7 @@ mod tests {
         assert_eq!(result.exit_code, 0, "{:?}", result.lines);
         let rows: Vec<Value> = graph_decisions(&req)
             .into_iter()
-            .filter(|r| r["subject"] == subject.as_str())
+            .filter(|r| r["subject"] == board_subject.as_str())
             .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["decision"], "2. No, keep it held.");
