@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Closure probe core for the agent field population contract.
 
-Reads the `fno-py doctor lint field-coverage --live --json` report from
+Reads the `fno doctor lint field-coverage --live --json` report from
 stdin (or a path argument) and prints the positive marker only when every
 contract field is either populated or measured under its declared
 population mode, and absent from both dead-field lists. Fails closed on

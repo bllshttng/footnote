@@ -922,7 +922,7 @@ Every node-bearing spawn passes the verb seam. The seam projects the
     ``fno agents spawn:`` prefix) before any lane slot, claim or worker is
     spent, so callers stop writing the verb twice: drop it from the payload
     and ``--node`` supplies it. An empty seed routes the profile by the
-    derived verb (``node_verb`` reaches ``inject_spawn_defaults``; the journal
+    derived verb (``node_verb`` reaches the spawn compose; the journal
     keeps the real seed) and the door still renders the command, because
     ``render_node_seed`` also carries the brief env and the worktree ensure. A
     prose seed gains the node's command in front at its own slot. Everything

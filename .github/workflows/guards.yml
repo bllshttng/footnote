@@ -357,10 +357,11 @@ jobs:
         working-directory: cli
         run: uv run fno-py doctor lint hook-tombstones
 
-      # The complete harness roster vs its shipped evidence: setup docs, the
-      # Rust provider dispatch arms, and the Python adapter registry. stdlib
-      # only - no package install, no Rust build, no network.
-      - name: Harness roster parity (complete roster vs its evidence)
+      # The shipped harness evidence as a subset of the one Rust roster
+      # (provider.rs KNOWN_HARNESSES, parsed from source): setup docs, the
+      # dispatch arms, and the Python adapter registry. stdlib only - no
+      # package install, no Rust build, no network.
+      - name: Harness roster parity (evidence vs the one Rust roster)
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: python3 scripts/ci/check-harness-roster-parity.py

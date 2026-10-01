@@ -19,6 +19,7 @@ file lock; accepted).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -318,7 +319,6 @@ def inventory_cmd(
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.route_resolve import (
-        _inventory_payload,
         resolve_inventory,
         slot_states,
         slot_verbs,
@@ -326,7 +326,7 @@ def inventory_cmd(
     from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     inv = resolve_inventory()
-    slots = [slot_states(verb, inventory=inv) for verb in slot_verbs()]
+    slots = [slot_states(verb) for verb in slot_verbs()]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:
@@ -341,8 +341,13 @@ def inventory_cmd(
             _echo_slots(slots)
         return
     try:
-        answer = route_slot_call({"mode": "inventory", "inventory": _inventory_payload(inv),
-                                  "known_harnesses": list(READABLE_PROVIDERS)})
+        answer = route_slot_call({
+            "mode": "inventory",
+            "inventory": {
+                "rows": [dataclasses.asdict(r) for r in inv.rows.values()],
+            },
+            "known_harnesses": list(READABLE_PROVIDERS),
+        })
     except RouteSlotUnavailable as exc:
         answer = {"refusals": [f"route-slot-unavailable ({exc})"]}
     rows, refusals, drift = (answer.get(k) or [] for k in ("rows", "refusals", "drift"))
@@ -381,12 +386,11 @@ def inventory_cmd(
 
 
 def _routing_policy_safe() -> dict:
-    from fno.config import load_settings
-    from fno.route_resolve import _routing_policy_payload
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     try:
-        return _routing_policy_payload(load_settings())
-    except Exception:  # noqa: BLE001 - an unreadable config answers unknown
+        return route_slot_call({"mode": "policy"})
+    except RouteSlotUnavailable:  # noqa: BLE001 - an unreachable verb answers unknown
         return {"enforce_inventory": False, "operator_access": "unknown"}
 
 

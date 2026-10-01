@@ -799,11 +799,6 @@ pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BL
     lines
 }
 
-/// Truncate one line to `w` chars (the painter wraps nothing).
-pub(crate) fn trunc(s: &str, w: usize) -> String {
-    s.chars().take(w).collect()
-}
-
 /// Truncate a summary to `w` chars, but cut after the last whole word that
 /// fits and mark the cut with an ellipsis: a summary truncated mid-word
 /// (`Nex`) reads as a broken word, not a cut.

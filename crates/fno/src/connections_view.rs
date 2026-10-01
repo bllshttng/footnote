@@ -29,9 +29,6 @@ const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 /// and identity is enrichment that lands after the rows are visible.
 const IDENTITY_TIMEOUT: Duration = Duration::from_millis(5000);
 
-/// Longest account name cell before an ellipsis clamp.
-const MAX_NAME_COL: usize = 18;
-
 /// One account record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
@@ -1100,9 +1097,9 @@ impl ConnectionsView {
         }
         // One width per column, shared by the header and every row, so the
         // body reads as a table. A column with no values still gets its
-        // header's width (AC4-EDGE). Name cells render through client::pad_to,
-        // which truncates with an ellipsis at the column cap (AC4-HP).
-        let name_w = |id: &str| id.chars().count().min(MAX_NAME_COL);
+        // header's width (AC4-EDGE). The name column is as wide as the
+        // longest name; the overlay wraps a row too wide for the screen.
+        let name_w = |id: &str| crate::chrome::str_cols(id);
         let w_name = self
             .accounts
             .iter()
@@ -2282,10 +2279,4 @@ mod tests {
         // renders at all and the SNAP header exists even with no values
         assert!(out.contains("SNAP"));
     }
-
-    // AC4-HP: a header row and aligned columns; the name clamps; exactly one
-    // blank line at each seam.
-
-    // AC4-EDGE: an empty list prints no header; an all-empty column is sized
-    // to its header label (no negative pad).
 }

@@ -1,20 +1,20 @@
-from fno.graph.store import read_graph_strict
-from fno.paths import graph_json
+#!/usr/bin/env python3
+"""List an epic's children from the graph through the front door.
 
-nodes = read_graph_strict(graph_json())
-byid = {n["id"]: n for n in nodes}
-epic = byid["NODEID"]
+Usage: kids.py <node-id>   (prints one `fno backlog get <id>` row summary)
+"""
+import json
+import subprocess
+import sys
+
+node = sys.argv[1] if len(sys.argv) > 1 else "NODEID"
+cmd = ["fno", "backlog", "get", node]
+row = subprocess.run(cmd, capture_output=True, text=True)
+epic = json.loads(row.stdout or "{}")
 kids = epic.get("children") or []
-print("NODEID status:", epic.get("status"), "| children:", len(kids))
+print("node:", node, "| status:", epic.get("status"), "| children:", len(kids))
 print()
-ids = []
-for k in kids:
-    ids.append(k["id"] if isinstance(k, dict) else k)
-for k in ids:
-    n = byid.get(k)
-    if not n:
-        print("  %s  MISSING from graph" % k)
-        continue
-    print("  %s  %-12s %-3s %-7s | %s" % (
-        n["id"], n.get("status"), str(n.get("priority")),
-        str(n.get("difficulty")), (n.get("title") or "")[:58]))
+for kid in kids:
+    kid = kid["id"] if isinstance(kid, dict) else kid
+    entry = epic.get("_byid", {}).get(kid) or {}
+    print(" ", kid, " ", entry.get("status"), " ", (entry.get("title") or "")[:58])

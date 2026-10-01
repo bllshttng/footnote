@@ -50,6 +50,7 @@ pub mod session_cli;
 pub mod sessions;
 pub mod settings;
 pub mod style_check;
+pub mod target_binding;
 pub mod title_gate;
 pub mod undispatched;
 pub mod update_cli;

@@ -1,0 +1,68 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w9",
+    "/fno:target x-7"
+  ],
+  "config_toml": "[routing]\nenforce_inventory = true\noperator_access = \"local\"\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--name",
+      "w9",
+      "/fno:target x-7"
+    ],
+    "exit": 2,
+    "journal": {
+      "detail": "slot agents.profiles.target declares no lanes; strict routing refuses the harness default; declare agents.profiles.target.lanes or type --model, -P or --route to pin (strict routing: config routing.enforce_inventory)",
+      "exit_code": 2,
+      "gate": "routing",
+      "kind": "spawn_gate_refused",
+      "lanes": [],
+      "reason": "strict",
+      "verb": "target"
+    },
+    "stderr": [
+      "fno agents spawn: slot agents.profiles.target declares no lanes; strict routing refuses the harness default; declare agents.profiles.target.lanes or type --model, -P or --route to pin (strict routing: config routing.enforce_inventory)",
+      "fno agents spawn: refusing; no worker launched"
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w9",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-7",
+    "seed_form": "positional",
+    "seed_index": 3,
+    "spawn_tokens": [
+      "--name",
+      "w9",
+      "/fno:target x-7"
+    ],
+    "tab_flag_present": false
+  }
+}
