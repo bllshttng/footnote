@@ -3318,8 +3318,7 @@ def _a2a_handle_re() -> "re.Pattern[str]":
     the flip is undeliverable, so the dead-letter report is the only thing that
     surfaces it. Prefixes come from the complete supported-harness roster
     (KNOWN_HARNESSES), not the narrower capability-backed set, so adding a
-    harness to the roster cannot silently drop it out of the scan - the same
-    anti-drift property _legacy_handle_re in harness_identity carries.
+    harness to the roster cannot silently drop it out of the scan.
     """
     from fno.harness_names import KNOWN_HARNESSES
 

@@ -559,10 +559,9 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
 
 # The retired harness-prefixed address. Kept ONLY so the send path can
 # recognize one and refuse it with a message naming the fix, and so `fno
-# doctor` can still report mail queued to one before the flip as the dead
-# letter it is. Never an accepted address, never generated. Built from the
-# roster door, lazily (module __getattr__, lru_cache): an eager build paid a
-# roster subprocess on every import, which broke the binary-less CI lints.
+# doctor` can still report pre-flip mail as the dead letter it is. Never an
+# accepted address, never generated. Read from the roster door lazily
+# (module __getattr__, lru_cache): an eager build paid a subprocess per import.
 @lru_cache(maxsize=1)
 def _legacy_handle_re() -> "re.Pattern[str]":
     # In-function: a module-level from-import resolves the attr (the subprocess) at import.
