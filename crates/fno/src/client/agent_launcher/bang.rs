@@ -231,6 +231,16 @@ mod tests {
         v
     }
 
+    fn read_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+        // The rows commit into the store beside the journal; the raw file
+        // is legacy bytes the writer no longer touches.
+        crate::event_store::query_events(path, &crate::event_store::EventQuery::default())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|row| serde_json::from_str(&row.line).ok())
+            .collect()
+    }
+
     /// AC5 + the full run_with story on injected round-trips: the
     /// trampoline, the verified birth (AC4), the fatal refusal with the
     /// draft kept (AC6), the empty project, the empty-line no-op (AC8),
@@ -288,9 +298,9 @@ mod tests {
             assert_eq!(argv[4], "printf hi; pwd");
             assert!(!claim);
         }
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert_eq!(journal.lines().count(), 1);
-        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let rows = read_rows(&events);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
         assert_eq!(row["type"], "composer_shell_ran");
         assert_eq!(row["data"]["cwd"], "/tmp/proj-a");
         assert_eq!(row["data"]["line"], "printf hi; pwd");
@@ -317,9 +327,9 @@ mod tests {
             assert!(l.shell, "shell mode kept");
             assert_eq!(l.draft.message, "git status", "the line is kept");
         }
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert_eq!(journal.lines().count(), 2);
-        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let rows = read_rows(&events);
+        assert_eq!(rows.len(), 2);
+        let row = rows.last().unwrap();
         assert_eq!(row["type"], "composer_shell_refused");
         assert_eq!(row["data"]["outcome"], "refused");
 
@@ -332,9 +342,9 @@ mod tests {
             .await
             .unwrap();
         });
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert_eq!(journal.lines().count(), 3);
-        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let rows = read_rows(&events);
+        assert_eq!(rows.len(), 3);
+        let row = rows.last().unwrap();
         assert_eq!(row["data"]["cwd"], "");
 
         // AC8: an empty line sends and writes nothing.
@@ -346,8 +356,7 @@ mod tests {
             .await
             .unwrap();
         });
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert_eq!(journal.lines().count(), 3, "no row for the empty line");
+        assert_eq!(read_rows(&events).len(), 3, "no row for the empty line");
 
         // AC7: an unanswered attempt lands in Unknown, writes its row, and
         // blocks a second send until the operator dismisses it.
@@ -363,9 +372,9 @@ mod tests {
             let l = v.launcher.as_ref().unwrap();
             assert!(matches!(l.phase, Phase::Unknown { .. }));
         }
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert_eq!(journal.lines().count(), 4);
-        let row: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        let rows = read_rows(&events);
+        assert_eq!(rows.len(), 4);
+        let row = rows.last().unwrap();
         assert_eq!(row["data"]["outcome"], "unanswered");
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called2 = called.clone();
