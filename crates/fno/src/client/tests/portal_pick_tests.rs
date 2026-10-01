@@ -50,8 +50,6 @@ fn portal_pick_view() -> View {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -73,6 +71,7 @@ fn portal_pick_view() -> View {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     let mut v = view_with_agents(vec![
         agent(Some(1), "nairobi", Some(10), Some(0), Some(0)),

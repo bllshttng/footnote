@@ -226,6 +226,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // to 1..=34.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
+// v38 preserves sweep-owned context and unread measurements across writers.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
@@ -773,6 +774,16 @@ pub struct RegistryEntry {
     pub liveness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_measured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_unread: Option<u32>,
     /// The LAST title the harness reported for this session (claude's
     /// Ctrl+R agent-name record; codex/opencode's index title), kept ONLY as
     /// the diff baseline the sweep's `agent_renamed` emit compares against.

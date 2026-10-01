@@ -44,6 +44,7 @@ pub mod mouse;
 pub mod mux_cli;
 pub mod mux_rows;
 pub mod needs_overlay;
+pub mod org_model;
 pub mod org_titles;
 pub mod pane_argv;
 pub mod pane_border;

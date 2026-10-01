@@ -108,6 +108,16 @@ impl Core {
                                 dnd: a.dnd,
                                 unmeasured,
                                 liveness_measured_at: a.liveness_measured_at,
+                                context_used_pct: a.context_used_pct,
+                                context_tokens: a.context_tokens,
+                                context_measured_at: a.context_measured_at,
+                                started_at: a.started_at,
+                                mail_unread: a.mail_unread,
+                                node: a.node.clone().or_else(|| {
+                                    agents_view::node_id_candidates(&a.name)
+                                        .into_iter()
+                                        .find(|n| n.contains('-'))
+                                }),
                                 harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
@@ -186,6 +196,12 @@ impl Core {
                                 dnd: false,
                                 unmeasured: false,
                                 liveness_measured_at: None,
+                                context_used_pct: None,
+                                context_tokens: None,
+                                context_measured_at: None,
+                                started_at: None,
+                                mail_unread: None,
+                                node: None,
                                 harness_title: None,
                                 answerable: None,
                                 attach_id: None,
@@ -284,6 +300,16 @@ impl Core {
                         dnd: a.dnd,
                         unmeasured: false,
                         liveness_measured_at: None,
+                        context_used_pct: a.context_used_pct,
+                        context_tokens: a.context_tokens,
+                        context_measured_at: a.context_measured_at,
+                        started_at: a.started_at,
+                        mail_unread: a.mail_unread,
+                        node: a.node.clone().or_else(|| {
+                            agents_view::node_id_candidates(&a.name)
+                                .into_iter()
+                                .find(|n| n.contains('-'))
+                        }),
                         harness_title: a.harness_title.clone(),
                         answerable: None,
                         attach_id: None,
@@ -353,6 +379,16 @@ impl Core {
                         dnd: a.dnd,
                         unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
                         liveness_measured_at: a.liveness_measured_at,
+                        context_used_pct: a.context_used_pct,
+                        context_tokens: a.context_tokens,
+                        context_measured_at: a.context_measured_at,
+                        started_at: a.started_at,
+                        mail_unread: a.mail_unread,
+                        node: a.node.clone().or_else(|| {
+                            agents_view::node_id_candidates(&a.name)
+                                .into_iter()
+                                .find(|n| n.contains('-'))
+                        }),
                         harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
@@ -502,6 +538,12 @@ impl Core {
                 dnd: false,
                 unmeasured: false,
                 liveness_measured_at: None,
+                context_used_pct: None,
+                context_tokens: None,
+                context_measured_at: None,
+                started_at: None,
+                mail_unread: None,
+                node: None,
                 harness_title: None,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;

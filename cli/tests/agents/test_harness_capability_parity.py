@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 from copy import deepcopy
 from pathlib import Path
@@ -73,7 +74,8 @@ def bundled_state():
 def test_resolved_rows_match_between_readers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bundled_state
 ) -> None:
-    if shutil.which("cargo") is None:
+    cargo = shutil.which("cargo")
+    if cargo is None:
         pytest.skip("no cargo toolchain: the Rust half of the parity check cannot run")
     stage = tmp_path / "stage"
     (stage / ".fno").mkdir(parents=True)
@@ -89,13 +91,18 @@ def test_resolved_rows_match_between_readers(
     repo_root = Path(__file__).resolve().parents[3]
     env = {
         **os.environ,
+        # HOME stays isolated; reuse the checkout artifacts smoke-setup built
+        # instead of neutralise's fresh sandbox build directory.
+        "CARGO_BUILD_BUILD_DIR": str(repo_root / "crates" / "fno" / "target"),
         "FNO_CAPABILITY_PARITY_DIR": str(stage),
         "FNO_CAPABILITY_PARITY_JSON": str(expected_path),
     }
-    result = subprocess.run(
+    with subprocess.Popen(
         [
-            "cargo",
+            cargo,
             "test",
+            "--lib",
+            "--locked",
             "--manifest-path",
             str(repo_root / "crates" / "fno" / "Cargo.toml"),
             "--",
@@ -105,14 +112,27 @@ def test_resolved_rows_match_between_readers(
         ],
         env=env,
         cwd=repo_root,
-        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=900,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            pytest.fail("Rust capability parity exceeded 120s:\n" + (stdout + stderr)[-4000:])
+    output = stdout + stderr
+    assert process.returncode == 0, (
+        "the Rust reader resolved the staged config differently:\n" + output[-4000:]
     )
-    output = result.stdout + result.stderr
-    assert result.returncode == 0, (
-        "the Rust reader resolved the staged config differently:\n"
-        + output[-4000:]
+    assert "test agents_view::tests::capability_parity_with_python ... ok" in stdout, (
+        "the native parity test did not run:\n" + output[-4000:]
     )
     # The refusal the stage plants is a POSITIVE marker, not a silent pass:
     # both readers must have declined it and the Python side must say so.
