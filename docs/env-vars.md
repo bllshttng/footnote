@@ -248,7 +248,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `PWD` | py+rs | unclear: cli/src/fno/adapters/providers/cli.py:54 |
 | `PYTEST_CURRENT_TEST` | py+rs | unclear: cli/src/fno/cli.py:404 |
 | `PYTHONPATH` | rs | unclear: crates/fno-agents/src/finalize.rs:1090 |
-| `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating. |
+| `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating, and a Working row's status glyph stays a still `●` instead of spinning. |
 | `SHELL` | py+rs | The user's login shell. |
 | `SMOKE_CHANGED_RECEIPT` | py | unclear: cli/src/fno/test_cmd.py:1726 |
 | `SMOKE_FAILURE_RECORD` | py | unclear: cli/src/fno/test_cmd.py:2066 |

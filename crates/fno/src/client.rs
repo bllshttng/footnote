@@ -1414,6 +1414,7 @@ mod questions;
 mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
+mod frame_tick;
 mod pane_paint;
 // Region input ownership + the mouse pre-pass, moved out of handle_stdin
 // under the file-budget ratchet.
@@ -7569,7 +7570,9 @@ const NAV_OVERLAY_W: usize = 54;
 // every `use super::*` renderer and test reading the same paths as before.
 #[cfg(test)]
 pub(crate) use crate::lattice::LATTICE_ACCENT;
-pub(crate) use crate::lattice::{lattice_glyph, lattice_style, status_word, LatticeState};
+pub(crate) use crate::lattice::{
+    lattice_glyph, lattice_style, status_glyph, status_word, LatticeState,
+};
 
 /// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
@@ -8277,7 +8280,7 @@ async fn attach_and_run(
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
-
+    crate::lattice::start_spin();
     let exit: Result<i32, String> = loop {
         // kick a wanted event-fold off the UI loop, at most ONE in
         // flight (P2-5). Runs at loop top so a want re-armed from either the
@@ -8516,23 +8519,9 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
         // Refresh timer; the deadline is None while a fold runs.
         let court_tick = view.court.refresh_deadline();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
-        let yard_tick = view.yard.as_ref().map(|yv| {
-            let step = YARD_FRAME_MS as u64;
-            let elapsed = yv.opened_at.elapsed().as_millis() as u64;
-            yv.opened_at + Duration::from_millis((elapsed / step + 1) * step)
-        });
+        let frame_tick = view.frame_deadline();
         // The meter's one-shot spawn: the settings toggle sets
         // `resource_meter_sampling`, and the loop - which owns meter_tx -
         // starts the sampler here, exactly once per toggle-on. A fresh
@@ -9229,11 +9218,11 @@ async fn attach_and_run(
                 }
             }
             _ = async {
-                match yard_tick {
+                match frame_tick {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
                 }
-            }, if yard_tick.is_some() => {
+            }, if frame_tick.is_some() => {
                 // Frame advance only: compose() uses the elapsed time, so the
                 // wake repaints (and re-arms the next deadline next pass).
                 if let Err(e) = compositor.draw(&view.compose()) {

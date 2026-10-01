@@ -630,7 +630,7 @@ mod tests {
     }
 
     fn events_of(home: &crate::paths::AgentsHome) -> String {
-        std::fs::read_to_string(crate::client_verbs::trace_events_path(home)).unwrap_or_default()
+        crate::event_store::journal_text(&crate::client_verbs::trace_events_path(home), &[])
     }
 
     fn read_row(home: &crate::paths::AgentsHome) -> RegistryEntry {
