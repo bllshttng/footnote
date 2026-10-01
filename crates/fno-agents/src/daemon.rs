@@ -6481,35 +6481,13 @@ pub(crate) fn run_reconcile_sweep(
     // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
-    // The rollout file recorded at spawn is the durable codex thread object
-    // (docs/architecture/codex-thread-driver.md): existence separates an
-    // unhosted thread's Orphaned from Exited; freshness keeps working ones
-    // unsettled. Existence answers from the SAME store walk the freshness
-    // rung reads, beside the row's recorded path: a manifest-only adoption
-    // of a Desktop thread records no path, and reading the empty record as
-    // "nothing persisted" settled live threads Exited with an exit stamp
-    // that blinded the freshness rung forever.
     let codex_index = crate::client_verbs::codex_rollout_index(None);
     let rollout_exists = |e: &RegistryEntry| -> bool {
-        if e.log_path
-            .as_deref()
-            .map(Path::new)
-            .is_some_and(Path::is_file)
-        {
-            return true;
-        }
-        let Some(index) = codex_index.as_ref() else {
-            return false;
-        };
-        e.harness_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some_and(|sid| {
-                index
-                    .iter()
-                    .any(|(name, _)| crate::codex_store::codex_rollout_matches(name, sid))
-            })
+        crate::codex_store::codex_rollout_exists(
+            codex_index.as_deref(),
+            e.log_path.as_deref(),
+            e.harness_session_id.as_deref(),
+        )
     };
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.

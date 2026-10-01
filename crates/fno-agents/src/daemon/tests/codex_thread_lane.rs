@@ -112,17 +112,22 @@ fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
 }
 
 #[test]
-fn an_unhosted_thread_with_a_fresh_rollout_keeps_running() {
+fn a_measured_alive_rollout_keeps_a_live_row_and_heals_an_orphaned_one() {
     // A rollout written within the freshness window is a positive running
     // marker: the app-server writes it while the thread turns, so losing the
     // hosting entry must not demote the row - the demoted row dropped out of
-    // every status-filtered census while the mux showed it working.
-    let entries = vec![thread_entry(
-        "t-working",
-        AgentStatus::Live,
-        Some("/tmp/r.jsonl".into()),
-    )];
-    let (changes, _) = plan_reconcile(
+    // every status-filtered census while the mux showed it working. A row
+    // stamped Orphaned while its rollout kept moving heals on the next full
+    // sweep: the stamp was the lie, the fresh rollout is the truth.
+    let entries = vec![
+        thread_entry("t-working", AgentStatus::Live, Some("/tmp/r.jsonl".into())),
+        thread_entry(
+            "t-heals",
+            AgentStatus::Orphaned,
+            Some("/tmp/r.jsonl".into()),
+        ),
+    ];
+    let (changes, out) = plan_reconcile(
         &entries,
         |_| Ok(false),
         || false,
@@ -138,30 +143,8 @@ fn an_unhosted_thread_with_a_fresh_rollout_keeps_running() {
         "a fresh rollout outranks the unhosted answer"
     );
     assert_eq!(changes[0].new_liveness, Some("alive"));
-}
-
-#[test]
-fn an_orphaned_stamp_on_a_fresh_rollout_heals_to_live() {
-    // A row stamped Orphaned while its rollout kept moving heals on the next
-    // full sweep: the stamp was the lie, the fresh rollout is the truth.
-    let entries = vec![thread_entry(
-        "t-heals",
-        AgentStatus::Orphaned,
-        Some("/tmp/r.jsonl".into()),
-    )];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Ok(false),
-        || false,
-        |_| true,
-        |_| false,
-        |_| false,
-        |_| true,
-        |_| RowLiveness::Alive,
-        true,
-    );
-    assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
-    assert_eq!(changes[0].new_liveness, Some("alive"));
+    assert_eq!(changes[1].new_status, Some(AgentStatus::Live));
+    assert_eq!(changes[1].new_liveness, Some("alive"));
     assert_eq!(out.updated, vec!["t-heals".to_string()]);
 }
 
