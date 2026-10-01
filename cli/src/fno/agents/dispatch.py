@@ -6265,15 +6265,12 @@ def _delivery_policy_refusal(
         token = getattr(target, "harness_session_id", None) or getattr(target, "name") or ""
     else:
         token = target
-        try:
-            stamped = any(
-                getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
-                and target in (entry.harness_session_id, entry.short_id, entry.name)
-                for entry in load_registry()
-            )
-        except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
-            return None
-        if not stamped:
+        # The one resolution rule, hold.resolve_entry's address sweep: name,
+        # short id, full session id, canonical handle. A registry read
+        # failure resolves no row, which never blocks delivery.
+        from fno.mail.hold import resolve_entry
+
+        if getattr(resolve_entry(target), "delivery_policy", None) != BUS_ONLY_POLICY:
             return None
     from fno import rust_binary
 

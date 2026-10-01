@@ -285,10 +285,18 @@ def test_two_same_window_codex_rows_never_share_one_clock():
 
 
 def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypatch):
-    """The x-e21e guarantee, unchanged for every row busy mode never touched."""
-    monkeypatch.setattr(dispatch, "load_registry", lambda: [_entry()])
+    """The clockless-hold guarantee, unchanged for every row busy mode
+    never touched.
 
-    assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+    The row keeps the production shape: its registry name is its label, not
+    its handle, so the token branch must reach it through the address sweep
+    (the canonical handle here), not through the name.
+    """
+    row = _entry(name="quill")
+    monkeypatch.setattr(dispatch, "load_registry", lambda: [row])
+    _stub_gate(monkeypatch, "hold")
+
+    assert dispatch._delivery_policy_refusal(row) == dispatch.BUS_ONLY_POLICY
     assert dispatch._delivery_policy_refusal(HANDLE) == dispatch.BUS_ONLY_POLICY
 
 
