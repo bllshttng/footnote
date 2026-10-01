@@ -748,7 +748,9 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
             .filter(|d| !d.is_empty());
         if is_message_kind(kind) && delivery.is_none() {
             let id = line.get("id").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty() {
+            if id.is_empty() || id_to_chat.contains_key(id) {
+                // A row without an id, or a duplicate of one already staged,
+                // records once or not at all.
                 receipt.skipped += 1;
                 continue;
             }
