@@ -526,10 +526,9 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         raise DispatchResolveError(
             "harness capability contract harness set is empty or not a table"
         )
-    # Subset, not equality: KNOWN_HARNESSES is the COMPLETE supported roster
-    # and a roster entry with no capability row is legal (hermes, openclaw).
-    # A capability row naming a harness the roster does not carry is not - it
-    # would advertise a dispatch lane for a harness no evidence supports.
+    # Subset, not equality: the roster is wider than the capability table on
+    # purpose (hermes, openclaw carry no row); a row naming an unrostered
+    # harness would advertise a lane no evidence supports.
     # In-function: a module-level from-import resolves the served attr at import time.
     from fno.harness_names import KNOWN_HARNESSES
 
