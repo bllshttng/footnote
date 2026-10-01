@@ -584,6 +584,16 @@ pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarnin
     (map, warnings)
 }
 
+/// The file the settings key page edits: `$FNO_CONFIG` when it pins one,
+/// else this checkout's `.fno/config.toml`, the file `fno config set
+/// --local` writes.
+pub(crate) fn keys_file_path(cwd: &Path) -> PathBuf {
+    match non_empty_env("FNO_CONFIG") {
+        Some(explicit) => PathBuf::from(explicit),
+        None => project_root(cwd).join(".fno").join("config.toml"),
+    }
+}
+
 /// A warning when `$FNO_CONFIG` names a file this reader cannot parse.
 ///
 /// The Python loader reads an explicitly pinned file AS-IS and parses YAML by
