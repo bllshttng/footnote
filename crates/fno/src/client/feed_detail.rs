@@ -382,25 +382,11 @@ pub(crate) async fn execute_selected(
         FeedAction::Session(hit) => apply_hit(view, hit.clone(), sock_w).await?,
         FeedAction::Node(id) => {
             let id = id.clone();
-            // The drill-down lives on the experimental board: opening a node
-            // opens the board on it. Off, the notice says where the jump
-            // would land rather than pretending nothing exists.
-            if !view.experimental_backlog {
-                view.set_notice(format!(
-                    "node {id}: the backlog view is off (sideline menu)"
-                ));
-                return Ok(());
+            let on = view.experimental_backlog;
+            node_link::open_detail(view, id);
+            if on {
+                view.feed_detail = None;
             }
-            View::open(view);
-            if let Some(b) = view.backlog_board.as_mut() {
-                b.detail = Some(node_detail::NodeDetailOverlay {
-                    node_id: id,
-                    trail: Vec::new(),
-                    sel: 0,
-                    scroll: 0,
-                });
-            }
-            view.feed_detail = None;
         }
         FeedAction::Pr(url) => {
             let url = url.clone();
