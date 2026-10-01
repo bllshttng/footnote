@@ -29,15 +29,19 @@ mkdir -p "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text"
 # State under $ROOT/.fno: the mux board reads the graph from $HOME/.fno.
 printf 'schema_version = 1\nstate_dir = "%s"\n' "$ROOT/.fno" >"$ROOT/config.toml"
 export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$ROOT/agents"
+# HOME too, for every process: the server reads harness rosters under it,
+# and a real home would list real sessions in the sideline.
+export HOME="$ROOT"
 unset FNO_SERVER FNO_SESSION FNO_PANE FNO_OWNER_BIRTH
 # Under an owner session the server lives as long as its owner. Left alone,
 # the owner is the first short-lived `pane run`, and the server shuts down
 # before the shot. This script owns it instead, so it also dies with us.
 export FNO_OWNER_PID=$$
-# The sideline opens on the backlog, the way the product is pitched.
-printf '{"sideline_view":"backlog","experimental_backlog_view":true}\n' >"$ROOT/agents/mux-view.json"
 
 cd "$ROOT/code/checkout"
+# A repo, so every attach resolves the panes' workspace instead of
+# minting a second one, and the status row names a branch.
+git init -q -b main
 # Invented work. The board's lanes come from priority, and its scope from
 # the server's project, so these stay unscoped.
 IDS=()
@@ -76,44 +80,65 @@ printf -- '---\nstatus: ready\n---\n# Rate limit the checkout api per key\n' >"$
 # Pane text: an invented transcript per harness, shown by a process that
 # never prints a prompt. The cursor is hidden, so no block reads as a glyph.
 E=$'\033'
+# Each harness's screen: a transcript on top, its own footer at the bottom.
 cat >"$ROOT/text/claude.txt" <<EOF
-${E}[36m> rate limit the checkout api per key${E}[0m
+${E}[2m> rate limit the checkout api per key${E}[0m
 
-${E}[2m  Read src/checkout/handler.ts${E}[0m
-${E}[2m  Read src/middleware/limits.ts${E}[0m
+${E}[97m⏺${E}[0m Read ${E}[1msrc/checkout/handler.ts${E}[0m, ${E}[1msrc/middleware/limits.ts${E}[0m
 
-  The handler has no limit today. I will add a token bucket per api
+${E}[97m⏺${E}[0m The handler has no limit today. I will add a token bucket per api
   key: 60 requests a minute, and a 429 with Retry-After when it empties.
 
-${E}[32m  Edited src/middleware/limits.ts  +42 -3${E}[0m
-${E}[32m  Edited src/checkout/handler.ts   +6 -1${E}[0m
+${E}[97m⏺${E}[0m ${E}[1mUpdate${E}[0m(src/middleware/limits.ts)
+  ⎿  Added ${E}[32m42${E}[0m lines, removed ${E}[31m3${E}[0m lines
 
-  Running npm test -- limits
-${E}[32m  14 passed${E}[0m
+${E}[97m⏺${E}[0m ${E}[1mBash${E}[0m(npm test -- limits)
+  ⎿  ${E}[32m14 passed${E}[0m
 
-  Opened PR 118: rate limit the checkout api per key.
+${E}[97m⏺${E}[0m Opened PR 118: rate limit the checkout api per key.
+EOF
+cat >"$ROOT/text/claude.foot" <<EOF
+${E}[2m────────────────────────────────────────────────────────────${E}[0m
+${E}[1m❯${E}[0m
+${E}[2m────────────────────────────────────────────────────────────${E}[0m
+${E}[2m  Opus 5.5 on main · ~/code/checkout${E}[0m
 EOF
 cat >"$ROOT/text/codex.txt" <<EOF
-${E}[1m> retry webhooks with backoff${E}[0m
+${E}[1m›${E}[0m retry webhooks with backoff and a dead-letter queue
 
-${E}[2m  Ran rg -n "deliver\(" src/webhooks${E}[0m
-  Delivery is one attempt today. A failed call is dropped.
+${E}[2m•${E}[0m ${E}[1mRan${E}[0m ${E}[36mrg -n "deliver\(" src/webhooks${E}[0m
+  ${E}[2m└${E}[0m src/webhooks/send.ts:41: await deliver(event)
 
-  Plan:
+${E}[2m•${E}[0m Delivery is one attempt today. A failed call is dropped.
+
+${E}[2m•${E}[0m Plan:
   1. Retry 5 times, doubling from 2s.
   2. Move the event to a dead-letter queue after the last try.
   3. Add a replay command for the queue.
 
-${E}[2m  Working (2m 14s)${E}[0m
+${E}[2m•${E}[0m ${E}[1mEdited${E}[0m src/webhooks/send.ts ${E}[32m(+31${E}[0m ${E}[31m-4)${E}[0m
+
+${E}[2m•${E}[0m Working (2m 14s • ${E}[1mesc${E}[0m to interrupt)
+EOF
+cat >"$ROOT/text/codex.foot" <<EOF
+${E}[1m›${E}[0m ${E}[2mAsk Codex to do anything${E}[0m
+
+${E}[2m  GPT-6-Sol medium · ~/code/checkout${E}[0m
 EOF
 cat >"$ROOT/text/opencode.txt" <<EOF
-${E}[1m> cache product search for 60 seconds${E}[0m
+${E}[1m┃${E}[0m cache product search for 60 seconds
 
   Search runs the full query on every keypress.
   I added a 60s cache keyed by the normalized query.
 
-${E}[32m  Edited src/search/index.ts  +18 -2${E}[0m
-${E}[33m  Waiting on review before I push.${E}[0m
+  ${E}[32m✓${E}[0m Edit src/search/index.ts ${E}[32m+18${E}[0m ${E}[31m-2${E}[0m
+
+  ${E}[33m⚠ Permission required: git push${E}[0m
+EOF
+cat >"$ROOT/text/opencode.foot" <<EOF
+${E}[1m┃${E}[0m ${E}[2mallow once (a) · always (A) · reject (r)${E}[0m
+
+${E}[2m  zen · opencode · ~/code/checkout${E}[0m
 EOF
 cat >"$ROOT/text/pi.txt" <<EOF
 ${E}[1m> page the on-call when p95 passes 800ms${E}[0m
@@ -126,11 +151,14 @@ ${E}[1m> document the refund audit log${E}[0m
 
   Drafting docs/refunds.md from the new schema.
 EOF
+: >"$ROOT/text/pi.foot"
+: >"$ROOT/text/docs.foot"
 
 # Each pane prints its text, hides the cursor, and prints it again on every
 # resize, so the sizing attach below lands on a full screen.
-show() {
-  printf "draw() { printf '\\\\033[?25l\\\\033[2J\\\\033[H'; cat '%s'; }; trap draw WINCH; draw; while :; do sleep 1; done" "$1"
+show() { # show <name> : the transcript, then the footer on the last rows
+  local t="$ROOT/text/$1"
+  printf "draw() { printf '\\\\033[?25l\\\\033[2J\\\\033[H'; cat '%s.txt'; n=\$(wc -l < '%s.foot'); r=\$(stty size | cut -d' ' -f1); printf '\\\\033[%%d;1H' \$((r - n)); cat '%s.foot'; }; trap draw WINCH; draw; while :; do sleep 1; done" "$t" "$t" "$t"
 }
 run() { # run <args...> : start a pane, record its id
   PANES+=("$("$FNO" mux pane run --server "$SERVER" --json "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pane_id"])')")
@@ -138,11 +166,11 @@ run() { # run <args...> : start a pane, record its id
 
 W=(--workspace checkout)
 # The first tab stays the active one, so the three-pane tab comes first.
-run "${W[@]}" --cwd "$ROOT/code/checkout" --worker archer -- sh -c "$(show "$ROOT/text/codex.txt")"
-run "${W[@]}" --tab 1 --at "${PANES[0]}" --split right --worker scout -- sh -c "$(show "$ROOT/text/claude.txt")"
-run "${W[@]}" --tab 1 --at "${PANES[0]}" --split down --worker reviewer -- sh -c "$(show "$ROOT/text/opencode.txt")"
-run "${W[@]}" --worker pager -- sh -c "$(show "$ROOT/text/pi.txt")"
-run "${W[@]}" --worker scribe -- sh -c "$(show "$ROOT/text/docs.txt")"
+run --cwd "$ROOT/code/checkout" -- sh -c "$(show codex)"
+run --cwd "$ROOT/code/checkout" --tab 1 --at "${PANES[0]}" --split right -- sh -c "$(show claude)"
+run --cwd "$ROOT/code/checkout" --tab 1 --at "${PANES[0]}" --split down -- sh -c "$(show opencode)"
+run --cwd "$ROOT/code/checkout" -- sh -c "$(show pi)"
+run --cwd "$ROOT/code/checkout" -- sh -c "$(show docs)"
 "$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 1 --name agents >/dev/null
 "$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 2 --name alerts >/dev/null
 "$FNO" mux tab rename --server "$SERVER" "${W[@]}" --tab 3 --name docs >/dev/null
@@ -176,8 +204,8 @@ sleep 6
 
 # The server reads the registry only while a viewer is attached, and the
 # first attach ends before the rows join. A warm-up shot starts that read.
-HOME="$ROOT" "$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout --out "$ROOT/warm.svg" >/dev/null
+"$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout --out "$ROOT/warm.svg" >/dev/null
 sleep 3
 
 # The flags after ours win. HOME makes the status row read ~/code/checkout.
-HOME="$ROOT" "$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout "$@"
+"$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout "$@"

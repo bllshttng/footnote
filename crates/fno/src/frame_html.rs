@@ -540,6 +540,21 @@ fn cell_geometry(ch: char, x: f64, y: f64, color: &str) -> Option<String> {
         _ => return None,
     };
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    // A rounded corner is one arc between its two arms, as the font draws it.
+    let rounded = |hx: f64, vy: f64| {
+        let rad = w / 2.0;
+        let (ex, ey) = (cx + (hx - cx).signum() * rad, cy + (vy - cy).signum() * rad);
+        format!(
+            "<path d=\"M{hx:.2} {cy:.2}H{ex:.2}Q{cx:.2} {cy:.2} {cx:.2} {ey:.2}V{vy:.2}\" stroke=\"{color}\" stroke-width=\"1\" fill=\"none\"/>"
+        )
+    };
+    match ch {
+        '╭' => return Some(rounded(x + w, y + h)),
+        '╮' => return Some(rounded(x, y + h)),
+        '╰' => return Some(rounded(x + w, y)),
+        '╯' => return Some(rounded(x, y)),
+        _ => {}
+    }
     let mut d_attr = String::new();
     if l {
         d_attr.push_str(&format!("M{x:.2} {cy:.2}H{cx:.2}"));
