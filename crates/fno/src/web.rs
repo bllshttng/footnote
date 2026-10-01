@@ -2565,7 +2565,7 @@ eq(isTypingTarget({ tagName: "BUTTON" }), false, "a button is a board target");
 eq(isTypingTarget({}), false, "no tag is no target");
 eq(isTypingTarget(null), false, "no target is no target");
 // the toast names what landed on the clipboard.
-eq(copiedToast("x-1234"), "copied x-1234", "the toast carries the id");
+eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
 console.log("backlog shortcuts: 35 cases ok");
 "#;
         let src = format!(
@@ -2575,8 +2575,8 @@ console.log("backlog shortcuts: 35 cases ok");
             lift_js_fn(BACKLOG_PAGE, "copiedToast"),
             asserts
         );
-        let path = std::env::temp_dir()
-            .join(format!("fno-backlog-shortcuts-{}.mjs", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("fno-backlog-shortcuts-{}.mjs", std::process::id()));
         std::fs::write(&path, src).expect("temp dir writable");
         let out = std::process::Command::new("node").arg(&path).output();
         let _ = std::fs::remove_file(&path);
