@@ -25,7 +25,7 @@ It does not reimplement worktree mechanics; it sequences pieces that already exi
 
 ## Binding a node that already has a PR
 
-A node can already have a PR (status `in_review`). For that node, one native owner decides which node a run binds: `fno backlog target-binding` in `crates/fno-agents/src/backlog/target_binding.rs`. `start`, `init` and a direct `init-target-state.sh` run only forward their input. Each acts on the receipt, which names one of four verdicts.
+A node can already have a PR (status `in_review`). For that node, one native owner decides which node a run binds: `fno backlog target-binding` in `crates/fno-agents/src/backlog/target_binding.rs`. `start`, `init` and a direct `init-target-state.sh` run only forward their input. Each acts on the receipt, which names one of four verdicts. `start` forwards only an input with scope or the in-review allowance. A bare id goes through untouched, and `init` binds it in the tree it lands in. So the already-isolated no-op, the Desktop handoff and the dispatch-hold refusal behave for a bare id as they did before this verb existed. A held parent refuses before any child is born.
 
 - **continue.** The node has no PR. Bootstrap runs as before.
 - **adopt.** The caller stands in the open PR's own worktree, on the PR's head branch, and the PR is OPEN. Init proceeds, stamps `target_adopted_pr: <n>` on the manifest, and prints an `ADOPTED` receipt. A CLOSED or MERGED PR, another branch, or an unreadable PR is never adopted. Prose given in that worktree is repair work on that PR.

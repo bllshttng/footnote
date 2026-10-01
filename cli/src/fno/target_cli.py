@@ -3651,12 +3651,12 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
-    # Scope (words beside the id) can fork a child; a held parent refuses first.
-    if len(node.split()) > 1:
+    # Bare id: init binds. Scope may fork a child, so a held parent refuses first.
+    if len(node.split()) > 1 or os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1":
         _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
-    binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
-    if binding.get("verdict") == "forked":
-        node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None
+        binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
+        if binding.get("verdict") == "forked":
+            node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None
 
     # Boundary: already isolated -> no-op, create nothing (case). But
     # first refuse if a DIFFERENT live session holds this node's claim: this cwd

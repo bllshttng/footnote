@@ -20,8 +20,6 @@ from fno.cli import app
 from fno import target_cli
 
 runner = CliRunner()
-# Captured at import, before the shared conftest stubs it per test.
-_REAL_BINDING = target_cli._target_binding
 
 
 def _binding_answers(monkeypatch, receipt):
@@ -32,7 +30,6 @@ def _binding_answers(monkeypatch, receipt):
         calls.append((list(verb), dict(payload)))
         return dict(receipt)
 
-    monkeypatch.setattr(target_cli, "_target_binding", _REAL_BINDING)
     monkeypatch.setattr("fno.rust_binary.verb_call", _verb_call)
     return calls
 
@@ -1483,14 +1480,21 @@ def test_target_start_refusals_and_forks_land_before_a_worktree(tmp_path, monkey
     assert result.exit_code == 2, result.output
     assert ensured == [], "worktree was allocated before the redirect fired"
 
+    calls = _binding_answers(monkeypatch, {"verdict": "continue"})
+    result = runner.invoke(app, ["do", "target", "start", "x-4fb6"])
+    assert calls == [], "a bare id leaves binding to init"
+    ensured.clear()
+
     calls = _binding_answers(monkeypatch, {
         "verdict": "refused", "message": "target binding: REFUSED: node x-4fb6",
         "next": 'fno do target start "x-4fb6 <scope>"',
     })
+    monkeypatch.setenv("TARGET_ALLOW_IN_REVIEW", "1")
     result = runner.invoke(app, ["do", "target", "start", "x-4fb6"])
     assert result.exit_code == 1, result.output
-    assert calls[0][1]["phase"] == "start" and calls[0][1]["input"] == "x-4fb6"
+    assert calls[0][1]["phase"] == "start" and calls[0][1]["allow_in_review"] is True
     assert ensured == [], "worktree was allocated before the binding refusal"
+    monkeypatch.delenv("TARGET_ALLOW_IN_REVIEW")
 
     _binding_answers(monkeypatch, {
         "verdict": "forked", "effective_node": "x-261c", "effective_plan": None,

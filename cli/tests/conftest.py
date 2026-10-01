@@ -75,19 +75,6 @@ def _no_board_render(monkeypatch):
     monkeypatch.setattr(rp, "render_local_targets", lambda: 0)
 
 
-@pytest.fixture(autouse=True)
-def _no_native_target_binding(monkeypatch):
-    """Keep `fno do target init/start` off the native binding verb.
-
-    The verdict is native and tested in the crate. Here it would fork the
-    fno-agents binary through tests that stub `subprocess.run`. Tests about
-    the transport patch `target_cli._target_binding` back in themselves.
-    """
-    import fno.target_cli as target_cli
-
-    monkeypatch.setattr(target_cli, "_target_binding", lambda *a, **k: {})
-
-
 @pytest.fixture
 def native_board_render(monkeypatch):
     """An in-process fake of the native board render, for the render's own
