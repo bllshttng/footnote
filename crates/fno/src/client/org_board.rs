@@ -662,6 +662,7 @@ pub(crate) async fn route_keys(
                 DispatchFlow::Continue => {}
                 DispatchFlow::Break => break,
                 DispatchFlow::Detach => return Ok(StdinFlow::Detach),
+                DispatchFlow::RestartMux => return Ok(StdinFlow::RestartMux),
             },
         }
     }
