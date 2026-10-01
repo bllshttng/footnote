@@ -4198,7 +4198,7 @@ def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {
             "status": "unmeasured",
             "reason": "select-unmeasured",
@@ -4217,7 +4217,7 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {"status": "ok", "answer": receipt}
 
     monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)
