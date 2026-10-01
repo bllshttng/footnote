@@ -13,15 +13,11 @@
 //! queue's ready selection (the same `backlog_ready::select` the verb
 //! serves). The claims merge is a directory scan. `needs` folds in-process
 //! over the same sources `fno
-//! agents needs` reads. Three source reads stay subprocesses: `gh pr list` (a
-//! real network boundary), `fno inbox outstanding`
-//! (measured 2026-09-04: 1.12s wall at load 52, far under its 10s bar - the
-//! plan's change 2 keeps it and records the measurement), and `fno backlog
-//! undispatched`, which used to classify the graph in-process here. That copy
-//! ordered the board differently from the Python selection key, so the two
-//! named different next nodes on one graph. One implementation costs one
-//! spawn. The batched truth probe is a fifth spawn: one interpreter per holder
-//! it measures, when any holder exists.
+//! agents needs` reads. Two source reads stay subprocesses: `gh pr list` (a
+//! real network boundary) and `fno inbox outstanding` (measured 2026-09-04:
+//! 1.12s wall at load 52, far under its 10s bar - the plan's change 2 keeps it
+//! and records the measurement). Undispatched reuses the native observer over
+//! the graph, claims, and worked rows already loaded for this board.
 //!
 //! Output keeps the Python JSON shape: `actionable`, `unreadable`, `queues`
 //! (same names, same order, same row dicts), `warnings`, `exit_code` - plus a
@@ -129,6 +125,59 @@ fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
         .flatten()
         .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
         .collect()
+}
+
+fn undispatched_from_board(
+    entries: Option<&[Value]>,
+    claims: &SourceRead,
+    worked: &SourceRead,
+) -> SourceRead {
+    let Some(entries) = entries else {
+        return SourceRead::err("graph unreadable: no entries for undispatched selection");
+    };
+    if !claims.is_ok() {
+        return claims.rewrap(
+            claims
+                .error
+                .clone()
+                .unwrap_or_else(|| "claims unreadable".to_string()),
+        );
+    }
+    if !worked.is_ok() {
+        return SourceRead::err(format!(
+            "worked overlay unreadable: {}",
+            worked.error.as_deref().unwrap_or("worked read failed")
+        ));
+    }
+    let mut claim_rows = Vec::new();
+    for claim in claims.rows() {
+        let Some(key) = claim.get("key").and_then(Value::as_str) else {
+            return SourceRead::err("claims unreadable: claim key is not a string");
+        };
+        claim_rows.push(json!({"key": key, "state": Value::Null}));
+    }
+    for id in worked_node_ids(worked) {
+        claim_rows.push(json!({
+            "key": format!("node:{id}"),
+            "state": "live-worker"
+        }));
+    }
+    match crate::backlog::undispatched::classify_planned_unclaimed(
+        entries,
+        &claim_rows,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Ok(receipt) => receipt
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .map(|rows| SourceRead::ok(Value::Array(rows)))
+            .unwrap_or_else(|| SourceRead::err("undispatched: native observer omitted its rows")),
+        Err(reason) => SourceRead::err(reason),
+    }
 }
 
 /// Split held nodes out of the ready feed: an open question whose `blocks`
@@ -453,8 +502,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_blocked_child = budget.start(SRC_DISTRESS);
 
     // Mostly in-process: graph already read; claims scan, claimed-node lookups,
-    // the needs fold, and the lane file. Undispatched is the exception and
-    // spawns, for the reason given at its own block below.
+    // the needs fold, and the lane file.
     let claims = match s_claims {
         None => {
             spent(&mut sources, "claims", &budget);
@@ -466,14 +514,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             read
         }
     };
-    // Undispatched keeps its slice claim above; its SUBPROCESS moved into
-    // the concurrent section below. Its inline run sat between the slice
-    // claims and the registry-load source, and under fleet load it ate the
-    // whole wall before later sources could spawn: the beat read "budget
-    // exhausted after registry::load_registry" with unplanned and
-    // blocked_child never started (measured 2026-09-28, three beats in a
-    // row). One implementation, at the cost of one subprocess inside the
-    // slice the source already had.
+    // Undispatched keeps its slice claim above. Its former subprocess moved
+    // into the concurrent section to avoid blocking later sources under fleet
+    // load; the native fold now runs there over inputs already read here.
 
     // Claimed nodes: from the locks to the rows, one graph read.
     let (claimed_nodes, mut holders, claimed_warnings) = match s_stalled {
@@ -573,26 +616,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         holder_activity_error,
         holder_starved,
     ) = std::thread::scope(|s| {
-        // Undispatched rides the concurrent section (moved out of the inline
-        // run above, whose wall it ate under fleet load). Its one consumer is
-        // the queue build after the scope, so its join waits with the others.
-        let t_undispatched = s_undispatched.map(|dl| {
-            let cwd = cwd_for_threads.clone();
-            let spent_err = spent_err.clone();
-            s.spawn(move || {
-                let bound = Budget::spawn_bound(dl);
-                if bound.is_zero() {
-                    return SourceRead::over_budget(spent_err);
-                }
-                let mut cmd = fno_py_cmd();
-                cmd.extend([
-                    "backlog".to_string(),
-                    "undispatched".to_string(),
-                    "--json".to_string(),
-                ]);
-                run_json(cmd, &cwd, bound)
-            })
-        });
         // The worked read answers in-process now: the authority is native
         // (backlog::worked), and the Python leg it used to shell out to is a
         // refusing tombstone. It still rides the concurrent section:
@@ -600,10 +623,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         // consumer) waits for the result.
         let t_worked = s_worked.map(|dl| {
             let spent_err = spent_err.clone();
+            let undispatched_spent_err = spent_err.clone();
+            let undispatched_dl = s_undispatched;
+            let entries = entries_ref;
+            let claims = &claims;
             s.spawn(move || {
                 let bound = Budget::spawn_bound(dl);
                 if bound.is_zero() {
-                    return SourceRead::over_budget(spent_err);
+                    let not_read = SourceRead::over_budget(spent_err);
+                    return (not_read.clone(), not_read);
                 }
                 // The fold is in-process, so the subprocess read's kill at
                 // the slice becomes a race: the fold runs on its own thread
@@ -614,14 +642,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 std::thread::spawn(move || {
                     let _ = tx.send(crate::backlog::worked::json_rows());
                 });
-                match rx.recv_timeout(bound) {
+                let worked = match rx.recv_timeout(bound) {
                     Ok(Ok(rows)) => SourceRead::ok(Value::Array(rows)),
                     Ok(Err(reason)) => SourceRead::err(format!("worked: {reason}")),
                     Err(_) => SourceRead::err(format!(
                         "worked: killed at its {:.1}s slice of the board budget; the source did not fail",
                         bound.as_secs_f64()
                     )),
-                }
+                };
+                let undispatched = match undispatched_dl {
+                    Some(dl) if !Budget::spawn_bound(dl).is_zero() => {
+                        undispatched_from_board(entries, claims, &worked)
+                    }
+                    _ => SourceRead::over_budget(undispatched_spent_err),
+                };
+                (worked, undispatched)
             })
         });
         let t_prs = s_prs.map(|dl| {
@@ -643,11 +678,18 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 (prs, pr_nodes, w, truncated, pr_gates)
             })
         });
-        let mut worked = match t_worked {
-            None => budget.spent_read(),
-            Some(h) => h
-                .join()
-                .unwrap_or(SourceRead::err("worked: reader panicked")),
+        let (mut worked, undispatched) = match t_worked {
+            None => {
+                let not_read = budget.spent_read();
+                (not_read.clone(), not_read)
+            }
+            Some(h) => h.join().unwrap_or_else(|_| {
+                let failed = SourceRead::err("worked: reader panicked");
+                (
+                    failed.clone(),
+                    SourceRead::err("undispatched: reader panicked"),
+                )
+            }),
         };
         mark(&mut sources, "worked", &worked, false);
         let worked_ids = worked_node_ids(&worked);
@@ -903,12 +945,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     false,
                 ),
             },
-        };
-        let undispatched = match t_undispatched {
-            None => budget.spent_read(),
-            Some(h) => h
-                .join()
-                .unwrap_or(SourceRead::err("undispatched: reader panicked")),
         };
         mark(&mut sources, "undispatched", &undispatched, false);
         let undispatched = match undispatched
