@@ -1494,11 +1494,17 @@ def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[st
     ]
 
 
-def _shell_fail_clause(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
-    """The `||` tail chained onto the exec'd installer: journal the failure,
-    mail the crowns, and re-exit with the installer's own code. The exit code
-    travels through the shell (`execvp` never returns here), so the JSON is
-    assembled by `printf` with `$rc` as the one substitution."""
+def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
+    """An EXIT-trap prologue prefixed to the exec'd shell line: on a nonzero
+    exit anywhere in the line it journals the failure, mails the crowns, and
+    lets the shell exit with its own code.
+
+    A `|| { ...; }` suffix is not enough: `_uv_retry_sh` fails with a bare
+    `exit` from inside a loop, and `exit` skips every trailing command and
+    every `||` chain. The trap is the one mechanism that fires on all of
+    them. The handler performs NO explicit exit, so the shell keeps the
+    original status; the JSON is assembled by `printf` with `$rc` as the one
+    substitution."""
     template = json.dumps(
         {
             "reason": "install exited %s",
@@ -1527,9 +1533,13 @@ def _shell_fail_clause(fno_bin: str, old_rev: Optional[str], rev: Optional[str])
     mail_body = '"fno doctor update FAILED: install exited $rc."'
     mail = f"{shlex.quote(fno_bin)} agents mail team --scope kings --subject fno-update {mail_body}"
     return (
-        f"rc=$?; FNO_UPDATE_FAIL_DATA=$(printf {shlex.quote(template)} \"$rc\"); "
+        "fno_fail_handler() { "
+        'rc=$?; [ "$rc" -eq 0 ] && return 0; '
+        f"FNO_UPDATE_FAIL_DATA=$(printf {shlex.quote(template)} \"$rc\"); "
         f"{emit} >/dev/null 2>&1 || true; "
-        f"{mail} >/dev/null 2>&1 || true; exit $rc"
+        f"{mail} >/dev/null 2>&1 || true; "
+        "}; "
+        "trap fno_fail_handler EXIT; "
     )
 
 def update_command(
@@ -1848,18 +1858,18 @@ def update_command(
     post_steps += [shlex.join(c) for c in refresh_cmds]
     post_install = "; ".join(post_steps) or None
 
-    fail_clause = _shell_fail_clause(_fno_bin, old_rev, rev) if _fno_bin else None
-    fail_suffix = f" || {{ {fail_clause}; }}" if fail_clause else ""
+    fail_prologue = _shell_fail_prologue(_fno_bin, old_rev, rev) if _fno_bin else ""
     if rev:
         os.execvp(
             "/bin/sh",
             [
                 "/bin/sh", "-c",
-                _install_then_mark(
+                fail_prologue
+                + _install_then_mark(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
                     post_install=post_install, await_binary=_await_bin,
                     install_sh=install_sh,
-                ) + fail_suffix,
+                ),
             ],
         )
     elif post_install:
@@ -1868,10 +1878,10 @@ def update_command(
         os.execvp(
             "/bin/sh",
             ["/bin/sh", "-c",
-             f"{install_sh or shlex.join(cmd)} && "
-             f"{{ {_await_binary(post_install, _await_bin)} }}{fail_suffix}"],
+             f"{fail_prologue}{install_sh or shlex.join(cmd)} && "
+             f"{{ {_await_binary(post_install, _await_bin)} }}"],
         )
     elif install_sh:
-        os.execvp("/bin/sh", ["/bin/sh", "-c", install_sh + fail_suffix])
+        os.execvp("/bin/sh", ["/bin/sh", "-c", fail_prologue + install_sh])
     else:
         os.execvp(cmd[0], cmd)

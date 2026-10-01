@@ -3328,5 +3328,8 @@ class TestUpdateJournal:
         assert "FNO_UPDATE_FAIL_DATA" in line
         assert "fno_update_failed" in line
         assert "agents" in line and "kings" in line
-        # The failed clause preserves the installer's exit code.
-        assert "exit $rc" in line
+        # The failed journal rides an EXIT trap (uv's retry loop fails with a
+        # bare `exit`, which a `||` suffix can never see), and the handler
+        # performs no explicit exit so the installer's own code survives.
+        assert "trap fno_fail_handler EXIT" in line
+        assert '[ "$rc" -eq 0 ] && return 0' in line
