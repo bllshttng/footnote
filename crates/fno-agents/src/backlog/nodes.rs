@@ -498,8 +498,9 @@ fn claims_cache_key() -> CacheKey {
     let dir = claims_directory().ok();
     let stat = |p: std::path::PathBuf| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
     let dir_mtime = dir.as_deref().and_then(|d| stat(d.to_path_buf()));
-    let db_mtime = dir.as_deref().map(|d| stat(d.join("graph.db")));
-    let wal_mtime = dir.as_deref().map(|d| stat(d.join("graph.db-wal")));
+    let db_path = crate::claim_store::database_path(None).ok();
+    let db_mtime = db_path.as_deref().map(|p| stat(p.to_path_buf()));
+    let wal_mtime = db_path.map(|p| stat(p.with_extension("db-wal")));
     (
         dir_mtime,
         db_mtime.unwrap_or(None),
