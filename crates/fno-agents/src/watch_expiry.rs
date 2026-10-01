@@ -137,6 +137,16 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
             "watch expiry event window exceeds {MAX_EVENTS} rows"
         ));
     }
+    // Recovery provenance re-serializes store rows, but a wake receipt names
+    // the hash of the stored line, so identity hashes that line instead.
+    let stored_lines: std::collections::HashMap<i64, String> = if text.contains("\"_store_seq\"") {
+        crate::event_store::query_events(&global_events, &query)?
+            .into_iter()
+            .map(|row| (row.seq, row.line))
+            .collect()
+    } else {
+        Default::default()
+    };
     lines
         .into_iter()
         .enumerate()
@@ -163,8 +173,13 @@ fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String
             if ts_ms > now_ms {
                 return Err("watch expiry event has a future timestamp".to_string());
             }
+            let stored_line = value
+                .get("_store_seq")
+                .and_then(Value::as_i64)
+                .and_then(|seq| stored_lines.get(&seq))
+                .map_or(line, String::as_str);
             Ok(Some(Evidence {
-                event_id: event_id(line),
+                event_id: event_id(stored_line),
                 seq: index as i64,
                 ts_ms,
                 kind,

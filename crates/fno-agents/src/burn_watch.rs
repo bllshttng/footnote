@@ -1016,6 +1016,65 @@ mod tests {
         assert_eq!(overdue[0].session_id, "s-legacy");
         assert!(overdue[0].overdue_ms > 0);
 
+        // A genuine watch woken before recovery keeps its receipt: the copy
+        // batch must not change the identity that receipt names.
+        let mut genuine_entry = crate::state::RegistryEntry::default();
+        genuine_entry.name = "genuine-watch-owner".into();
+        genuine_entry.harness_session_id = Some("s-genuine".into());
+        genuine_entry.status = crate::AgentStatus::Live;
+        registry.entries.push(genuine_entry);
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let acquired_genuine = crate::claims::acquire(
+            "node:x-genuine",
+            "target-session:s-genuine",
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                identity: Some(("s-genuine".into(), "claude".into())),
+                root: None,
+                events_dir: Some(temp.path().join("claim-events")),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired_genuine,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let genuine_watch = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "type": "loop_check_watch_idle",
+            "source": "hook",
+            "data": {
+                "session_id": "s-genuine",
+                "node": "x-genuine",
+                "blocker": "ci",
+                "expires_at_ms": 0
+            }
+        })
+        .to_string();
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(&global_events)
+                .unwrap(),
+            format!("{genuine_watch}\n").as_bytes(),
+        )
+        .unwrap();
+        crate::events::EventEmitter::new(global_events.clone(), "daemon")
+            .emit(
+                "loop_check_watch_expiry_wake",
+                &serde_json::json!({
+                    "session_id": "s-genuine",
+                    "node": "x-genuine",
+                    "watch_event_id": format!(
+                        "sha256:{:x}",
+                        <sha2::Sha256 as sha2::Digest>::digest(genuine_watch.as_bytes())
+                    ),
+                    "delivered": true,
+                    "via": "mail"
+                }),
+            )
+            .unwrap();
+
         // Copied-store replay contract: a watch row known only through the
         // recovered store must never wake, while a fresh live watch still
         // wakes exactly once.
@@ -1079,6 +1138,10 @@ mod tests {
                 .map(|argv| argv[8].clone())
                 .collect::<Vec<String>>()
         };
+        assert!(
+            !woke.contains(&"s-genuine".to_string()),
+            "a receipt predating recovery_history still names its genuine watch"
+        );
         assert_eq!(
             woke,
             vec!["s-fresh"],
