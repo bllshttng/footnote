@@ -742,4 +742,3 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         .collect();
     assert!(headers.contains(&"fix(x): raw subject"));
 }
-
