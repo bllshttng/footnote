@@ -84,7 +84,7 @@ The caller sets one value on the effort axis. Each harness spells the reasoning-
 | codex | `reasoning.effort` | `-c model_reasoning_effort=<value>` |
 | opencode | provider/model-defined | no token emitted |
 
-`effort_tokens` in `cli/src/fno/agents/mux_spawn.py` owns only this flag translation. Gemini and agy have no fno effort surface and refuse `--effort`. Other harnesses pass the value to their provider CLI.
+`effort_tokens` in `crates/fno-agents/src/effort_surface.rs` owns the flag translation; `mux_spawn.py` only forwards the ask. Gemini and agy have no fno effort surface and refuse `--effort`. Other harnesses pass the value to their provider CLI.
 
 claude accepts `max`, and codex does not. codex accepts `minimal`, and claude does not. An `--effort` value valid for one harness can be invalid for another, so `effort_tokens` validates against the resolved harness's own set, not the union.
 
@@ -130,7 +130,7 @@ An unpinned claude spawn bills whatever login its launching process holds. Read 
 
 ## Resolver authority
 
-`inject_spawn_defaults` (`cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
+The spawn compose (`crates/fno-agents/src/spawn_compose.rs`, applied by `compose_spawn_argv` in `cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
 
 ## Ambiguous values
 

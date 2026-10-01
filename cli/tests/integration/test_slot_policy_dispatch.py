@@ -12,7 +12,6 @@ from tests.fixtures.graph_seed import seed_graph
 
 import io
 import json
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -21,7 +20,7 @@ from typer.testing import CliRunner
 requires_rust = pytest.mark.dev_build
 
 
-from fno.agents.spawn_defaults import inject_spawn_defaults
+from fno.agents.spawn_defaults import compose_spawn_argv
 from fno.cli import app
 
 runner = CliRunner()
@@ -44,29 +43,24 @@ def tmp_graph(tmp_path, monkeypatch):
     return g
 
 
-def _settings(rows, profiles):
-    """Settings whose declared inventory is exactly ``rows`` (string lanes)."""
-    lane_defaults = SimpleNamespace(
-        provider="", model="", effort="", substrate="", permission_mode="",
-        route="", account="", pane_group="", lanes=None, on_exhausted="",
-        by_difficulty={}, on_low="prefer_healthy", on_unknown="allow",
-    )
-    profiles_obj = {}
-    for verb, fields in profiles.items():
-        merged = vars(lane_defaults).copy()
-        merged.update(fields)
-        profiles_obj[verb] = SimpleNamespace(**merged)
-    return SimpleNamespace(
-        agents=SimpleNamespace(defaults=lane_defaults, profiles=profiles_obj),
-        routing=SimpleNamespace(models=rows),
-    )
-
-
-_ROWS = [
-    {"name": "flash-x", "harness": "claude", "model": "glm",
-     "band": "low", "account": "zai-main", "route": "zai/glm"},
-    {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5"},
-]
+def _append_lanes(cfg, rows, profile):
+    """Declare the lanes on the pinned config file: ``rows`` become
+    [[routing.models]] blocks, ``profile`` rides [agents.profiles.target]."""
+    lines = []
+    for row in rows:
+        lines.append("[[routing.models]]")
+        for key, value in row.items():
+            lines.append(f'{key} = "{value}"')
+        lines.append("")
+    lines.append("[agents.profiles.target]")
+    for key, value in profile.items():
+        if key == "lanes":
+            # The caller passes the TOML array text verbatim.
+            lines.append(f"lanes = {value}")
+        else:
+            lines.append(f'{key} = "{value}"')
+    with open(cfg, "a") as f:
+        f.write("\n" + "\n".join(lines) + "\n")
 
 
 def _last_json(text):
@@ -125,6 +119,9 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
@@ -134,20 +131,25 @@ def test_queue_refusal_is_typed_and_names_retry_at(monkeypatch, capsys):
     """The refusal half of AC6-QUEUE: exit 78, typed JSON, per-lane reasons,
     and the reset horizon the dispatcher should honour."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    _pin_capacity(
+    cfg, _state = _pin_capacity(
         monkeypatch,
         claude="exhausted",
         extra={"claude": {"zai-main": {"state": "exhausted", "resets_at": 1900000000.0}}},
     )
+    _append_lanes(
+        cfg,
+        [
+            {"name": "flash-x", "harness": "claude", "model": "glm",
+             "band": "low", "account": "zai-main", "route": "zai/glm"},
+            {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5"},
+        ],
+        {"lanes": '["flash-x", "sonnet-x"]', "on_exhausted": "queue"},
+    )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
-        inject_spawn_defaults(
+        compose_spawn_argv(
             ["spawn", "--name", "w", "/fno:target x-1"],
-            settings=_settings(_ROWS, {"target": {
-                "lanes": ["flash-x", "sonnet-x"], "on_exhausted": "queue",
-            }}),
             stderr=err,
-            env={},
         )
     assert exc.value.code == 78
     payload = _last_json(capsys.readouterr().out)
@@ -166,16 +168,21 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     """The full queue contract: refusal, persisted deferred state through the
     landed backlog owners, then one controlled successful selection."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    _pin_capacity(monkeypatch, claude="exhausted", extra={"claude": {"zai-main": "exhausted"}})
+    cfg, _state = _pin_capacity(monkeypatch, claude="exhausted", extra={"claude": {"zai-main": "exhausted"}})
+    _append_lanes(
+        cfg,
+        [
+            {"name": "flash-x", "harness": "claude", "model": "glm",
+             "band": "low", "account": "zai-main", "route": "zai/glm"},
+            {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5"},
+        ],
+        {"lanes": '["flash-x", "sonnet-x"]', "on_exhausted": "queue"},
+    )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
-        inject_spawn_defaults(
+        compose_spawn_argv(
             ["spawn", "--name", "w", "/fno:target x-1"],
-            settings=_settings(_ROWS, {"target": {
-                "lanes": ["flash-x", "sonnet-x"], "on_exhausted": "queue",
-            }}),
             stderr=err,
-            env={},
         )
     assert exc.value.code == 78
 
@@ -208,15 +215,20 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     # launches. The seam re-reads capacity; nothing cached the refusal. The
     # route owns the model (no --model by design), so the coordinate to assert
     # is harness + route + account.
-    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
+    cfg, _state = _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
+    _append_lanes(
+        cfg,
+        [
+            {"name": "flash-x", "harness": "claude", "model": "glm",
+             "band": "low", "account": "zai-main", "route": "zai/glm"},
+            {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5"},
+        ],
+        {"lanes": '["flash-x", "sonnet-x"]', "on_exhausted": "queue"},
+    )
     err2 = io.StringIO()
-    out = inject_spawn_defaults(
+    out = compose_spawn_argv(
         ["spawn", "--name", "w", "/fno:target x-1"],
-        settings=_settings(_ROWS, {"target": {
-            "lanes": ["flash-x", "sonnet-x"], "on_exhausted": "queue",
-        }}),
         stderr=err2,
-        env={},
     )
     assert out[out.index("--route") + 1] == "zai/glm"
     assert out[out.index("--account") + 1] == "zai-main"
@@ -227,26 +239,26 @@ def test_manual_account_switch_terminal_never_logs_in(monkeypatch):
     """AC6-QUEUE: identity-only exhaustion names the manual terminal; fno
     never signs in or re-enables remote control itself."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    _pin_capacity(
+    cfg, _state = _pin_capacity(
         monkeypatch,
         extra={"claude": {"makers": "ok", "readyrule": "ok"}},
         active={"claude": "makers"},
     )
+    _append_lanes(
+        cfg,
+        [
+            {"name": "alt-a", "harness": "claude", "model": "a", "account": "readyrule"},
+            {"name": "alt-b", "harness": "codex", "model": "b", "account": "ghost"},
+        ],
+        {"lanes": '["alt-a", "alt-b"]', "on_unknown": "skip"},
+    )
     # The unknown arm needs a harness with NO stamp: under one proven stamp
     # every other claude account reads mismatch, so ghost rides codex.
-    rows = [
-        {"name": "alt-a", "harness": "claude", "model": "a", "account": "readyrule"},
-        {"name": "alt-b", "harness": "codex", "model": "b", "account": "ghost"},
-    ]
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
-        inject_spawn_defaults(
+        compose_spawn_argv(
             ["spawn", "--name", "w", "/fno:target x-1"],
-            settings=_settings(rows, {"target": {
-                "lanes": ["alt-a", "alt-b"], "on_unknown": "skip",
-            }}),
             stderr=err,
-            env={},
         )
     assert exc.value.code == 2
     assert "manual canonical account switch" in err.getvalue()

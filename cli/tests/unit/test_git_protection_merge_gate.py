@@ -30,14 +30,17 @@ def gp(monkeypatch, tmp_path):
     return mod
 
 
-def _arm(repo, enabled):
-    d = repo / ".fno"
-    d.mkdir(parents=True, exist_ok=True)
-    # TOML booleans are lowercase; a Python bool's repr would be malformed
-    # config, which the resolver correctly degrades to defaults (off).
-    (d / "config.toml").write_text(
-        f"[auto_merge]\nenabled = {str(enabled).lower()}\n"
-    )
+def _arm(monkeypatch, gp, enabled):
+    """Arm/disarm the live switch by scripting the resolver CLI's answer.
+    The hook reads config through `fno config get auto_merge.enabled`; the
+    resolver's layer precedence is that verb's own tested contract, so the
+    hook-side test scripts its answer instead of re-parsing TOML."""
+    class _R:
+        returncode = 0
+        stdout = "true\n" if enabled else "false\n"
+        stderr = ""
+
+    monkeypatch.setattr(gp.subprocess, "run", lambda cmd, **kw: _R())
 
 
 def _fm(approved="true", source="config"):
@@ -86,97 +89,57 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
     assert seen[0][1] == canonical
 
 
-def test_dispatch_hold_from_canonical_reads_the_pr_branch_worktree(
-    gp, monkeypatch, tmp_path
-):
-    canonical = tmp_path / "canonical"
-    feature = tmp_path / "feature-worktree"
-    canonical.mkdir()
-    feature.mkdir()
-    monkeypatch.chdir(canonical)
-    gp._PR_WORKTREE_CACHE.clear()
-    seen = []
-
-    def fake_run(argv, **kwargs):
-        assert argv[-1] == "pr-worktree"
-        assert json.loads(kwargs["input"]) == {
-            "cwd": str(canonical),
-            "pr": 42,
-            "timeout_secs": 1,
-        }
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps({"worktree": str(feature)}),
-            stderr="",
-        )
-
-    monkeypatch.setattr(gp.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "fno.pr._hold.merge_hold_reason",
-        lambda pr, repo: seen.append((pr, Path(repo))) or None,
-    )
-
-    assert gp._inprocess_dispatch_hold_reason("42") == (True, None)
-    assert seen == [(42, feature)]
+def test_live_switch_arms_from_project_config(gp, monkeypatch):
+    _arm(monkeypatch, gp, True)
+    assert gp._live_merge_switch_armed(Path("/any/repo"), _fm()) is True
 
 
-def test_live_switch_arms_from_project_config(gp, tmp_path):
-    _arm(tmp_path, True)
-    assert gp._live_merge_switch_armed(tmp_path, _fm()) is True
-
-
-def test_live_switch_disarmed_refuses_manifest_true(gp, tmp_path):
+def test_live_switch_disarmed_refuses_manifest_true(gp, monkeypatch):
     """The x-2270 doctrine at the raw path: a snapshot whose true mirrored
     config must not outlive the operator flipping the live switch off."""
-    _arm(tmp_path, False)
-    assert gp._live_merge_switch_armed(tmp_path, _fm()) is False
+    _arm(monkeypatch, gp, False)
+    assert gp._live_merge_switch_armed(Path("/any/repo"), _fm()) is False
 
 
-def test_unreadable_config_fails_closed(gp, tmp_path):
-    d = tmp_path / ".fno"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "config.toml").write_text("[auto_merge]\nenabled = unclosed [")
-    assert gp._live_merge_switch_armed(tmp_path, _fm()) is False
+def test_unreadable_config_fails_closed(gp, monkeypatch):
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = "fno config: cannot read layers\n"
+
+    monkeypatch.setattr(gp.subprocess, "run", lambda cmd, **kw: _R())
+    assert gp._live_merge_switch_armed(Path("/any/repo"), _fm()) is False
 
 
-def test_env_grant_stamp_arms_without_the_switch(gp, tmp_path):
-    _arm(tmp_path, False)
+def test_env_grant_stamp_arms_without_the_switch(gp, monkeypatch):
+    _arm(monkeypatch, gp, False)
     assert (
-        gp._live_merge_switch_armed(tmp_path, _fm(source="env-target-auto-merge"))
+        gp._live_merge_switch_armed(
+            Path("/any/repo"), _fm(source="env-target-auto-merge")
+        )
         is True
     )
 
 
-def test_resolver_cli_fallback_when_fno_not_importable(gp, tmp_path, monkeypatch):
-    """The hook interpreter may not carry the package; the resolver CLI is
-    the fallback, and its failure fails closed."""
-    import builtins
-
-    real_import = builtins.__import__
-
-    def no_fno_config(name, *a, **k):
-        if name == "fno.config":
-            raise ImportError("simulated absent package")
-        return real_import(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", no_fno_config)
-
+def test_resolver_cli_answer_arms_and_failure_fails_closed(gp, monkeypatch):
+    """The resolver CLI is the one reader; its affirmative answer arms and
+    its failure fails closed."""
     class _R:
         returncode = 0
         stdout = "True\n"
         stderr = ""
 
     monkeypatch.setattr(gp.subprocess, "run", lambda cmd, **kw: _R())
-    assert gp._live_merge_switch_armed(tmp_path, _fm()) is True
+    assert gp._live_merge_switch_armed(Path("/any/repo"), _fm()) is True
 
     def boom(cmd, **kw):
         raise RuntimeError("fno missing")
 
     monkeypatch.setattr(gp.subprocess, "run", boom)
-    assert gp._live_merge_switch_armed(tmp_path, _fm()) is False
+    assert gp._live_merge_switch_armed(Path("/any/repo"), _fm()) is False
 
 
-def _session(tmp_path, source="config", enabled=True):
+def _session(monkeypatch, gp, tmp_path, source="config", enabled=True):
     state_file = tmp_path / ".fno" / "target-state.md"
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(
@@ -184,7 +147,7 @@ def _session(tmp_path, source="config", enabled=True):
         f"auto_merge_source: {source}\nexternal_review_passed: skipped\n---\n",
         encoding="utf-8",
     )
-    _arm(tmp_path, enabled)
+    _arm(monkeypatch, gp, enabled)
     fm = {
         "auto_merge_approved": "true",
         "auto_merge_source": source,
@@ -198,7 +161,7 @@ def test_merge_allowed_declines_when_live_switch_disarmed(gp, monkeypatch, tmp_p
     """The two-factor authorize path consults the live switch: a disarmed
     config returns None (not authorized), so the deny path explains instead
     of raw-merging past the disarm."""
-    state_file, fm = _session(tmp_path, enabled=False)
+    state_file, fm = _session(monkeypatch, gp, tmp_path, enabled=False)
     monkeypatch.setattr(
         gp, "_get_active_target_session", lambda prefer_pr=0: (state_file, fm, tmp_path)
     )
@@ -208,7 +171,7 @@ def test_merge_allowed_declines_when_live_switch_disarmed(gp, monkeypatch, tmp_p
 
 
 def test_merge_allowed_authorizes_when_live_switch_armed(gp, monkeypatch, tmp_path):
-    state_file, fm = _session(tmp_path, enabled=True)
+    state_file, fm = _session(monkeypatch, gp, tmp_path, enabled=True)
     monkeypatch.setattr(
         gp, "_get_active_target_session", lambda prefer_pr=0: (state_file, fm, tmp_path)
     )

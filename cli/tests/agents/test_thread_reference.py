@@ -37,32 +37,15 @@ def _thread_row(**overrides) -> AgentEntry:
     return AgentEntry(**values)
 
 
-def _settings(provider: str = "codex") -> SimpleNamespace:
-    defaults = SimpleNamespace(
-        provider=provider,
-        model="gpt-5.6-sol",
-        effort="high",
-        substrate="",
-        permission_mode="",
-        route="",
-        account="",
-        pane_group="",
-        lanes=[],
-    )
-    return SimpleNamespace(
-        agents=SimpleNamespace(
-            defaults=defaults,
-            profiles={"target": SimpleNamespace(**vars(defaults))},
-            max_lanes={},
-        ),
-        model_routing=None,
-    )
-
-
-def test_resolve_target_coordinate_leaves_substrate_unspecified_until_worker_read():
+def test_resolve_target_coordinate_leaves_substrate_unspecified_until_worker_read(
+    tmp_path, monkeypatch
+):
     from fno.agents.retask import resolve_target_coordinate
 
-    target = resolve_target_coordinate("x-bdb9", settings=_settings(), env={})
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    target = resolve_target_coordinate("x-bdb9", env={})
 
     assert target.substrate is None
 

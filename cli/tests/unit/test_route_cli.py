@@ -302,8 +302,29 @@ def test_env_malformed_target(monkeypatch: pytest.MonkeyPatch) -> None:
 def _declare(monkeypatch, rows, objective="cheapest-that-clears"):
     from fno import route_resolve as rr
 
-    inv = rr.inventory_from_rows(rows, objective=objective)
+    inv = _inv(rows)
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (the fixture builder the
+    Python fold lost; construction is all that survives in Python)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""),
+            harness=r.get("harness", ""),
+            model=r.get("model", ""),
+            route=r.get("route", ""),
+            account=r.get("account", ""),
+            band=r.get("band", ""),
+            effort=r.get("effort", ""),
+            operator_view=r.get("operator_view", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)
+
 
 
 @requires_rust
@@ -404,18 +425,20 @@ _SLOT_ROWS = [
 ]
 
 
-def _slot_settings(rows):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        routing=SimpleNamespace(models=rows),
-        agents=SimpleNamespace(profiles={
-            "target": SimpleNamespace(
-                lanes=["flash-zai", "luna-codex"], on_exhausted="queue"
-            )
-        }),
-        model_routing=SimpleNamespace(roles={}),
-    )
+def _pin_slots(cfg, rows):
+    """Declare the rows and the target profile's lanes on the pinned config
+    file: the verb reads the config, the Python stub is invisible to it."""
+    lines = [""]
+    for row in rows:
+        lines.append("[[routing.models]]")
+        for key, value in row.items():
+            lines.append(f'{key} = "{value}"')
+        lines.append("")
+    lines.append("[agents.profiles.target]")
+    lines.append('lanes = ["flash-zai", "luna-codex"]')
+    lines.append('on_exhausted = "queue"')
+    with open(cfg, "a") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
@@ -469,6 +492,9 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
@@ -480,8 +506,8 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     lane a spawn would take RIGHT NOW - and the answer moves when capacity
     moves."""
     _declare(monkeypatch, _SLOT_ROWS)
-    monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
-    _pin_capacity(monkeypatch)
+    cfg, _state = _pin_capacity(monkeypatch)
+    _pin_slots(cfg, _SLOT_ROWS)
     res = runner.invoke(route_app, ["inventory"])
     assert res.exit_code == 0
     assert "slots:" in res.output
@@ -493,7 +519,8 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     assert "routing=armed" in res.output
 
     # the lane whose harness reads exhausted skips; the next lane answers
-    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    cfg2, _state2 = _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _pin_slots(cfg2, _SLOT_ROWS)
     res = runner.invoke(route_app, ["inventory"])
     assert "lanes[0] flash-zai capacity=exhausted" in res.output
     assert "would take agents.profiles.target.lanes[1] luna-codex" in res.output
@@ -502,8 +529,8 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
 @requires_rust
 def test_inventory_json_carries_slots(monkeypatch) -> None:
     _declare(monkeypatch, _SLOT_ROWS)
-    monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
-    _pin_capacity(monkeypatch)
+    cfg, _state = _pin_capacity(monkeypatch)
+    _pin_slots(cfg, _SLOT_ROWS)
     res = runner.invoke(route_app, ["inventory", "--json"])
     assert res.exit_code == 0
     payload = json.loads(res.output)

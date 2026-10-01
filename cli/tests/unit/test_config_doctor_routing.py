@@ -94,6 +94,13 @@ def test_declared_inventory_with_a_resolving_lane_prints_nothing(monkeypatch):
         lanes={"target": ["row-x"]},
         rows=[{"name": "row-x", "harness": "claude", "model": "m-1"}],
     )
+
+    def fake_call(payload, **_):
+        if payload.get("mode") == "states" and payload.get("work_verb") == "target":
+            return {"would_take": "agents.profiles.target.lanes[0]"}
+        return {}
+
+    monkeypatch.setattr("fno.route_slot_client.route_slot_call", fake_call)
     out = _capture(monkeypatch)
 
     _report_band_routing()
@@ -143,6 +150,11 @@ def test_unreadable_roles_still_prints_the_line(monkeypatch):
         raise RuntimeError("unreadable")
 
     monkeypatch.setattr("fno.config.load_settings", boom)
+
+    def fake_call(payload, **_):
+        return {}
+
+    monkeypatch.setattr("fno.route_slot_client.route_slot_call", fake_call)
     out = _capture(monkeypatch)
 
     _report_band_routing()

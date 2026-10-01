@@ -7,9 +7,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping, Optional
-
-from fno.harness_names import KNOWN_HARNESSES
+from functools import lru_cache
+from typing import Any, Callable, Mapping, Optional
 
 
 # --- FNO_AGENT_HARNESS env resolution (with pre-cutover compat window) -------
@@ -558,26 +557,23 @@ def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
     return bool(_HEAD8_RE.match(token.strip()))
 
 
-# The retired harness-prefixed address. Kept ONLY so the send path can recognize
-# one and refuse it with a message naming the fix, and so `fno doctor` can still
-# report mail queued to one before the flip as the dead letter it is. Never an
-# accepted address, never generated.
-#
-# Built from the harness map rather than a literal list: a hardcoded copy silently
-# stops covering a harness the moment one is added, which is the same drift that
-# produced the two-conventions mess this address change exists to end.
+# The retired harness-prefixed address. Kept ONLY so the send path can
+# recognize one and refuse it with a message naming the fix, and so `fno
+# doctor` can still report pre-flip mail as the dead letter it is. Never an
+# accepted address, never generated. Read from the roster door lazily
+# (module __getattr__, lru_cache): an eager build paid a subprocess per import.
+@lru_cache(maxsize=1)
 def _legacy_handle_re() -> "re.Pattern[str]":
+    # In-function: a module-level from-import resolves the attr (the subprocess) at import.
+    from fno.harness_names import KNOWN_HARNESSES
+
     return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
 
 
-# Built eagerly from the canonical harness-name list (fno.harness_names) rather
-# than the capability table: this module is platform-layer and must not reach
-# into the runtime for the name set. The name list is the source of
-# truth and the capability table asserts against it, so a new harness is covered
-# here the moment it lands there - the same anti-drift property the old
-# derivation (names read FROM fno.agents.harness_map) had, with the dependency
-# direction inverted so no fno.agents import is needed at all.
-LEGACY_HANDLE_RE = _legacy_handle_re()
+def __getattr__(name: str) -> Any:
+    if name == "LEGACY_HANDLE_RE":
+        return _legacy_handle_re()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:
