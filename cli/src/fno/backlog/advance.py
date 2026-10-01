@@ -740,6 +740,7 @@ def _refuse_repeated_dead_dispatch(
         cwd=node_cwd or None,
         capture_output=True,
         text=True,
+        timeout=300,
     )
     action = "auto-deferred" if proc.returncode == 0 else "defer-failed"
     from fno.agents import events as agent_events
