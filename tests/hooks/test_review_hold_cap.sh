@@ -10,7 +10,7 @@
 # protected branch) whose journal carries two spent rounds with the real
 # base sha, so the interdiff carveout measures real patches; the hook runs
 # for real with FNO pointed at a wrapper that execs the checkout's own CLI
-# (fno-py: the deployed cargo shim shadows the source `fno` on PATH).
+# (fno: the deployed cargo shim shadows the source `fno` on PATH).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +26,7 @@ export FNO_SPACES_DIR="$WORK/spaces"
 CLI_DIR="$REPO/cli"
 cat > "$WORK/fno-wrapper" <<WRAPPER
 #!/usr/bin/env bash
-exec uv run --quiet --project "$CLI_DIR" fno-py "\$@"
+exec uv run --quiet --project "$CLI_DIR" fno "\$@"
 WRAPPER
 chmod +x "$WORK/fno-wrapper"
 

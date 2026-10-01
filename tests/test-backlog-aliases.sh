@@ -66,7 +66,7 @@ resolve_fno() {
         echo "fno"
         return
     fi
-    echo "python3 -m fno.cli"
+    echo "fno"
 }
 
 ABI=$(resolve_fno)

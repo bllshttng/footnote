@@ -44,7 +44,7 @@ assert_absent()   { [[ "$2" != *"$3"* ]] && ok "$1" || bad "$1 (unexpected '$3')
 assert_eq()       { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (expected='$3' actual='$2')"; }
 
 # --- FNO_PYTHON discovery (mirror test-handoff.sh): an interpreter that can ---
-# --- import the worktree CLI, plus a PATH wrapper mapping fno -> fno-py.    ---
+# --- import the worktree CLI, plus a PATH wrapper mapping fno -> fno.    ---
 export FNO_SRC="$REPO_ROOT/cli/src"
 FNO_PYTHON=""
 for _cand in \
@@ -78,9 +78,9 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
-# fno-py is the console script name; provide it too in case anything resolves it.
-cp "$BINDIR/fno" "$BINDIR/fno-py"
-chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
+# fno is the console script name; provide it too in case anything resolves it.
+cp "$BINDIR/fno" "$BINDIR/fno"
+chmod +x "$BINDIR/fno" "$BINDIR/fno"
 export PATH="$BINDIR:$PATH"
 
 # x-1b75: registry-json now dispatches through the Rust client (no Python leg
@@ -725,8 +725,8 @@ COUNT_BINDIR="$(mktemp -d)"
 COUNTER="$SBX/fno-invocations.txt"
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" -m fno.cli "$@"\n' \
   "$FNO_SRC" "$COUNTER" "$FNO_PYTHON" > "$COUNT_BINDIR/fno"
-cp "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
-chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
+cp "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno"
+chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno"
 
 # Configure BOTH triggers away from their defaults (50/40) so a stale-value bug
 # (e.g. a fold that reads the block but keeps hardcoded defaults) cannot pass.

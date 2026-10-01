@@ -9,8 +9,8 @@
 # Covers AC1-EDGE (keep-going harvests all failures), AC1-UI (summary + header),
 # AC2-FR (subset labelled), AC3-ERR (corrupt/missing record -> full run).
 #
-# The runner is `fno-py doctor test smoke` (the deployed console script, on PATH inside
-# a smoke run via cli/.venv/bin; falls back to `uv run --project cli fno-py` for
+# The runner is `fno doctor test smoke` (the deployed console script, on PATH inside
+# a smoke run via cli/.venv/bin; falls back to `uv run --project cli fno` for
 # a standalone local run).
 
 set -uo pipefail
@@ -32,16 +32,16 @@ STEPS = [("alpha pass", ".", "true"), ("bravo fail", ".", "exit 1"),
          ("charlie pass", ".", "true"), ("delta fail", ".", "false")]
 EOF
 
-# Prefer the worktree's venv'd fno-py (current source); fall back to uv run so
+# Prefer the worktree's venv'd fno (current source); fall back to uv run so
 # a fresh checkout with no synced venv still resolves. Never trust a global
-# `fno-py` on PATH: a deployed build is stale and lacks the smoke subcommand.
-VENVED="$REPO_ROOT/cli/.venv/bin/fno-py"
+# `fno` on PATH: a deployed build is stale and lacks the smoke subcommand.
+VENVED="$REPO_ROOT/cli/.venv/bin/fno"
 if [[ -x "$VENVED" ]]; then
     RUNNER=("$VENVED" test smoke)
 else
     # Absolute --project: the changed-mode cases below run from a throwaway repo,
     # where a relative `cli` would not resolve.
-    RUNNER=(uv run --project "$REPO_ROOT/cli" fno-py doctor test smoke)
+    RUNNER=(uv run --project "$REPO_ROOT/cli" fno doctor test smoke)
 fi
 
 FAILS=0

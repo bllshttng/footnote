@@ -41,7 +41,7 @@ run_init() {
         mkdir -p .fno home/.fno bin
         cat > bin/fno <<EOF
 #!/usr/bin/env bash
-exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
+exec uv run --project "$REPO_ROOT/cli" fno "\$@"
 EOF
         chmod +x bin/fno
         # State-path stub: pins init's manifest location under env -i.

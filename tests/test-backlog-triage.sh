@@ -39,7 +39,7 @@ resolve_fno() {
         echo "$venv_py -m fno.cli"
         return
     fi
-    echo "python3 -m fno.cli"
+    echo "fno"
 }
 
 ABI=$(resolve_fno)

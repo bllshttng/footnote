@@ -211,7 +211,7 @@ if [[ "$*" == "agents mail notify-self" && -n "${FNO_TEST_SESSION_HARNESS:-}" ]]
   exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" python -c \
     'import os; from unittest.mock import patch; from fno.mail.cli import cmd_notify_self; p = patch("fno.claims.session_pid.resolve_session_harness", return_value=os.environ["FNO_TEST_SESSION_HARNESS"]); p.start(); cmd_notify_self()'
 fi
-exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" fno-py "$@"
+exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" fno "$@"
 REAL_FNO
   chmod +x "$TMP/real-bin/fno"
 

@@ -48,19 +48,19 @@ chmod +x "$TMP/cli/.venv/bin/python3"
     && pass "refuses a cli/.venv with no co-located cli/src/fno" \
     || fail "selected a foreign cli/.venv where 'import fno' would fail"
 
-# --- 3. The installed interpreter is found even with fno-py off PATH ---------
-# On a cargo-only install only the Rust mux (~/.cargo/bin/fno) is on PATH; fno-py
+# --- 3. The installed interpreter is found even with fno off PATH ---------
+# On a cargo-only install only the Rust mux (~/.cargo/bin/fno) is on PATH; fno
 # is not, and that machine has no checkout venv to fall back on. Hermetic: a fake
 # shim under a fake HOME, so this asserts the resolver's own legs, not the box.
 FAKEHOME="$(mktemp -d)"
 mkdir -p "$FAKEHOME/.local/bin"
-printf '#!%s\n' "$(command -v sh)" > "$FAKEHOME/.local/bin/fno-py"
+printf '#!%s\n' "$(command -v sh)" > "$FAKEHOME/.local/bin/fno"
 NOROOT="$(mktemp -d)"   # no cli/.venv and no cli/src, so leg 1 cannot match
 # PATH keeps the standard bin dirs (the resolver itself needs sed/awk) but drops
 # ~/.local/bin, which is exactly the cargo-only shape.
 ( HOME="$FAKEHOME" PATH="/usr/bin:/bin" fno_python_init "$NOROOT"
   [[ "$FNO_PYTHON" == "$(command -v sh)" ]] ) \
-    && pass "reads the installed fno-py shebang with fno-py off PATH" \
+    && pass "reads the installed fno shebang with fno off PATH" \
     || fail "missed the installed interpreter off PATH - would fall to bare python3"
 rm -rf "$FAKEHOME" "$NOROOT"
 

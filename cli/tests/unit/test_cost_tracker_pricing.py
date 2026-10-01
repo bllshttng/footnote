@@ -17,10 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-# cost_tracker.py moved into the fno package as fno.cost.cost_tracker.
-sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
-
+# Family goldens live under cli/tests (the cost family child owns them);
+# fno resolves through the pinned worktree PYTHONPATH.
 from fno.cost import cost_tracker  # noqa: E402
 from fno.cost.cost_tracker import (  # noqa: E402
     LATEST_MODERN_OPUS_TIER,

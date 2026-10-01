@@ -48,8 +48,8 @@ BINDIR="$(mktemp -d)"
 # comment): without it `python -m fno.cli` can silently resolve a DIFFERENT
 # tree's fno.cli than the worktree being tested.
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
-cp "$BINDIR/fno" "$BINDIR/fno-py"
-chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
+cp "$BINDIR/fno" "$BINDIR/fno"
+chmod +x "$BINDIR/fno" "$BINDIR/fno"
 export PATH="$BINDIR:$PATH"
 
 # x-1b75: registry-json has no Python leg left; resolve THIS checkout's Rust

@@ -2,7 +2,7 @@
 # test_uv_install_verify_wait.sh
 #
 # `uv tool install` exits before its own artifacts settle. The console script
-# `<tools>/fno/bin/fno-py` is deleted and recreated across an install and is
+# `<tools>/fno/bin/fno` is deleted and recreated across an install and is
 # absent for ~490ms, a gap that closed only ~40ms before uv exited in an idle
 # measurement (docs/architecture/cli-lazy-imports.md). A verify firing the
 # instant uv returns therefore races the install it is verifying, and the
