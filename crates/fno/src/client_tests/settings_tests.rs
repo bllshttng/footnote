@@ -335,7 +335,11 @@ async fn key_capture_refuses_a_conflict_and_takes_a_free_key() {
         .collect::<Vec<_>>();
     let mut v = settings_on(SettingsTab::Keys);
     let mut keys = Keys::new();
-    keys.tap(&mut v, "detach").await;
+    // The page is taller than the terminal: select the row, then Enter.
+    let modal = v.aux.as_mut().unwrap();
+    let detach = AuxAction::KeyCapture("detach".into());
+    modal.popup.sel = modal.actions.iter().position(|a| *a == detach).unwrap();
+    keys.send(&mut v, b"\r").await;
     assert!(frame_text(&mut v)
         .iter()
         .any(|l| l.contains("press the new key for detach")));
