@@ -150,6 +150,11 @@ def test_unreadable_roles_still_prints_the_line(monkeypatch):
         raise RuntimeError("unreadable")
 
     monkeypatch.setattr("fno.config.load_settings", boom)
+
+    def fake_call(payload, **_):
+        return {}
+
+    monkeypatch.setattr("fno.route_slot_client.route_slot_call", fake_call)
     out = _capture(monkeypatch)
 
     _report_band_routing()
