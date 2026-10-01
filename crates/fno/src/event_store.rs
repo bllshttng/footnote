@@ -1485,10 +1485,19 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
     let live = live_journal(journal);
     let store = store_path(&live);
     if !store.is_file() {
-        return match std::fs::read_to_string(&live) {
+        // No store: read the journal that was named. A rotated path must
+        // yield its own bytes, not the live file live_journal folds it into
+        // - folding double-counted the live lines under the rotation's name
+        // and blamed a corrupt live line on the rotation.
+        let direct = if journal.is_file() {
+            journal
+        } else {
+            live.as_path()
+        };
+        return match std::fs::read_to_string(direct) {
             Ok(text) => Ok(text),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(err) => Err(format!("{}: {err}", live.display())),
+            Err(err) => Err(format!("{}: {err}", direct.display())),
         };
     }
     let conn = open_read(&store)?;
