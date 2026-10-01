@@ -9,7 +9,9 @@
 //! that swap (the default in iTerm2, Terminal.app and GNOME Terminal), `DIM`
 //! drops it toward the background.
 //!
-//! Test-only: a lens on the render path, never shipped chrome.
+//! Tests use it as a lens on the render path. `fno mux serve --snapshot` uses
+//! [`screen_html`] and [`frame_svg`] to publish one frame in one theme. Neither
+//! draws a cursor.
 
 use crate::proto::{cell_flags, Cell, Color, Frame};
 
@@ -347,6 +349,243 @@ fn frame_body(frame: &Frame, theme: Theme) -> String {
     body
 }
 
+/// The theme a snapshot names: `dark` and `light` are the mux's own footnote
+/// themes, so a shot paints what the live mux paints; `macchiato` is a lens.
+pub fn theme_by_name(name: &str) -> Option<Theme> {
+    match name {
+        "dark" => Some(footnote(crate::theme::theme_footnote_superscript(), "dark")),
+        "light" => Some(footnote(crate::theme::theme_footnote_paper(), "light")),
+        "macchiato" => Some(MACCHIATO),
+        _ => None,
+    }
+}
+
+/// A mux chrome theme as a lens: its text on its ground, over its Terminal 16.
+fn footnote(t: crate::theme::Theme, name: &'static str) -> Theme {
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => unreachable!("the footnote themes are all RGB"),
+    };
+    Theme {
+        fg: rgb(t.title),
+        bg: rgb(t.base),
+        name,
+        ansi: std::array::from_fn(|i| {
+            rgb(crate::theme::terminal16_slot(i as u8, &t)
+                .expect("footnote themes define 16 slots"))
+        }),
+    }
+}
+
+/// One screen in one theme, as a bare page whose background is the theme's.
+/// This is the publishable form; [`frame_html`] is the side-by-side lens.
+pub fn screen_html(frame: &Frame, theme: Theme) -> String {
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>fno mux</title>\
+<style>\
+html,body{{margin:0;background:{bg}}}\
+.screen{{display:inline-block;padding:8px;font:14px/1.15 'SF Mono',Menlo,'DejaVu Sans Mono',monospace}}\
+.row{{white-space:pre;height:1.15em}}\
+span{{white-space:pre}}\
+</style><div class=\"screen\">{body}</div>",
+        bg = hex(theme.bg),
+        body = frame_body(frame, theme)
+    )
+}
+
+/// Cell size of [`frame_svg`] in px. Every text run is stretched to its cell
+/// count with `textLength`, so the grid holds whatever monospace font the
+/// viewer has.
+pub const SVG_CELL_W: f64 = 8.4;
+pub const SVG_CELL_H: f64 = 17.0;
+
+/// One screen in one theme as SVG: crisp at any width, and the theme's
+/// background fills the whole image.
+pub fn frame_svg(frame: &Frame, theme: Theme) -> String {
+    let cols = frame.cols as usize;
+    let (w, h) = (cols as f64 * SVG_CELL_W, frame.rows as f64 * SVG_CELL_H);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.1}\" height=\"{h:.1}\" viewBox=\"0 0 {w:.1} {h:.1}\" xml:space=\"preserve\" \
+font-family=\"'SF Mono',Menlo,'DejaVu Sans Mono',monospace\" font-size=\"14\">\
+<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
+        hex(theme.bg)
+    );
+    for r in 0..frame.rows as usize {
+        let y = r as f64 * SVG_CELL_H;
+        let mut c = 0usize;
+        // Box and block glyphs, drawn on the grid after the row's text.
+        let mut geometry = String::new();
+        while c < cols {
+            let start = c;
+            let cell = &frame.cells[r * cols + c];
+            let (fg, bg) = cell_colors(cell, theme);
+            let flags =
+                cell.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
+            // (glyph, cells it spans): a wide glyph owns its spacer cell.
+            let mut glyphs: Vec<(char, usize)> = Vec::new();
+            while c < cols {
+                let n = &frame.cells[r * cols + c];
+                if n.flags & cell_flags::WIDE_SPACER != 0 {
+                    if let Some(last) = glyphs.last_mut() {
+                        last.1 += 1;
+                    }
+                } else {
+                    let nflags =
+                        n.flags & (cell_flags::BOLD | cell_flags::UNDERLINE | cell_flags::ITALIC);
+                    if cell_colors(n, theme) != (fg, bg) || nflags != flags {
+                        break;
+                    }
+                    match cell_geometry(n.c, c as f64 * SVG_CELL_W, y, &hex(fg)) {
+                        Some(g) => {
+                            geometry.push_str(&g);
+                            glyphs.push((' ', 1));
+                        }
+                        None => glyphs.push((n.c, 1)),
+                    }
+                }
+                c += 1;
+            }
+            let x = start as f64 * SVG_CELL_W;
+            let run_w = (c - start) as f64 * SVG_CELL_W;
+            if bg != theme.bg {
+                out.push_str(&format!(
+                    "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{run_w:.1}\" height=\"{SVG_CELL_H}\" fill=\"{}\"/>",
+                    hex(bg)
+                ));
+            }
+            let blank = |g: &(char, usize)| g.0 == ' ' || g.0 == '\0';
+            let end = glyphs.iter().rposition(|g| !blank(g)).map_or(0, |i| i + 1);
+            let lead = glyphs[..end].iter().take_while(|g| blank(g)).count();
+            if lead == end {
+                continue;
+            }
+            let body: String = glyphs[lead..end].iter().map(|g| xml_escape(g.0)).collect();
+            let lead_cells: usize = glyphs[..lead].iter().map(|g| g.1).sum();
+            let cells: usize = glyphs[lead..end].iter().map(|g| g.1).sum();
+            out.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\" textLength=\"{:.1}\" lengthAdjust=\"spacingAndGlyphs\"{}{}{}>{body}</text>",
+                x + lead_cells as f64 * SVG_CELL_W,
+                y + SVG_CELL_H * 0.78,
+                hex(fg),
+                cells as f64 * SVG_CELL_W,
+                if flags & cell_flags::BOLD != 0 { " font-weight=\"700\"" } else { "" },
+                if flags & cell_flags::ITALIC != 0 { " font-style=\"italic\"" } else { "" },
+                if flags & cell_flags::UNDERLINE != 0 { " text-decoration=\"underline\"" } else { "" },
+            ));
+        }
+        out.push_str(&geometry);
+    }
+    out.push_str("</svg>");
+    out
+}
+
+/// A box-drawing or block glyph as shapes on its cell, so borders join from
+/// cell to cell. As font text they leave gaps: the line height is not the
+/// font's, and a fallback font draws them at another width.
+fn cell_geometry(ch: char, x: f64, y: f64, color: &str) -> Option<String> {
+    let (w, h) = (SVG_CELL_W, SVG_CELL_H);
+    let rect =
+        |dx: f64, dy: f64, rw: f64, rh: f64, opacity: f64| {
+            format!(
+            "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{color}\"{}/>",
+            x + dx,
+            y + dy,
+            rw,
+            rh,
+            if opacity < 1.0 { format!(" fill-opacity=\"{opacity}\"") } else { String::new() }
+        )
+        };
+    match ch {
+        '█' => return Some(rect(0.0, 0.0, w, h, 1.0)),
+        '▀' => return Some(rect(0.0, 0.0, w, h / 2.0, 1.0)),
+        '▄' => return Some(rect(0.0, h / 2.0, w, h / 2.0, 1.0)),
+        '▌' => return Some(rect(0.0, 0.0, w / 2.0, h, 1.0)),
+        '▐' => return Some(rect(w / 2.0, 0.0, w / 2.0, h, 1.0)),
+        '▔' => return Some(rect(0.0, 0.0, w, h / 8.0, 1.0)),
+        '▏' => return Some(rect(0.0, 0.0, w / 8.0, h, 1.0)),
+        '▕' => return Some(rect(w * 7.0 / 8.0, 0.0, w / 8.0, h, 1.0)),
+        '░' => return Some(rect(0.0, 0.0, w, h, 0.25)),
+        '▒' => return Some(rect(0.0, 0.0, w, h, 0.5)),
+        '▓' => return Some(rect(0.0, 0.0, w, h, 0.75)),
+        '▁'..='▇' => {
+            let eighths = (ch as u32 - '▁' as u32 + 1) as f64;
+            let bh = h * eighths / 8.0;
+            return Some(rect(0.0, h - bh, w, bh, 1.0));
+        }
+        _ => {}
+    }
+    // (left, right, up, down, heavy)
+    let (l, r, u, d, heavy) = match ch {
+        '─' | '╌' | '┄' | '┈' | '═' => (true, true, false, false, false),
+        '━' | '╍' | '┅' | '┉' => (true, true, false, false, true),
+        '│' | '╎' | '┆' | '┊' | '║' => (false, false, true, true, false),
+        '┃' | '╏' | '┇' | '┋' => (false, false, true, true, true),
+        '╴' => (true, false, false, false, false),
+        '╶' => (false, true, false, false, false),
+        '╵' => (false, false, true, false, false),
+        '╷' => (false, false, false, true, false),
+        '┌' | '╭' | '╔' => (false, true, false, true, false),
+        '┐' | '╮' | '╗' => (true, false, false, true, false),
+        '└' | '╰' | '╚' => (false, true, true, false, false),
+        '┘' | '╯' | '╝' => (true, false, true, false, false),
+        '┏' => (false, true, false, true, true),
+        '┓' => (true, false, false, true, true),
+        '┗' => (false, true, true, false, true),
+        '┛' => (true, false, true, false, true),
+        '├' | '╠' => (false, true, true, true, false),
+        '┤' | '╣' => (true, false, true, true, false),
+        '┬' | '╦' => (true, true, false, true, false),
+        '┴' | '╩' => (true, true, true, false, false),
+        '┼' | '╬' => (true, true, true, true, false),
+        _ => return None,
+    };
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    // A rounded corner is one arc between its two arms, as the font draws it.
+    let rounded = |hx: f64, vy: f64| {
+        let rad = w / 2.0;
+        let (ex, ey) = (cx + (hx - cx).signum() * rad, cy + (vy - cy).signum() * rad);
+        format!(
+            "<path d=\"M{hx:.2} {cy:.2}H{ex:.2}Q{cx:.2} {cy:.2} {cx:.2} {ey:.2}V{vy:.2}\" stroke=\"{color}\" stroke-width=\"1\" fill=\"none\"/>"
+        )
+    };
+    match ch {
+        '╭' => return Some(rounded(x + w, y + h)),
+        '╮' => return Some(rounded(x, y + h)),
+        '╰' => return Some(rounded(x + w, y)),
+        '╯' => return Some(rounded(x, y)),
+        _ => {}
+    }
+    let mut d_attr = String::new();
+    if l {
+        d_attr.push_str(&format!("M{x:.2} {cy:.2}H{cx:.2}"));
+    }
+    if r {
+        d_attr.push_str(&format!("M{cx:.2} {cy:.2}H{:.2}", x + w));
+    }
+    if u {
+        d_attr.push_str(&format!("M{cx:.2} {y:.2}V{cy:.2}"));
+    }
+    if d {
+        d_attr.push_str(&format!("M{cx:.2} {cy:.2}V{:.2}", y + h));
+    }
+    Some(format!(
+        "<path d=\"{d_attr}\" stroke=\"{color}\" stroke-width=\"{}\" stroke-linecap=\"square\" fill=\"none\"/>",
+        if heavy { 2 } else { 1 }
+    ))
+}
+
+fn xml_escape(c: char) -> String {
+    match c {
+        '&' => "&amp;".into(),
+        '<' => "&lt;".into(),
+        '>' => "&gt;".into(),
+        // A browser page ignores xml:space and collapses a run of spaces, so
+        // textLength then stretches the few glyphs left across the run.
+        ' ' | '\0' => "\u{a0}".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Write `frame` to `<dir>/<name>.html`; `dir` is `$FNO_UX_SHOTS`, else this
 /// crate's `target/ux-shots` so `cargo test ux_shot` leaves the pictures on disk
 /// with no variable to know about, gitignored by construction.
@@ -373,6 +612,46 @@ pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::P
 mod tests {
     use super::*;
 
+    /// A published shot fills with the chosen theme's background, keeps a
+    /// run of spaces as spaces a browser cannot collapse (a collapsed run
+    /// stretches its glyphs across the cells), escapes markup, and paints an
+    /// inverse cell as a rect in the theme's foreground.
+    #[test]
+    fn svg_paints_the_theme_and_keeps_the_grid() {
+        let mut cells: Vec<Cell> = "a <b>   c "
+            .chars()
+            .map(|c| Cell {
+                c,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            })
+            .collect();
+        cells.last_mut().unwrap().flags = cell_flags::INVERSE;
+        let frame = Frame {
+            rows: 1,
+            cols: cells.len() as u16,
+            cells,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            scroll_offset: 0,
+        };
+        let dark = theme_by_name("dark").unwrap();
+        assert_eq!(
+            (dark.fg, dark.bg),
+            ((0xe8, 0xe8, 0xe8), (0x14, 0x14, 0x14)),
+            "the live mux ground"
+        );
+        for theme in [dark, theme_by_name("light").unwrap(), DARK, LIGHT] {
+            let svg = frame_svg(&frame, theme);
+            assert!(svg.contains(&format!("height=\"100%\" fill=\"{}\"", hex(theme.bg))));
+            assert!(svg.contains(&format!("height=\"17\" fill=\"{}\"", hex(theme.fg))));
+            assert!(svg.contains("a\u{a0}&lt;b&gt;\u{a0}\u{a0}\u{a0}c"), "{svg}");
+            assert!(screen_html(&frame, theme).contains(&format!("background:{}", hex(theme.bg))));
+        }
+    }
+
     fn cell(flags: u8) -> Cell {
         Cell {
             c: 'x',
@@ -397,12 +676,6 @@ mod tests {
             "on a light theme bold over inverse should LOSE contrast: \
              plain {plain:.2} vs bold {bolded:.2}"
         );
-    }
-
-    #[test]
-    fn inverse_swaps_the_pair() {
-        let ((fr, _, _), (br, _, _)) = cell_colors(&cell(cell_flags::INVERSE), DARK);
-        assert_eq!((fr, br), (DARK.bg.0, DARK.fg.0));
     }
 
     #[test]
