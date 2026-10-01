@@ -1884,4 +1884,6 @@ def update_command(
     elif install_sh:
         os.execvp("/bin/sh", ["/bin/sh", "-c", fail_prologue + install_sh])
     else:
-        os.execvp(cmd[0], cmd)
+        # The bare installer (no rev, no marker, no refresh chain) execs
+        # through a shell too, so a failed install still reaches the trap.
+        os.execvp("/bin/sh", ["/bin/sh", "-c", fail_prologue + shlex.join(cmd)])
