@@ -3258,7 +3258,7 @@ fn rename_emits_ride_the_successful_write() {
     // The emit loop sits AFTER the write-failure return inside
     // `run_reconcile_sweep`, so a failed write never announces a rename
     // it did not persist. The write itself is delegated to
-    // `liveness_sweep::apply_reconcile_changes`. Structural, so pin it
+    // `liveness_sweep::persist_reconcile_changes`. Structural, so pin it
     // like the budget clock.
     let src = include_str!("../../daemon.rs");
     let sweep = src
@@ -3266,13 +3266,24 @@ fn rename_emits_ride_the_successful_write() {
         .nth(1)
         .expect("run_reconcile_sweep exists");
     let write = sweep
-        .find("liveness_sweep::apply_reconcile_changes(r, &entries, &changes, &titles")
+        .find("liveness_sweep::persist_reconcile_changes(")
         .expect("title write");
     let fail = sweep.find("registry write failed").expect("failure return");
     let emit = sweep.find("\"agent_renamed\"").expect("rename emit");
     assert!(
         write < fail && fail < emit,
         "a failed write must return before any rename is emitted"
+    );
+    let persist = include_str!("../../liveness_sweep.rs")
+        .split("fn persist_reconcile_changes(")
+        .nth(1)
+        .expect("persistence helper")
+        .split("fn apply_reconcile_changes(")
+        .next()
+        .unwrap();
+    assert!(
+        persist.contains("state::update_registry(") && persist.contains("apply_reconcile_changes("),
+        "the persistence boundary must apply the title changes under the registry write"
     );
 }
 

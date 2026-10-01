@@ -40,12 +40,32 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     h.wait_screen(15, |s| s.contains("filters"));
 
     // leg 1: `^B V` (cycle sideline view) still resolves while the
-    // board holds the keyboard. The old router swallowed it, so the board
-    // never handed the sideline back.
+    // board holds the keyboard. Org is the next view in the three-view cycle.
     h.type_bytes(&[PREFIX, b'V']);
-    // Fails on the old code: the board swallowed ^B V and stayed docked.
-    eprintln!("STAGE leg1 agents-after-V");
+    eprintln!("STAGE leg1 org-after-V");
+    h.wait_screen(15, |s| s.contains("Org Tree"));
+
+    h.type_bytes(&[PREFIX, b'?']);
+    eprintln!("STAGE org global-keybinds");
+    let screen = h.wait_screen(15, |s| s.contains("keybinds"));
+    assert!(
+        !screen.contains("Org keys"),
+        "Org's own keys must not answer the prefix chord:\n{screen}"
+    );
+    h.type_bytes(&[27]);
+    h.wait_screen(15, |s| s.contains("Org Tree") && !s.contains("keybinds"));
+
+    h.type_bytes(&[PREFIX, b'V']);
+    eprintln!("STAGE leg1 agents-after-second-V");
     h.wait_screen(15, |s| s.contains("+ new workspace"));
+
+    h.type_bytes(&[PREFIX, b'?']);
+    eprintln!("STAGE agents global-keybinds");
+    h.wait_screen(15, |s| s.contains("keybinds"));
+    h.type_bytes(&[27]);
+    h.wait_screen(15, |s| {
+        s.contains("+ new workspace") && !s.contains("keybinds")
+    });
 
     // ... and the chord round-trips the view back to the board.
     h.type_bytes(&[PREFIX, b'V']);

@@ -26,8 +26,6 @@ fn agent_hit_resolves_pane_then_attach_then_notice() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -49,6 +47,7 @@ fn agent_hit_resolves_pane_then_attach_then_notice() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     // A pane-hosted row focuses regardless of the active squad.
     assert!(
@@ -183,8 +182,6 @@ fn agent_hit_resumes_a_resumable_paneless_row() {
         exited: true,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -206,6 +203,7 @@ fn agent_hit_resumes_a_resumable_paneless_row() {
         resumable: true,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     assert!(matches!(
         agent_hit(&row, 2),
@@ -263,8 +261,6 @@ fn agent_hit_watch_only_reaches_the_thread_pane() {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: Some("job1".into()),
         external: false,
@@ -286,6 +282,7 @@ fn agent_hit_watch_only_reaches_the_thread_pane() {
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     };
     match agent_hit(&row, 1) {
         ChromeHit::Cmds(c) => assert!(

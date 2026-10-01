@@ -53,4 +53,5 @@ mux where	leaf	visible	-	-
 mux workspace	group	visible	-	-
 mux workspace prune	leaf	visible	-	-
 mux workspace restore	leaf	visible	-	-
+uninstall	leaf	visible	-	--dry-run,--purge,--yes
 version	leaf	visible	-	--json
