@@ -26,10 +26,20 @@ def test_unmeasured_refusal_names_only_remedies_the_verbs_support():
     assert "fno inbox outstanding clear" in refusal
     assert "with no --answer" in refusal
 
-    result = runner.invoke(app, ["inbox", "decide", "--help"])
-    assert result.exit_code == 0, result.output
+    front = front_dev_binary()
+    if front is None:
+        raise pytest.skip(
+            "compiled fno front binary not present (build with `cargo build "
+            "--manifest-path crates/fno/Cargo.toml --bin fno)`"
+        )
+    helped = subprocess.run(
+        [str(front), "inbox", "decide", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert helped.returncode == 0, helped.stderr
     for option in ("--read", "--question-id"):
-        assert option in result.output, f"fno inbox decide must expose {option}"
+        assert option in helped.stdout, f"fno inbox decide must expose {option}"
 
     clear = runner.invoke(app, ["inbox", "outstanding", "clear", "--help"])
     assert clear.exit_code == 0, clear.output
