@@ -48,7 +48,7 @@ fno uninstall --dry-run
 fno uninstall
 ```
 
-The first command lists what it found and changes nothing. The second removes the Claude and Codex plugins, the OpenCode plugin files, the hooks fno added to harness config, the launchd agents, the `uv`, Homebrew and `cargo` installs, and it stops the daemon and the mux. It keeps `~/.fno`. Add `--purge` to delete that too, after you type the confirmation word. Run it from a plain terminal, not from inside an fno mux pane.
+The first command lists what it found and changes nothing. The second removes the plugins, the hooks fno added to harness config, the launchd agents and the binaries. It also stops the daemon and the mux. It keeps `~/.fno`. Add `--purge` to delete that too, after you type the confirmation word. Run it from a plain terminal, not from inside an fno mux pane.
 
 ## How it works
 
