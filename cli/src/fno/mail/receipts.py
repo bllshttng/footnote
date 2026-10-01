@@ -175,6 +175,42 @@ def not_landed_receipt(
     return "\n".join(lines)
 
 
+def report_landing(
+    msg_id: str,
+    *,
+    target: str,
+    to: Optional[str],
+    to_harness: Optional[str],
+    to_session: Optional[str],
+) -> bool:
+    """The post-send verify both durable floors share: after the settle
+    window, re-read the recipient - bus claim and cursor, then transcript -
+    and print `landed (<how>)` or the NOT LANDED block with the
+    substrate-correct recovery. True when landed; the caller owns the
+    non-zero exit."""
+    import time as _time
+
+    from fno.mail.landed import post_send_landed, post_send_settle_seconds
+
+    settle_s = post_send_settle_seconds()
+    if settle_s > 0:
+        _time.sleep(settle_s)
+    landed, how = post_send_landed(
+        msg_id, to=to, to_harness=to_harness, to_session=to_session
+    )
+    if landed:
+        print(f"{msg_id} landed ({how})")
+        return True
+    print(not_landed_receipt(
+        msg_id,
+        _live_pane_for(target, to_session),
+        target=target,
+        harness=to_harness,
+        session_id=to_session,
+    ))
+    return False
+
+
 def _live_pane_for(target: str, session_id: Optional[str]) -> Optional[int]:
     """The recipient's pane id from the LIVE pane list, or None.
 
