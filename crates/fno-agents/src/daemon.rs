@@ -7094,3 +7094,5 @@ mod adopt_pin_tests;
 #[path = "daemon/tests/pid_zombie_tests.rs"]
 mod pid_zombie_tests;
 #[cfg(test)]
+#[path = "daemon/tests/report_codex.rs"]
+mod report_codex_tests;
