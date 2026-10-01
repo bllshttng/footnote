@@ -25,6 +25,9 @@ pub(super) async fn route(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Option<Result<StdinFlow, String>> {
+    if view.selector.is_none() {
+        view.questions_block.cursor = None;
+    }
     if view.digest.is_some() {
         // any key dismisses the catch-up digest into the normal view.
         // Same whole-chunk swallow as the key-table overlay below. A flush

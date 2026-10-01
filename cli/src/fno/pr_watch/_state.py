@@ -8,7 +8,7 @@ Entry schema per key::
     {
         "last_review_ts": str | None,   # ISO-8601 ts of last dispatched review
         "last_seen_state": str,          # PR state at last observation ("OPEN", "MERGED", ...)
-        "merge_dispatched": bool,        # True once /fno:pr merged was fired
+        "merge_dispatched": bool,        # True once /fno:ship pr merged was fired
         "retries": int,                  # consecutive dispatch failures
         "parked": str | None,            # non-None = reason we stopped polling
         "last_polled_at": str,           # ISO ts of last rich read; orders the next

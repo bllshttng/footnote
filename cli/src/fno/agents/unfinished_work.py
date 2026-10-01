@@ -478,7 +478,7 @@ def classify(
                         + (f", node {pr.node_id}" if pr.node_id else "")
                         + (f", {pr.pr_url}" if pr.pr_url else "")
                     ),
-                    clear_command=f"/fno:pr check {pr.pr_number}",
+                    clear_command=f"/fno:ship pr check {pr.pr_number}",
                     node_id=pr.node_id,
                     pr_number=pr.pr_number,
                     pr_url=pr.pr_url,

@@ -1188,11 +1188,11 @@ def _refuse_repeated_dead_dispatch(
     except Exception:
         failure_limit = 3
     project_events = Path(node_cwd) / ".fno" / "events.jsonl" if node_cwd else None
-    events = failure.read_events()
+    events = failure.read_events(types=list(failure.FAILURE_EVENT_TYPES))
     if project_events is not None and project_events.exists():
         events = failure.merge_event_histories(
             events,
-            failure.read_events(project_events),
+            failure.read_events(project_events, types=list(failure.FAILURE_EVENT_TYPES)),
         )
     streak = failure.consecutive_failures(node_id, events)
     if streak < failure_limit:

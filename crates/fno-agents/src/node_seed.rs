@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn out_of_family_seed_passes_unchecked() {
         let mut p = base().clone();
-        p["argv"] = json!(["spawn", "w", "/fno:pr merged x-1", "--node", "x-1"]);
+        p["argv"] = json!(["spawn", "w", "/fno:ship pr merged x-1", "--node", "x-1"]);
         p["seed_index"] = json!(2);
         p["seed_form"] = json!("positional");
         assert_eq!(decide_map(p)["action"], "pass");

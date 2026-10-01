@@ -107,12 +107,7 @@ The angle brackets are placeholder notation, not literal syntax. Infer the
 fields from the user's unquoted text (a free-form phrasing maps the same way -
 see below):
 
-- **payload** (required): a backlog node id (`ab-XXXXXXXX`, builds via `/target`),
-  an explicit slash command (`/target ...`, `/pr check 42`, dispatched per
-  harness), or any other free text - sent **verbatim as the session seed** (a
-  live pane), no `/target` wrap. (: `spawn "fix the login bug"` seeds a
-  session; it does NOT build. To build free text, write `spawn /target <text>`
-  or pass a node id.)
+- **payload** (required): a backlog node id (`ab-XXXXXXXX`, builds via `/target`), an explicit slash command (`/target ...`, `/fno:ship pr check 42`, dispatched per harness), or any other free text - sent **verbatim as the session seed** (a live pane), no `/target` wrap. (: `spawn "fix the login bug"` seeds a session; it does NOT build. To build free text, write `spawn /target <text>` or pass a node id.)
 - **one-shot Q&A**: append the `headless` substrate (: it replaced the
   old one-shot ask and `bare`) - `spawn "<question>" headless` returns a
   single reply. (Messaging an EXISTING worker for an inline reply is the

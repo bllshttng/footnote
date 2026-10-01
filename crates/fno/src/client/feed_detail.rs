@@ -115,8 +115,13 @@ pub(crate) enum FeedAction {
     Node(String),
     /// Open the PR in the browser.
     Pr(String),
-    /// Show the removal's recovery line as a notice.
-    Resume(String),
+    /// A recovery row: the session is not reachable as a live seat. `name`
+    /// carries the registry handle when the roster still holds the row
+    /// (a removal's worker): Enter then resumes through
+    /// `Command::ResumeAgent` (the fno-owned door) instead of only talking.
+    /// Without it `line` is the command or revival form to copy, and Enter
+    /// repeats that line as a notice.
+    Resume { line: String, name: Option<String> },
 }
 
 /// The open provenance modal, held on the view: the event, its popup, and the
@@ -229,16 +234,17 @@ pub(crate) fn build(
                 hint: String::new(),
                 enabled: true,
             });
-            actions.push(FeedAction::Session(ChromeHit::Cmds(vec![
-                Command::AttachAgent {
-                    id: (*sid).to_string(),
-                    placement: PanePlacement {
-                        portal: Some(0),
-                        ..PanePlacement::default()
-                    },
-                },
-            ])));
-            values.push((*sid).to_string());
+            // The feed's session id is a session handle (an fno id or a
+            // harness uuid), never the 8-hex jobId the AttachAgent door
+            // resolves, so an attach here is a guaranteed refusal. The
+            // resume verb takes the full session id directly; Enter repeats
+            // the command and `y` copies it.
+            let cmd = format!("fno agents resume {sid}");
+            actions.push(FeedAction::Resume {
+                line: cmd.clone(),
+                name: None,
+            });
+            values.push(cmd);
             info(
                 "pane",
                 Some("not in the live roster".to_string()),
@@ -302,16 +308,34 @@ pub(crate) fn build(
     info("actor", item.actor.clone(), &mut rows);
     info("phase", item.phase.clone(), &mut rows);
 
-    // A removal's answer: the recovery line, as its own row.
+    // A removal's answer: resume the row through fno when the roster still
+    // holds it, else the retirement receipt's revival line verbatim. The
+    // copied value is the command either way, so `y` never hands over a raw
+    // harness argv when the fno handle exists.
     if let Destination::Recovery(detail) = &dest {
+        let named = item
+            .name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .filter(|n| agents.iter().any(|a| a.name == *n));
+        let (label, name) = match named {
+            Some(n) => {
+                info("revival", Some((*detail).to_string()), &mut rows);
+                (format!("fno agents resume {n}"), Some(n.to_string()))
+            }
+            None => ((*detail).to_string(), None),
+        };
         rows.push(PopupRow::Entry {
             glyph: "resume".to_string(),
-            label: (*detail).to_string(),
+            label: label.clone(),
             hint: String::new(),
             enabled: true,
         });
-        actions.push(FeedAction::Resume((*detail).to_string()));
-        values.push((*detail).to_string());
+        actions.push(FeedAction::Resume {
+            line: label.clone(),
+            name,
+        });
+        values.push(label);
     }
 
     // The footer names every gesture the modal answers, including the
@@ -358,25 +382,11 @@ pub(crate) async fn execute_selected(
         FeedAction::Session(hit) => apply_hit(view, hit.clone(), sock_w).await?,
         FeedAction::Node(id) => {
             let id = id.clone();
-            // The drill-down lives on the experimental board: opening a node
-            // opens the board on it. Off, the notice says where the jump
-            // would land rather than pretending nothing exists.
-            if !view.experimental_backlog {
-                view.set_notice(format!(
-                    "node {id}: the backlog view is off (sideline menu)"
-                ));
-                return Ok(());
+            let on = view.experimental_backlog;
+            node_link::open_detail(view, id);
+            if on {
+                view.feed_detail = None;
             }
-            View::open(view);
-            if let Some(b) = view.backlog_board.as_mut() {
-                b.detail = Some(node_detail::NodeDetailOverlay {
-                    node_id: id,
-                    trail: Vec::new(),
-                    sel: 0,
-                    scroll: 0,
-                });
-            }
-            view.feed_detail = None;
         }
         FeedAction::Pr(url) => {
             let url = url.clone();
@@ -391,7 +401,23 @@ pub(crate) async fn execute_selected(
                 Err(e) => view.set_notice(format!("open failed: {e}")),
             }
         }
-        FeedAction::Resume(detail) => view.set_notice(detail.clone()),
+        FeedAction::Resume { line, name } => {
+            // Own the strings first: they borrow into the modal, and the
+            // mutable view work below must not hold that borrow.
+            let line = line.clone();
+            let name = name.clone();
+            match name {
+                Some(name) => {
+                    // The verdict arrives on the wire either way: "resumed
+                    // <name>" or the gate's one-line refusal, as a notice.
+                    view.set_notice(format!("resuming {name}"));
+                    write_msg(sock_w, &ClientMsg::Command(Command::ResumeAgent { name }))
+                        .await
+                        .map_err(|e| format!("resume send failed: {e}"))?;
+                }
+                None => view.set_notice(line),
+            }
+        }
     }
     Ok(())
 }
@@ -473,29 +499,19 @@ pub(crate) async fn mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => {
-            let close = view
-                .feed_detail
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col));
-            if close {
-                view.feed_detail = None;
-                return Ok(());
-            }
-            match hit_at(view, rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.feed_detail.as_mut() {
-                        m.popup.select(t);
-                    }
-                    execute_selected(view, sock_w).await?;
+        MouseKind::Press(MouseButton::Left) => match hit_at(view, rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.feed_detail.as_mut() {
+                    m.popup.select(t);
                 }
-                None => {
-                    if !block_contains(view, rep.row, rep.col) {
-                        view.feed_detail = None;
-                    }
+                execute_selected(view, sock_w).await?;
+            }
+            None => {
+                if !block_contains(view, rep.row, rep.col) {
+                    view.feed_detail = None;
                 }
             }
-        }
+        },
         _ => {}
     }
     Ok(())

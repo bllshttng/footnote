@@ -382,7 +382,7 @@ def fire_skill(
         ]
         if model:
             cmd += ["--model", model]
-        cmd.append(f"/fno:pr {verb} {pr_number}")
+        cmd.append(f"/fno:ship pr {verb} {pr_number}")
 
     try:
         result = runner(

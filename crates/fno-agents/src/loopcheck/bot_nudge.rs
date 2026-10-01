@@ -9,7 +9,7 @@ use super::*;
 /// Idempotency is the PR itself, not a counter: this fires only on a NeedsNudge
 /// classification, which means zero qualifying mentions exist within the wait
 /// window - the same read every participant makes. A sibling worktree, a
-/// `/fno:pr check` cron, a human, and a restarted-after-compaction session all
+/// `/fno:ship pr check` cron, a human, and a restarted-after-compaction session all
 /// see the same PR and reach the same decision, so there is nothing to double.
 pub(super) fn post_nudge_comment(
     gh_bin: &str,
@@ -223,7 +223,7 @@ pub(super) fn nudge_config_for<'a>(
 
 /// A missing bot's nudge classification for this fire. Derived fresh
 /// from PR comments every fire - no durable counter - so a mention posted by a
-/// human, `/fno:pr check`, or a sibling worktree counts identically and
+/// human, `/fno:ship pr check`, or a sibling worktree counts identically and
 /// self-heals across restart / compaction / handoff.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NudgeClass {

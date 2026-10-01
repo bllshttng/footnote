@@ -17,6 +17,11 @@ pub(super) struct BlockPrefs {
     pub(super) visible: bool,
     pub(super) height: u16,
     pub(super) show_done: bool,
+    /// The full view's list pane width, in percent.
+    pub(super) split: u8,
+    /// The keyboard cursor inside the block (a line past the head rows),
+    /// set while the selector walked down into it. Runtime only.
+    pub(super) cursor: Option<usize>,
 }
 
 impl Default for BlockPrefs {
@@ -25,6 +30,8 @@ impl Default for BlockPrefs {
             visible: true,
             height: crate::view_store::QUESTIONS_DEFAULT_HEIGHT,
             show_done: false,
+            split: crate::view_store::QUESTIONS_DEFAULT_SPLIT,
+            cursor: None,
         }
     }
 }
@@ -35,6 +42,8 @@ impl BlockPrefs {
             visible: crate::view_store::load_questions_block(),
             height: crate::view_store::load_questions_height(),
             show_done: crate::view_store::load_questions_show_done(),
+            split: crate::view_store::load_questions_split(),
+            cursor: None,
         }
     }
 }
@@ -129,8 +138,13 @@ fn block_items(
 /// One painted run: text plus cell flags (BOLD for a title, DIM for meta).
 type Seg = (String, u8);
 
+/// The rows above the first question line: one blank row, then the header
+/// band. Paint, click and keyboard all offset by it.
+const HEAD_ROWS: usize = 2;
+
 /// The block's lines and the hit map for the sideline paint and the click
-/// test to share. The header counts open and ready; up to `height - 1` rows
+/// test to share. A blank row parts it from the list above, then the header
+/// band counts open and ready in the workspace header style; up to `height - 1` rows
 /// follow (title bold, meta dim), then `+N more` (kept visible whenever rows
 /// elide and the height affords it), then the answered section: per-answer
 /// lines when shown, else at most one dim count line. Nothing is drawn past
@@ -141,6 +155,7 @@ pub(super) fn block_layout(
     show_done: bool,
     fold: &crate::needs_overlay::QuestionsFold,
     now: u64,
+    text_w: usize,
 ) -> (Vec<Vec<Seg>>, Vec<String>, bool) {
     let items = block_items(fold, show_done);
     if items.is_empty() && fold.answered.is_empty() {
@@ -149,10 +164,14 @@ pub(super) fn block_layout(
     let opens = open_items(fold);
     let open_count = opens.len();
     let ready = opens.iter().filter(|q| q.ready).count();
-    let mut lines: Vec<Vec<Seg>> = Vec::new();
+    let mut lines: Vec<Vec<Seg>> = vec![vec![(String::new(), 0)]];
     lines.push(vec![(
-        format!(" questions {open_count} \u{b7} {ready} ready"),
-        0,
+        super::header_band_text(
+            &format!("questions {open_count} \u{b7} {ready} ready"),
+            &[],
+            text_w,
+        ),
+        super::header_band_flags(false),
     )]);
     let mut ids: Vec<String> = Vec::new();
     let body_budget = height.saturating_sub(1);
@@ -202,7 +221,7 @@ pub(super) fn block_layout(
     }
     // The answered section: the fresh answers with their delivery rung when
     // shown, else at most one dim count line.
-    let remaining = height.saturating_sub(lines.len());
+    let remaining = (height + HEAD_ROWS - 1).saturating_sub(lines.len());
     if show_done {
         for a in fold.answered.iter().take(remaining) {
             lines.push(vec![(answered_line(a), cell_flags::DIM)]);
@@ -232,6 +251,8 @@ pub(super) struct BlockRows {
     pub(super) lines: Vec<Vec<Seg>>,
     pub(super) ids: Vec<String>,
     pub(super) more: bool,
+    /// The line the keyboard cursor bands, when the selector is in the block.
+    pub(super) band: Option<usize>,
 }
 
 pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
@@ -249,31 +270,39 @@ pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
     let chrome = view.bottom_row_is_chrome() as usize;
     let available = term_rows.saturating_sub(court + chrome);
     let height =
-        (view.questions_block.height as usize).clamp(2, available.saturating_sub(1).max(2));
-    let (lines, ids, more) = block_layout(height, view.questions_block.show_done, fold, now);
+        (view.questions_block.height as usize).clamp(2, available.saturating_sub(HEAD_ROWS).max(2));
+    let text_w = (view.panel_w() as usize).saturating_sub(1);
+    let (lines, ids, more) =
+        block_layout(height, view.questions_block.show_done, fold, now, text_w);
     if lines.is_empty() {
         return None;
     }
     if available > lines.len() {
+        let band = view
+            .questions_block
+            .cursor
+            .filter(|_| view.selector.is_some())
+            .map(|c| HEAD_ROWS + c);
         Some(BlockRows {
             n: lines.len(),
             lines,
-            ids: ids.clone(),
+            ids,
             more,
+            band,
         })
     } else {
         None
     }
 }
 
-/// The question row a click landed on, by sideline row. Line 0 is the
-/// header, body rows carry ids in order, and the first row past them is the
+/// The question row a click landed on, by sideline row. The head rows are
+/// inert, body rows carry ids in order, and the first row past them is the
 /// `+N more` line when it painted.
 pub(super) fn hit_at(view: &View, term_rows: usize, row: u16) -> Option<QuestionHit> {
     let b = block_rows(view, term_rows)?;
     let court = view.court_block_layout(term_rows).0;
     let start = term_rows.saturating_sub(court + b.n);
-    let r = (row as usize).checked_sub(start)?.checked_sub(1)?;
+    let r = (row as usize).checked_sub(start)?.checked_sub(HEAD_ROWS)?;
     if let Some(id) = b.ids.get(r) {
         return Some(QuestionHit::Row(id.clone()));
     }
@@ -282,19 +311,31 @@ pub(super) fn hit_at(view: &View, term_rows: usize, row: u16) -> Option<Question
 
 /// Paint the block's lines at `start` in the sideline column: the same cell
 /// loop the court block paints, with each segment's flags deciding whether a
-/// run reads bold (a title), dim (meta and chrome), or plain.
+/// run reads bold (a title), dim (meta and chrome), or plain. The `band` line
+/// wears the selector's full-width band instead.
 pub(super) fn paint_block(
-    lines: Vec<Vec<Seg>>,
+    b: BlockRows,
     cells: &mut [Cell],
     start: usize,
-    rows: usize,
-    cols: usize,
-    text_w: usize,
+    (rows, cols, text_w): (usize, usize, usize),
+    theme: &Theme,
 ) {
-    for (k, segs) in lines.into_iter().enumerate() {
+    let band = crate::theme::band_style(theme);
+    for (k, segs) in b.lines.into_iter().enumerate() {
         let r = start + k;
         if r >= rows {
             break;
+        }
+        let banded = b.band == Some(k);
+        if banded {
+            for cell in &mut cells[r * cols..r * cols + text_w] {
+                *cell = Cell {
+                    c: ' ',
+                    fg: band.0,
+                    bg: band.1,
+                    flags: band.2,
+                };
+            }
         }
         let mut col = 0usize;
         for (text, flags) in segs {
@@ -303,17 +344,22 @@ pub(super) fn paint_block(
                 if col + w > text_w {
                     break;
                 }
+                let (fg, bg, flags) = if banded {
+                    band
+                } else {
+                    (Color::Default, Color::Default, flags)
+                };
                 cells[r * cols + col] = Cell {
                     c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
+                    fg,
+                    bg,
                     flags,
                 };
                 if w == 2 {
                     cells[r * cols + col + 1] = Cell {
                         c: ' ',
-                        fg: Color::Default,
-                        bg: Color::Default,
+                        fg,
+                        bg,
                         flags: flags | cell_flags::WIDE_SPACER,
                     };
                 }
@@ -321,6 +367,48 @@ pub(super) fn paint_block(
             }
         }
     }
+}
+
+/// How many lines the keyboard cursor can stop on: the question rows plus
+/// the `+N more` line when it painted.
+fn cursor_stops(view: &View) -> usize {
+    block_rows(view, view.term.0 as usize).map_or(0, |b| b.ids.len() + b.more as usize)
+}
+
+/// One selector key, checked before the row list sees it. `j` on the last
+/// list stop walks into the block; inside it `j`/`k` move, `k` on the first
+/// line walks back out, and Enter opens the question (or the full list on
+/// the more line) and closes the selector, which would otherwise outrank the
+/// questions view and eat its keys. Esc and `q` leave the block with the
+/// selector. Every other key is swallowed while the cursor is in the block.
+pub(super) fn selector_key(view: &mut View, k: u8, cur: usize) -> bool {
+    let stops = cursor_stops(view);
+    let Some(c) = view.questions_block.cursor else {
+        if k == b'j' && stops > 0 && view.selector_down(cur) == cur {
+            view.questions_block.cursor = Some(0);
+            return true;
+        }
+        return false;
+    };
+    match k {
+        b'j' => view.questions_block.cursor = Some((c + 1).min(stops.saturating_sub(1))),
+        b'k' => view.questions_block.cursor = c.checked_sub(1),
+        b'\r' | b'\n' => {
+            let id = block_rows(view, view.term.0 as usize).and_then(|b| b.ids.get(c).cloned());
+            match id {
+                Some(id) => view.open_detail_on(&id),
+                None => view.open_questions_list(),
+            }
+            view.selector = None;
+            view.questions_block.cursor = None;
+        }
+        0x1b | b'q' => {
+            view.questions_block.cursor = None;
+            return false;
+        }
+        _ => {}
+    }
+    true
 }
 
 fn age_short(created_at: &str, now: u64) -> String {
@@ -363,6 +451,10 @@ pub(super) struct Detail {
     pub(super) focus: bool,
     /// The page line the detail pane windows to when it holds focus.
     pub(super) scroll: usize,
+    /// `a` picked "agents decide": Enter hands the question to the crown.
+    pub(super) delegate: bool,
+    /// The first `X` armed archive-all; the second sends it.
+    pub(super) archive_armed: bool,
 }
 
 impl Detail {
@@ -388,6 +480,8 @@ impl Detail {
             notice: None,
             focus: id.is_some(),
             scroll: 0,
+            delegate: false,
+            archive_armed: false,
         })
     }
 
@@ -404,6 +498,7 @@ impl Detail {
         self.free = None;
         self.notice = None;
         self.scroll = 0;
+        self.delegate = false;
     }
 }
 
@@ -528,10 +623,25 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
             .filter(|v| !v.is_empty())
             .unwrap_or(not_recorded)
     ));
+    if d.delegate {
+        s.push_str(
+            "## answer\n\nagents decide: the crown over the node decides a reversible call\n\n",
+        );
+    }
     if let Some(notes) = &d.notes {
         s.push_str(&format!("## answer\n\nnotes: {notes}\n\n"));
     }
     s
+}
+
+/// A list title's role by state, the sideline block's rule in theme tokens:
+/// open and ready reads bright, open and not ready plain, answered muted.
+fn title_role(q: &crate::needs_overlay::QuestionItem) -> backlog_style::BRole {
+    match (q.state == "open", q.ready) {
+        (true, true) => backlog_style::BRole::Head,
+        (true, false) => backlog_style::BRole::Body,
+        (false, _) => backlog_style::BRole::Meta,
+    }
 }
 
 /// The question page's rendered lines at the detail pane's width.
@@ -539,17 +649,26 @@ fn page_lines(d: &Detail, w: usize, now: u64) -> Vec<backlog_style::BLine> {
     super::node_detail::backlog_md::md_lines(&question_page(d.item(), d, now), w, usize::MAX)
 }
 
-/// The detail pane's body width at a terminal size, shared by the draw and
-/// the scroll clamp so the window never follows past a line the pane hides:
-/// side-by-side splits at 45%, stacked spans the terminal.
-fn page_width(rows: usize, cols: usize) -> usize {
+/// The list pane's width at a terminal size and split percent: side by
+/// side it takes `split` percent, stacked it spans the terminal. The draw
+/// and the scroll clamp share it, so the window never follows past a line
+/// the pane hides.
+fn list_width(rows: usize, cols: usize, split: u8) -> (usize, bool) {
     let hint_h = if rows >= 8 { 2 } else { 0 };
     let panes_h = rows.saturating_sub(hint_h);
     let side_by_side = cols >= 100 && panes_h >= 10;
-    let pane_w = if side_by_side {
-        cols.saturating_sub(cols * 45 / 100)
+    if side_by_side {
+        (cols * split as usize / 100, true)
     } else {
-        cols
+        (cols, false)
+    }
+}
+
+/// The detail pane's body width at a terminal size and split.
+fn page_width(rows: usize, cols: usize, split: u8) -> usize {
+    let pane_w = match list_width(rows, cols, split) {
+        (list_w, true) => cols.saturating_sub(list_w),
+        (_, false) => cols,
     };
     pane_w.saturating_sub(2).max(10)
 }
@@ -571,8 +690,8 @@ pub(super) fn draw_detail(
     let now = crate::digest_overlay::now_secs();
     let hint_h = if rows >= 8 { 2 } else { 0 };
     let panes_h = rows.saturating_sub(hint_h);
-    let side_by_side = cols >= 100 && panes_h >= 10;
-    let list_w = if side_by_side { cols * 45 / 100 } else { cols };
+    let split = view.questions_block.split;
+    let (list_w, side_by_side) = list_width(rows, cols, split);
     // The list pane: one bold title row plus one dim meta row per question.
     let mut list_lines: Vec<backlog_style::BLine> = Vec::new();
     let mut cursor_line: Option<usize> = None;
@@ -591,7 +710,7 @@ pub(super) fn draw_detail(
             },
             backlog_style::BSeg {
                 text: title.to_string(),
-                role: backlog_style::BRole::Label,
+                role: title_role(q),
             },
         ]);
         title_line.band = i == d.idx;
@@ -615,7 +734,12 @@ pub(super) fn draw_detail(
     if list_lines.is_empty() {
         list_lines.push(backlog_style::BLine::meta("no questions in the fold"));
     }
-    let list_chrome = chrome::Chrome::new("questions", crate::popup::Anchor::Center).flat();
+    // One esc chip for the view, on the pane at its top-right corner: the
+    // page side by side, the list when stacked.
+    let mut list_chrome = chrome::Chrome::new("questions", crate::popup::Anchor::Center).flat();
+    if side_by_side {
+        list_chrome = list_chrome.without_close();
+    }
     let list_body: Vec<chrome::BodyLine> = list_lines
         .iter()
         .map(|l| backlog_style::to_body_line(&l.clone().pad_to(list_w.saturating_sub(2))))
@@ -641,13 +765,16 @@ pub(super) fn draw_detail(
     );
     // The detail pane: the cursor question's page, wrapped to the pane the
     // layout actually gave it (the full width when the panes stack).
-    let page = page_lines(d, page_width(rows, cols), now);
+    let page = page_lines(d, page_width(rows, cols, split), now);
     let page_follow = Some(d.scroll.min(page.len().saturating_sub(1)));
-    let detail_chrome = chrome::Chrome::new(
+    let mut detail_chrome = chrome::Chrome::new(
         format!("question \u{b7} {}", d.item().id),
         crate::popup::Anchor::Center,
     )
     .flat();
+    if !side_by_side {
+        detail_chrome = detail_chrome.without_close();
+    }
     let detail_body: Vec<chrome::BodyLine> = page
         .iter()
         .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_rect.3.saturating_sub(2))))
@@ -677,10 +804,10 @@ pub(super) fn draw_detail(
         if d.item().options.is_empty() {
             "Enter answer \u{b7} j/k scroll \u{b7} n notes \u{b7} Tab list \u{b7} Esc close"
         } else {
-            "1-9 option \u{b7} 0 none \u{b7} j/k select \u{b7} Enter sends \u{b7} n notes \u{b7} ^d/^u scroll \u{b7} Tab list \u{b7} Esc close"
+            "1-9 option \u{b7} 0 none \u{b7} a agents decide \u{b7} j/k select \u{b7} Enter sends \u{b7} n notes \u{b7} ^d/^u scroll \u{b7} x archive \u{b7} X archive all \u{b7} </> split \u{b7} Tab list \u{b7} Esc close"
         }
     } else {
-        "j/k move \u{b7} Enter opens \u{b7} Tab page \u{b7} n notes \u{b7} 0 none of these \u{b7} Esc close"
+        "j/k move \u{b7} Enter opens \u{b7} Tab page \u{b7} n notes \u{b7} 0 none of these \u{b7} x archive \u{b7} X archive all \u{b7} </> split \u{b7} Esc close"
     };
     if hint_h > 0 {
         let [a, b] = super::backlog_board::backlog_panes::hint_rows(hint, cols);
@@ -819,6 +946,24 @@ pub(super) fn maybe_kick(
     });
 }
 
+/// Kick a queued answer or archive off the UI loop; the result rides `tx`
+/// back. `question_acting` was set at enqueue time, so one send at a time.
+pub(super) fn kick_action(
+    view: &mut View,
+    tx: &tokio::sync::mpsc::UnboundedSender<Result<String, String>>,
+) {
+    let tx = tx.clone();
+    if let Some((qid, pick)) = view.question_action.take() {
+        tokio::spawn(async move {
+            let _ = tx.send(crate::needs_overlay::answer(&qid, pick).await);
+        });
+    } else if let Some(ids) = view.question_archive.take() {
+        tokio::spawn(async move {
+            let _ = tx.send(crate::needs_overlay::archive(ids).await);
+        });
+    }
+}
+
 /// The full questions view's keys. The notes input owns the keyboard while
 /// open (Enter saves or sends, Esc cancels); otherwise the list pane's j/k
 /// moves the cursor, Tab flips panes, digits (and 0 for none of these)
@@ -865,7 +1010,47 @@ pub(super) async fn detail_keys(
             }
             continue;
         }
+        let armed = std::mem::take(&mut d.archive_armed);
         match k {
+            b'x' | b'X' => {
+                let ids: Vec<String> = if k == b'x' {
+                    Some(d.item())
+                        .filter(|q| q.state == "open")
+                        .map(|q| q.id.clone())
+                        .into_iter()
+                        .collect()
+                } else {
+                    d.items
+                        .iter()
+                        .filter(|q| q.state == "open")
+                        .map(|q| q.id.clone())
+                        .collect()
+                };
+                if ids.is_empty() {
+                    d.notice = Some("no open question to archive".into());
+                } else if k == b'X' && !armed {
+                    d.archive_armed = true;
+                    d.notice = Some(format!(
+                        "press X again to archive {} open questions",
+                        ids.len()
+                    ));
+                } else if !view.question_acting {
+                    view.question_archive = Some(ids);
+                    view.question_acting = true;
+                }
+            }
+            b'a' => {
+                let (open, pin) = (d.item().state == "open", d.item().kind == "pin");
+                if !open {
+                    d.notice = Some("this question is answered - read only".into());
+                } else if pin {
+                    d.notice = Some("a pin has no delegate".into());
+                } else {
+                    d.delegate = true;
+                    d.sel = None;
+                    d.focus = true;
+                }
+            }
             b'j' => {
                 if !d.focus {
                     d.advance(1);
@@ -874,7 +1059,7 @@ pub(super) async fn detail_keys(
                     let (rows, cols) = view.term;
                     let lines = page_lines(
                         d,
-                        page_width(rows as usize, cols as usize),
+                        page_width(rows as usize, cols as usize, view.questions_block.split),
                         crate::digest_overlay::now_secs(),
                     )
                     .len();
@@ -898,7 +1083,7 @@ pub(super) async fn detail_keys(
                 let (rows, cols) = view.term;
                 let lines = page_lines(
                     d,
-                    page_width(rows as usize, cols as usize),
+                    page_width(rows as usize, cols as usize, view.questions_block.split),
                     crate::digest_overlay::now_secs(),
                 )
                 .len();
@@ -910,12 +1095,23 @@ pub(super) async fn detail_keys(
                 };
             }
             b'\t' => d.focus = !d.focus,
+            b'<' | b'>' => {
+                let split = &mut view.questions_block.split;
+                *split = if k == b'>' {
+                    split.saturating_add(5)
+                } else {
+                    split.saturating_sub(5)
+                }
+                .clamp(20, 80);
+                crate::view_store::save_questions_split(*split);
+            }
             b'0'..=b'9' => {
                 let n = (k - b'0') as u32;
                 let opts = &d.item().options;
                 let valid = n == 0 && !opts.is_empty() || opts.iter().any(|o| o.n == n);
                 if valid {
                     d.sel = Some(n);
+                    d.delegate = false;
                     d.focus = true;
                 }
             }
@@ -987,6 +1183,9 @@ fn submit(d: &mut Detail) -> Submit {
     }
     if item.kind == "pin" {
         return Submit::Queued((item.id, crate::needs_overlay::AnswerPick::Done));
+    }
+    if d.delegate {
+        return Submit::Queued((item.id, crate::needs_overlay::AnswerPick::Delegate));
     }
     if item.options.is_empty() {
         return Submit::OpenFree;
@@ -1060,6 +1259,19 @@ impl View {
                 self.questions_degraded_reason = Some(reason);
             }
         }
+        // A refold that shrinks the block keeps the cursor on a real line.
+        let stops = cursor_stops(self);
+        self.questions_block.cursor = self
+            .questions_block
+            .cursor
+            .and_then(|c| (stops > 0).then(|| c.min(stops - 1)));
+    }
+
+    /// The row list's selector, or none while the cursor is in the
+    /// questions block, so only one row wears the band.
+    pub(super) fn list_selector(&self) -> Option<usize> {
+        self.selector
+            .filter(|_| self.questions_block.cursor.is_none())
     }
 
     /// Apply a finished question answer: success re-folds so the row leaves
@@ -1127,7 +1339,7 @@ mod tests {
         show_done: bool,
         fold: &QuestionsFold,
     ) -> (Vec<Vec<Seg>>, Vec<String>, bool) {
-        block_layout(height, show_done, fold, 0)
+        block_layout(height, show_done, fold, 0, 40)
     }
 
     #[test]
@@ -1140,13 +1352,20 @@ mod tests {
             })
             .collect();
         let (lines, ids, more) = layout(H, false, &fold_with(items));
-        assert_eq!(lines[0][0].0, " questions 9 \u{b7} 2 ready");
+        // A blank row parts the block from the list, then the header band
+        // in the workspace header style, ruled out to the panel width.
+        assert_eq!(lines[0][0].0, "");
+        assert!(lines[1][0]
+            .0
+            .starts_with("questions 9 \u{b7} 2 ready \u{2500}"));
+        assert_eq!(lines[1][0].0.chars().count(), 40);
+        assert_eq!(lines[1][0].1, header_band_flags(false));
         // Height 8: header + 6 title/meta pairs, then the more line. Nine
         // items elide two, and the more line trades one row for the door.
         assert_eq!(ids.len(), 6, "six open rows carry ids at height 8");
         assert!(more);
-        assert_eq!(lines[7][0].0, " +3 more");
-        assert_eq!(lines.len(), 8, "nothing paints past the height");
+        assert_eq!(lines[8][0].0, " +3 more");
+        assert_eq!(lines.len(), 9, "nothing paints past the height");
 
         let (lines, ids, _) = layout(H, false, &fold_with(vec![]));
         assert!(lines.is_empty() && ids.is_empty());
@@ -1184,8 +1403,8 @@ mod tests {
         }];
         let (lines, ids, _) = layout(H, false, &fold);
         assert!(ids.is_empty(), "no open rows carry ids");
-        assert_eq!(lines.len(), 2, "header plus the count line");
-        assert!(lines[1][0].0.contains("1 answered"));
+        assert_eq!(lines.len(), 3, "head rows plus the count line");
+        assert!(lines[2][0].0.contains("1 answered"));
 
         let mut a = item("q-a", false);
         a.title = "slow lane".into();
@@ -1195,19 +1414,19 @@ mod tests {
         assert_eq!(ids[0], "q-b", "ready first");
         // One row per question: the bold title leads, the dim meta trails
         // on the same line.
-        assert_eq!(lines[1][0].0, " ? pick the door");
-        assert_eq!(lines[1][0].1, cell_flags::BOLD, "the title is bold");
-        assert!(lines[1][1].1 & cell_flags::DIM != 0, "meta is dim");
-        assert!(lines[1][1].0.contains("? -> none"), "{:?}", lines[1][1].0);
-        assert_eq!(lines[2][0].0, " ? slow lane", "the not-ready row follows");
+        assert_eq!(lines[2][0].0, " ? pick the door");
+        assert_eq!(lines[2][0].1, cell_flags::BOLD, "the title is bold");
+        assert!(lines[2][1].1 & cell_flags::DIM != 0, "meta is dim");
+        assert!(lines[2][1].0.contains("? -> none"), "{:?}", lines[2][1].0);
+        assert_eq!(lines[3][0].0, " ? slow lane", "the not-ready row follows");
 
         assert_eq!(crate::view_store::QUESTIONS_DEFAULT_HEIGHT, 4);
         let items: Vec<QuestionItem> = (0..9).map(|i| item(&format!("q-{i}"), true)).collect();
         let (lines, ids, more) = layout(4, false, &fold_with(items));
-        assert_eq!(lines.len(), 4, "header + 2 rows + more at the default");
+        assert_eq!(lines.len(), 5, "head rows + 2 rows + more at the default");
         assert_eq!(ids.len(), 2);
         assert!(more);
-        assert_eq!(lines[3][0].0, " +7 more");
+        assert_eq!(lines[4][0].0, " +7 more");
 
         let mut answered = item("q-old", true);
         answered.state = "answered".into();
@@ -1215,7 +1434,7 @@ mod tests {
         assert_eq!(ids.len(), 2, "both rows carry ids");
         assert_eq!(ids[0], "q-new", "open before answered");
         assert_eq!(
-            lines[2][0].1,
+            lines[3][0].1,
             cell_flags::BOLD | cell_flags::DIM,
             "the answered row reads as done"
         );
@@ -1427,6 +1646,53 @@ mod tests {
             v.question_action,
             Some(("q-pin".into(), crate::needs_overlay::AnswerPick::Done))
         );
+        // `a` on a pin refuses; there is nothing to decide.
+        v.question_action = None;
+        v.question_acting = false;
+        detail_keys(&mut v, b"a", &mut Vec::new()).await.unwrap();
+        let d = v.question_detail.as_ref().unwrap();
+        assert_eq!(d.notice.as_deref(), Some("a pin has no delegate"));
+
+        // `a` then Enter hands the question to the crown.
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
+        v.open_detail_on("q-1");
+        detail_keys(&mut v, b"a\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some(("q-1".into(), crate::needs_overlay::AnswerPick::Delegate))
+        );
+
+        // X arms archive-all on the first press and sends every open id on
+        // the second; any other key between disarms.
+        let mut v = view_with_agents(vec![]);
+        let mut done = item("q-d", true);
+        done.state = "answered".into();
+        v.questions_fold = Some(fold_with(vec![
+            item("q-a", true),
+            item("q-b", true),
+            item("q-c", false),
+            done,
+        ]));
+        v.open_questions_list();
+        detail_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
+        assert!(v.question_archive.is_none(), "one X archives nothing");
+        assert_eq!(
+            v.question_detail.as_ref().unwrap().notice.as_deref(),
+            Some("press X again to archive 3 open questions")
+        );
+        detail_keys(&mut v, b"jX", &mut Vec::new()).await.unwrap();
+        assert!(v.question_archive.is_none(), "a key between disarms");
+        detail_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_archive,
+            Some(vec!["q-a".into(), "q-b".into(), "q-c".into()])
+        );
+        // x archives the cursor question alone.
+        v.question_archive = None;
+        v.question_acting = false;
+        detail_keys(&mut v, b"x", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_archive, Some(vec!["q-b".into()]));
     }
 
     #[tokio::test]
@@ -1489,18 +1755,78 @@ mod tests {
         assert!(v.question_detail.is_none());
     }
 
-    #[test]
-    fn page_width_follows_the_layout_the_draw_uses() {
+    #[tokio::test]
+    async fn page_width_follows_the_layout_the_draw_uses() {
         // Stacked: the page wraps at the full terminal width.
-        assert_eq!(page_width(40, 80), 78);
+        assert_eq!(page_width(40, 80, 45), 78);
         // Side-by-side: the detail pane's own inner width.
-        assert_eq!(page_width(40, 100), 100 - 45 - 2);
+        assert_eq!(page_width(40, 100, 45), 100 - 45 - 2);
         // Tiny terminal: the width floors at ten.
-        assert_eq!(page_width(6, 8), 10);
+        assert_eq!(page_width(6, 8, 45), 10);
+
+        // > twice widens the list to 55 percent, saved, and the draw splits
+        // where page_width says.
+        let dir = std::env::temp_dir().join(format!("fno-q-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::view_store::set_test_path(&dir);
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
+        v.open_detail_on("q-1");
+        detail_keys(&mut v, b">>", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.questions_block.split, 55);
+        assert_eq!(crate::view_store::load_questions_split(), 55);
+        let (rows, cols) = (30usize, 120usize);
+        assert_eq!(page_width(rows, cols, 55), 120 - 66 - 2);
+        let mut cells = vec![Cell::default(); rows * cols];
+        draw_detail(&v, &mut cells, (rows, cols), (0, 0), (rows, cols));
+        // The detail frame's left corner sits where the list pane ends.
+        assert_eq!(cells[66].c, '\u{256d}', "the detail pane starts at col 66");
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn notes_box_on_a_tiny_terminal_stays_in_bounds() {
+    async fn draw_detail_rows() {
+        let mut answered = item("q-d", true);
+        answered.state = "answered".into();
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![
+            item("q-a", true),
+            item("q-b", true),
+            item("q-c", false),
+            answered,
+        ]));
+        v.open_questions_list();
+        let (rows, cols) = (30usize, 120usize);
+        v.term = (rows as u16, cols as u16);
+        let mut cells = vec![Cell::default(); rows * cols];
+        assert!(draw_detail(
+            &v,
+            &mut cells,
+            (rows, cols),
+            (0, 0),
+            (rows, cols)
+        ));
+        // Row 1 is the banded cursor; q-b, q-c, q-d titles sit at rows 3, 5, 7,
+        // each starting at the first `t` past the frame's pad and the mark.
+        let title = |r: usize| {
+            let row = &cells[r * cols..(r + 1) * cols];
+            *row.iter().find(|c| c.c == 't').expect("a title on the row")
+        };
+        assert_eq!(title(3).fg, Color::Default);
+        assert_ne!(title(3).flags & cell_flags::BOLD, 0, "ready reads bright");
+        assert_eq!(title(5).fg, Color::Default);
+        assert_eq!(
+            title(5).flags & cell_flags::BOLD,
+            0,
+            "not ready reads plain"
+        );
+        assert_eq!(title(7).fg, Color::Indexed(8), "answered reads muted");
+        for r in [3, 5, 7] {
+            assert_ne!(title(r).fg, Color::Indexed(3), "no olive title");
+        }
+
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
         v.open_detail_on("q-1");
@@ -1582,8 +1908,8 @@ mod tests {
         assert_eq!(v.notice.as_ref().unwrap().0, "questions block: hidden");
     }
 
-    #[test]
-    fn block_hit_rows() {
+    #[tokio::test]
+    async fn block_hit_rows() {
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(
             (0..9).map(|i| item(&format!("q-{i}"), true)).collect(),
@@ -1591,14 +1917,14 @@ mod tests {
         v.questions_block.visible = true;
         v.questions_block.height = 4;
         let b = block_rows(&v, 60).expect("the block reserves rows");
-        assert_eq!(b.n, 4);
+        assert_eq!(b.n, 5);
         assert!(b.more, "nine questions at height 4 leave more");
         v.questions_block.visible = false;
         assert!(block_rows(&v, 60).is_none(), "the toggle hides the block");
         v.questions_block.visible = true;
         v.questions_block.height = 2;
         let b = block_rows(&v, 60).expect("the block reserves rows");
-        assert_eq!(b.n, 2, "height 2: header plus one row");
+        assert_eq!(b.n, 3, "height 2: head rows plus one row");
 
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(
@@ -1606,22 +1932,67 @@ mod tests {
         ));
         v.questions_block.visible = true;
         v.questions_block.height = 4;
-        // term_rows 40, court 0: the block paints [36..40): header, 2 rows,
-        // the more line. Height 4 with nine items shows q-0 and q-1.
+        // term_rows 40, court 0: the block paints [35..40): blank, header,
+        // 2 rows, the more line. Height 4 with nine items shows q-0 and q-1.
         let court = v.court_block_layout(40).0;
-        let start = 40 - court - 4;
+        let start = 40 - court - 5;
         assert!(matches!(
-            hit_at(&v, 40, (start + 1) as u16),
+            hit_at(&v, 40, (start + 2) as u16),
             Some(QuestionHit::Row(id)) if id == "q-0"
         ));
         assert!(matches!(
-            hit_at(&v, 40, (start + 3) as u16),
+            hit_at(&v, 40, (start + 4) as u16),
             Some(QuestionHit::More)
         ));
-        assert!(hit_at(&v, 40, (start + 4) as u16).is_none());
-        assert!(
-            hit_at(&v, 40, start as u16).is_none(),
-            "the header is inert"
-        );
+        assert!(hit_at(&v, 40, (start + 5) as u16).is_none());
+        for r in [start, start + 1] {
+            assert!(
+                hit_at(&v, 40, r as u16).is_none(),
+                "the head rows are inert"
+            );
+        }
+
+        // The keyboard walks into the block from the last list stop.
+        let last = |v: &View| {
+            let mut cur = 0;
+            while v.selector_down(cur) != cur {
+                cur = v.selector_down(cur);
+            }
+            cur
+        };
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(
+            (0..3).map(|i| item(&format!("q-{i}"), true)).collect(),
+        ));
+        v.questions_block.height = 8;
+        let end = last(&v);
+        v.selector = Some(end);
+        selector_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.questions_block.cursor, Some(0));
+        assert_eq!(v.list_selector(), None, "only the block line is banded");
+        let b = block_rows(&v, v.term.0 as usize).unwrap();
+        assert_eq!(b.band, Some(HEAD_ROWS));
+        // k on the first line walks back out to the last list stop.
+        selector_keys(&mut v, b"k", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.questions_block.cursor, None);
+        assert_eq!(v.selector, Some(end));
+        assert_eq!(block_rows(&v, v.term.0 as usize).unwrap().band, None);
+        // A refold that shrinks the block clamps the cursor; an empty one
+        // clears it.
+        selector_keys(&mut v, b"jjj", &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(v.questions_block.cursor, Some(2));
+        v.apply_questions_fold(Ok(fold_with(vec![item("q-1", true)])));
+        assert_eq!(v.questions_block.cursor, Some(0));
+        // j then Enter opens the question and closes the selector.
+        selector_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().item().id, "q-1");
+        assert!(v.selector.is_none() && v.questions_block.cursor.is_none());
+        v.question_detail = None;
+        v.selector = Some(end);
+        selector_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        v.apply_questions_fold(Ok(fold_with(vec![])));
+        assert_eq!(v.questions_block.cursor, None);
     }
 }

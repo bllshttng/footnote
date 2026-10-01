@@ -16,9 +16,9 @@ Read this for a from-idea or multi-phase run when you want the whole phase map a
 │  validate        → Run tests / typecheck / build            │
 │  /ship-docs      → Architecture docs + how-to guides        │
 │  browser testing → If has_ui, run Chrome DevTools checks    │
-│  /pr create      → Create PR (fork to Haiku)                │
+│  /fno:ship pr create      → Create PR (fork to Haiku)                │
 │  review          → Native final-head review request         │
-│  /pr check       → Wait for external review + implement     │
+│  /fno:ship pr check       → Wait for external review + implement     │
 │  auto-merge      → Optional, only if auto_merge_approved    │
 └─────────────────────────────────────────────────────────────┘
          │
@@ -28,7 +28,7 @@ Read this for a from-idea or multi-phase run when you want the whole phase map a
 
 `/think` is not in this diagram (operator ruling). It is a research verb outside the delivery path, never a pipeline phase and never a `/blueprint` prerequisite. `/blueprint` grounds a bare idea itself via the discovery gate above, which runs `fno do think inspect` for a receipt. When a question needs deeper investigation than that receipt gives, run `/think` beforehand, only as a deliberate choice, never automatically.
 
-Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, get reviewed alongside the code, and are included in any auto-merge. Historic versions of this skill ran docs last, which led to docs landing in a follow-up PR whenever `auto_merge_approved: true` tripped immediately after external review.
+Docs and browser testing run BEFORE `/fno:ship pr create` so they ride in the same PR, get reviewed alongside the code, and are included in any auto-merge. Historic versions of this skill ran docs last, which led to docs landing in a follow-up PR whenever `auto_merge_approved: true` tripped immediately after external review.
 
 ## Philosophy
 
@@ -43,8 +43,8 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 | Validate | _(bash)_ | npm run build / pytest | Always | Opus (inline) |
 | Docs | `/ship-docs` | Architecture + how-to in parallel | Default YES, skip with `--no-docs` or config - runs BEFORE ship so docs ride in the same PR | **Sonnet** (agents) |
 | Browser | `/tdd` (browser-testing ref) | Human-like UI checks (advisory: runs and logs, never gates `<promise>`) | If `has_ui` - runs BEFORE ship | Sonnet (agent) |
-| Ship | /pr create | PR creation (fresh agent) | Always | **Haiku** (agent) |
-| External | `/pr check` | Wait for external review + implement | Default YES, skip with `--no-external` or config | Sonnet (review response), Opus (code fixes) |
+| Ship | /fno:ship pr create | PR creation (fresh agent) | Always | **Haiku** (agent) |
+| External | `/fno:ship pr check` | Wait for external review + implement | Default YES, skip with `--no-external` or config | Sonnet (review response), Opus (code fixes) |
 | Auto-merge | `${SKILL_DIR}/scripts/lib/pr-merge.sh` | Merge after external approves | If `auto_merge_approved: true` | n/a (shell) |
 
 See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to keep Opus inline vs spawn cheaper agents).
@@ -57,6 +57,6 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 - **review**: before the PR exists, run `/fno:review <size> --comment` (Codex `$fno:review <size> --comment`) on the final local HEAD, in the invoking session. Size: medium under 300 changed lines, high above, xhigh for risky surfaces. Require a positive result. The promise waits for the stop gate to read review coverage covered. Coverage means a clean round that tiles the head, or the budget spent. Findings hold on branch and HEAD. Once the PR opens, they post as one PR comment. Docs-only payloads and the explicit opt-out keep their exemptions.
 - **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.
 - **browser testing**: only if `has_ui`.
-- **/pr create + `<promise>`**: always. That is the deliverable.
+- **/fno:ship pr create + `<promise>`**: always. That is the deliverable.
 
 When unsure whether ceremony applies, prefer running it. But never let "did every phase fire?" gate the promise - completion is the world (PR green + reviewed), not a phase checklist.

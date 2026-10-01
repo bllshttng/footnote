@@ -6,7 +6,7 @@ rebase+repush cycle. ``fno workspace worktree ensure`` bases new worktrees off
 ``origin/main``, but the EnterWorktree and manual-worktree paths bypass it, so
 guard at PR-creation time where every path converges.
 
-One implementation (:func:`check_stale_base`), two call sites: the ``/pr create``
+One implementation (:func:`check_stale_base`), two call sites: the ``/fno:ship pr create``
 router shells ``fno do pr base-check``; ``fno agents worker ship`` imports the function
 directly. The bypass and the staleness rule live only here so both sites behave
 identically.

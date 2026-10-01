@@ -1294,7 +1294,11 @@ def resolve_owned_identity_cmd() -> None:
         # own_pair arrives from claims.self_identity (None when it could not);
         # the registry applies the agreement check, so this site never answers
         # the own-row question itself.
-        return row_owning_session_id(sid, self_binding=own_pair)
+        from fno.claims.session_pid import resolve_session_harness
+
+        return row_owning_session_id(
+            sid, self_binding=own_pair, walk_harness=resolve_session_harness()
+        )
 
     # Same injection seam self_stamp uses.
     from fno.agents.self_stamp import runtime_identity_witness

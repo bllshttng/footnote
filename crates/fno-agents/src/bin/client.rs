@@ -382,7 +382,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:
-    // the /pr create worker runs it against the attestation journal (global
+    // the /fno:ship pr create worker runs it against the attestation journal (global
     // state root by default) and appends its stdout to the body. Same
     // `matches!` treatment as `claim`/`detect` so the
     // routable-verb parity guard does not see it - it reads one file and

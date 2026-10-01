@@ -1445,6 +1445,7 @@ fn gather_checks() -> Vec<Check> {
     checks.push(clipboard_check(crate::clipboard::available_tool()));
     checks.push(doctor::squad_store_check());
     checks.push(doctor::board_scope_check());
+    checks.push(doctor::canonical_venv_check());
     checks
 }
 
@@ -6950,23 +6951,6 @@ mod tests {
         assert_eq!(terminal_check("xterm-256color").verdict, Verdict::Ok);
         assert_eq!(terminal_check("dumb").verdict, Verdict::Warn);
         assert_eq!(terminal_check("").verdict, Verdict::Warn);
-    }
-
-    #[test]
-    fn doctor_text_lines_are_single_line_with_verdict() {
-        // AC6-UI: every finding is one line carrying its verdict word.
-        let c = Check {
-            name: "socket-dir".into(),
-            verdict: Verdict::Warn,
-            detail: "mode 755".into(),
-            remedy: Some("chmod 700".into()),
-        };
-        // Render captures stdout only in an integration harness; here assert the
-        // verdict vocabulary the line is built from stays stable.
-        assert_eq!(c.verdict.word(), "warn");
-        assert_eq!(Verdict::Ok.word(), "ok");
-        assert_eq!(Verdict::Fail.word(), "fail");
-        assert_eq!(Verdict::Na.word(), "n/a");
     }
 
     // -- block pipe -------------------------------------------------

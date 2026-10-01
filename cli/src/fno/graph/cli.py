@@ -4274,10 +4274,8 @@ def cmd_roadmap(
     from fno.graph._intake import detect_project_from_settings, repo_root
     from fno.graph.roadmap_public import (
         atomic_write_documents,
-        leak_refusal_report,
         load_render_entries,
-        public_projection_entries,
-        public_title_leaks,
+        omit_leaky_rows,
         render_public_roadmap_md,
     )
 
@@ -4296,10 +4294,7 @@ def cmd_roadmap(
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    offenders = public_title_leaks(public_projection_entries(entries, resolved_project))
-    if offenders:
-        leak_refusal_report(f"{resolved_project} roadmap render", offenders)
-        raise typer.Exit(code=1)
+    entries, _ = omit_leaky_rows(entries, resolved_project)
 
     md = render_public_roadmap_md(entries, resolved_project)
 

@@ -105,16 +105,28 @@ fn hold_sidecar_path(handle: &str) -> PathBuf {
         .join(format!("{handle}.json"))
 }
 
-/// Find the registry row whose harness session id is `session_id`
-/// (case-normalized), returning its index.
+/// The one token-to-row rule, `hold.addresses` mirrored: a token addresses a
+/// row when it names its full session id (case-normalized), the row's
+/// canonical first-eight handle, its daemon short_id, or its name. The
+/// check-in resolves by full session id, the status verb by the short
+/// handle, senders by any of the four; one matcher so every reader of a hold
+/// answers the same question instead of the gate resolving fewer addresses
+/// than the writers stamp.
+fn row_matches_token(entry: &crate::state::RegistryEntry, token: &str) -> bool {
+    let wanted = identity_key(token);
+    entry.harness_session_id.as_deref().map_or(false, |sid| {
+        let key = identity_key(sid);
+        key == wanted || key.get(..8) == Some(wanted.as_str())
+    }) || entry.short_id == token
+        || entry.name == token
+}
+
+/// Find the registry row `session_id` addresses, returning its index.
 fn row_for_session(registry: &crate::state::Registry, session_id: &str) -> Option<usize> {
-    let wanted = identity_key(session_id);
-    registry.entries.iter().position(|e| {
-        e.harness_session_id
-            .as_deref()
-            .map(|sid| identity_key(sid) == wanted)
-            .unwrap_or(false)
-    })
+    registry
+        .entries
+        .iter()
+        .position(|e| row_matches_token(e, session_id))
 }
 
 /// Stamp the row `bus-only` (or clear the stamp for `--off`) under the
@@ -483,19 +495,13 @@ pub(crate) struct GateVerdict {
 }
 
 /// The registry row the gate's token addresses, as (harness session id,
-/// name, delivery policy). The three keys are the ones the Python token
-/// branch matched: full session id (case-normalized), short id, name.
+/// name, delivery policy), under the shared [`row_matches_token`] rule.
 fn lookup_gate_row(token: &str) -> Option<(String, String, Option<String>)> {
     let registry = load_registry(&AgentsHome::shared_registry_json()).ok()?;
-    let wanted = identity_key(token);
-    let entry = registry.entries.iter().find(|e| {
-        e.harness_session_id
-            .as_deref()
-            .map(|sid| identity_key(sid) == wanted)
-            .unwrap_or(false)
-            || e.short_id == token
-            || e.name == token
-    })?;
+    let entry = registry
+        .entries
+        .iter()
+        .find(|e| row_matches_token(e, token))?;
     Some((
         entry.harness_session_id.clone()?,
         entry.name.clone(),
@@ -1159,6 +1165,10 @@ pub(crate) mod tests {
             let status = self_status(SID).unwrap();
             assert_eq!(status["clock_live"], true);
             assert_eq!(status["delivery_policy"], "bus-only");
+            // The status verb addresses the same hold by the canonical
+            // short handle; the gate must hold on it, not deliver.
+            let first8 = identity_key(SID).get(..8).unwrap().to_string();
+            assert!(!gate(&first8, None, chrono::Utc::now()).deliver);
             std::fs::remove_file(clock_path(dir, SID)).unwrap();
             let status = self_status(SID).unwrap();
             assert_eq!(status["clock_live"], false);
@@ -1184,8 +1194,11 @@ pub(crate) mod tests {
         with_hold_env(|dir| {
             write_registry(dir, serde_json::json!([registry_row("worker", SID)]));
             assert_eq!(run_mail_hold(&["--session".into(), SID.into()]), 0);
+            // Off, addressed the way a sender or the status verb addresses
+            // the row: the canonical short handle, not the full session id.
+            let first8 = identity_key(SID).get(..8).unwrap().to_string();
             assert_eq!(
-                run_mail_hold(&["--session".into(), SID.into(), "--off".into()]),
+                run_mail_hold(&["--session".into(), first8, "--off".into()]),
                 0
             );
             assert!(!clock_path(dir, SID).exists(), "the clock file is gone");

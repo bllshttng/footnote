@@ -41,7 +41,7 @@ pub enum TerminationReason {
     /// A batch-lane member (batch-lane Wave 2/3): its commits live on a shared
     /// batch branch and ship via the batch PR, not its own, so there is no
     /// per-node PR to go green. Terminal, but NOT a ship reason - the batch's
-    /// own `/pr create` graduates the plan; a member must not.
+    /// own `/fno:ship pr create` graduates the plan; a member must not.
     DoneBatched,
     /// Work complete (PR open, mergeable, reviewed, HEAD shipped) but `done()`
     /// fails SOLELY on CI-green because main itself is red on the same checks,
@@ -1140,7 +1140,7 @@ pub(crate) fn decide_with_payload(
         // here means the member finished committing to the shared branch.
         // Terminal as DoneBatched - deliberately NOT a ship reason, so finalize
         // records the ledger entry but does NOT stamp/graduate the plan (the
-        // batch's own `/pr create` graduates it once, for all members). Comes
+        // batch's own `/fno:ship pr create` graduates it once, for all members). Comes
         // AFTER the advisory arm (a batched unit is not advisory: it sets
         // neither no_ship nor advisory) and BEFORE run_done so no PR is polled.
         if manifest.batched && intent == Intent::Promise {

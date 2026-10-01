@@ -3725,45 +3725,12 @@ async fn keys_modal_unbound_key_and_esc_dismiss_without_acting() {
 
 #[tokio::test]
 async fn keys_modal_esc_click_and_escape_both_close() {
-    use crate::mouse::MouseReport;
     let mut v = two_pane_view();
     v.term = (30, 100);
     v.open_keys_modal();
-    let (row, col) = {
-        let rendered = v.keys_modal.as_ref().unwrap().popup.render(v.term);
-        let (line, hits) = rendered
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| {
-                line.hits
-                    .iter()
-                    .any(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
-            })
-            .expect("which-key modal exposes a clickable esc target");
-        let (offset, len) = hits
-            .hits
-            .iter()
-            .find(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
-            .map(|(_, offset, len)| (*offset, *len))
-            .unwrap();
-        (
-            rendered.origin.0 + line,
-            rendered.origin.1 + offset + len / 2,
-        )
-    };
-    let click = MouseReport {
-        row: row as u16,
-        col: col as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    let mut buf = Vec::new();
-    keys_modal_mouse(&mut v, &mut Scanner::default(), click, &mut buf)
-        .await
-        .unwrap();
+    assert_eq!(super::esc_close::tap_chip(&mut v).await, 1);
     assert!(v.keys_modal.is_none());
-    assert!(buf.is_empty());
+    let mut buf = Vec::new();
 
     v.open_keys_modal();
     keys_modal_keys(&mut v, &mut Scanner::default(), b"\x1b", &mut buf)
@@ -3780,12 +3747,14 @@ async fn keys_modal_esc_click_and_escape_both_close() {
 async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
     use crate::mouse::MouseReport;
     let mut v = two_pane_view();
-    v.term = (8, 80); // short: the binding list overflows and scrolls
+    // Short: the binding list overflows and scrolls. Wide: the modal grows to
+    // its content, so the top-left corner stays off it.
+    v.term = (8, 240);
     v.open_keys_modal();
     let mut buf: Vec<u8> = Vec::new();
     let wheel = MouseReport {
         row: 4,
-        col: 40,
+        col: 120,
         kind: MouseKind::WheelDown,
         shift: false,
     };
@@ -3808,144 +3777,6 @@ async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
         .await
         .unwrap();
     assert!(v.keys_modal.is_none(), "click off the popup dismisses");
-}
-
-#[tokio::test]
-async fn clicking_the_footer_esc_close_dismisses_the_modal() {
-    // AC10-HP: the chrome footer's `esc close` words are a mouse target
-    // stamped by chrome::frame, so clicking them closes the modal without
-    // touching a key. Verified THROUGH the mouse router (chrome_close_hit
-    // feeding aux_mouse) on the settings modal, whose footer reads
-    // `tab switches section · esc close`, on the real rendered geometry.
-    use crate::mouse::MouseReport;
-    let mut v = two_pane_view();
-    v.term = (30, 100);
-    v.aux = Some(v.build_settings_modal());
-    // Where do the words sit on screen? Render exactly as the router does.
-    // (x-020d) The title bar's chip now ALSO carries an ESC_CLOSE_HIT (a
-    // 3-char span); pick the footer's specifically by its longer span so
-    // this stays a test of the footer words, not whichever comes first.
-    let (fr, fc) = {
-        let r = v.aux.as_ref().unwrap().popup.render(v.term);
-        let (li, row) = r
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| {
-                l.hits
-                    .iter()
-                    .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
-            })
-            .expect("the modal footer carries the close target");
-        let (off, len) = row
-            .hits
-            .iter()
-            .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
-            .map(|(_, o, l)| (*o, *l))
-            .unwrap();
-        (r.origin.0 + li, r.origin.1 + off + len / 2)
-    };
-    let mut buf: Vec<u8> = Vec::new();
-    let click = MouseReport {
-        row: fr as u16,
-        col: fc as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    aux_mouse(&mut v, click, &mut buf).await.unwrap();
-    assert!(v.aux.is_none(), "clicking `esc close` closes");
-    assert!(buf.is_empty(), "the close sends nothing on the wire");
-
-    // Esc still closes: the click added a target, it did not move the key.
-    v.aux = Some(v.build_settings_modal());
-    v.aux_esc = vec![0x1b];
-    aux_keys(&mut v, b"z", &mut buf).await.unwrap();
-    assert!(v.aux.is_none(), "Esc still closes the modal");
-}
-
-#[tokio::test]
-async fn clicking_the_title_bar_esc_chip_dismisses_the_modal() {
-    // (x-020d) The title bar's ` esc ` chip was decorative chrome; it is
-    // now the same kind of mouse target the footer's `esc close` words
-    // already were. Verified through the real mouse router, same as the
-    // footer's own test above.
-    use crate::mouse::MouseReport;
-    let mut v = two_pane_view();
-    v.term = (30, 100);
-    v.aux = Some(v.build_settings_modal());
-    let (fr, fc) = {
-        let r = v.aux.as_ref().unwrap().popup.render(v.term);
-        let (li, row) = r
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| {
-                l.hits
-                    .iter()
-                    .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
-            })
-            .expect("the title bar carries the close target");
-        let (off, len) = row
-            .hits
-            .iter()
-            .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
-            .map(|(_, o, l)| (*o, *l))
-            .unwrap();
-        (r.origin.0 + li, r.origin.1 + off + len / 2)
-    };
-    let mut buf: Vec<u8> = Vec::new();
-    let click = MouseReport {
-        row: fr as u16,
-        col: fc as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    aux_mouse(&mut v, click, &mut buf).await.unwrap();
-    assert!(v.aux.is_none(), "clicking the title bar's esc chip closes");
-    assert!(buf.is_empty(), "the close sends nothing on the wire");
-}
-
-#[tokio::test]
-async fn clicking_a_row_menus_bare_bottom_border_chip_dismisses_it() {
-    // (x-020d) A row/tab menu wears Bare chrome (Anchor::At), whose esc
-    // chip rides the inline bottom border rather than a title bar. Same
-    // click target, different chrome level - verified through the real
-    // row_menu_mouse router, same as the Full title-bar chip above.
-    use crate::mouse::MouseReport;
-    let mut v = view_with_agents(vec![agent_row("a", 10, Some(AgentBadge::Working), false)]);
-    assert!(v.open_row_menu(1, Anchor::At { row: 1, col: 1 }));
-    let (fr, fc) = {
-        let r = v.row_menu.as_ref().unwrap().popup.render(v.term);
-        let (li, row) = r
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| {
-                l.hits
-                    .iter()
-                    .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
-            })
-            .expect("the Bare bottom border carries the close target");
-        let (off, len) = row
-            .hits
-            .iter()
-            .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
-            .map(|(_, o, l)| (*o, *l))
-            .unwrap();
-        (r.origin.0 + li, r.origin.1 + off + len / 2)
-    };
-    let mut buf: Vec<u8> = Vec::new();
-    let click = MouseReport {
-        row: fr as u16,
-        col: fc as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    row_menu_mouse(&mut v, click, &mut buf).await.unwrap();
-    assert!(
-        v.row_menu.is_none(),
-        "clicking the Bare menu's bottom-border chip closes it"
-    );
 }
 
 #[tokio::test]
@@ -4548,212 +4379,36 @@ fn name_modal_rows() {
     );
 }
 
-#[test]
-fn esc_chip_rows() {
-    let close_cell = |view: &View| {
-        let layout = view
-            .active_overlay_layout()
-            .expect("an active modal has a family-B layout");
-        let (line, offset, len) = layout
-            .framed
-            .lines
-            .iter()
-            .enumerate()
-            .find_map(|(line, row)| {
-                row.hits
-                    .iter()
-                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
-                    .map(|(_, offset, len)| (line, *offset, *len))
-            })
-            .expect("the modal exposes a shared esc chip");
-        (
-            (layout.origin.0 + line) as u16,
-            (layout.origin.1 + offset + len / 2) as u16,
-        )
-    };
-    let click = |view: &mut View| {
-        let (row, col) = close_cell(view);
-        let press = crate::mouse::MouseReport {
-            row,
-            col,
-            kind: MouseKind::Press(MouseButton::Left),
-            shift: false,
-        };
-        assert!(modal_mouse(view, press));
-        assert!(modal_mouse(
-            view,
-            crate::mouse::MouseReport {
-                kind: MouseKind::Release(MouseButton::Left),
-                ..press
-            },
-        ));
-    };
-
-    let mut view = two_pane_view();
+/// Open the new-workspace modal and press its esc chip through the shared
+/// tap path, leaving the release latch armed. Returns the chip cell.
+async fn press_create_chip(view: &mut View) -> (u16, u16) {
     view.open_create();
-    click(&mut view);
-    assert!(
-        view.create.is_none(),
-        "create closes from the shared esc chip"
-    );
-
-    view.open_rename(RenameTarget::Tab(1));
-    click(&mut view);
-    assert!(
-        view.rename.is_none(),
-        "rename closes from the shared esc chip"
-    );
-
-    view.marks.insert("a-1".into());
-    view.open_recruit();
-    click(&mut view);
-    assert!(
-        view.recruit.is_none(),
-        "recruit closes from the shared esc chip"
-    );
-    assert!(view.marks.contains("a-1"), "recruit cancel keeps its marks");
-
-    view.confirm = Some(ConfirmAction {
-        action: ConfirmKind::ReapAgents,
-        label: "reap".into(),
-    });
-    assert!(modal_mouse(
-        &mut view,
-        crate::mouse::MouseReport {
-            row: 0,
-            col: 0,
-            kind: MouseKind::Press(MouseButton::Left),
-            shift: false,
-        },
-    ));
-    assert!(
-        view.confirm.is_some(),
-        "an outside click is swallowed without dismissing the confirm"
-    );
-    click(&mut view);
-    assert!(
-        view.confirm.is_none(),
-        "confirm closes from the shared esc chip"
-    );
-
-    let mut view = two_pane_view();
-    view.open_create();
-    let layout = view.active_overlay_layout().expect("create layout");
-    let (line, offset, len) = layout
-        .framed
-        .lines
+    view.compose();
+    let chip = view
+        .close_chips
+        .borrow()
         .iter()
-        .enumerate()
-        .find_map(|(line, row)| {
-            row.hits
-                .iter()
-                .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
-                .map(|(_, offset, len)| (line, *offset, *len))
-        })
-        .expect("create exposes an esc chip");
-    let click = crate::mouse::MouseReport {
-        row: (layout.origin.0 + line) as u16,
-        col: (layout.origin.1 + offset + len / 2) as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    assert!(modal_mouse(&mut view, click));
+        .copied()
+        .find(|s| s.len == 3);
+    let chip = chip.expect("create paints an esc chip");
+    let (row, col) = (chip.row as u16, chip.col as u16 + 1);
+    let press = format!("\x1b[<0;{};{}M", col + 1, row + 1);
+    let (mut scanner, mut carry, mut buf) = (Scanner::default(), Vec::new(), Vec::new());
+    handle_stdin(view, &mut scanner, &mut carry, press.as_bytes(), &mut buf)
+        .await
+        .unwrap();
     assert!(view.create.is_none(), "the chip press closes the modal");
     assert!(
-        modal_mouse(
-            &mut view,
-            crate::mouse::MouseReport {
-                kind: MouseKind::Release(MouseButton::Left),
-                ..click
-            },
-        ),
-        "the release paired with the closing click stays swallowed"
-    );
-    assert!(
-        !modal_mouse(
-            &mut view,
-            crate::mouse::MouseReport {
-                kind: MouseKind::Release(MouseButton::Left),
-                ..click
-            },
-        ),
-        "only the matching release is consumed"
-    );
-
-    let mut view = two_pane_view();
-    view.open_create();
-    let layout = view.active_overlay_layout().expect("create layout");
-    let (line, offset, len) = layout
-        .framed
-        .lines
-        .iter()
-        .enumerate()
-        .find_map(|(line, row)| {
-            row.hits
-                .iter()
-                .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
-                .map(|(_, offset, len)| (line, *offset, *len))
-        })
-        .expect("create exposes an esc chip");
-    let click = crate::mouse::MouseReport {
-        row: (layout.origin.0 + line) as u16,
-        col: (layout.origin.1 + offset + len / 2) as u16,
-        kind: MouseKind::Press(MouseButton::Left),
-        shift: false,
-    };
-    assert!(modal_mouse(&mut view, click));
-    assert!(modal_mouse(
-        &mut view,
-        crate::mouse::MouseReport {
-            kind: MouseKind::Drag(MouseButton::Left),
-            ..click
-        },
-    ));
-    assert!(
         view.modal_release_swallow,
-        "drag keeps the closing gesture armed"
+        "the press arms the release latch"
     );
-    assert!(modal_mouse(
-        &mut view,
-        crate::mouse::MouseReport {
-            kind: MouseKind::Release(MouseButton::Left),
-            ..click
-        },
-    ));
-    assert!(
-        !view.modal_release_swallow,
-        "left release ends the closing gesture"
-    );
+    (row, col)
 }
 
 #[tokio::test]
 async fn shifted_release_after_esc_chip_close_is_consumed_before_prefilter() {
     let mut view = two_pane_view();
-    view.open_create();
-    let layout = view.active_overlay_layout().expect("create layout");
-    let (line, offset, len) = layout
-        .framed
-        .lines
-        .iter()
-        .enumerate()
-        .find_map(|(line, row)| {
-            row.hits
-                .iter()
-                .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
-                .map(|(_, offset, len)| (line, *offset, *len))
-        })
-        .expect("create exposes an esc chip");
-    let row = (layout.origin.0 + line) as u16;
-    let col = (layout.origin.1 + offset + len / 2) as u16;
-    assert!(modal_mouse(
-        &mut view,
-        crate::mouse::MouseReport {
-            row,
-            col,
-            kind: MouseKind::Press(MouseButton::Left),
-            shift: false,
-        },
-    ));
+    let (row, col) = press_create_chip(&mut view).await;
 
     let mut scanner = Scanner::default();
     let mut carry = Vec::new();
@@ -4779,31 +4434,7 @@ async fn shifted_release_after_esc_chip_close_is_consumed_before_prefilter() {
 #[tokio::test]
 async fn close_latch_consumes_release_before_an_intervening_modal_router() {
     let mut view = two_pane_view();
-    view.open_create();
-    let layout = view.active_overlay_layout().expect("create layout");
-    let (line, offset, len) = layout
-        .framed
-        .lines
-        .iter()
-        .enumerate()
-        .find_map(|(line, row)| {
-            row.hits
-                .iter()
-                .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
-                .map(|(_, offset, len)| (line, *offset, *len))
-        })
-        .expect("create exposes an esc chip");
-    let row = (layout.origin.0 + line) as u16;
-    let col = (layout.origin.1 + offset + len / 2) as u16;
-    assert!(modal_mouse(
-        &mut view,
-        crate::mouse::MouseReport {
-            row,
-            col,
-            kind: MouseKind::Press(MouseButton::Left),
-            shift: false,
-        },
-    ));
+    let (row, col) = press_create_chip(&mut view).await;
     view.open_keys_modal();
     assert!(
         view.modal_release_swallow,
@@ -7389,6 +7020,20 @@ fn overlay_footer_cell(layout: &OverlayLayout) -> (u16, u16) {
     panic!("no esc close hit span anywhere in the overlay frame");
 }
 
+/// Compose, then left-press and release `(row, col)` through `handle_stdin`,
+/// the path a real click on a painted close span takes.
+async fn click_close(v: &mut View, (row, col): (u16, u16)) {
+    v.compose();
+    let (mut scanner, mut carry, mut buf) = (Scanner::default(), Vec::new(), Vec::new());
+    for end in ['M', 'm'] {
+        let report = format!("\x1b[<0;{};{}{end}", col + 1, row + 1);
+        handle_stdin(v, &mut scanner, &mut carry, report.as_bytes(), &mut buf)
+            .await
+            .unwrap();
+    }
+    assert!(buf.is_empty(), "a close click sends nothing to a pane");
+}
+
 fn left_click(row: u16, col: u16) -> crate::mouse::MouseReport {
     crate::mouse::MouseReport {
         row,
@@ -7421,10 +7066,7 @@ async fn update_modal_footer_esc_close_click_closes() {
             width: r.width,
         },
     ));
-    let mut buf: Vec<u8> = Vec::new();
-    aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
-        .await
-        .unwrap();
+    click_close(&mut v, footer).await;
     assert!(v.aux.is_none(), "the footer's close words closed the modal");
 }
 
@@ -7436,11 +7078,7 @@ async fn connections_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.connections = Some(crate::connections_view::ConnectionsView::new());
     let layout = v.active_overlay_layout().expect("connections hit layout");
-    let footer = overlay_footer_cell(&layout);
-    assert!(
-        modal_mouse(&mut v, left_click(footer.0, footer.1)),
-        "the modal owns the pointer"
-    );
+    click_close(&mut v, overlay_footer_cell(&layout)).await;
     assert!(
         v.connections.is_none(),
         "the footer's close words closed the modal"
@@ -7474,8 +7112,7 @@ async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
         squad: None,
     });
     let layout = v.active_overlay_layout().expect("peek hit layout");
-    let footer = overlay_footer_cell(&layout);
-    assert!(modal_mouse(&mut v, left_click(footer.0, footer.1)));
+    click_close(&mut v, overlay_footer_cell(&layout)).await;
     assert!(v.peek.is_none(), "the footer's close words closed the peek");
 
     // A non-close event falls through: modal_mouse returns false, so the

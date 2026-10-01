@@ -42,6 +42,42 @@ fn which_key_lists_the_dead_row_removal_verbs() {
             );
         }
     }
+    // The tail notes and the glyph legend each sit under their own header
+    // with one blank line before it, like the binding sections.
+    for head in ["right click", "sideline glyphs"] {
+        let at = labels.iter().position(|l| l == head).expect(head);
+        assert_eq!(labels[at - 1], "", "a blank line before {head}");
+    }
+    // Fit to the screen: no row ellipsizes at 160 columns or at 50; at 50 the
+    // widest rows wrap into inert continuations, and every binding row keeps
+    // its own chord.
+    for cols in [160u16, 50] {
+        let fitted = build_keys_modal().fit(cols);
+        assert_eq!(fitted.popup.rows.len(), fitted.row_events.len());
+        let r = fitted.popup.render((200, cols));
+        assert!(
+            r.lines.iter().all(|l| !l.text.contains('\u{2026}')),
+            "no ellipsis at {cols} columns"
+        );
+        let bound = |m: &KeysModal| {
+            m.popup
+                .rows
+                .iter()
+                .zip(&m.row_events)
+                .filter_map(|(row, ev)| match (row, ev) {
+                    (PopupRow::Entry { glyph, .. }, Some(ev)) => Some((glyph.clone(), ev.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bound(&fitted), bound(&modal), "chords follow at {cols}");
+        if cols == 50 {
+            assert!(
+                fitted.popup.rows.len() > modal.popup.rows.len(),
+                "rows wrap"
+            );
+        }
+    }
 }
 
 #[test]
@@ -55,7 +91,7 @@ fn client_compose_keys_modal_renders_the_which_key_reference() {
     view.term = (57, 80);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "chrome title present");
+    assert!(text.contains("Keybindings"), "chrome title present");
     assert!(text.contains("esc close"), "dismiss affordance present");
     assert!(
         text.contains("⏎ runs the selected chord"),
@@ -197,4 +233,59 @@ async fn menu_only_surfaces_open_from_their_new_chords() {
         "prefix+T arms the sweep counts probe"
     );
     assert!(buf.is_empty(), "nothing to the wire");
+}
+
+/// Mouse motion alone never scrolls or moves a menu: Move reports over every
+/// cell of a short terminal leave each popup's scroll and origin where they
+/// were, while a wheel report over the keys modal still scrolls it.
+#[tokio::test]
+async fn hover_never_scrolls_a_menu() {
+    use super::tests::{agent_row_at, blocked_row, view_with_agents};
+    fn popup(v: &View) -> &Popup {
+        let m = v.keys_modal.as_ref().map(|m| &m.popup);
+        m.or(v.row_menu.as_ref().map(|m| &m.popup))
+            .or(v.aux.as_ref().map(|m| &m.popup))
+            .expect("a menu is open")
+    }
+    let opens: [(&str, fn(&mut View)); 4] = [
+        ("menu", |v| v.open_sideline_menu(Anchor::Center)),
+        ("settings", |v| v.aux = Some(v.build_settings_modal())),
+        ("keys modal", |v| v.open_keys_modal()),
+        ("row menu", |v| {
+            let i = agent_row_at(v, |a| a.name == "w");
+            assert!(v.open_row_menu(i, Anchor::At { row: 1, col: 1 }));
+        }),
+    ];
+    for (name, open) in opens {
+        let mut v = view_with_agents(vec![blocked_row("w", 10, None)]);
+        v.term = (8, 80);
+        open(&mut v);
+        let (mut scanner, mut carry, mut buf) = (Scanner::default(), Vec::new(), Vec::new());
+        if name == "keys modal" {
+            let wheel = b"\x1b[<65;40;4M";
+            handle_stdin(&mut v, &mut scanner, &mut carry, wheel, &mut buf)
+                .await
+                .unwrap();
+            assert!(popup(&v).scroll > 0, "a wheel report scrolls");
+        }
+        let before = (popup(&v).scroll, popup(&v).render(v.term).origin);
+        for row in 1..=8 {
+            for col in 1..=80 {
+                v.compose();
+                let report = format!("\x1b[<35;{col};{row}M");
+                handle_stdin(
+                    &mut v,
+                    &mut scanner,
+                    &mut carry,
+                    report.as_bytes(),
+                    &mut buf,
+                )
+                .await
+                .unwrap();
+                let after = (popup(&v).scroll, popup(&v).render(v.term).origin);
+                assert_eq!(after, before, "{name}: Move at ({row}, {col})");
+            }
+        }
+        assert!(buf.is_empty(), "{name}: motion sends nothing to a pane");
+    }
 }

@@ -127,4 +127,4 @@ echo "└───────────────────────�
 echo ""
 echo "State: $STATE_FILE"
 echo ""
-echo "🚀 Skill will orchestrate: /execute → /review → /pr create"
+echo "🚀 Skill will orchestrate: /execute → /review → /fno:ship pr create"

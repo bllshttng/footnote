@@ -1838,7 +1838,7 @@ def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypat
     monkeypatch.setattr(
         failure,
         "read_events",
-        lambda: [
+        lambda *a, **k: [
             {"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}},
             {"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}},
         ],
@@ -1905,7 +1905,7 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
     monkeypatch.setattr(
         failure,
         "read_events",
-        lambda: [{"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}}],
+        lambda *a, **k: [{"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}}],
     )
     monkeypatch.setattr(
         adv.subprocess,

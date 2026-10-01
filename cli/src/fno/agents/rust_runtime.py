@@ -604,8 +604,8 @@ def rust_runtime_enabled() -> bool:
 _WORKER_DIR_VERBS = ("resume", "ask", "revive", "wake")
 
 _CODE_PAYLOAD_PREFIXES = frozenset(
-    "/target /execute /tdd /fix /pr /fno:target /fno:execute /fno:tdd "
-    "/fno:fix /fno:pr $fno:target $fno:execute $fno:tdd $fno:fix $fno:pr".split()
+    "/target /execute /tdd /fix /fno:target /fno:execute /fno:tdd "
+    "/fno:fix $fno:target $fno:execute $fno:tdd $fno:fix".split()
 )
 
 

@@ -84,6 +84,9 @@ pub struct Chrome {
     /// slots instead of the inverse chrome, so a framed surface sits on the
     /// terminal's own bg under every theme.
     flat: bool,
+    /// Whether the top border carries the esc chip. A multi-pane overlay
+    /// shows one chip, on the pane at its top-right corner.
+    closeable: bool,
 }
 
 impl Chrome {
@@ -97,7 +100,15 @@ impl Chrome {
             footer: None,
             level: Self::level_for(anchor),
             flat: false,
+            closeable: true,
         }
+    }
+
+    /// No esc chip on the top border (construction-time): the pane is one of
+    /// several in an overlay whose chip rides another pane.
+    pub fn without_close(mut self) -> Self {
+        self.closeable = false;
+        self
     }
 
     /// The flat frame (construction-time, like [`Self::full`]): border,
@@ -415,6 +426,61 @@ fn flat_role(r: Role) -> Role {
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
+/// One painted esc-close span in screen cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseSpan {
+    pub row: usize,
+    pub col: usize,
+    pub len: usize,
+}
+
+thread_local! {
+    /// The esc-close spans one compose painted, collected between
+    /// [`close_chips_begin`] and [`close_chips_end`]; `None` outside them.
+    static CLOSE_CHIPS: std::cell::RefCell<Option<Vec<CloseSpan>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start collecting the esc-close spans the painters put on screen.
+pub fn close_chips_begin() {
+    CLOSE_CHIPS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop collecting and return what the frame painted, top layer last.
+pub fn close_chips_end() -> Vec<CloseSpan> {
+    CLOSE_CHIPS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one painted line: it covers whatever span an earlier layer left
+/// under it, then adds its own esc-close spans, clipped to the screen.
+pub(crate) fn record_close_spans(
+    (rows, cols): (usize, usize),
+    (row, col0): (usize, usize),
+    width: usize,
+    hits: &[(usize, usize, usize)],
+) {
+    if row >= rows {
+        return;
+    }
+    CLOSE_CHIPS.with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(spans) = c.as_mut() else {
+            return;
+        };
+        spans.retain(|s| s.row != row || s.col + s.len <= col0 || s.col >= col0 + width);
+        for &(target, off, len) in hits {
+            let col = col0 + off;
+            if target == ESC_CLOSE_HIT && col < cols {
+                spans.push(CloseSpan {
+                    row,
+                    col,
+                    len: len.min(cols - col),
+                });
+            }
+        }
+    });
+}
+
 /// The `(column offset, column len)` of a footer's close affordance when it
 /// carries one: the words `esc close` when present, else a bare `esc`. Column
 /// offsets, so they compare against `inner_w` and land the hit span on the
@@ -505,6 +571,7 @@ pub fn blit(
             &line.roles,
             theme,
         );
+        record_close_spans((rows, cols), (r0 + i, c0), framed.width, &line.hits);
     }
 }
 
@@ -644,6 +711,7 @@ fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize)
 
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
+        Level::Bare if !chrome.closeable => edge_row('╭', '╮', '─', Vec::new(), inner_w),
         // Bare: `╭─ esc ─╮` - the chip rides the TOP border at every level,
         // so the affordance lives in one corner of every modal.
         Level::Bare => chip_border_row('╭', '╮', vec![('─', Role::Border)], inner_w),
@@ -661,7 +729,11 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
                 inner.push((' ', Role::Title));
                 inner.push(('─', Role::Border));
             }
-            chip_border_row('╭', '╮', inner, inner_w)
+            if chrome.closeable {
+                chip_border_row('╭', '╮', inner, inner_w)
+            } else {
+                edge_row('╭', '╮', '─', inner, inner_w)
+            }
         }
     }
 }

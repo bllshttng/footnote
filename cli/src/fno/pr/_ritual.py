@@ -1,6 +1,6 @@
 """fno do pr ritual - the mechanical core of the post-merge ritual.
 
-One idempotent verb runs the ~90% of ``skills/pr/references/merged.md`` that is
+One idempotent verb runs the ~90% of ``skills/ship/references/merged.md`` that is
 pure CLI orchestration. Per leg it shells the existing fno verb, captures the
 exit code, and prints one receipt line::
 
@@ -57,7 +57,7 @@ from fno.config import load_settings_for_repo
 from fno.paths import agents_home_dir
 from fno.pr._proc import Result, ToolMissing, run as _run
 
-# Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
+# Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:ship pr
 # merged` and an auto-dispatched worker cannot run the destructive middle
 # concurrently. 15m bounds a run that finishes in 1-3 min; the TTL is the
 # crash backstop.
