@@ -2499,6 +2499,24 @@ console.log("snapshot page helpers: 16 cases ok");
         );
     }
 
+    /// The page's filter state reads every key FILTER_KEYS iterates: one
+    /// missing key made filterParams throw "state[k] is not iterable" on
+    /// every fresh served board, and the served route drew no cards at all
+    /// (the snapshot copy tolerates the undefined, which is why only the
+    /// bridge showed it). Found live on the deployed binary on 2026-10-01.
+    #[test]
+    fn the_filter_state_reads_every_filter_key() {
+        for key in [
+            "project", "epic", "status", "priority", "size", "king", "kind",
+        ] {
+            let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
+            assert!(
+                BACKLOG_PAGE.contains(&line),
+                "the filter state must read {key} or filterParams throws at boot"
+            );
+        }
+    }
+
     /// Every board shortcut answers, and the typing guard holds: lift
     /// shortcutAction / isTypingTarget / copiedToast from the shipped page
     /// and drive each key the ? sheet advertises, under node.

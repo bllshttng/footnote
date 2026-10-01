@@ -421,6 +421,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     project: initial.getAll("project"), epic: initial.getAll("epic"),
     status: initial.getAll("status"), priority: initial.getAll("priority"),
     size: initial.getAll("size"), king: initial.getAll("king"),
+    kind: initial.getAll("kind"),
     q: initial.get("q") || "", all: initial.get("all") === "1", };
   // Collapse state survives the 10 s poll's rebuild: the lane keys whose
   // list section is closed.
