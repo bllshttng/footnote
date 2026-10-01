@@ -14,6 +14,7 @@ import contextlib
 import io
 import subprocess
 import sys
+from pathlib import Path
 
 # Family goldens live under cli/tests (the cost family child owns them);
 # fno resolves through the pinned worktree PYTHONPATH.
@@ -223,7 +224,7 @@ def _cli_env() -> dict:
     import os
 
     env = os.environ.copy()
-    src = str(REPO_ROOT / "cli" / "src")
+    src = str(Path(__file__).resolve().parents[3] / "cli" / "src")
     env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return env
 

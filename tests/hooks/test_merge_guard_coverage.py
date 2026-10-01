@@ -116,14 +116,14 @@ def test_dispatch_hold_veto_probes_the_front_door_once(monkeypatch):
     """The hold verdict comes from one `fno do pr hold-check` probe; the
     retired in-process fast path and its `python -m fno.cli` source fallback
     are gone, so the veto never imports the package or re-probes."""
-    calls = _patch_run(
+    seen = _patch_run(
         monkeypatch,
         _Proc(3, stderr="dispatch-hold:x-5a5c: blocked"),
     )
     msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
     assert msg == "dispatch-hold:x-5a5c: blocked"
-    assert len(calls) == 1
-    assert calls[0] == ["fno", "do", "pr", "hold-check", "900"]
+    assert seen["cmd"] == ["fno", "do", "pr", "hold-check", "900"]
+    assert seen["timeout"] <= 5
 
 
 @pytest.mark.parametrize(
