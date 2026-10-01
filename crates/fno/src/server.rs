@@ -5442,9 +5442,8 @@ impl Core {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
         };
-        // Screen text only: the line is fed to the seat's VT and never
-        // typed as shell input - a typed printf echoed and executed on the
-        // placeholder, so the operator read the same message three times.
+        // Screen text only: fed to the seat's VT, never typed as shell input
+        // (a typed printf executed on the placeholder; the operator read it 3x).
         let line = format!("{message}\r\n");
         entry.vt.feed(line.as_bytes());
     }
@@ -5460,10 +5459,9 @@ impl Core {
         let (cwd, _) = restore_member_cwd(stored_cwd, fallback_cwd, |path| {
             std::path::Path::new(path).is_dir()
         });
-        // The placeholder's identity rides its argv (the same wrapper the
-        // worker spawn path uses): every pane is keeper-hosted, so the
-        // placeholder outlives this server, and the next one re-derives whose
-        // seat it holds from the argv instead of minting a twin beside it.
+        // The placeholder's identity rides its argv: panes are keeper-hosted,
+        // so the placeholder outlives this server, and the next one re-derives
+        // whose seat it holds from the argv instead of minting a twin beside it.
         let pid = self.spawn_env_placeholder(
             format!("FNO_AGENT_SELF={}", facts.name),
             rows,
@@ -5519,8 +5517,8 @@ impl Core {
     /// fallback, the workspace resolution, the claude re-entry plan - so a
     /// bulk caller cannot drift from the single-gesture guards and grow a
     /// second-writer bug. The gesture wraps the outcome in notices and view
-    /// changes; `client_id` is consulted only when the claude plan must
-    /// resolve off-loop (the gesture replay path).
+    /// changes; `client_id` feeds the attached-and-driving admission test
+    /// and the off-loop claude plan resolution.
     ///
     /// `stored_hint` hands the driver's already-resolved member in; `None`
     /// resolves it from `name` exactly as the gesture always did.
@@ -5716,12 +5714,10 @@ impl Core {
             }
         }
         .unwrap_or(view.0);
-        // A claude row's resume runs the canonical re-entry
-        // plan; the `None` arm fires the off-loop resolution and the
-        // gesture replays with the verdict staged. A receipt-only row
-        // (no registry row) has no recorded binding, so its name
-        // misses the resolver and the visible refusal is the design -
-        // no bare claude resume on this axis.
+        // A claude row's resume runs the canonical re-entry plan; the
+        // `None` arm fires the off-loop resolution and the gesture replays
+        // with the verdict staged. A receipt-only row (no registry row)
+        // misses the resolver by design: no bare claude resume on this axis.
         let plan;
         let staged_argv;
         if facts.harness == "claude" {
@@ -5758,6 +5754,8 @@ impl Core {
             }
             plan = None;
         }
+        // The user's own tap: the attached-and-driving test [`Core::admit_gesture_pane`] uses.
+        let human = self.clients.iter().any(|c| c.id == client_id && !c.passive);
         let (pid, tid, fallback_notice) = match self.resume_worker_into(
             &facts,
             sid,
@@ -5766,6 +5764,7 @@ impl Core {
             dims.1,
             plan.as_ref(),
             staged_argv.as_deref(),
+            human,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -5808,10 +5807,8 @@ impl Core {
             .collect()
     }
 
-    /// The directory a resumed member spawns at, and the missing
-    /// recorded directory when it is gone. Extracted from
-    /// [`Core::resume_worker_into`] so the off-loop argv resolution grants
-    /// the SAME directory the spawn will use.
+    /// The spawn directory [`Core::resume_worker_into`] uses, plus the
+    /// missing recorded directory; the off-loop resolution grants the same.
     fn member_resume_cwd(&self, sid: u64, stored_cwd: Option<&str>) -> (String, Option<String>) {
         let fallback_cwd = self
             .session
@@ -5836,6 +5833,7 @@ impl Core {
         cols: u16,
         plan: Option<&ReentryVerdict>,
         staged_argv: Option<&[String]>,
+        human: bool,
     ) -> Result<(u64, TabId, Option<String>), String> {
         if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
@@ -5848,12 +5846,9 @@ impl Core {
                 facts.name
             )
         });
-        // A staged re-entry verdict replaces the bare provider argv;
-        // its `env` prefix carries the row's recorded account context. A
-        // non-claude row runs the argv the off-loop resume-argv resolution
-        // staged (: the codex grant + --cd ride it); without one it
-        // resumes exactly as before (the declared-form render, which is also
-        // the fail-open fallback the resolution stages on failure).
+        // A staged re-entry verdict (carrying the row's recorded account
+        // env) replaces the bare provider argv; without one the row resumes
+        // as before, the fail-open fallback the off-loop resolution stages.
         let argv = match plan {
             Some(verdict) => verdict.prefixed_argv(),
             None => match staged_argv {
@@ -5861,15 +5856,17 @@ impl Core {
                 None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
             },
         };
-        // Unit fixtures replace the provider with short-lived `/bin/cat`; it
-        // can exit before a keeper answers Identify. Production resumes use
-        // the keeper so the worker has the same ownership contract as a
-        // `pane run --worker` launch.
+        // Unit fixtures spawn short-lived `/bin/cat` inline; production
+        // resumes keep the keeper's ownership contract (`pane run --worker`).
         #[cfg(test)]
-        let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
+        let pid = {
+            let _ = human; // fixtures gate nothing; the flag is the prod arm's
+            self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?
+        };
         #[cfg(not(test))]
         let pid = {
-            let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+            let permit =
+                crate::process_admission::admit_fleet_for(human).map_err(|e| e.to_string())?;
             self.spawn_pane_shell_with_permit(&argv, rows, cols, &spawn_cwd, permit, true)?
         };
         if let Some(entry) = self.panes.get_mut(&pid) {
@@ -10201,6 +10198,9 @@ impl Core {
                             cols,
                             plan.as_ref(),
                             staged_argv.as_deref(),
+                            // Restore-revive keeps the brake's teeth: only the
+                            // tap gesture counts as human.
+                            false,
                         ) {
                             Ok((resumed, _, fallback_notice)) => {
                                 focus_pid = resumed;

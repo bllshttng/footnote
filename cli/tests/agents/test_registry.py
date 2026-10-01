@@ -209,6 +209,11 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
         short_id="abc123",
         harness_session_id=None,
         log_path="/tmp/my-agent.log",
+        context_used_pct=26,
+        context_used_tokens=258_687,
+        context_window_tokens=1_000_000,
+        context_measured_at="2026-09-30T12:00:00Z",
+        mail_unread=1,
     )
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -223,6 +228,11 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     assert e.short_id == "abc123"
     assert e.harness_session_id is None
     assert e.log_path == "/tmp/my-agent.log"
+    assert e.context_used_pct == 26
+    assert e.context_used_tokens == 258_687
+    assert e.context_window_tokens == 1_000_000
+    assert e.context_measured_at == "2026-09-30T12:00:00Z"
+    assert e.mail_unread == 1
     # AC1-HP: model provider is explicit and unset; removed session aliases die.
     raw_row = json.loads(registry_path.read_text())["agents"][0]
     assert raw_row["provider"] is None
@@ -895,7 +905,8 @@ def test_us2_schema_version_is_three() -> None:
     # attempt id and validated birth record).
     # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
-    assert SCHEMA_VERSION == 37
+    # v38: sweep-owned context and unread facts survive compatibility writes.
+    assert SCHEMA_VERSION == 38
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2473,14 +2484,12 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
     v21 schema (asdict emits the key on every written row, so a pre-v21
     reader must reject the store rather than silently drop the stamp)."""
     from fno.agents.registry import (
-        SCHEMA_VERSION,
         AgentEntry,
         load_registry,
         register_existing_session,
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 37
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2544,9 +2553,8 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     token is how a stored request stops being evidence of what was typed.
     """
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 37
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",

@@ -79,6 +79,11 @@
   "rust_only": {
     "$comment": "Keys the Rust daemon projection emits on top of `required`. A harmless superset: the Python list surface has no equivalent source field.",
     "keys": [
+      "context_used_pct",
+      "context_used_tokens",
+      "context_window_tokens",
+      "context_measured_at",
+      "mail_unread",
       "harness_title",
       "liveness",
       "liveness_basis",

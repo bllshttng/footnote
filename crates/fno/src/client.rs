@@ -85,6 +85,7 @@ use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
+#[cfg(test)]
 use sideline::sideline_column_rects;
 
 mod row_stamp;
@@ -133,7 +134,7 @@ const COL_TIME: u16 = 6;
 
 /// The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
-const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 7 + 4 + 2 + 1;
 /// The narrowest useful extended panel: fixed status/PR/age cells, a readable
 /// agent cell, and the divider. The message cell is omitted only below its
 /// eight-column floor; age is never dropped from an admitted table.
@@ -1054,6 +1055,8 @@ struct View {
     server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
+    org_board: Option<org_board::OrgBoard>,
+    org_generation: u64,
     sideline_view: crate::view_store::SidelineView,
     /// The board's full-screen toggle (persisted in the view store).
     board_full: bool,
@@ -1415,6 +1418,7 @@ mod questions;
 mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
+mod frame_tick;
 mod pane_paint;
 // Region input ownership + the mouse pre-pass, moved out of handle_stdin
 // under the file-budget ratchet.
@@ -1884,9 +1888,13 @@ pub(crate) enum AuxAction {
 
 mod backlog_board;
 mod backlog_style;
+mod chrome_hit;
 mod config_set;
 mod lane_entry;
 mod node_detail;
+mod org_board;
+mod org_detail;
+mod org_graph;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
@@ -2093,6 +2101,8 @@ impl View {
             backlog: Vec::new(),
             server_proto: None,
             backlog_board: None,
+            org_board: None,
+            org_generation: 0,
             sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
@@ -2889,6 +2899,7 @@ impl View {
             || self.peek.is_some()
             || self.digest.is_some()
             || self.backlog_board.is_some()
+            || self.org_board.is_some()
     }
 
     /// The narrower guard for the ROW/TAB menu paths (right-press
@@ -2923,6 +2934,7 @@ impl View {
             || self.yard.is_some()
             || self.digest.is_some()
             || self.backlog_board.is_some()
+            || self.org_board.is_some()
     }
 
     /// Open the owning agent's row menu for the pane under
@@ -4181,112 +4193,6 @@ impl View {
         (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
     }
 
-    /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
-    /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
-    /// for a row that isn't directly actionable (a work-only agent, a card).
-    /// `None` = not a chrome cell (the caller falls through to [`hit_test`]), so
-    /// clicking anywhere off the panel still reaches the pane underneath.
-    fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
-        let panel_w = self.panel_w();
-        if let Some(hit) = self.chrome_hit_feed(row, col) {
-            return Some(hit);
-        }
-        // The questions block pins above the court block: a click on its
-        // rows opens the full questions view on that question; the `+N more`
-        // row opens the list. The header toggles nothing here (the key does).
-        if col < panel_w {
-            match questions::hit_at(self, self.term.0 as usize, row) {
-                Some(questions::QuestionHit::Row(id)) => {
-                    return Some(ChromeHit::OpenQuestionDetail(id));
-                }
-                Some(questions::QuestionHit::More) => {
-                    return Some(ChromeHit::OpenQuestionsList);
-                }
-                None => {}
-            }
-        }
-        // Tab strip (row 0, scoped to the content columns since US1): it
-        // begins at `panel_w`, walking the same spans the renderer paints (with
-        // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
-        // belongs to the sideline's reclaimed row 0 and falls through below.
-        // `panel_w == 0` (no sideline) -> strip from col 0, unchanged.
-        if row < TAB_BAR_ROWS && col >= panel_w {
-            let col = col as usize;
-            if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
-                if col >= start && col < start + text.chars().count() {
-                    return None;
-                }
-            }
-            let mut c = panel_w as usize;
-            for span in self.tab_bar_window() {
-                let w = tab_text_cols(&span.text);
-                if col >= c && col < c + w {
-                    return match span.hit? {
-                        TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
-                        TabHit::NewTab => Some(ChromeHit::Cmds(vec![Command::NewTab])),
-                    };
-                }
-                c += w;
-            }
-            return None;
-        }
-        // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel. Under the docked
-        // board the column is the board's own surface: no agents rows, no
-        // footer, no density button - a click must resolve nothing here or
-        // it acts on a phantom row.
-        if self.sideline_view == crate::view_store::SidelineView::Backlog {
-            return None;
-        }
-        let paint_w = self.sideline_paint_w();
-        if paint_w == 0 || col as usize >= paint_w - 1 {
-            return None;
-        }
-        // Full-screen sideline paints below the strip; invert the same
-        // offset the painter used.
-        let top = self.sideline_top();
-        if (row as usize) < top {
-            return None;
-        }
-        // The bottom row is overlaid by the status / which-key / search chrome
-        // (draw_bottom_row paints last), so a click there belongs to that chrome,
-        // not the sideline row drawn underneath it (codex P2).
-        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
-            return None;
-        }
-        // The density button rides the sideline's top painted row, over
-        // whatever display row is scrolled to it. It is chrome pinned to the
-        // first PAINTED row, not a property of that row, so the check is on
-        // the painted row and must precede the display-row resolution below.
-        if row == top as u16 && !self.sideline_full {
-            // In full-screen the button is not painted, so a hit there would
-            // cycle a density the screen does not show.
-            if let Some(range) = self.density_button_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::CycleDensity);
-                }
-            }
-        }
-        // Display row i is painted at `i - offset` (draw_sideline, since
-        // the sideline owns the top painted row), so invert with the paint
-        // offset - else a click on a scrolled row activates the wrong row.
-        // Mirrors sideline_row_at.
-        let i = row as usize - top + self.sideline_offset();
-        if let Some(hit) = self.table_header_hit(i, col) {
-            return Some(hit);
-        }
-        // US4: a click on the footer's `☰ menu` region opens the sideline
-        // MENU popup; the rest of the footer row keeps its `+ new` create action.
-        if matches!(self.painted_rows().get(i), Some(DisplayRow::NewSquad)) {
-            if let Some(range) = self.footer_menu_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::OpenSidelineMenu { row, col });
-                }
-            }
-        }
-        self.row_action(i)
-    }
-
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
         if (self.density != Density::Extended && !self.sideline_full)
             || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
@@ -4294,7 +4200,7 @@ impl View {
             return None;
         }
         let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = sideline_column_rects(text_w as u16);
+        let rects = self.worker_column_rects(text_w as u16);
         let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
         if hit(rects[0]) {
             Some(ChromeHit::SortColumn(AgentSortColumn::Status))
@@ -5281,12 +5187,15 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
 
+        let agents_full =
+            self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
+
         // Full-screen sideline: the agent table takes the terminal width
         // with the composer at the bottom, and the panes do not paint. The
         // strip still owns row 0, so the sideline composes below it (the
         // click mappers invert the same offset via `sideline_top`), and the
         // server's viewport is untouched - no `Resize` travels either way.
-        if self.sideline_full {
+        if agents_full {
             self.draw_tab_bar(&mut cells, cols);
             let top = TAB_BAR_ROWS as usize;
             self.draw_sideline(&mut cells[top * cols..], rows - top, cols, cols);
@@ -5297,7 +5206,7 @@ impl View {
             }
         }
 
-        if !self.sideline_full {
+        if !agents_full {
             let origin_r = TAB_BAR_ROWS as usize;
             let origin_c = panel_w as usize;
             // Blit, frames, underline, grips, indicator, letterbox +
@@ -5528,6 +5437,8 @@ impl View {
                 // drive the selection below the fold. +1 for the query line.
                 Some(nav.cursor + 1),
             );
+        } else if self.org_board.is_some() && self.board_full {
+            org_board::paint(self, &mut cells, rows, cols, cols, rows);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -5547,6 +5458,8 @@ impl View {
             && self.row_menu.is_none()
             && self.aux.is_none()
             && self.backlog_board.is_none()
+            && !(self.org_board.is_some()
+                && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
         {
             if let Some((_, rect)) = self
                 .layout
@@ -6254,22 +6167,6 @@ impl View {
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
         out.into_iter().unzip()
-    }
-
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
-        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
-        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
-        rows.insert(0, DisplayRow::TableHead);
-        depths.insert(0, 0);
-        if !has_agent {
-            rows.insert(1, DisplayRow::TableEmpty);
-            depths.insert(1, 0);
-        }
-        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -7570,7 +7467,9 @@ const NAV_OVERLAY_W: usize = 54;
 // every `use super::*` renderer and test reading the same paths as before.
 #[cfg(test)]
 pub(crate) use crate::lattice::LATTICE_ACCENT;
-pub(crate) use crate::lattice::{lattice_glyph, lattice_style, status_word, LatticeState};
+pub(crate) use crate::lattice::{
+    lattice_glyph, lattice_style, status_glyph, status_word, LatticeState,
+};
 
 /// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
@@ -8005,6 +7904,7 @@ async fn attach_and_run(
             focus_node: None,
         },
     );
+    org_board::restore(&mut view);
     // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
@@ -8172,6 +8072,7 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<theme_import_ui::ImportMsg>();
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
+    let (org_tx, mut org_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, org_detail::OrgMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -8278,7 +8179,7 @@ async fn attach_and_run(
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
-
+    crate::lattice::start_spin();
     let exit: Result<i32, String> = loop {
         // kick a wanted event-fold off the UI loop, at most ONE in
         // flight (P2-5). Runs at loop top so a want re-armed from either the
@@ -8304,6 +8205,7 @@ async fn attach_and_run(
         theme_import_ui::maybe_kick(&mut view, &theme_import_tx);
         // the backlog board's probe/gather kick, the same single-flight.
         backlog_board::maybe_kick(&mut view, &board_tx);
+        org_board::maybe_kick(&mut view, &org_tx);
         // a queued board write verb runs off the UI loop too.
         if let Some(action) = view
             .backlog_board
@@ -8517,23 +8419,9 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
         // Refresh timer; the deadline is None while a fold runs.
         let court_tick = view.court.refresh_deadline();
-        // The yard's frame cycling is a flavour channel on a timer:
-        // while the overlay is open, wake at the next frame boundary so the
-        // spotlight animates on an otherwise idle terminal (nothing else
-        // redraws there). Re-armed each loop pass, so the cadence holds until
-        // the overlay closes; closed -> no deadline, no wakeups.
-        let yard_tick = view.yard.as_ref().map(|yv| {
-            let step = YARD_FRAME_MS as u64;
-            let elapsed = yv.opened_at.elapsed().as_millis() as u64;
-            yv.opened_at + Duration::from_millis((elapsed / step + 1) * step)
-        });
+        let frame_tick = view.frame_deadline();
         // The meter's one-shot spawn: the settings toggle sets
         // `resource_meter_sampling`, and the loop - which owns meter_tx -
         // starts the sampler here, exactly once per toggle-on. A fresh
@@ -8965,6 +8853,12 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((gen, msg)) = org_rx.recv() => {
+                org_detail::apply(&mut view, gen, msg);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -9230,11 +9124,11 @@ async fn attach_and_run(
                 }
             }
             _ = async {
-                match yard_tick {
+                match frame_tick {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
                 }
-            }, if yard_tick.is_some() => {
+            }, if frame_tick.is_some() => {
                 // Frame advance only: compose() uses the elapsed time, so the
                 // wake repaints (and re-arms the next deadline next pass).
                 if let Err(e) = compositor.draw(&view.compose()) {
@@ -12372,6 +12266,7 @@ mod court_block;
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
 
+mod row_meter;
 #[path = "client/sideline.rs"]
 mod sideline;
 

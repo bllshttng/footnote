@@ -92,7 +92,9 @@ esac
 # strictly increasing. Wall-clock ns would regress if NTP steps the clock
 # backward between the two reports (dropping the `done`, pinning the badge at
 # `working`); the monotonic clock is host-global across processes and never
-# steps back. A missing/garbled session id -> silent exit 0.
+# steps back within one boot. A reboot restarts it at zero, so the daemon also
+# accepts a low seq that arrives long after the stored report
+# (`InsideLegReport::yields_to`). A missing/garbled session id -> silent exit 0.
 INPUT=$(cat)
 PARSED=$(python3 -c '
 import sys, json, time
