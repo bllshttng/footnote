@@ -20,6 +20,26 @@ from fno.cli import app
 from fno import target_cli
 
 runner = CliRunner()
+_REAL_BINDING = target_cli._target_binding
+
+
+@pytest.fixture(autouse=True)
+def _no_native_binding(monkeypatch):
+    """The binding verdict is native; tests that read it opt back in."""
+    monkeypatch.setattr(target_cli, "_target_binding", lambda *a, **k: None)
+
+
+def _binding_answers(monkeypatch, receipt):
+    """Route the transport to a canned native receipt and record payloads."""
+    calls = []
+
+    def _verb_call(verb, payload, *a, **k):
+        calls.append((list(verb), dict(payload)))
+        return dict(receipt)
+
+    monkeypatch.setattr(target_cli, "_target_binding", _REAL_BINDING)
+    monkeypatch.setattr("fno.rust_binary.verb_call", _verb_call)
+    return calls
 
 
 def test_target_init_help_documents_inputs():
@@ -50,6 +70,8 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
 
     class _Result:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
         # Capture the bash init shell-through specifically. init() also runs git
@@ -84,6 +106,32 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
     assert captured["env"].get("TARGET_START") == "1"
     assert captured["env"].get("TARGET_INPUT") == "fix-login"
     assert captured["env"].get("TARGET_PLAN_PATH") == str(plan)
+
+    # A named node asks the native binding owner first. adopt rides into the
+    # script as its verdict; forked exits 3 with the child's start command
+    # and never reaches the script.
+    monkeypatch.setattr(
+        target_cli, "_resolve_dispatch_node", lambda *a, **k: {"id": "x-4fb6"}
+    )
+    monkeypatch.setattr(target_cli, "_refuse_dispatch_hold", lambda *a, **k: None)
+    calls =_binding_answers(monkeypatch, {"verdict": "adopt", "pr": 2868})
+    captured.clear()
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-4fb6"])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == ["backlog", "target-binding", "--stdin"]
+    assert calls[0][1]["node"] == "x-4fb6" and calls[0][1]["phase"] == "init"
+    assert captured["env"].get("FNO_TARGET_BINDING") == "adopt"
+    assert captured["env"].get("TARGET_ADOPTED_PR") == "2868"
+
+    _binding_answers(monkeypatch, {
+        "verdict": "forked", "effective_node": "x-c1d1",
+        "message": "target binding: FORKED", "next": "fno do target start x-c1d1 --no-merge",
+    })
+    captured.clear()
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-4fb6 watch expiry"])
+    assert result.exit_code == 3, result.output
+    assert "fno do target start x-c1d1 --no-merge" in result.output
+    assert "cmd" not in captured
 
 
 def _fake_plugin_root(tmp_path):
@@ -1409,11 +1457,13 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     assert "run `/fno:target x-6320`" not in result.output
 
 
-def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch):
+def test_target_start_refusals_and_forks_land_before_a_worktree(tmp_path, monkeypatch):
     """sigma: `init` caught it, but only after `start` allocated the worktree.
 
     The operator got a refusal saying "Nothing was claimed" sitting next to an
-    orphan directory and branch they had to remove by hand.
+    orphan directory and branch they had to remove by hand. The binding
+    verdict holds the same line: a refusal allocates nothing, and a fork
+    starts the child instead of the parent.
     """
     _contained_graph(tmp_path, monkeypatch)
     ensured = []
@@ -1437,6 +1487,24 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     result = runner.invoke(app, ["do", "target", "start", "x-261c"])
     assert result.exit_code == 2, result.output
     assert ensured == [], "worktree was allocated before the redirect fired"
+
+    calls = _binding_answers(monkeypatch, {
+        "verdict": "refused", "message": "target binding: REFUSED: node x-4fb6",
+        "next": 'fno do target start "x-4fb6 <scope>"',
+    })
+    result = runner.invoke(app, ["do", "target", "start", "x-4fb6"])
+    assert result.exit_code == 1, result.output
+    assert calls[0][1]["phase"] == "start" and calls[0][1]["input"] == "x-4fb6"
+    assert ensured == [], "worktree was allocated before the binding refusal"
+
+    _binding_answers(monkeypatch, {
+        "verdict": "forked", "effective_node": "x-261c", "effective_plan": None,
+        "message": "target binding: FORKED",
+    })
+    result = runner.invoke(app, ["do", "target", "start", "x-4fb6 watch expiry"])
+    # The child (here a contained node) is what start goes on to resolve.
+    assert result.exit_code == 2, result.output
+    assert ensured == []
 
 
 def test_check_contained_reads_through_the_keeper(tmp_path, monkeypatch):
