@@ -837,13 +837,22 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
 def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
     """x-6390: the manifest is write-once, so --beastmode against an initialized
     session is a no-op - and a dropped grant looks exactly like no grant. Say it."""
+    original_run = target_cli.subprocess.run
+
     class _Result:
         returncode = 0
         stdout = ""
         stderr = ""
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
-        return _Result()
+        # Narrow to the init shell-through: the manifest read's harness
+        # discovery also shells out (claims/session_pid), and a bare _Result
+        # made that walk raise AttributeError, which read_target_manifest
+        # swallows - the manifest then read as body-keys-only and phase 2
+        # denied a grant the fixture grants. Everything else answers for real.
+        if list(cmd)[:1] == ["bash"]:
+            return _Result()
+        return original_run(cmd, check=check, env=env, **kwargs)
 
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
