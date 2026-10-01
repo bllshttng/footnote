@@ -45,16 +45,22 @@ pub(super) async fn tap(
 
 /// Compose, then tap the top layer's esc chip with a real SGR press and
 /// release through `handle_stdin`. Returns how many ` esc ` chips the frame
-/// painted (footer `esc close` words are close spans too, not chips).
+/// painted. A chip sits on a top border, one space before its corner; a
+/// footer's `esc close` or `esc cancel` words are close spans too, not chips.
 #[cfg(test)]
 pub(super) async fn tap_chip(v: &mut View) -> usize {
-    v.compose();
+    let text = crate::vt::frame_text(&v.compose());
+    let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+    let on_border = |s: &chrome::CloseSpan| {
+        let c = lines.get(s.row).and_then(|l| l.get(s.col + s.len + 1));
+        c.is_some_and(|c| ('\u{2500}'..='\u{257f}').contains(c))
+    };
     let chips: Vec<chrome::CloseSpan> = v
         .close_chips
         .borrow()
         .iter()
         .copied()
-        .filter(|s| s.len == 3)
+        .filter(|s| s.len == 3 && on_border(s))
         .collect();
     let Some(s) = chips.last() else {
         return 0;

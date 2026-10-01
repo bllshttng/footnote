@@ -250,9 +250,12 @@ fn update_modal_names_stale_processes_and_offers_restart() {
                 line.text
             );
         }
-        assert!(r.width + 4 <= cols as usize, "fits the screen at {cols}");
+        assert!(r.width <= cols as usize, "fits the screen at {cols}");
         if cols == 200 {
-            assert!(r.width > crate::popup::WIDTH_CAP, "grows past the old cap");
+            assert!(
+                r.width > crate::popup::WIDTH_CAP + 4,
+                "grows past the old cap"
+            );
         }
         assert_eq!(fitted.actions, wide.actions, "actions follow at {cols}");
     }
