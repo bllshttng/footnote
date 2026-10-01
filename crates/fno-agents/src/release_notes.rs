@@ -345,8 +345,14 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The builder's whole contract in one declaration (the suite is
+    /// shrink-only): grouping with highlights excluded from their groups and
+    /// churn hidden, feat-lead when no feat exists, the chores fallback,
+    /// null degrades, the 60-merge window, origin URLs, and
+    /// case-insensitive type prefixes.
     #[test]
-    fn notes_group_by_area_and_hide_churn() {
+    fn release_notes_contract() {
+        // Grouping, hiding, highlights, and the hidden count.
         let dir = tempfile::tempdir().unwrap();
         let (base, _head) = merge_repo(
             dir.path(),
@@ -371,11 +377,10 @@ mod tests {
         let agents = &notes["groups"][0]["lines"];
         assert_eq!(agents[0]["pr"], 104);
         assert_eq!(agents[0]["text"], "stop the crash");
+        assert_eq!(agents[0]["url"], Value::Null);
         assert_eq!(notes["hidden_line"], "3 test/docs/ci/chore PRs hidden");
-    }
 
-    #[test]
-    fn notes_without_feats_lead_with_first_two_visible() {
+        // No feats: the first two visible lead.
         let dir = tempfile::tempdir().unwrap();
         let (base, _head) = merge_repo(
             dir.path(),
@@ -388,10 +393,8 @@ mod tests {
         let notes = build(&base, dir.path());
         assert_eq!(prs_of(&notes, "highlights"), [202, 201]);
         assert_eq!(notes["hidden_line"], "1 test/docs/ci/chore PR hidden");
-    }
 
-    #[test]
-    fn notes_of_only_churn_show_chores_group() {
+        // Only churn: the chores group IS the release.
         let dir = tempfile::tempdir().unwrap();
         let (base, _head) = merge_repo(
             dir.path(),
@@ -407,21 +410,36 @@ mod tests {
         assert_eq!(areas, ["chores"]);
         assert_eq!(notes["highlights"].as_array().map(Vec::len), Some(0));
         assert!(notes["hidden_line"].is_null());
-    }
 
-    #[test]
-    fn notes_are_null_without_parseable_merges() {
+        // Degrades: no parseable merges and a bad rev both answer null.
         let dir = tempfile::tempdir().unwrap();
         let (base, _head) = merge_repo(dir.path(), &[]);
         assert!(build(&base, dir.path()).is_null());
-        // A bad rev degrades to null too, never a panic.
         assert!(build("deadbeefdead", dir.path()).is_null());
-    }
 
-    #[test]
-    fn origin_url_reads_ssh_and_https_remotes() {
+        // The 60-merge window names what it left out.
         let dir = tempfile::tempdir().unwrap();
-        merge_repo(dir.path(), &[]);
+        let prs: Vec<(u64, &str)> = (1..=65)
+            .map(|n| (n, "feat(mux): fill the window"))
+            .collect();
+        let (base, _head) = merge_repo(dir.path(), &prs);
+        let notes = build(&base, dir.path());
+        let shown: usize = notes["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["lines"].as_array().map(Vec::len).unwrap_or(0))
+            .sum::<usize>()
+            + notes["highlights"].as_array().unwrap().len();
+        assert!(shown <= 62, "window kept {shown} rows");
+        let hidden_line = notes["hidden_line"].as_str().unwrap();
+        assert!(
+            hidden_line.contains("newest 60 of 65 merges shown"),
+            "hidden_line: {hidden_line}"
+        );
+
+        // Origin remotes give every line a tappable URL; capitalized type
+        // prefixes strip like their lowercase kin.
         run_git_ok(
             dir.path(),
             &["remote", "add", "origin", "git@github.com:o/r.git"],
@@ -443,49 +461,14 @@ mod tests {
             origin_pr_url_base(dir.path()).as_deref(),
             Some("https://github.com/o2/r2/pull")
         );
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _head) = merge_repo(dir.path(), &[(501, "Fix(mux): stop the crash")]);
+        let notes = build(&base, dir.path());
+        assert_eq!(notes["highlights"][0]["text"], "stop the crash");
     }
 
     fn run_git_ok(dir: &Path, args: &[&str]) {
         let out = git_env().args(args).current_dir(dir).output().unwrap();
         assert!(out.status.success());
-    }
-
-    #[test]
-    fn conventional_titles_strip_prefix_in_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let (base, _head) = merge_repo(dir.path(), &[(401, "fix(mux): wrap the overlay")]);
-        let notes = build(&base, dir.path());
-        assert_eq!(notes["highlights"][0]["text"], "wrap the overlay");
-    }
-
-    #[test]
-    fn notes_window_names_what_it_left_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let prs: Vec<(u64, &str)> = (1..=65)
-            .map(|n| (n, "feat(mux): fill the window"))
-            .collect();
-        let (base, _head) = merge_repo(dir.path(), &prs);
-        let notes = build(&base, dir.path());
-        let shown: usize = notes["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|g| g["lines"].as_array().map(Vec::len).unwrap_or(0))
-            .sum::<usize>()
-            + notes["highlights"].as_array().unwrap().len();
-        assert!(shown <= 62, "window kept {shown} rows");
-        let hidden_line = notes["hidden_line"].as_str().unwrap();
-        assert!(
-            hidden_line.contains("newest 60 of 65 merges shown"),
-            "hidden_line: {hidden_line}"
-        );
-    }
-
-    #[test]
-    fn capitalized_type_prefixes_still_strip() {
-        let dir = tempfile::tempdir().unwrap();
-        let (base, _head) = merge_repo(dir.path(), &[(501, "Fix(mux): stop the crash")]);
-        let notes = build(&base, dir.path());
-        assert_eq!(notes["highlights"][0]["text"], "stop the crash");
     }
 }

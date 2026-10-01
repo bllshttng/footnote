@@ -316,6 +316,7 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
         installed_rev: Some("a".repeat(40)),
         source_rev: Some("b".repeat(40)),
         changelog: vec![format!("feat: {long}")],
+        release_notes: None,
         guidance: long.clone(),
         degraded: None,
         running: vec![],
@@ -650,13 +651,11 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
     assert!(headers.contains(&"fix(x): thing"));
     assert!(headers.contains(&"feat(y): other thing"));
     assert!(headers.iter().any(|h| h.contains("14 shells survive")));
-}
 
-/// Shaped release notes win over the raw changelog: highlights first, then
-/// area groups, then the hidden count. A line with a URL is a tappable Entry
-/// carrying OpenPr; the action list pairs with selectable rows by index.
-#[test]
-fn update_modal_renders_release_notes_with_tappable_prs() {
+    // Shaped notes win over the raw changelog: highlights lead as tappable
+    // Entries carrying OpenPr (actions pair with selectable rows by index),
+    // area groups follow as Headers, the hidden count renders, and a notes
+    // payload with no rows falls back to the raw subjects.
     let notes = ReleaseNotes {
         highlights: vec![ReleaseNoteLine {
             pr: Some(105),
@@ -709,20 +708,13 @@ fn update_modal_renders_release_notes_with_tappable_prs() {
     assert!(headers.contains(&"mux"));
     assert!(headers.contains(&"stop the crash (#104)"));
     assert!(headers.contains(&"3 test/docs/ci/chore PRs hidden"));
-    // Raw changelog suppressed when shaped notes exist.
     assert!(!headers.contains(&"fix(x): raw subject"));
-    // Actions pair by selectable-row index: the one OpenPr, no restart.
     assert_eq!(
         modal.actions,
         vec![AuxAction::OpenPr("https://github.com/o/r/pull/105".into())]
     );
-}
 
-/// An empty shaped-notes payload (no highlights, no group lines) falls back
-/// to the raw changelog rather than rendering nothing.
-#[test]
-fn update_modal_falls_back_to_changelog_when_notes_empty() {
-    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+    let empty = UpdateOutcome::Ok(UpdateReadiness {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
@@ -738,7 +730,7 @@ fn update_modal_falls_back_to_changelog_when_notes_empty() {
         running_stale: 0,
         source_pin: None,
     });
-    let modal = build_update_modal(Some(&outcome.clone().into()));
+    let modal = build_update_modal(Some(&empty.clone().into()));
     let headers: Vec<&str> = modal
         .popup
         .rows
@@ -750,3 +742,4 @@ fn update_modal_falls_back_to_changelog_when_notes_empty() {
         .collect();
     assert!(headers.contains(&"fix(x): raw subject"));
 }
+
