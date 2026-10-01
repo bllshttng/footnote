@@ -298,6 +298,7 @@ mod tests {
             reason: None,
             received_at: "2026-08-01T00:00:30Z".into(),
             ttl_ms: None,
+            posture: None,
         });
         assert_eq!(ladder(&e), RowLiveness::Alive);
     }

@@ -697,6 +697,7 @@ mod tests {
             reason: None,
             received_at: "2020-01-01T00:00:00Z".into(),
             ttl_ms: Some(1),
+            posture: None,
         });
         reg.entries.push(hooked);
         // Not mux-hosted: nothing to read.
@@ -749,6 +750,7 @@ mod tests {
             reason: None,
             received_at: NOW_STAMP.into(),
             ttl_ms: None,
+            posture: None,
         });
         assert_eq!(
             write_disposition(&row, &scraped),

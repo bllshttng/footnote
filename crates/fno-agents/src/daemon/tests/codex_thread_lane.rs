@@ -1596,6 +1596,7 @@ async fn codex_thread_resume_writes_above_the_row_seq() {
             reason: None,
             received_at: "2020-01-01T00:00:00Z".into(),
             ttl_ms: None,
+            posture: None,
         });
         registry.entries.push(entry);
     })
@@ -1661,6 +1662,7 @@ fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
         reason: None,
         received_at: "2020-01-01T00:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     };
 
     // Working: accepted, no notify, scrape verdict cleared.
@@ -1741,6 +1743,7 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
         reason: reason.map(String::from),
         received_at: "2020-01-01T00:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     };
 
     // Working at seq 1 lands with no intent.
