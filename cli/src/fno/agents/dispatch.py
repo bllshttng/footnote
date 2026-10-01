@@ -6250,13 +6250,11 @@ def _mux_content_confirm(
 def _delivery_policy_refusal(
     target, body: Optional[str] = None, park: bool = False
 ) -> Optional[str]:
-    """:data:`BUS_ONLY_POLICY` when the Rust hold gate holds mail to
-    ``target``; ``None`` otherwise. One-call port of the gate body to
-    ``mail_hold.rs`` ``gate``: the gate owns row resolution, the clock sweep,
-    the own-send and ``control:`` passes, and the receipt. A failed or
-    unreadable gate on a stamped row fails closed. With ``park`` (the raw
-    door), a held body is parked and the park receipt comes back instead.
-    Never raises."""
+    """:data:`BUS_ONLY_POLICY` when the Rust hold gate holds mail to ``target``;
+    ``None`` otherwise. One-call port of the gate body to ``mail_hold.rs``
+    ``gate``: the gate owns row resolution through ``hold.addresses``, the clock
+    sweep, the own-send/``control:`` passes, and the receipt; a failed gate on a
+    stamped row fails closed, ``park`` returns the park receipt, never raises."""
     if target is None:
         return None
     if hasattr(target, "delivery_policy"):
@@ -6265,11 +6263,7 @@ def _delivery_policy_refusal(
         token = getattr(target, "harness_session_id", None) or getattr(target, "name") or ""
     else:
         token = target
-        # The one resolution rule, hold.addresses: name, short id, full
-        # session id, canonical handle. A registry read failure never blocks
-        # delivery.
         from fno.mail.hold import addresses as hold_addresses
-
         try:
             stamped = any(
                 getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
