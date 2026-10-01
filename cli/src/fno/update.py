@@ -1384,6 +1384,154 @@ def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optiona
     return refresh_cmds, await_bin
 
 
+_UPDATE_EVENT_TYPES = (
+    "fno_update_started",
+    "fno_update_built",
+    "fno_update_installed",
+    "fno_update_failed",
+)
+
+
+def _read_current_installed_rev() -> Optional[str]:
+    try:
+        from fno import doctor
+
+        return doctor._read_marker()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _front_fno_bin() -> Optional[str]:
+    try:
+        from fno.pr_watch.cli import _resolve_fno_binary
+
+        return _resolve_fno_binary()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _crown_mail_cmd(fno_bin: str, body: str) -> list[str]:
+    return [fno_bin, "agents", "mail", "team", "--scope", "kings", "--subject", "fno-update", body]
+
+
+def _mail_crowns(fno_bin: Optional[str], body: str) -> None:
+    if not fno_bin:
+        return
+    try:
+        subprocess.run(
+            _crown_mail_cmd(fno_bin, body), capture_output=True, text=True, check=False, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        typer.echo(f"fno doctor update: WARNING: crown mail not sent: {exc}", err=True)
+
+
+def _emit_update_event(type_name: str, **data) -> None:
+    """Best-effort journal row for the update lifecycle.
+
+    The journal is the visibility a lead reads (`fno doctor update --status`),
+    never a gate: a failed write warns on stderr and the update proceeds."""
+    try:
+        import datetime as _dt
+
+        from fno.events import append_event
+        from fno.paths import global_events_json
+
+        event = {
+            "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "type": type_name,
+            "source": "python",
+            "data": {k: v for k, v in data.items() if v is not None},
+        }
+        append_event(event, global_events_json())
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"fno doctor update: WARNING: {type_name} event not journaled: {exc}", err=True)
+
+
+def _render_update_status() -> None:
+    """`fno doctor update --status`: the newest update event, one line.
+
+    JSON on a non-TTY so a script reads the same answer the operator does."""
+    from fno.events.store_client import EventStoreUnavailable, query_rows
+    from fno.paths import global_events_json
+
+    try:
+        rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES), limit=1000)
+    except EventStoreUnavailable as exc:
+        typer.echo(f"fno doctor update --status: the event store is unreadable: {exc}", err=True)
+        raise typer.Exit(1)
+    last = rows[-1] if rows else None
+    if last is None:
+        typer.echo("no fno doctor update has been journaled on this machine")
+        return
+    if not sys.stdout.isatty():
+        typer.echo(json.dumps(last, ensure_ascii=False))
+        return
+    data = last.get("data") or {}
+    parts = [str(last.get("type")), str(last.get("ts"))]
+    for key in ("old_rev", "new_rev", "outcome", "reason", "stage", "source_path"):
+        if key in data:
+            value = str(data[key])
+            parts.append(f"{key}={value[:12] if key.endswith('_rev') else value}")
+    typer.echo(" ".join(parts))
+
+
+def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[str]) -> list[str]:
+    data: dict = {"new_rev": rev or "unknown"}
+    if old_rev:
+        data["old_rev"] = old_rev
+    return [
+        fno_bin,
+        "doctor",
+        "event",
+        "emit",
+        "--type",
+        "fno_update_installed",
+        "--source",
+        "python",
+        "--global",
+        "--data",
+        json.dumps(data),
+    ]
+
+
+def _shell_fail_clause(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
+    """The `||` tail chained onto the exec'd installer: journal the failure,
+    mail the crowns, and re-exit with the installer's own code. The exit code
+    travels through the shell (`execvp` never returns here), so the JSON is
+    assembled by `printf` with `$rc` as the one substitution."""
+    template = json.dumps(
+        {
+            "reason": "install exited %s",
+            "stage": "install",
+            **({"old_rev": old_rev} if old_rev else {}),
+            **({"new_rev": rev} if rev else {}),
+        }
+    )
+    # The data arg stays OUTSIDE shlex.quote: shlex.quote would escape the
+    # `$`, and the whole point is shell expansion of the captured exit code.
+    emit = " ".join(
+        shlex.quote(t)
+        for t in [
+            fno_bin,
+            "doctor",
+            "event",
+            "emit",
+            "--type",
+            "fno_update_failed",
+            "--source",
+            "python",
+            "--global",
+            "--data",
+        ]
+    ) + ' "$FNO_UPDATE_FAIL_DATA"'
+    mail_body = '"fno doctor update FAILED: install exited $rc."'
+    mail = f"{shlex.quote(fno_bin)} agents mail team --scope kings --subject fno-update {mail_body}"
+    return (
+        f"rc=$?; FNO_UPDATE_FAIL_DATA=$(printf {shlex.quote(template)} \"$rc\"); "
+        f"{emit} >/dev/null 2>&1 || true; "
+        f"{mail} >/dev/null 2>&1 || true; exit $rc"
+    )
+
 def update_command(
     source: Optional[Path] = typer.Option(
         None,
@@ -1415,6 +1563,11 @@ def update_command(
         "--check",
         help="Print update readiness as JSON and exit without installing.",
     ),
+    status: bool = typer.Option(
+        False,
+        "--status",
+        help="Print the last journaled update event and exit.",
+    ),
 ) -> None:
     """Reinstall fno from its source directory.
 
@@ -1431,8 +1584,17 @@ def update_command(
     rust = rust is True
     no_rust = no_rust is True
     check = check is True
+    status = status is True
     if not isinstance(source, Path):
         source = None
+
+    if status:
+        if check or dry_run or rust or force or no_rust:
+            raise typer.BadParameter(
+                "--status cannot be combined with --check, --dry-run, --rust, --force, or --no-rust"
+            )
+        _render_update_status()
+        return
 
     if check:
         if dry_run or rust or force:
@@ -1602,13 +1764,34 @@ def update_command(
         )
         raise typer.Exit(1)
 
+    # Machine-global mutations start here, so this is where the update gets a
+    # journal trail: started now, built after the cargo leg, installed/failed
+    # from the post-install chain (Unix) or in-process (Windows). This is also
+    # where the cargo legs are marked as an install build:
+    # law d-829648bb - nothing stops fno loading for the user - so the
+    # admission doors (crates/fno-agents/src/test_run.rs) let them past the
+    # tests hold and the worker run-slot queue; they serialize only on the
+    # one-at-a-time build:cargo claim.
+    os.environ["FNO_INSTALL_BUILD"] = "1"
+    old_rev = _read_current_installed_rev()
+    _emit_update_event(
+        "fno_update_started",
+        new_rev=rev or "unknown",
+        old_rev=old_rev,
+        source_path=str(resolved),
+    )
+
+    rust_outcome = None
     if not no_rust:
-        # Outcome string deliberately dropped (locked decision 4:
-        # warn-and-continue). The helper prints one line per path, and on
-        # Unix execvp below replaces this process, so an exit-code channel
-        # for the rust leg is unreachable from here anyway. `fno doctor
-        # --fix` is the caller that branches on the outcome.
-        _refresh_rust_bins(resolved, force=rust, dry_run=False)
+        # Outcome still never branches control flow (locked decision 4:
+        # warn-and-continue); it rides the fno_update_built row so a lead
+        # reading the journal sees what the cargo leg concluded.
+        rust_outcome = _refresh_rust_bins(resolved, force=rust, dry_run=False)
+        _emit_update_event(
+            "fno_update_built",
+            outcome=rust_outcome or "none",
+            rust_rev=_rust_subtree_rev(resolved),
+        )
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
@@ -1621,10 +1804,26 @@ def update_command(
             _write_installed_rev(rev)
         if result.returncode == 0:
             # Best-effort, mirroring the Unix chain: refresh each agent onto the
-            # new binary but never let a failure change the update exit code.
+            # new binary but never let a failure name a success it did not have.
             # List form (no shell) so subprocess handles Windows quoting.
             for _argv in refresh_cmds:
                 subprocess.run(_argv, check=False)
+            _emit_update_event("fno_update_installed", new_rev=rev or "unknown", old_rev=old_rev)
+            _mail_crowns(
+                _front_fno_bin(),
+                f"fno doctor update installed {(rev or 'unknown')[:8]}"
+                + (f" (was {old_rev[:8]})" if old_rev else "")
+                + ".",
+            )
+        else:
+            _emit_update_event(
+                "fno_update_failed",
+                reason=f"installer exited {result.returncode}",
+                stage="install",
+                old_rev=old_rev,
+                new_rev=rev,
+            )
+            _mail_crowns(_front_fno_bin(), f"fno doctor update FAILED: installer exited {result.returncode}.")
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
@@ -1634,7 +1833,23 @@ def update_command(
     # installer via the shell so they run iff the install exits 0.
     # `;` not `&&`: the refreshes are independent and best-effort, so a wedged
     # watcher must not skip the groom agent.
-    post_install = "; ".join(shlex.join(c) for c in refresh_cmds) or None
+    # The installed fact and the crown mail chain BEFORE the refreshes: they
+    # are the two facts the node exists for, so no refresh crash may eat them.
+    installed_body = (
+        f"fno doctor update installed {(rev or 'unknown')[:8]}"
+        + (f" (was {old_rev[:8]})" if old_rev else "")
+        + "."
+    )
+    _fno_bin = _front_fno_bin()
+    post_steps: list[str] = []
+    if _fno_bin:
+        post_steps.append(shlex.join(_installed_event_argv(_fno_bin, rev, old_rev)))
+        post_steps.append(shlex.join(_crown_mail_cmd(_fno_bin, installed_body)))
+    post_steps += [shlex.join(c) for c in refresh_cmds]
+    post_install = "; ".join(post_steps) or None
+
+    fail_clause = _shell_fail_clause(_fno_bin, old_rev, rev) if _fno_bin else None
+    fail_suffix = f" || {{ {fail_clause}; }}" if fail_clause else ""
     if rev:
         os.execvp(
             "/bin/sh",
@@ -1644,7 +1859,7 @@ def update_command(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
                     post_install=post_install, await_binary=_await_bin,
                     install_sh=install_sh,
-                ),
+                ) + fail_suffix,
             ],
         )
     elif post_install:
@@ -1654,9 +1869,9 @@ def update_command(
             "/bin/sh",
             ["/bin/sh", "-c",
              f"{install_sh or shlex.join(cmd)} && "
-             f"{{ {_await_binary(post_install, _await_bin)} }}"],
+             f"{{ {_await_binary(post_install, _await_bin)} }}{fail_suffix}"],
         )
     elif install_sh:
-        os.execvp("/bin/sh", ["/bin/sh", "-c", install_sh])
+        os.execvp("/bin/sh", ["/bin/sh", "-c", install_sh + fail_suffix])
     else:
         os.execvp(cmd[0], cmd)
