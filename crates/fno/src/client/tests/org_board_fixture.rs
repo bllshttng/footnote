@@ -107,6 +107,10 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
         "dependency edge has a visible endpoint"
     );
     assert!(first[0].contains('▶'), "selected Lead is marked");
+    assert!(
+        b.lines(100, 20)[0].text.ends_with("· ▶ finch L1 team"),
+        "the header names the selected box without its border"
+    );
     b.move_graph_cursor(true);
     let moved = b.graph_lines(100, 20);
     assert!(!moved[0].contains('▶'));

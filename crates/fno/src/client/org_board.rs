@@ -434,7 +434,8 @@ impl OrgBoard {
             if let Some(cached) = memo.as_ref() {
                 if let Some((_, key)) = cached.5.iter().find(|(i, _)| *i == self.cursor) {
                     if let Some(placed) = cached.4.boxes.iter().find(|p| &p.key == key) {
-                        header.push(seg(format!(" · ▶ {}", placed.text), BRole::Meta));
+                        let label = placed.text.trim_matches(['┌', '┐', '├', '└', ' ']);
+                        header.push(seg(format!(" · ▶ {label}"), BRole::Meta));
                     }
                 }
             }
