@@ -120,8 +120,8 @@ fn release_degraded_and_current_render_one_header_and_no_action() {
 
 /// A tap queues the upgrade once; a second tap says one is running; the
 /// verdict lands as a notice and re-arms the probe. The restart tap queues
-/// nothing: nothing inflight, it unwinds the run loop (the foreground
-/// restart); anything inflight, it says so and stays.
+/// nothing: nothing inflight, it detaches with the restart armed (run_inner
+/// runs the foreground restart); anything inflight, it says so and stays.
 #[tokio::test]
 async fn upgrade_tap_queues_once_and_verdict_rearms_probe() {
     let mut v = view_with_agents(vec![]);
@@ -130,9 +130,11 @@ async fn upgrade_tap_queues_once_and_verdict_rearms_probe() {
         execute_aux_action(&mut v, AuxAction::RestartAgents, &mut buf)
             .await
             .unwrap(),
-        DispatchFlow::RestartMux
+        DispatchFlow::Detach
     ));
+    assert!(v.restart_pending, "the clean tap arms the restart unwind");
     assert_eq!(v.update_verb_want, None, "the restart never queues");
+    v.restart_pending = false;
     execute_aux_action(&mut v, AuxAction::UpgradeRelease(Channel::Uv), &mut buf)
         .await
         .unwrap();

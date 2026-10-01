@@ -411,22 +411,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     let stream = connect_or_spawn(&path, true)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
-    let code = runtime.block_on(attach_and_run(stream, &path))?;
-    if code == RESTART_REATTACH_EXIT {
-        // The terminal guard dropped on the way out, so the user's screen is
-        // back: run the restart where the receipts are visible, then exec a
-        // fresh client for the same session. exec, not an in-process restart:
-        // this client's stdin thread holds a blocking stdin lock that a
-        // second reader would deadlock on.
-        update_menu::run_restart_foreground();
-        use std::os::unix::process::CommandExt as _;
-        let err = std::process::Command::new(crate::server::fno_bin())
-            .arg("--session")
-            .arg(session)
-            .exec();
-        return Err(format!("restart finished; reattach failed: {err}"));
-    }
-    Ok(code)
+    runtime.block_on(attach_and_run(stream, &path))
 }
 
 /// Append one line to a log file under the mux dir, best-effort. The shared
@@ -1291,6 +1276,8 @@ struct View {
     /// sweep pair. (The restart is not queued: its tap unwinds the run loop.)
     update_verb_want: Option<release_check::Channel>,
     update_verb_inflight: bool,
+    /// The update modal's restart tap detached the client; the detach exit reads this.
+    restart_pending: bool,
     /// The open new-agent popup, or the RETAINED draft after Esc
     /// (hidden but alive). Both live through `launcher_closed`.
     launcher: Option<agent_launcher::Launcher>,
@@ -2171,6 +2158,7 @@ impl View {
             sweep_action: None,
             update_verb_want: None,
             update_verb_inflight: false,
+            restart_pending: false,
             sweep_inflight: false,
             launcher: None,
             launcher_closed: None,
@@ -8335,16 +8323,9 @@ async fn attach_and_run(
                 let _ = tx.send(outcome);
             });
         }
-        // Kick a wanted release upgrade off the UI loop, at most one in
-        // flight. (The restart never queues: its tap unwinds the run loop.)
+        // Kick a wanted update verb off the UI loop, at most one in flight.
         if let (false, Some(channel)) = (view.update_verb_inflight, view.update_verb_want) {
-            view.update_verb_want = None;
-            view.update_verb_inflight = true;
-            let tx = restart_tx.clone();
-            tokio::spawn(async move {
-                let verdict = release_check::run_upgrade_verb(channel).await;
-                let _ = tx.send(verdict);
-            });
+            update_menu::kick_upgrade(&mut view, restart_tx.clone(), channel);
         }
         // Kick a wanted harness-catalog probe, same one-in-flight
         // discipline as the update probe.
@@ -8717,16 +8698,7 @@ async fn attach_and_run(
                             // gate the catch-up digest on how long we were away.
                             crate::digest_overlay::record_detach(&view.session);
                             let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                            break Ok(exit_with_notice("detached; run fno to reattach".into()));
-                        }
-                        Ok(StdinFlow::RestartMux) => {
-                            // The update modal's restart: same detach stamp
-                            // (the reattach's catch-up digest gates on the
-                            // gap), no notice - run_inner's foreground verb
-                            // and fresh attach are the receipt.
-                            crate::digest_overlay::record_detach(&view.session);
-                            let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                            break Ok(RESTART_REATTACH_EXIT);
+                            break Ok(update_menu::detach_exit(&view));
                         }
                         Err(e) => break Err(e),
                     }
@@ -9092,14 +9064,7 @@ async fn attach_and_run(
                         // gate the catch-up digest on how long we were away.
                         crate::digest_overlay::record_detach(&view.session);
                         let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                        break Ok(exit_with_notice("detached; run fno to reattach".into()));
-                    }
-                    Ok(StdinFlow::RestartMux) => {
-                        // Same unwind as the stdin arm above: detach stamp,
-                        // no notice, sentinel to run_inner.
-                        crate::digest_overlay::record_detach(&view.session);
-                        let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                        break Ok(RESTART_REATTACH_EXIT);
+                        break Ok(update_menu::detach_exit(&view));
                     }
                     Err(e) => break Err(e),
                 }
@@ -9320,6 +9285,10 @@ async fn attach_and_run(
             if let Some(n) = NOTICE.with(|n| n.borrow_mut().take()) {
                 eprintln!("fno: {n}");
             }
+            // The update modal's restart unwinds here: run the verb in the foreground, exec the fresh client.
+            if let Some(err) = update_menu::maybe_reattach(code, &view.session) {
+                return Err(err);
+            }
             Ok(code)
         }
         Err(e) => Err(e),
@@ -9329,15 +9298,7 @@ async fn attach_and_run(
 enum StdinFlow {
     Continue,
     Detach,
-    /// The update modal's restart tap: unwind to run_inner, which runs the
-    /// mux restart in the foreground and reattaches (RESTART_REATTACH_EXIT).
-    RestartMux,
 }
-
-/// attach_and_run's sentinel for "unwound for the update-modal restart":
-/// every other Ok exit rides exit_with_notice, which is always 0, so any
-/// nonzero Ok code is unambiguous.
-const RESTART_REATTACH_EXIT: i32 = 42;
 
 fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
     if view.modal_release_swallow {
@@ -9469,21 +9430,18 @@ async fn handle_stdin(
             DispatchFlow::Continue => {}
             DispatchFlow::Break => break,
             DispatchFlow::Detach => return Ok(StdinFlow::Detach),
-            DispatchFlow::RestartMux => return Ok(StdinFlow::RestartMux),
         }
     }
     Ok(StdinFlow::Continue)
 }
 
-/// One of four control-flow outcomes of dispatching a prefix event: fall
+/// One of three control-flow outcomes of dispatching a prefix event: fall
 /// through to the next event, stop consuming this chunk (a chord that opens a
-/// typing mode must not leak the chunk's trailing bytes into a pane), detach,
-/// or unwind for the update modal's foreground restart.
+/// typing mode must not leak the chunk's trailing bytes into a pane), or detach.
 enum DispatchFlow {
     Continue,
     Break,
     Detach,
-    RestartMux,
 }
 
 /// Dispatch one resolved prefix [`Event`] to the wire / view state - the single
@@ -10290,25 +10248,14 @@ async fn execute_aux_action(
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
         AuxAction::UpgradeRelease(c) => {
-            // The modal named every effect; the tap is the confirmation.
-            view.aux = None;
-            if view.update_verb_inflight || view.update_verb_want.is_some() {
-                view.set_notice("an update action is already running".into());
-            } else {
+            if update_menu::update_tap(view) {
                 view.update_verb_want = Some(c);
             }
         }
         AuxAction::RestartAgents => {
-            // The modal named the flow; the tap is the confirmation. The
-            // restart kills this client's own server, so it cannot run as a
-            // queued off-loop verb: unwind the whole run loop, and run_inner
-            // restores the terminal, runs the verb in the foreground, and
-            // reattaches.
-            view.aux = None;
-            if view.update_verb_inflight || view.update_verb_want.is_some() {
-                view.set_notice("an update action is already running".into());
-            } else {
-                return Ok(DispatchFlow::RestartMux);
+            // Never queues: the restart kills this server; the tap detaches.
+            if update_menu::restart_tap(view) {
+                return Ok(DispatchFlow::Detach);
             }
         }
         AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),

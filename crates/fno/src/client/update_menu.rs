@@ -4,7 +4,7 @@
 //! so the over-budget file shrinks; everything here reaches the client's
 //! private items through `super::*`.
 
-use super::release_check::{probe_release, ReleaseOutcome};
+use super::release_check::{probe_release, run_upgrade_verb, Channel, ReleaseOutcome};
 use super::*;
 
 /// The client's view of `fno doctor update --check`'s payload - only
@@ -388,4 +388,78 @@ pub(crate) fn run_restart_foreground() -> i32 {
             1
         }
     }
+}
+
+/// attach_and_run's sentinel for "unwound for the update-modal restart":
+/// every other detach exit rides `exit_with_notice`, which is always 0, so
+/// any nonzero code is unambiguous.
+const RESTART_REATTACH_EXIT: i32 = 42;
+
+/// The update-modal taps' shared guard (the modal named every effect, so
+/// the tap is the confirmation): close the modal, and refuse while an
+/// update verb is queued or in flight. True = proceed with the tapped one.
+pub(crate) fn update_tap(view: &mut View) -> bool {
+    view.aux = None;
+    if view.update_verb_inflight || view.update_verb_want.is_some() {
+        view.set_notice("an update action is already running".into());
+        false
+    } else {
+        true
+    }
+}
+
+/// The restart tap never queues: true arms the flag and detaches the
+/// client, and run_inner runs the foreground restart and reattaches.
+pub(crate) fn restart_tap(view: &mut View) -> bool {
+    if update_tap(view) {
+        view.restart_pending = true;
+        true
+    } else {
+        false
+    }
+}
+
+/// The detach break's exit code: the restart sentinel when the update
+/// modal's tap armed one, else the plain detach notice path.
+pub(crate) fn detach_exit(view: &View) -> i32 {
+    if view.restart_pending {
+        RESTART_REATTACH_EXIT
+    } else {
+        exit_with_notice("detached; run fno to reattach".into())
+    }
+}
+
+/// run_inner's restart unwind: the sentinel means the TUI is gone (the
+/// terminal guard dropped on the way out), so the verb runs where the
+/// receipts are visible, then this process execs a fresh client for the
+/// same session. exec, not an in-process restart: the detached client's
+/// stdin thread holds a blocking stdin lock a second reader would deadlock
+/// on. Some(failure) when the reattach itself failed; on success exec never
+/// returns.
+pub(crate) fn maybe_reattach(code: i32, session: &str) -> Option<String> {
+    if code != RESTART_REATTACH_EXIT {
+        return None;
+    }
+    run_restart_foreground();
+    use std::os::unix::process::CommandExt as _;
+    let err = std::process::Command::new(crate::server::fno_bin())
+        .arg("--session")
+        .arg(session)
+        .exec();
+    Some(format!("restart finished; reattach failed: {err}"))
+}
+
+/// Kick a wanted release upgrade off the UI loop (the caller owns the
+/// one-in-flight bound); its verdict lands through `tx` as a notice.
+pub(crate) fn kick_upgrade(
+    view: &mut View,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    channel: Channel,
+) {
+    view.update_verb_want = None;
+    view.update_verb_inflight = true;
+    tokio::spawn(async move {
+        let verdict = run_upgrade_verb(channel).await;
+        let _ = tx.send(verdict);
+    });
 }
