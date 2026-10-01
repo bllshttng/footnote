@@ -66,11 +66,11 @@ check(affected is not None,
 if affected is not None:
     selector_needs = affected.get("needs")
     selector_needs = [selector_needs] if isinstance(selector_needs, str) else list(selector_needs or [])
-    check(selector_needs == ["changed-packet-size"],
-          "the selector reads the packet-fit result and no test job",
-          f"pr-affected needs {selector_needs!r}; only changed-packet-size belongs ahead of it")
+    check(selector_needs == [],
+          "the selector waits on no job",
+          f"pr-affected needs {selector_needs!r}; a PR's full lanes wait on nothing")
     check(re.sub(r"[${}\s]", "", str(affected.get("if", ""))) == "!cancelled()",
-          "the selector runs when changed-packet-size is skipped",
+          "the selector runs on every event",
           f"pr-affected has if: {affected.get('if')!r}; push and schedule would skip")
     selector_run = "\n".join(step.get("run", "") for step in affected.get("steps", []))
     check("crates/fno-agents/src/bin/pr-affected.rs" in selector_run,

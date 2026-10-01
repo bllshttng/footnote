@@ -93,9 +93,8 @@ jobs:
   # packet scales with the diff, so a fixed cap either starves a large rebase
   # (killed at the cap, reported as an unattributable `cancelled`) or idles
   # over a small one. Selection only: `--list` maps and prints, it runs
-  # nothing, so this job needs no smoke-setup and costs seconds. Three outputs:
-  # the raw estimate, the ceiling applied, and whether the packet fits that
-  # ceiling. The estimate and fit output are read by the full-suite selector.
+  # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
+  # the raw estimate and the ceiling applied.
   changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -148,22 +147,15 @@ jobs:
           {
             echo "estimate_minutes=$est"
             echo "timeout_minutes=$timeout_minutes"
-            if [ "$est" -le "$timeout_minutes" ]; then
-              echo "packet_fits=true"
-            else
-              echo "packet_fits=false"
-            fi
           } >> "$GITHUB_OUTPUT"
 
     outputs:
       estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
       timeout_minutes: ${{ steps.estimate.outputs.timeout_minutes }}
-      packet_fits: ${{ steps.estimate.outputs.packet_fits }}
 
-  # The Rust selector owns lane routing. On non-PR events it selects every
-  # full lane; a missing PR diff also fails closed to the full set.
+  # The Rust selector owns lane routing. A PR selects every full lane main
+  # runs; only the PR-only bundle freshness job depends on the diff.
   pr-affected:
-    needs: [changed-packet-size]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -185,10 +177,9 @@ jobs:
         env:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
-          PACKET_FITS: ${{ needs.changed-packet-size.outputs.packet_fits }}
         run: |
           rustc --edition=2021 crates/fno-agents/src/bin/pr-affected.rs -o "$RUNNER_TEMP/pr-affected"
-          "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" "$PACKET_FITS" | tee -a "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" | tee -a "$GITHUB_OUTPUT"
 
   # The freshness check rides the smoke registry, but a PR whose selector
   # keeps the full Python lane off never runs a registry entry: PR 2719
