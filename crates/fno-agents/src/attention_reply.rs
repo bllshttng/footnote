@@ -899,14 +899,27 @@ mod tests {
             now: 0,
             asker_is_crown,
         };
-        assert!(matches!(step(&delegated, &facts(true, false)), Step::CrownNeeded));
-        assert!(matches!(step(&delegated, &facts(false, true)), Step::CrownNeeded));
+        assert!(matches!(
+            step(&delegated, &facts(true, false)),
+            Step::CrownNeeded
+        ));
+        assert!(matches!(
+            step(&delegated, &facts(false, true)),
+            Step::CrownNeeded
+        ));
         assert!(matches!(
             step(&delegated, &facts(true, true)),
-            Step::Deliver(Delivery { rung: "mail", outcome: "landed", .. })
+            Step::Deliver(Delivery {
+                rung: "mail",
+                outcome: "landed",
+                ..
+            })
         ));
         let msg = delegate_message(&delegated, &items[0]);
-        assert!(msg.contains("q-hp") && msg.contains("fno backlog decide x-1"), "{msg}");
+        assert!(
+            msg.contains("q-hp") && msg.contains("fno backlog decide x-1"),
+            "{msg}"
+        );
     }
 
     #[test]

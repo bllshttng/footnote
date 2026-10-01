@@ -756,7 +756,10 @@ async fn compose_rows() {
     // returns it to the docked column, and a tap on the column's chip,
     // keyboard elsewhere, closes the column.
     assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
-    assert!(!v.board_full && v.backlog_board.is_some(), "full returns to docked");
+    assert!(
+        !v.board_full && v.backlog_board.is_some(),
+        "full returns to docked"
+    );
     v.region_owner = crate::client::region_focus::RegionOwner::Pane;
     assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
     assert!(v.backlog_board.is_none(), "the docked column closes");

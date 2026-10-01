@@ -273,9 +273,15 @@ async fn hover_never_scrolls_a_menu() {
             for col in 1..=80 {
                 v.compose();
                 let report = format!("\x1b[<35;{col};{row}M");
-                handle_stdin(&mut v, &mut scanner, &mut carry, report.as_bytes(), &mut buf)
-                    .await
-                    .unwrap();
+                handle_stdin(
+                    &mut v,
+                    &mut scanner,
+                    &mut carry,
+                    report.as_bytes(),
+                    &mut buf,
+                )
+                .await
+                .unwrap();
                 let after = (popup(&v).scroll, popup(&v).render(v.term).origin);
                 assert_eq!(after, before, "{name}: Move at ({row}, {col})");
             }

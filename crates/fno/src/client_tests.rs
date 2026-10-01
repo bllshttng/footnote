@@ -4382,7 +4382,12 @@ fn name_modal_rows() {
 async fn press_create_chip(view: &mut View) -> (u16, u16) {
     view.open_create();
     view.compose();
-    let chip = view.close_chips.borrow().iter().copied().find(|s| s.len == 3);
+    let chip = view
+        .close_chips
+        .borrow()
+        .iter()
+        .copied()
+        .find(|s| s.len == 3);
     let chip = chip.expect("create paints an esc chip");
     let (row, col) = (chip.row as u16, chip.col as u16 + 1);
     let press = format!("\x1b[<0;{};{}M", col + 1, row + 1);
@@ -4391,7 +4396,10 @@ async fn press_create_chip(view: &mut View) -> (u16, u16) {
         .await
         .unwrap();
     assert!(view.create.is_none(), "the chip press closes the modal");
-    assert!(view.modal_release_swallow, "the press arms the release latch");
+    assert!(
+        view.modal_release_swallow,
+        "the press arms the release latch"
+    );
     (row, col)
 }
 

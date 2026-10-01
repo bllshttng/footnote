@@ -427,7 +427,9 @@ pub async fn answer(item_id: &str, pick: AnswerPick) -> Result<String, String> {
     }
     args.push("--sink".into());
     args.push("mux".into());
-    run_door(args).await.map(|_| "recorded, delivering".to_string())
+    run_door(args)
+        .await
+        .map(|_| "recorded, delivering".to_string())
 }
 
 /// Withdraw open questions with no answer through the door - `fno-agents
