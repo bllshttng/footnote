@@ -1,5 +1,5 @@
 //! The provider-lane axes of the spawn gate : the per-provider live
-//! count, the king share, the registry schema guard and the account quota
+//! count, the lead share, the registry schema guard and the account quota
 //! lock, ported from the Python gate (`cli/src/fno/agents/spawn_gate.py`)
 //! that this gate replaces.
 //!
@@ -173,7 +173,7 @@ fn vendor_lane_readings_from_caps(
 /// the provider is uncapped. Mirrors `provider_lanes_cap`: a config that
 /// never named a provider_limits table falls back to the built-in budget
 /// table, exactly as Python's `provider_subagent_budget` fails open
-/// (`config._BUILTIN_PROVIDER_BUDGETS`). The reign check-in reads it as the
+/// (`config._BUILTIN_PROVIDER_BUDGETS`). The lead check-in reads it as the
 /// blueprint-subagent ceiling; `None` reads as the default ceiling there.
 pub(crate) fn provider_subagents_cap(config_cwd: &Path, provider: &str) -> Option<usize> {
     let subagents = match agents_config::config_lookup(config_cwd, &["agents", "provider_limits"]) {
@@ -780,15 +780,15 @@ fn urldecode(s: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// King share
+// Lead share
 // ---------------------------------------------------------------------------
 
-/// One share reading over the registry: the crowned sessions, the share, the
+/// One share reading over the registry: the teamed sessions, the share, the
 /// caller's held rows and the unattributed bucket (`share_reading` +
-/// `court.crowned_sessions`). Every count is `None` when the registry is
+/// `org.teamed_sessions`). Every count is `None` when the registry is
 /// unreadable — there is nothing to enforce and no zero to fail open on.
 pub(crate) struct ShareReading {
-    pub kings: Option<usize>,
+    pub leads: Option<usize>,
     pub share: Option<usize>,
     pub held: Option<usize>,
     pub held_rows: Option<Vec<String>>,
@@ -804,7 +804,7 @@ pub(crate) fn share_reading(
         Ok(registry) => registry,
         Err(_) => {
             return ShareReading {
-                kings: None,
+                leads: None,
                 share: None,
                 held: None,
                 held_rows: None,
@@ -812,20 +812,20 @@ pub(crate) fn share_reading(
             }
         }
     };
-    let mut crowned: HashSet<String> = HashSet::new();
+    let mut teamed: HashSet<String> = HashSet::new();
     let mut held_rows: Vec<String> = Vec::new();
     let mut unattributed: Vec<String> = Vec::new();
     for e in &registry.entries {
-        // A crown counts until it is cleared or its row is permanently dead.
-        // A reboot leaves every crowned row reading exited while the crown
-        // still stands, and dropping those crowns read kings=0 and a share
+        // A team counts until it is cleared or its row is permanently dead.
+        // A reboot leaves every teamed row reading exited while the team
+        // still stands, and dropping those teams read leads=0 and a share
         // of 1 for everyone.
         if let Some(session) = e.harness_session_id.as_deref() {
             if e.crown_level.is_some()
                 && !session.is_empty()
                 && e.status != AgentStatus::PermanentDead
             {
-                crowned.insert(session.to_string());
+                teamed.insert(session.to_string());
             }
         }
         if !status_is_liveish(&e.status) || e.crown_level.is_some() {
@@ -837,19 +837,19 @@ pub(crate) fn share_reading(
             None => unattributed.push(e.name.clone()),
         }
     }
-    let kings = crowned.len();
-    // The Python `_king_share` divisor expression (`crowned | {caller if
-    // caller in crowned}`) is a set union that can never grow the set, so the
-    // divisor is exactly the crown count. The caller folds in only when
-    // itself crowned - i.e. never as an extra vote (LD2).
-    let divisor = kings;
+    let leads = teamed.len();
+    // The Python `_lead_share` divisor expression (`teamed | {caller if
+    // caller in teamed}`) is a set union that can never grow the set, so the
+    // divisor is exactly the team count. The caller folds in only when
+    // itself teamed - i.e. never as an extra vote (LD2).
+    let divisor = leads;
     let share = if divisor == 0 {
         1
     } else {
         (cap / divisor).max(1)
     };
     ShareReading {
-        kings: Some(kings),
+        leads: Some(leads),
         share: Some(share),
         held: Some(held_rows.len()),
         held_rows: Some(held_rows),
@@ -857,7 +857,7 @@ pub(crate) fn share_reading(
     }
 }
 
-/// Return the caller's row only when crown settlement confirms it will be vacated.
+/// Return the caller's row only when team settlement confirms it will be vacated.
 pub(crate) fn succession_replaces(
     live: &[RegistryEntry],
     caller: Option<&str>,
@@ -875,7 +875,7 @@ pub(crate) fn succession_replaces(
         return Err("caller_ambiguous");
     }
     let rows = serde_json::to_value(live).map_err(|_| "settle_unreadable")?;
-    let answer = crate::crown_settle::resolve(&serde_json::json!({
+    let answer = crate::team_settle::resolve(&serde_json::json!({
         "scope": scope,
         "rows": rows,
         "succession": true,
@@ -1667,7 +1667,7 @@ mod tests {
         std::fs::write(
             &lock,
             format!(
-                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 claims::SCHEMA_VERSION,
                 now + 600_000,
                 dead_pid(),
@@ -1704,11 +1704,11 @@ mod tests {
             .as_millis() as i64;
         let host = claims::hostname();
         for (key, holder, reserved) in [
-            ("worker:t-reserved-x-4444", "king-1", true),
+            ("worker:t-reserved-x-4444", "lead-1", true),
             ("worker:t-live-worker", "live-holder", false),
         ] {
             let reserved_line = reserved
-                .then_some("  reserved_by: king-1\n")
+                .then_some("  reserved_by: lead-1\n")
                 .unwrap_or_default();
             let lock = claims_dir.join(format!("{}.lock", claims::encode_key(key)));
             std::fs::write(
@@ -1759,7 +1759,7 @@ mod tests {
         std::fs::write(
             &lock,
             format!(
-                "schema_version: {}\nkey: worker:t-expired-x-4444\nholder: king-1\nacquired_at: {}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                "schema_version: {}\nkey: worker:t-expired-x-4444\nholder: lead-1\nacquired_at: {}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 claims::SCHEMA_VERSION,
                 now - 700_000,
                 now - 100_000,
@@ -1776,11 +1776,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The king share: a crowned caller's rows divide the cap; rows naming
+    /// The lead share: a teamed caller's rows divide the cap; rows naming
     /// nobody sit in the unattributed bucket; an unreadable registry nulls
     /// every count.
     #[test]
-    fn king_share_divides_by_crowns_and_buckets_unattributed_rows() {
+    fn lead_share_divides_by_teams_and_buckets_unattributed_rows() {
         let _guard = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1791,18 +1791,18 @@ mod tests {
             &reg,
             &[
                 format!(
-                    r#"{{"name":"king-row","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"king-session-uuid","spawned_by_session":null}}"#
+                    r#"{{"name":"lead-row","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"lead-session-uuid","spawned_by_session":null}}"#
                 ),
                 format!(
-                    r#"{{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"king-session-uuid"}}"#
+                    r#"{{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"lead-session-uuid"}}"#
                 ),
                 format!(
                     r#"{{"name":"w2","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":null}}"#
                 ),
             ],
         );
-        let reading = share_reading(&reg, 6, Some("king-session-uuid"));
-        assert_eq!(reading.kings, Some(1));
+        let reading = share_reading(&reg, 6, Some("lead-session-uuid"));
+        assert_eq!(reading.leads, Some(1));
         assert_eq!(reading.share, Some(6));
         assert_eq!(reading.held, Some(1));
         assert_eq!(reading.held_rows, Some(vec!["w1".to_string()]));
@@ -1812,7 +1812,7 @@ mod tests {
         // Python load_registry's [] arm - unlike a damaged one, which nulls.
         let missing = dir.join("nope.json");
         let reading = share_reading(&missing, 6, Some("x"));
-        assert_eq!(reading.kings, Some(0));
+        assert_eq!(reading.leads, Some(0));
         assert_eq!(reading.share, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1848,17 +1848,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// After a reboot every crowned row reads exited, and the crowns still
-    /// stand: they divide the cap. A permanently dead crown row does not.
+    /// After a reboot every teamed row reads exited, and the teams still
+    /// stand: they divide the cap. A permanently dead team row does not.
     #[test]
-    fn share_reading_counts_crowns_a_reboot_left_reading_exited() {
+    fn share_reading_counts_teams_a_reboot_left_reading_exited() {
         let _guard = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-lanes-reboot-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let reg = dir.join("registry.json");
-        let crown = |name: &str, status: &str, sid: &str| {
+        let team = |name: &str, status: &str, sid: &str| {
             format!(
                 r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"{name}","harness_session_id":"{sid}"}}"#
             )
@@ -1866,16 +1866,16 @@ mod tests {
         write_registry(
             &reg,
             &[
-                crown("quill", "exited", "quill-session"),
-                crown("kestrel", "orphaned", "kestrel-session"),
-                crown("gone", "permanent_dead", "gone-session"),
+                team("quill", "exited", "quill-session"),
+                team("kestrel", "orphaned", "kestrel-session"),
+                team("gone", "permanent_dead", "gone-session"),
                 format!(
                     r#"{{"name":"w1","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"quill-session"}}"#
                 ),
             ],
         );
         let reading = share_reading(&reg, 6, Some("quill-session"));
-        assert_eq!(reading.kings, Some(2));
+        assert_eq!(reading.leads, Some(2));
         assert_eq!(reading.share, Some(3));
         assert_eq!(reading.held, Some(1));
         let _ = std::fs::remove_dir_all(&dir);

@@ -54,7 +54,7 @@ pub enum Surface {
     /// Shell, split, detach, reattach, terminal diagnostics: native, needs
     /// no optional component.
     PlainWorkspace,
-    /// Attach-time overlays (digest, feed, court, needs) and the agent
+    /// Attach-time overlays (digest, feed, org, needs) and the agent
     /// lifecycle views: shell out to the runtime binary.
     AgentLifecycle,
     /// Keeper-backed graph operations and the verbs the native mux forwards
@@ -177,7 +177,7 @@ pub(crate) fn agent_runtime_observation_at(now: u64) -> Observation {
     let (availability, reason) = runtime_availability(&bin);
     Observation {
         component: AGENT_RUNTIME_BIN,
-        requirement: "attach-time overlays (digest, feed, court, needs) and agent lifecycle views",
+        requirement: "attach-time overlays (digest, feed, org, needs) and agent lifecycle views",
         availability,
         reason,
         observed_at: now,

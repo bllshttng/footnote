@@ -46,7 +46,7 @@ async fn rm_cascades_claude_before_removing_the_registry_row() {
 }
 
 #[tokio::test]
-async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
+async fn rm_cleans_a_teamed_rows_scope_manifest_best_effort() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -58,7 +58,7 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
     std::env::set_var("FNO_SPACES_DIR", &spaces);
     let manifest = crate::paths::space_dir_opt(&project)
         .unwrap()
-        .join("kings")
+        .join("leads")
         .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, "---\nscope: alpha\n---\n").unwrap();
@@ -90,7 +90,7 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
     assert!(response.error().is_none(), "{response:?}");
     assert!(
         !manifest.exists(),
-        "successful rm left crown loop state behind"
+        "successful rm left team loop state behind"
     );
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
@@ -102,7 +102,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // The vacated row is removed with a manifest on disk naming a
-    // DIFFERENT session: a successor crowned over the scope after this
+    // DIFFERENT session: a successor teamed over the scope after this
     // row went terminal re-armed it. Deleting that file would disarm the
     // live successor's stop gate.
     let home = short_home("rmcrownsucc");
@@ -111,7 +111,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
     std::env::set_var("FNO_SPACES_DIR", &spaces);
     let manifest = crate::paths::space_dir_opt(&project)
         .unwrap()
-        .join("kings")
+        .join("leads")
         .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(

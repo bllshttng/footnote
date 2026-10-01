@@ -86,8 +86,8 @@ fn seat(a: &AgentRow) -> String {
 }
 
 /// The owner line as the modal prints it: a holder the live roster no longer
-/// holds says so, rather than naming a dead crown's handle as if it were
-/// current (the report's dead `king (...)`). The holder is the parenthesized
+/// holds says so, rather than naming a dead team's handle as if it were
+/// current (the report's dead `lead (...)`). The holder is the parenthesized
 /// name the owner assignment writes; a line without one passes through.
 fn live_owner(owner: &str, agents: &[AgentRow]) -> String {
     let Some(open) = owner.rfind('(') else {
@@ -286,7 +286,7 @@ pub(crate) fn build(
     });
     info("parent", parent.or_else(|| item.parent.clone()), &mut rows);
 
-    // lead: the exact row's crown, else the row's own stamp.
+    // lead: the exact row's team, else the row's own stamp.
     let lead = exact_row(&dest).and_then(|a| match a.crown_scope.as_deref() {
         Some(scope) => Some(
             a.crown_title

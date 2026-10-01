@@ -1,12 +1,12 @@
-//! Per-beat refusal-rate trend baseline for the reign check-in.
+//! Per-beat refusal-rate trend baseline for the lead check-in.
 //!
-//! The `reign_checkin` journal is the diff corpus, not the trend baseline: a
+//! The `lead_checkin` journal is the diff corpus, not the trend baseline: a
 //! beat that prints but never journals (`--no-emit`, a refused `emit_row`, a
 //! missing emit path) leaves the comparison on the same old journalled pair,
 //! so a falling series reads RISING beat after beat. The baseline therefore
 //! lives here and advances on every beat that measured a rate, whether or
 //! not its full row landed. One file per scope: concurrent beats of
-//! different crowns share no document, so no write can erase another
+//! different teams share no document, so no write can erase another
 //! scope's ring.
 
 use serde_json::{json, Value};
@@ -59,7 +59,7 @@ pub(crate) fn record(dir: &Path, scope: &str, ts: &str, rate: f64) {
     let tmp = path.with_extension("json.tmp");
     let written = std::fs::write(&tmp, &text).and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(e) = written {
-        eprintln!("king-checkin: WARNING: refusal trend not recorded: {e}");
+        eprintln!("lead-checkin: WARNING: refusal trend not recorded: {e}");
     }
 }
 

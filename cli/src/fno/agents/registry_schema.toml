@@ -14,7 +14,7 @@
 # v28: additive `adopted_by_session` - the session that VOUCHED for
 # an adopted row. LD3 splits one field's two meanings: `spawned_by_session`
 # keeps "who spawned this row, whose share pays for it", and the adoption
-# grantor moves here, so crowning can never re-attribute a row's cost.
+# grantor moves here, so teaming can never re-attribute a row's cost.
 # Rationale lives beside the column in state.rs / registry.py.
 # v29: additive `resolved_sandbox` / `granted_writable_roots` - what a codex
 # thread row's sandbox RESOLVED to server-side, and the roots it carries onto
@@ -82,7 +82,7 @@
 # without a bump, so an fno built between the two merges called itself v33,
 # read v33-with-spawn_id rows as its own version, and Python's strict reader
 # refused the whole registry ("row N has malformed shape"), taking down every
-# crowned king's checkin. The Rust unit test `registry_schema_fields` (state
+# teamed lead's checkin. The Rust unit test `registry_schema_fields` (state
 # tests) and scripts/ci/check-registry-schema-bump.sh both read this array:
 # any field-set change without a monotonic version bump is refused at test
 # time and at PR time. Add the field, add its name here, bump `version` - in

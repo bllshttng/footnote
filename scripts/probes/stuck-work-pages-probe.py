@@ -4,7 +4,7 @@
 Live mode (--live --scope SCOPE) plants a hung verb (a python process with
 argv0 fno-py and a --timeout far exceeded) and a dead-pid flight claim, then
 requires, inside the arm_watch cadence, an operator_notice row naming both in
-the project journal, a phone sink cursor at or past that row, and a king
+the project journal, a phone sink cursor at or past that row, and a lead
 check-in whose change starts `attention:` and names the probe pid.
 
 Self-test mode (--self-test) runs the polling and change checks against
@@ -113,7 +113,7 @@ def cursor_ts(path: pathlib.Path) -> str:
 
 def checkin_attends(scope: str, pid: int, cwd: pathlib.Path) -> tuple[bool, str]:
     code, out, err = run(
-        ["fno", "agents", "king", "checkin", "--scope", scope, "--no-emit", "--json"],
+        ["fno", "agents", "lead", "checkin", "--scope", scope, "--no-emit", "--json"],
         cwd=cwd,
     )
     if code != 0:
@@ -192,7 +192,7 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
 
         ok, detail = checkin_attends(scope, sleeper.pid, cwd)
         if not ok:
-            return fail("king checkin", detail)
+            return fail("lead checkin", detail)
         print(f"checkin change={detail}")
     finally:
         sleeper.send_signal(signal.SIGKILL)
@@ -256,7 +256,7 @@ def run_self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--live", action="store_true", help="plant the findings and watch them page")
-    ap.add_argument("--scope", default="", help="the crown scope the check-in runs under")
+    ap.add_argument("--scope", default="", help="the team scope the check-in runs under")
     ap.add_argument(
         "--cwd",
         type=pathlib.Path,

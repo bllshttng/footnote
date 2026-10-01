@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # fno hook: multi-event - surface captured operator turns
 # Stop + SessionStart hook: report the operator-capture queue depth, so the
-# king's capture loop is a measured number at the moment, not prose to
+# lead's capture loop is a measured number at the moment, not prose to
 # remember.
 #
-# The failure this closes: a king records from the direction it is pushed.
+# The failure this closes: a lead records from the direction it is pushed.
 # Worker mail arrives as a discrete event (id, queue, ack), so it gets
 # recorded; operator conversation is a stream with no boundary, so it does
-# not - one reign recorded twenty-two rulings from worker mail and zero from
+# not - one lead recorded twenty-two rulings from worker mail and zero from
 # operator conversation. `fno inbox operator` derives the queue from the
 # session transcript; this hook is the push mechanism that surfaces its
-# depth at the two turn boundaries a king actually pauses on.
+# depth at the two turn boundaries a lead actually pauses on.
 #
 # Depth-gated on purpose: it prints nothing when the queue is empty, so a
 # quiet session costs one bounded read and no context. A non-zero depth
@@ -18,9 +18,9 @@
 # measured line inject-mail-notify.sh delivers for mail, which is the channel
 # that gets recorded.
 #
-# NEVER gate this on a crown. `hooks/king-postcompact-reinject.sh` gated on
-# `crown_level`, a field a different verb writes, and exited 0 silently for
-# every king in the fleet. The queue depth here is state the verb derives
+# NEVER gate this on a team. `hooks/lead-postcompact-reinject.sh` gated on
+# `team_level`, a field a different verb writes, and exited 0 silently for
+# every lead in the fleet. The queue depth here is state the verb derives
 # for itself; a session with an empty queue is the steady state.
 #
 # Hook contract: stdout is appended to the session prompt; exit 0 always.

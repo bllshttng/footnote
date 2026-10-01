@@ -793,7 +793,7 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
         }),
     }
     // The user lane file.
-    let lane_path = crate::king_board::scope::operator_lane_path(cwd);
+    let lane_path = crate::org_board::scope::operator_lane_path(cwd);
     let lane_text = match std::fs::read_to_string(&lane_path) {
         Ok(text) => {
             sources.push(SourceRead {
@@ -854,7 +854,7 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
 /// The `--answer` door: record one durable `attention_answer` row for an open
 /// item, first answer wins, and print a one-line JSON receipt. The mux is the
 /// caller this exists for, but any process gets the same receipt. The arm owns
-/// delivery (the clear, the resume, the crown escalation) on its next beat;
+/// delivery (the clear, the resume, the team escalation) on its next beat;
 /// the door never delivers.
 fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) -> i32 {
     let picks = [
@@ -945,7 +945,7 @@ fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) ->
 
 /// Whether the agents may decide `item` for the user: a question (a pin has
 /// nothing to decide), recorded reversible as `yes` or `costly` (an
-/// irreversible or unstated call stays the user's), and a live crown over
+/// irreversible or unstated call stays the user's), and a live team over
 /// its node to decide it (else the question would close with nobody on it).
 fn delegable(item: &crate::attention::AttentionItem, cwd: &Path) -> Result<(), String> {
     let id = &item.id;
@@ -957,9 +957,9 @@ fn delegable(item: &crate::attention::AttentionItem, cwd: &Path) -> Result<(), S
         Some("no") => return Err(format!("irreversible: the user decides {id}")),
         _ => return Err(format!("reversibility not recorded: the user decides {id}")),
     }
-    if crate::attention_reply::crown_holder(item, cwd).is_none() {
+    if crate::attention_reply::team_holder(item, cwd).is_none() {
         let node = item.node.as_deref().unwrap_or("its node");
-        return Err(format!("no live crown covers {node}; answer it yourself"));
+        return Err(format!("no live team covers {node}; answer it yourself"));
     }
     Ok(())
 }
@@ -1530,8 +1530,8 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
 
 /// The whole needs fold over explicit sources: events read + fold + the three
 /// non-event legs (carveout age, stale claims, refused workers) + liveness
-/// stamp. Shared by the `needs` verb and the king board's in-process needs
-/// read, so the two surfaces cannot drift (the king board is why this is `pub`).
+/// stamp. Shared by the `needs` verb and the lead board's in-process needs
+/// read, so the two surfaces cannot drift (the lead board is why this is `pub`).
 /// `cwd` anchors the carveout leg: the verb passes the process cwd it inherits,
 /// the board passes its own resolved cwd (the process cwd is not guaranteed to
 /// be the project for an in-process caller).
@@ -1908,7 +1908,7 @@ mod tests {
 
     #[test]
     fn reachable_miss_folds_to_its_own_kind() {
-        // Measured 2026-08-17: three of twelve operator rows were the king's own
+        // Measured 2026-08-17: three of twelve operator rows were the lead's own
         // outbound mail that missed a reachable recipient, sorted beside a real
         // question. A miss needs a retry or a wake, not a human.
         let events = mail_escalation(
@@ -2866,7 +2866,7 @@ mod tests {
         args.done = true;
         assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
         // --delegate on an unstated, an irreversible, and a reversible call
-        // with no live crown over its node: each stays the user's.
+        // with no live team over its node: each stays the user's.
         args.done = false;
         args.delegate = true;
         assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);

@@ -240,7 +240,7 @@ fn tick_once(
                     } else {
                         let stamp = json!({"epoch": now, "from": from, "to": to});
                         let path = home.root().join("slot-cutover.json");
-                        match crate::king_ledger::write_atomic(
+                        match crate::rundown::write_atomic(
                             &path,
                             &serde_json::to_string(&stamp).unwrap_or_default(),
                         ) {
@@ -374,7 +374,7 @@ pub fn run_health_tick(
     }
     if changed {
         let serialized = serde_json::to_string(&state).unwrap_or_default();
-        let _ = crate::king_ledger::write_atomic(&state_path, &serialized);
+        let _ = crate::rundown::write_atomic(&state_path, &serialized);
     }
     let bad: Vec<&str> = state
         .iter()

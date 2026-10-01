@@ -339,7 +339,7 @@ mod tests {
 
     fn full<'a>() -> EdgeFields<'a> {
         EdgeFields {
-            name: "king-5317-succeed-g3",
+            name: "lead-5317-succeed-g3",
             status: Some(('●', "Work")),
             model: Some("opus-5"),
             node: Some("node7"),
@@ -371,7 +371,7 @@ mod tests {
     fn full_fields_lay_out_both_edges_on_step_zero() {
         let e = edges(&full(), rect(100, 12), false);
         let top = s(&e.top);
-        assert!(top.starts_with("╭─ king-5317-succeed-g3 ─"), "{top}");
+        assert!(top.starts_with("╭─ lead-5317-succeed-g3 ─"), "{top}");
         assert!(top.ends_with(" ● Work · opus-5 ╮"), "{top}");
         assert_eq!(cols_of(&e.top), 100);
         let bottom = s(&e.bottom);
@@ -429,7 +429,7 @@ mod tests {
         assert!(s(&e.top).contains("● Work"), "{:?}", s(&e.top));
         assert!(!s(&e.top).contains("opus-5"), "{:?}", s(&e.top));
         assert!(
-            s(&e.top).contains("king-5317-succeed-g3"),
+            s(&e.top).contains("lead-5317-succeed-g3"),
             "{:?}",
             s(&e.top)
         );
@@ -444,7 +444,7 @@ mod tests {
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert!(!s(&e.top).contains("Work"), "{:?}", s(&e.top));
         assert!(
-            s(&e.top).contains("king-5317-succeed-g3"),
+            s(&e.top).contains("lead-5317-succeed-g3"),
             "{:?}",
             s(&e.top)
         );
@@ -456,7 +456,7 @@ mod tests {
         // word drops AND the name is cut (the last resort: name_max 18).
         let e = edges(&full(), rect(28, 12), false);
         assert_eq!(e.top_step, 4, "{:?}", s(&e.top));
-        assert!(s(&e.top).contains("king-5317-succeed-…"), "{:?}", s(&e.top));
+        assert!(s(&e.top).contains("lead-5317-succeed-…"), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert_eq!(cols_of(&e.top), 28);
     }
@@ -486,7 +486,7 @@ mod tests {
     fn the_tab_shape_never_carries_focus() {
         let e = edges(&full(), rect(60, 12), true);
         assert!(!e.top.iter().any(|(c, _)| *c == '▐' || *c == '▌'));
-        assert!(s(&e.top).starts_with("╭─ king-5317-succeed-g3 ─"));
+        assert!(s(&e.top).starts_with("╭─ lead-5317-succeed-g3 ─"));
     }
 
     // AC2-ERR

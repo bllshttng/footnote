@@ -1,6 +1,6 @@
-//! Which crown owns an open question. The attention arm calls [`Router::route`]
+//! Which team owns an open question. The attention arm calls [`Router::route`]
 //! once per delivered page and freezes the answer into the page frontmatter
-//! (the user's "at write time" rule): a crown crowned later never sees older
+//! (the user's "at write time" rule): a team teamed later never sees older
 //! pages in its check-in. Asker facts join the registry by session id first
 //! and treat the name as an alias. Nothing is guessed: an unmeasured asker
 //! fact stays `None` (the page renders `unknown`) and a routing fact the walk
@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::attention::AttentionItem;
 use crate::state::{load_registry, Registry};
-use crate::territory::{self, Crown};
+use crate::territory::{self, Team};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Routing {
@@ -21,34 +21,34 @@ pub struct Routing {
     pub harness: Option<String>,
     pub model: Option<String>,
     pub epic: Option<String>,
-    pub crown: Option<String>,
-    pub king: Option<String>,
+    pub team: Option<String>,
+    pub lead: Option<String>,
 }
 
 pub struct Router {
     entries_by_id: HashMap<String, Value>,
     /// Rung-2 member epic -> (canonical scope, holder).
-    epic_crowns: HashMap<String, (String, String)>,
+    epic_teams: HashMap<String, (String, String)>,
     /// Rung-0/1 canonical project -> (canonical scope, holder).
-    project_crowns: HashMap<String, (String, String)>,
+    project_teams: HashMap<String, (String, String)>,
     /// Workspace path basename -> canonical project name.
     projects_by_basename: HashMap<String, String>,
     registry: Registry,
 }
 
 impl Router {
-    /// Read the graph, the live crowns and the workspace map from `cwd` and
+    /// Read the graph, the live teams and the workspace map from `cwd` and
     /// the registry cache at `registry_path`. A graph or registry fault is
     /// `Err` naming the source: delivery waits a beat rather than stamping
-    /// pages with no crown.
+    /// pages with no team.
     pub fn load(cwd: &Path, registry_path: &Path) -> Result<Router, String> {
         let entries = territory::graph_entries(cwd).map_err(|e| format!("attention_route: {e}"))?;
-        let crowns =
-            territory::live_crowns(registry_path).map_err(|e| format!("attention_route: {e}"))?;
+        let teams =
+            territory::live_teams(registry_path).map_err(|e| format!("attention_route: {e}"))?;
         // An absent alias map is a normal shape, not a fault.
-        let projects = crate::king_board::project_map(cwd).unwrap_or_default();
+        let projects = crate::org_board::project_map(cwd).unwrap_or_default();
         let workspace = territory::workspace_paths(cwd);
-        Ok(Router::from_parts(entries, crowns, projects, workspace, {
+        Ok(Router::from_parts(entries, teams, projects, workspace, {
             load_registry(registry_path)
                 .map_err(|e| format!("attention_route: registry unreadable ({e})"))?
         }))
@@ -56,7 +56,7 @@ impl Router {
 
     pub fn from_parts(
         entries: Vec<Value>,
-        crowns: Vec<Crown>,
+        teams: Vec<Team>,
         projects: HashMap<String, String>,
         workspace: HashMap<String, String>,
         registry: Registry,
@@ -67,22 +67,22 @@ impl Router {
                 entries_by_id.insert(id.to_string(), e.clone());
             }
         }
-        let mut epic_crowns = HashMap::new();
-        let mut project_crowns = HashMap::new();
-        for crown in &crowns {
-            for member in crown
+        let mut epic_teams = HashMap::new();
+        let mut project_teams = HashMap::new();
+        for team in &teams {
+            for member in team
                 .scope
                 .split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                let slot = if crown.level >= 2 {
-                    &mut epic_crowns
+                let slot = if team.level >= 2 {
+                    &mut epic_teams
                 } else {
-                    &mut project_crowns
+                    &mut project_teams
                 };
                 slot.entry(member.to_string())
-                    .or_insert_with(|| (crown.scope.clone(), crown.holder.clone()));
+                    .or_insert_with(|| (team.scope.clone(), team.holder.clone()));
             }
         }
         // basename(workspace path) -> canonical project, aliases resolved.
@@ -100,8 +100,8 @@ impl Router {
         }
         Router {
             entries_by_id,
-            epic_crowns,
-            project_crowns,
+            epic_teams,
+            project_teams,
             projects_by_basename,
             registry,
         }
@@ -155,17 +155,17 @@ impl Router {
                 .filter(|id| self.entry_type(id) == Some("epic"))
                 .next_back()
                 .cloned();
-            // The first chain id a rung-2 crown lists wins.
-            if let Some(id) = chain.iter().find(|id| self.epic_crowns.contains_key(*id)) {
-                let (scope, holder) = &self.epic_crowns[id];
-                out.crown = Some(scope.clone());
-                out.king = Some(holder.clone());
+            // The first chain id a rung-2 team lists wins.
+            if let Some(id) = chain.iter().find(|id| self.epic_teams.contains_key(*id)) {
+                let (scope, holder) = &self.epic_teams[id];
+                out.team = Some(scope.clone());
+                out.lead = Some(holder.clone());
             }
         }
 
-        if out.crown.is_none() {
+        if out.team.is_none() {
             // With a node: the node's graph project. Without: the asker's
-            // live crown, else its row's node, else the workspace basename
+            // live team, else its row's node, else the workspace basename
             // of the item's own project.
             let mut candidates: Vec<String> = Vec::new();
             if let Some(node) = &node {
@@ -178,11 +178,11 @@ impl Router {
                     if let Some(scope) = row.crown_scope.as_deref() {
                         let canon = crate::event_store::canonical_scope(scope);
                         if !canon.is_empty() {
-                            out.crown = Some(canon.clone());
-                            out.king = self.crown_holder(&canon);
+                            out.team = Some(canon.clone());
+                            out.lead = self.team_holder(&canon);
                         }
                     }
-                    if out.crown.is_none() {
+                    if out.team.is_none() {
                         if let Some(row_node) = row.node.as_deref() {
                             if !row_node.is_empty() && row_node != "none" {
                                 let chain = self.parent_chain(row_node);
@@ -192,11 +192,11 @@ impl Router {
                                     .next_back()
                                     .cloned();
                                 if let Some(id) =
-                                    chain.iter().find(|id| self.epic_crowns.contains_key(*id))
+                                    chain.iter().find(|id| self.epic_teams.contains_key(*id))
                                 {
-                                    let (scope, holder) = &self.epic_crowns[id];
-                                    out.crown = Some(scope.clone());
-                                    out.king = Some(holder.clone());
+                                    let (scope, holder) = &self.epic_teams[id];
+                                    out.team = Some(scope.clone());
+                                    out.lead = Some(holder.clone());
                                 } else if let Some(project) = self.entry_project(row_node) {
                                     candidates.push(project);
                                 }
@@ -206,31 +206,31 @@ impl Router {
                 }
             }
             // The basename fallback the plan names for a node-less item:
-            // the rung-1 crown whose workspace path basename matches.
-            if out.crown.is_none() && candidates.is_empty() && !item.project.is_empty() {
+            // the rung-1 team whose workspace path basename matches.
+            if out.team.is_none() && candidates.is_empty() && !item.project.is_empty() {
                 candidates.push(item.project.clone());
             }
-            if out.crown.is_none() {
+            if out.team.is_none() {
                 for project in &candidates {
                     let canon = self.projects_by_basename.get(project).unwrap_or(project);
-                    if let Some((scope, holder)) = self.project_crowns.get(canon) {
-                        out.crown = Some(scope.clone());
-                        out.king = Some(holder.clone());
+                    if let Some((scope, holder)) = self.project_teams.get(canon) {
+                        out.team = Some(scope.clone());
+                        out.lead = Some(holder.clone());
                         break;
                     }
                 }
-                if out.crown.is_none() && node.is_none() && row.is_none() {
-                    // Last resort: the only rung-0/1 crown when exactly one is live.
-                    let project_crowns: Vec<_> = self.project_crowns.values().collect();
-                    if project_crowns.len() == 1 {
-                        let (scope, holder) = project_crowns[0];
-                        out.crown = Some(scope.clone());
-                        out.king = Some(holder.clone());
+                if out.team.is_none() && node.is_none() && row.is_none() {
+                    // Last resort: the only rung-0/1 team when exactly one is live.
+                    let project_teams: Vec<_> = self.project_teams.values().collect();
+                    if project_teams.len() == 1 {
+                        let (scope, holder) = project_teams[0];
+                        out.team = Some(scope.clone());
+                        out.lead = Some(holder.clone());
                     }
                 }
             }
         }
-        out.king = match (&out.crown, &out.king) {
+        out.lead = match (&out.team, &out.lead) {
             (Some(_), k) => k.clone(),
             (None, _) => None,
         };
@@ -276,10 +276,10 @@ impl Router {
             .map(|p| p.to_string())
     }
 
-    fn crown_holder(&self, canonical: &str) -> Option<String> {
-        self.epic_crowns
+    fn team_holder(&self, canonical: &str) -> Option<String> {
+        self.epic_teams
             .get(canonical)
-            .or_else(|| self.project_crowns.get(canonical))
+            .or_else(|| self.project_teams.get(canonical))
             .map(|(_, holder)| holder.clone())
     }
 }
@@ -299,27 +299,27 @@ mod tests {
         e
     }
 
-    fn crowns() -> Vec<Crown> {
+    fn teams() -> Vec<Team> {
         vec![
-            Crown {
+            Team {
                 scope: "x-b".into(),
                 level: 2,
-                holder: "king-b".into(),
+                holder: "lead-b".into(),
                 holder_session: None,
             },
-            Crown {
+            Team {
                 scope: "fno".into(),
                 level: 1,
-                holder: "king-fno".into(),
+                holder: "lead-fno".into(),
                 holder_session: None,
             },
         ]
     }
 
-    fn router(entries: Vec<Value>, crowns: Vec<Crown>) -> Router {
+    fn router(entries: Vec<Value>, teams: Vec<Team>) -> Router {
         Router::from_parts(
             entries,
-            crowns,
+            teams,
             HashMap::from([("fno".to_string(), "fno".to_string())]),
             HashMap::from([("fno".to_string(), "/ws/fno".to_string())]),
             Registry::default(),
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn ac2_hp_node_under_crowned_epic_routes_to_it() {
+    fn ac2_hp_node_under_teamed_epic_routes_to_it() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let r = router(
             vec![
@@ -366,11 +366,11 @@ mod tests {
                 entry("x-b", "epic", Some("x-a"), "fno"),
                 entry("x-c", "feature", Some("x-b"), "fno"),
             ],
-            crowns(),
+            teams(),
         );
         let routing = r.route(&item(vec!["x-c".into()], None, "fno"));
-        assert_eq!(routing.crown.as_deref(), Some("x-b"), "AC2-HP");
-        assert_eq!(routing.king.as_deref(), Some("king-b"), "AC2-HP");
+        assert_eq!(routing.team.as_deref(), Some("x-b"), "AC2-HP");
+        assert_eq!(routing.lead.as_deref(), Some("lead-b"), "AC2-HP");
         assert_eq!(routing.epic.as_deref(), Some("x-a"), "AC2-HP");
     }
 
@@ -391,7 +391,7 @@ mod tests {
         });
         let r = Router::from_parts(
             entries.clone(),
-            crowns(),
+            teams(),
             HashMap::from([("fno".to_string(), "fno".to_string())]),
             HashMap::from([("fno".to_string(), "/ws/fno".to_string())]),
             reg,
@@ -407,28 +407,28 @@ mod tests {
         });
         let routing = r.route(&it);
         assert_eq!(
-            routing.crown.as_deref(),
+            routing.team.as_deref(),
             Some("x-b"),
             "AC2-EDGE asker row node"
         );
         assert_eq!(routing.epic.as_deref(), Some("x-a"));
 
-        // An asker with no row: the rung-1 crown whose workspace basename
+        // An asker with no row: the rung-1 team whose workspace basename
         // matches the item's project.
-        let r = router(entries.clone(), crowns());
+        let r = router(entries.clone(), teams());
         let routing = r.route(&item(vec![], None, "fno"));
         assert_eq!(
-            routing.crown.as_deref(),
+            routing.team.as_deref(),
             Some("fno"),
             "AC2-EDGE workspace basename"
         );
-        assert_eq!(routing.king.as_deref(), Some("king-fno"));
+        assert_eq!(routing.lead.as_deref(), Some("lead-fno"));
 
-        // With no live crown at all: crown, king and epic are None.
+        // With no live team at all: team, lead and epic are None.
         let r = router(entries, vec![]);
         let routing = r.route(&item(vec![], None, "fno"));
-        assert_eq!(routing.crown, None, "AC2-EDGE no crown");
-        assert_eq!(routing.king, None);
+        assert_eq!(routing.team, None, "AC2-EDGE no team");
+        assert_eq!(routing.lead, None);
         assert_eq!(routing.epic, None);
     }
 
@@ -440,18 +440,18 @@ mod tests {
                 entry("x-c", "feature", Some("x-d"), "fno"),
                 entry("x-d", "feature", Some("x-c"), "fno"),
             ],
-            crowns(),
+            teams(),
         );
         let routing = r.route(&item(vec!["x-c".into()], None, "fno"));
         assert_eq!(
-            routing.crown.as_deref(),
+            routing.team.as_deref(),
             Some("fno"),
-            "AC2-ERR cycle falls back to the project crown"
+            "AC2-ERR cycle falls back to the project team"
         );
-        assert_eq!(routing.king.as_deref(), Some("king-fno"));
+        assert_eq!(routing.lead.as_deref(), Some("lead-fno"));
         assert_eq!(
             routing.epic, None,
-            "no epic in a cycle with no crowned epic"
+            "no epic in a cycle with no teamed epic"
         );
     }
 
@@ -472,7 +472,7 @@ mod tests {
             name: "aaaaaaaa".into(),
             ..Default::default()
         });
-        let r = Router::from_parts(vec![], crowns(), HashMap::new(), HashMap::new(), reg);
+        let r = Router::from_parts(vec![], teams(), HashMap::new(), HashMap::new(), reg);
         let mut it = item(vec![], None, "fno");
         it.asker = Some(Asker {
             handle: "aaaaaaaa".into(),
@@ -514,10 +514,10 @@ mod tests {
     #[test]
     fn placeholder_node_is_ignored() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let r = router(vec![], crowns());
+        let r = router(vec![], teams());
         let routing = r.route(&item(vec![], Some("none"), "fno"));
         assert_eq!(
-            routing.crown.as_deref(),
+            routing.team.as_deref(),
             Some("fno"),
             "node=none falls through"
         );

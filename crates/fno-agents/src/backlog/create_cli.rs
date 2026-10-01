@@ -894,7 +894,7 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
         // activity feed's provenance view prints for a node_created row. A
         // session no registry row holds (a human filing by hand) reads as
         // absent, never guessed.
-        let (source_model, source_effort, source_parent, source_crown) = source_session_id
+        let (source_model, source_effort, source_parent, source_team) = source_session_id
             .as_deref()
             .and_then(|sid| {
                 let registry = crate::state::load_registry(
@@ -960,7 +960,7 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
             "source_model": source_model,
             "source_effort": source_effort,
             "source_parent_session": source_parent,
-            "source_crown": source_crown,
+            "source_team": source_team,
             "source_cwd": source_cwd,
             "source_node_id": source_node_id,
             "source_plan_path": source_plan_path,
@@ -987,7 +987,7 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
             entries.push(node.clone());
             let resolution = autolink::resolve(&node, &entries, None);
             rollup_lines = autolink::receipt_lines(&resolution, &minted, &entries);
-            if matches!(resolution.kind, "linked" | "crown") {
+            if matches!(resolution.kind, "linked" | "team") {
                 if let Some(epic_id) = &resolution.epic_id {
                     // The edge lands on the row INSIDE the write, so the node
                     // never exists linked-without-receipt (or vice versa).

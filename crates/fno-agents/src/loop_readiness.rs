@@ -1,4 +1,4 @@
-//! One effective-readiness snapshot for target and crown admission.
+//! One effective-readiness snapshot for target and team admission.
 //!
 //! The four legs are deliberately separate. A healthy machine does not prove
 //! that the lifecycle invokes the loop, and a lifecycle hook does not prove
@@ -305,7 +305,7 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
     let complete = data.get("measurement_complete").and_then(Value::as_bool) == Some(true);
     // A slow startup producer times out and lands in measurement_errors: the
     // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
-    // crown admission on it starved a fresh heir for its whole session life.
+    // team admission on it starved a fresh heir for its whole session life.
     let errors: Vec<&str> = data
         .get("measurement_errors")
         .and_then(Value::as_array)
@@ -313,7 +313,7 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
         .unwrap_or_default();
     // A slow startup producer times out and lands in measurement_errors: the
     // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
-    // crown admission on it starved a fresh heir for its whole session life.
+    // team admission on it starved a fresh heir for its whole session life.
     // The producer's structured `measurement_timeouts` count is the contract;
     // the substring fallback reads journals written before the field existed.
     let all_timeouts = !errors.is_empty()
@@ -417,10 +417,10 @@ pub fn run(args: &[String]) -> i32 {
     if ensure_goal && harness == "codex" && snapshot.ready() {
         if scope.trim().is_empty() || session.trim().is_empty() {
             snapshot.provider_goal = ReadinessLeg::unreadable(
-                "Codex reign goal ensure requires exact session and scope",
+                "Codex lead goal ensure requires exact session and scope",
             );
         } else {
-            match crate::reign_goal::ensure(&session, &scope, &cwd) {
+            match crate::lead_goal::ensure(&session, &scope, &cwd) {
                 Ok(receipt) => goal_receipt = Some(receipt),
                 Err(error) => snapshot.provider_goal = ReadinessLeg::unreadable(error),
             }
@@ -446,7 +446,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn continuation_owner(scope: &str, session: &str) -> String {
     if !scope.trim().is_empty() {
-        format!("king:{}", scope.trim())
+        format!("lead:{}", scope.trim())
     } else if !session.trim().is_empty() {
         format!("target:{}", session.trim())
     } else {
@@ -518,10 +518,10 @@ mod tests {
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
-            "king:x-0000",
+            "lead:x-0000",
         );
         assert!(snapshot.ready());
-        assert_eq!(snapshot.continuation_owner, "king:x-0000");
+        assert_eq!(snapshot.continuation_owner, "lead:x-0000");
         assert_eq!(
             snapshot.to_json()["legs"]["provider_goal"]["state"],
             "ready"
@@ -535,7 +535,7 @@ mod tests {
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
-            "king:x-0000",
+            "lead:x-0000",
         );
         let refusal = admit(snapshot).unwrap_err();
         assert!(refusal.contains("machine"));
@@ -550,7 +550,7 @@ mod tests {
         );
         assert_eq!(
             continuation_owner("scope-a", "thread-full-id"),
-            "king:scope-a"
+            "lead:scope-a"
         );
         assert!(continuation_owner("", "").is_empty());
     }
@@ -614,7 +614,7 @@ mod tests {
 
     /// A slow startup producer times out and lands in
     /// measurement_errors; the snapshot is a MEASURED partial, not an
-    /// unobserved hook, and must not block crown admission.
+    /// unobserved hook, and must not block team admission.
     #[test]
     fn a_producer_timeout_is_a_measured_partial_not_an_unobserved_hook() {
         let snapshot = serde_json::json!({

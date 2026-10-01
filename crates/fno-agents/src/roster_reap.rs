@@ -1094,11 +1094,11 @@ mod tests {
         operator.name = "w-operator".into();
         operator.origin = Some("operator".into());
         operator.harness_session_id = Some("sid-1".into());
-        let mut crowned = RegistryEntry::default();
-        crowned.name = "w-crowned".into();
-        crowned.origin = Some("adopted".into());
-        crowned.crown_level = Some(1);
-        crowned.harness_session_id = Some("sid-1".into());
+        let mut teamed = RegistryEntry::default();
+        teamed.name = "w-teamed".into();
+        teamed.origin = Some("adopted".into());
+        teamed.crown_level = Some(1);
+        teamed.harness_session_id = Some("sid-1".into());
         let mut unstamped = RegistryEntry::default();
         unstamped.name = "w-unstamped".into();
         unstamped.harness_session_id = Some("sid-1".into());
@@ -1108,7 +1108,7 @@ mod tests {
             RosterScope::All,
             true,
             &roster(rows),
-            &[spawn, operator, crowned, unstamped],
+            &[spawn, operator, teamed, unstamped],
             &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_| None,
             &|_| HashMap::new(),
@@ -1254,7 +1254,7 @@ mod tests {
     // session. The session still needs its own gates - marker, quiet - but
     // the adopted keep is no longer one of them.
 
-    // AC3-ERR: spawn, operator, crowned, and unstamped entries all still
+    // AC3-ERR: spawn, operator, teamed, and unstamped entries all still
     // shield their listed session; only the adopted-uncrowned carve-out
     // stops shielding.
 

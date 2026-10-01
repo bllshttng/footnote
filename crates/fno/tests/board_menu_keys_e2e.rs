@@ -5,7 +5,7 @@
 //!
 //! Before the fix the board's key router swallowed every raw byte: `^B V`
 //! never cycled the sideline view and `^B ?` armed the board's own keys
-//! overlay instead of the global keybinds, so the court fold could not be
+//! overlay instead of the global keybinds, so the org fold could not be
 //! collapsed while the board held the sideline.
 
 mod common;
@@ -29,7 +29,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.wait_input_ready(20);
-    // The court fold is open before the board arrives, the shape the bug was
+    // The org fold is open before the board arrives, the shape the bug was
     // seen live in: the fold's expanded state must not pin anything the
     // board paints.
     h.type_bytes(&[PREFIX, b'C']);

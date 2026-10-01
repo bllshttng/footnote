@@ -1,4 +1,4 @@
-//! The wake meter: how much of the king's own transcript is machine wake
+//! The wake meter: how much of the lead's own transcript is machine wake
 //! against a typed turn, plus the subagent token spend those notifications
 //! carried. Same single-read posture as [`crate::refusal_rate`]: the file is
 //! read once, and an unreadable transcript is an error, never a silent zero.
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Machine wakes beyond 3 to 1 over typed turns is the attention line the
-/// check-in prints OVER at (king-5317-succeed-g3 ran 6.5 to 1). A named
+/// check-in prints OVER at (lead-5317-succeed-g3 ran 6.5 to 1). A named
 /// constant, the same stance as `DEFAULT_BLUEPRINT_CEILING`: no config key.
 const WAKE_RATIO_CEILING: u64 = 3;
 
@@ -155,7 +155,7 @@ mod tests {
                 false,
             ));
         }
-        lines.push(row("reign check-in: beat 4", "2026-09-24T12:02:00Z", true));
+        lines.push(row("lead check-in: beat 4", "2026-09-24T12:02:00Z", true));
         for _ in 0..3 {
             lines.push(row(
                 "what moved since the last beat",

@@ -6,7 +6,7 @@ use super::*;
 use super::{no_agents, quiet_transcript, stage_graph, staged_graph_home, uniform_ages};
 use crate::gc_sweep::{self, GcSummary};
 
-/// The crown specimen (2026-09-14): a do-phase claude row whose transcript
+/// The team specimen (2026-09-14): a do-phase claude row whose transcript
 /// ends mid-Edit with the badge still `working` and live. A fresh working
 /// report is a turn plausibly in flight, so it blocks the tick retirement
 /// even with an unanswered probe and an unchanged seq.

@@ -1,6 +1,6 @@
 //! One tick row per control-plane arm run, and the readout built from them.
 //!
-//! Every scheduled arm of the control plane (king wake, watchdog, pr-watch
+//! Every scheduled arm of the control plane (lead wake, watchdog, pr-watch
 //! merge dispatch, active backlog, auto-continue, the stop-hook shim) appends
 //! one `control_plane_tick` row to the journal it already uses, saying what it
 //! did or why it did nothing. The reader folds every journal into one row per
@@ -92,7 +92,7 @@ const FLEET_TAIL_CADENCE: u64 = 3;
 
 /// The interval multiplier a row's staleness is judged against: 3 for the
 /// fleet-tail arms (`stranded`, `recovery`, `watchdog`), 1 for every other
-/// arm. One table, every reader: `arm_watch::overdue_arms`, the king
+/// arm. One table, every reader: `arm_watch::overdue_arms`, the lead
 /// check-in and the status readout all fold rows through [`arm_status`].
 fn cadence_of(arm: &str) -> u64 {
     match arm {
@@ -104,7 +104,7 @@ fn cadence_of(arm: &str) -> u64 {
 /// Every arm the readout shows, whether or not it has ever ticked.
 pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
-        arm: "king_wake",
+        arm: "lead_wake",
         default_interval_s: 900,
         scheduler: SCHED_LAUNCHD,
         upstream: None,
@@ -208,7 +208,7 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: Some("fno agents loops table"),
     },
     ArmSpec {
-        arm: "king_settle",
+        arm: "lead_settle",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
         upstream: None,
@@ -248,16 +248,16 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
-        arm: "crown_ledger",
-        default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
+        arm: "team_ledger",
+        default_interval_s: crate::rundown::TEAM_LEDGER_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
         reader: None,
     },
     ArmSpec {
-        arm: "reign_eval",
-        default_interval_s: crate::reign_eval::REIGN_EVAL_INTERVAL_S,
+        arm: "lead_eval",
+        default_interval_s: crate::lead_eval::LEAD_EVAL_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
@@ -290,7 +290,7 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
-/// (`no_crowned_target`, `watchdog_off`, `env_broken`, ...); `detail` is a
+/// (`no_teamed_target`, `watchdog_off`, `env_broken`, ...); `detail` is a
 /// short human string.
 pub fn tick_data(
     arm: &str,
@@ -830,7 +830,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 
 /// Skip reasons that mean the arm ran and its run failed - not that it chose
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
-/// quota_skip pass through; timeout/error fail), the king-wake and notify
+/// quota_skip pass through; timeout/error fail), the lead-wake and notify
 /// emitters' failure tokens, merge_close's `failures` (a partial reconcile
 /// that left nodes unresolved), and auto_continue's `next-error` (a non-zero
 /// or malformed `backlog next`) and `select-unmeasured` (a bounded read that
@@ -840,7 +840,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// receipt -): an arm that could not compute its input, or whose
 /// action failed, has not skipped - it has failed. `budget_spent` fails
 /// because the arm stopped before it covered every unit it enumerated (the
-/// king wake's `budget spent after k of N crowns`, the watchdog's skipped
+/// lead wake's `budget spent after k of N teams`, the watchdog's skipped
 /// leg, a merge queue whose grant budget spent with nothing merged); its
 /// detail carries the count. `select-unmeasured` is a
 /// bounded selection that the arm_watch heal lane retries. `degraded` is
@@ -1029,7 +1029,7 @@ pub fn launchd_fold_live() -> Option<LaunchdFold> {
         return None;
     }
     let cmd = vec!["launchctl".to_string(), "list".to_string()];
-    let stdout = crate::king_board::budget::run_with_timeout(
+    let stdout = crate::org_board::budget::run_with_timeout(
         &cmd,
         Path::new("."),
         std::time::Duration::from_secs(5),
@@ -1099,7 +1099,7 @@ pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
 pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: u64) -> TickTrace {
     let mut trace = read_tick_trace(journals, now_unix);
     // The one live pause read, taken before the tier check so a healthy
-    // tier carries the fact too (the king summary reads it there). A
+    // tier carries the fact too (the lead summary reads it there). A
     // journal-folded trace stays pause-free.
     trace.pause = Some(crate::loops_pause::dispatch_pause())
         .filter(crate::loops_pause::DispatchPause::is_paused);
@@ -1120,7 +1120,7 @@ pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: 
         "print".to_string(),
         format!("gui/{uid}/{label}"),
     ];
-    if let Ok(stdout) = crate::king_board::budget::run_with_timeout(
+    if let Ok(stdout) = crate::org_board::budget::run_with_timeout(
         &cmd,
         Path::new("."),
         std::time::Duration::from_secs(2),
@@ -1589,9 +1589,9 @@ mod tests {
     }
 
     /// The readout knows its arms before the first tick and assigns the new
-    /// reign eval arm its 600-second daemon cadence.
+    /// lead eval arm its 600-second daemon cadence.
     #[test]
-    fn arm_watch_merge_close_and_reign_eval_are_known_daemon_arms() {
+    fn arm_watch_merge_close_and_lead_eval_are_known_daemon_arms() {
         assert_eq!(KNOWN_ARMS.len(), 23);
         let attention = KNOWN_ARMS
             .iter()
@@ -1637,26 +1637,26 @@ mod tests {
         assert_eq!(mc.scheduler, SCHED_DAEMON);
         let cl = KNOWN_ARMS
             .iter()
-            .find(|s| s.arm == "crown_ledger")
-            .expect("crown_ledger row");
+            .find(|s| s.arm == "team_ledger")
+            .expect("team_ledger row");
         assert_eq!(
             cl.default_interval_s,
-            crate::king_ledger::CROWN_LEDGER_INTERVAL_S
+            crate::rundown::TEAM_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
-        let reign_eval = KNOWN_ARMS
+        let lead_eval = KNOWN_ARMS
             .iter()
-            .find(|s| s.arm == "reign_eval")
-            .expect("reign_eval row");
+            .find(|s| s.arm == "lead_eval")
+            .expect("lead_eval row");
         assert_eq!(
-            reign_eval.default_interval_s,
-            crate::reign_eval::REIGN_EVAL_INTERVAL_S
+            lead_eval.default_interval_s,
+            crate::lead_eval::LEAD_EVAL_INTERVAL_S
         );
-        assert_eq!(reign_eval.scheduler, SCHED_DAEMON);
+        assert_eq!(lead_eval.scheduler, SCHED_DAEMON);
         let settle = KNOWN_ARMS
             .iter()
-            .find(|s| s.arm == "king_settle")
-            .expect("king_settle row");
+            .find(|s| s.arm == "lead_settle")
+            .expect("lead_settle row");
         assert_eq!(settle.default_interval_s, 300);
         assert_eq!(settle.scheduler, SCHED_DAEMON);
     }
@@ -2014,7 +2014,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let row = tick_envelope(
             "2026-09-22T08:27:07Z",
-            "king_wake",
+            "lead_wake",
             SCHED_DAEMON,
             1,
             json!(null),
@@ -2023,13 +2023,13 @@ mod tests {
         commit_row(&journal, &row);
         let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
         let rows = read_arms(&[journal.clone()], now);
-        let king = rows
+        let lead = rows
             .iter()
-            .find(|r| r.arm == "king_wake")
-            .expect("king_wake row");
-        assert_eq!(king.producer_evidence, ProducerEvidence::Observed);
-        assert_eq!(king.age_s, Some(10));
-        assert!(!king.stale);
+            .find(|r| r.arm == "lead_wake")
+            .expect("lead_wake row");
+        assert_eq!(lead.producer_evidence, ProducerEvidence::Observed);
+        assert_eq!(lead.age_s, Some(10));
+        assert!(!lead.stale);
         std::fs::remove_dir_all(&dir).ok();
 
         let dir = temp_dir();
@@ -2038,7 +2038,7 @@ mod tests {
             &journal,
             &[tick_envelope(
                 "2026-09-22T05:00:00Z",
-                "king_wake",
+                "lead_wake",
                 SCHED_DAEMON,
                 1,
                 json!(null),
@@ -2048,18 +2048,18 @@ mod tests {
         std::fs::write(dir.join("events.db"), b"not a sqlite database").unwrap();
         let now = parse_rfc3339_unix("2026-09-22T05:00:10Z").unwrap();
         let rows = read_arms(&[journal], now);
-        let king = rows
+        let lead = rows
             .iter()
-            .find(|r| r.arm == "king_wake")
-            .expect("king_wake row");
-        assert_eq!(king.acted, Some(1));
+            .find(|r| r.arm == "lead_wake")
+            .expect("lead_wake row");
+        assert_eq!(lead.acted, Some(1));
         std::fs::remove_dir_all(&dir).ok();
 
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         let frozen = tick_envelope(
             "2026-09-22T04:51:51Z",
-            "king_wake",
+            "lead_wake",
             SCHED_DAEMON,
             1,
             json!(null),
@@ -2067,7 +2067,7 @@ mod tests {
         );
         let fresh = tick_envelope(
             "2026-09-22T08:27:07Z",
-            "king_wake",
+            "lead_wake",
             SCHED_DAEMON,
             0,
             json!("no_trigger"),
@@ -2078,12 +2078,12 @@ mod tests {
         commit_row(&journal, &fresh);
         let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
         let rows = read_arms(&[journal], now);
-        let king = rows
+        let lead = rows
             .iter()
-            .find(|r| r.arm == "king_wake")
-            .expect("king_wake row");
-        assert_eq!(king.skip_reason.as_deref(), Some("no_trigger"));
-        assert_eq!(king.age_s, Some(10));
+            .find(|r| r.arm == "lead_wake")
+            .expect("lead_wake row");
+        assert_eq!(lead.skip_reason.as_deref(), Some("no_trigger"));
+        assert_eq!(lead.age_s, Some(10));
         std::fs::remove_dir_all(&dir).ok();
 
         let dir = temp_dir();
@@ -2140,10 +2140,10 @@ mod tests {
             &a_rotated,
             &[tick_envelope(
                 "2026-09-04T10:00:00Z",
-                "king_wake",
+                "lead_wake",
                 SCHED_DAEMON,
                 0,
-                json!("no_crowned_target"),
+                json!("no_teamed_target"),
                 900,
             )],
         );
@@ -2151,7 +2151,7 @@ mod tests {
             &a,
             &[tick_envelope(
                 "2026-09-04T11:00:00Z",
-                "king_wake",
+                "lead_wake",
                 SCHED_DAEMON,
                 1,
                 json!(null),
@@ -2172,10 +2172,10 @@ mod tests {
 
         let now = parse_rfc3339_unix("2026-09-04T11:00:10Z").unwrap();
         let rows = read_arms(&[a, b], now);
-        let king = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert_eq!(king.acted, Some(1));
-        assert_eq!(king.skip_reason, None);
-        assert!(!king.stale);
+        let lead = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
+        assert_eq!(lead.acted, Some(1));
+        assert_eq!(lead.skip_reason, None);
+        assert!(!lead.stale);
         let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
         assert_eq!(ab.acted, Some(3));
         std::fs::remove_dir_all(&dir).ok();
@@ -2365,7 +2365,7 @@ mod tests {
     /// A fleet-tail arm runs one real run every three buckets, so mid-rotation
     /// silence up to three intervals is its rest tick, not staleness. The old
     /// one-bucket bound (2 x interval) called exactly this shape STALE and the
-    /// king check-in paged a healthy rotation.
+    /// lead check-in paged a healthy rotation.
 
     /// notify_watch is checked against the same reader rule: cadence 1, so it
     /// goes stale past its own carried interval and never rides the fleet-tail
@@ -2532,27 +2532,27 @@ mod tests {
         assert!(line.contains("skip=degraded"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
 
-        // A king_wake pass that ran out of its slice before covering every
-        // crown it enumerated is a failure, not an ok skip: the detail
+        // A lead_wake pass that ran out of its slice before covering every
+        // team it enumerated is a failure, not an ok skip: the detail
         // carries the shortfall count (evaluated=0/5).
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         let mut short = tick_envelope(
             "2026-09-04T11:58:00Z",
-            "king_wake",
+            "lead_wake",
             SCHED_DAEMON,
             0,
             json!("budget_spent"),
             900,
         );
         short["data"]["detail"] =
-            json!("crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns");
+            json!("teams=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 teams");
         write_rows(
             &journal,
             &[
                 tick_envelope(
                     "2026-09-04T11:30:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_DAEMON,
                     0,
                     json!("no_trigger"),
@@ -2564,7 +2564,7 @@ mod tests {
         let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
 
         let rows = read_arms(&[journal.clone()], now);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.failing, "budget_spent must set failing");
         assert!(needs_attention(kw));
         let line = render_row(kw);
@@ -2579,7 +2579,7 @@ mod tests {
         let bare = dir.join("bare.jsonl");
         write_rows(&bare, &[short]);
         let rows = read_arms(&[bare], now);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.failing, "budget_spent must set failing");
         let line = render_row(kw);
         assert!(line.contains("FAIL"), "line: {line}");
@@ -2670,7 +2670,7 @@ mod tests {
 
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
-        // pr_watch_merge ticked 100s ago and its tick timed out; king_wake's
+        // pr_watch_merge ticked 100s ago and its tick timed out; lead_wake's
         // newest tick is 10000s old (interval 900: stale past 1800).
         write_rows(
             &journal,
@@ -2685,7 +2685,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T09:33:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -2701,7 +2701,7 @@ mod tests {
         assert!(pm.failing, "a fresh timeout row is failing");
         assert!(!pm.stale);
         assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         assert!(kw.line.contains("STALE"), "line: {}", kw.line);
         std::fs::remove_dir_all(&dir).ok();
@@ -2723,7 +2723,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T11:00:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -2750,13 +2750,13 @@ mod tests {
         assert!(reap.line.contains("STALE"), "line: {}", reap.line);
         // A launchd arm names its overdue tick tier, not the daemon:
         // pr_watch_merge is itself stale, so the stamps are tier-wide overdue.
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         std::fs::remove_dir_all(&dir).ok();
 
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
-        // pr_watch_merge ticked fresh but its run errored; king_wake is stale.
+        // pr_watch_merge ticked fresh but its run errored; lead_wake is stale.
         // Any failure-token skip (not just timeout) blames the tick.
         write_rows(
             &journal,
@@ -2771,7 +2771,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T09:33:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -2783,7 +2783,7 @@ mod tests {
 
         let mut rows = read_arms(&[journal], now);
         explain(&mut rows, &DaemonFacts::Unknown);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         assert!(
             kw.line.contains("the pr-watch tick cut this arm's phase"),
@@ -2810,7 +2810,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T09:33:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -2851,7 +2851,7 @@ mod tests {
         );
         // The downstream rule now sees an honest merge row: the stale arm
         // blames the tick instead of reading unexplained.
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         std::fs::remove_dir_all(&dir).ok();
 
@@ -2905,7 +2905,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T09:33:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -2931,7 +2931,7 @@ mod tests {
         let mut rows = read_arms(&[journal], now);
         let trace = read_tick_trace(&[dir.join("global.jsonl")], now);
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         assert!(
             kw.line.contains("the tick started and did not complete"),
@@ -3198,14 +3198,14 @@ mod tests {
 
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
-        // king_wake timed out once and never came back: age 1801s against a
+        // lead_wake timed out once and never came back: age 1801s against a
         // 900s interval reads stale, and the reason it stopped is still a
         // failure the row must name.
         write_rows(
             &journal,
             &[tick_envelope(
                 "2026-09-04T09:33:19Z",
-                "king_wake",
+                "lead_wake",
                 SCHED_LAUNCHD,
                 0,
                 json!("timeout"),
@@ -3216,7 +3216,7 @@ mod tests {
 
         let mut rows = read_arms(&[journal], now);
         explain(&mut rows, &DaemonFacts::Unknown);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.stale, "1801s against 2x900 must read stale");
         assert!(kw.failing, "the newest run is a timeout, stale or not");
         assert!(kw.line.contains("STALE"), "line: {}", kw.line);
@@ -3232,7 +3232,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-04T10:00:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     1,
                     json!(null),
@@ -3240,7 +3240,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T10:15:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!("timeout"),
@@ -3248,7 +3248,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T10:30:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!("timeout"),
@@ -3260,7 +3260,7 @@ mod tests {
 
         let mut rows = read_arms(&[journal], now);
         explain(&mut rows, &DaemonFacts::Unknown);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.failing);
         assert_eq!(kw.failing_for_s, Some(1900));
         assert!(kw.line.contains("failing_for=1900s"), "line: {}", kw.line);
@@ -3313,7 +3313,7 @@ mod tests {
             },
             &trace,
         );
-        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+        for arm in ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert_eq!(
                 row.producer_evidence,
@@ -3348,7 +3348,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-04T09:33:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3368,7 +3368,7 @@ mod tests {
 
         let mut rows = read_arms(&[journal], now);
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        for arm in ["king_wake", "pr_watch_merge"] {
+        for arm in ["lead_wake", "pr_watch_merge"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert_eq!(
                 row.cause.as_deref(),
@@ -3475,7 +3475,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-11T10:40:26Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3517,7 +3517,7 @@ mod tests {
                 drifted: false,
             },
         );
-        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+        for arm in ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert!(row.stale, "{arm} must read STALE, line: {}", row.line);
             assert!(row.line.contains("STALE"), "line: {}", row.line);
@@ -3543,7 +3543,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-11T10:57:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3573,7 +3573,7 @@ mod tests {
         explain(&mut rows, &DaemonFacts::Unknown);
         let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
         assert!(nw.stale, "notify_watch 4000s against 300 is stale");
-        for arm in ["king_wake", "watchdog", "pr_watch_merge"] {
+        for arm in ["lead_wake", "watchdog", "pr_watch_merge"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert!(!row.stale, "{arm} ticked 100s ago and reads ok");
         }
@@ -3644,7 +3644,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-11T11:58:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3685,7 +3685,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-11T10:40:26Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3719,7 +3719,7 @@ mod tests {
         let mut rows = read_arms(&[journal], now);
         let trace = read_tick_trace(&[dir.join("global.jsonl")], now);
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.stale, "line: {}", kw.line);
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         assert!(
@@ -3795,7 +3795,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-11T10:49:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     1,
                     json!(null),
@@ -3837,7 +3837,7 @@ mod tests {
                 drifted: false,
             },
         );
-        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+        for arm in ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert!(!row.stale, "{arm} must read ok, line: {}", row.line);
             assert_eq!(row.cause, None);
@@ -3866,7 +3866,7 @@ mod tests {
         let trace = TickTrace {
             end_ts_unix: Some(parse_rfc3339_unix("2026-09-16T11:59:30Z").unwrap()),
             end_outcome: Some("timeout".to_string()),
-            end_cut: Some(vec!["sweep".to_string(), "king_wake".to_string()]),
+            end_cut: Some(vec!["sweep".to_string(), "lead_wake".to_string()]),
             ..TickTrace::default()
         };
 
@@ -3910,7 +3910,7 @@ mod tests {
         assert!(pm.line.contains("merge"), "line: {}", pm.line);
         std::fs::remove_dir_all(&dir).ok();
 
-        // AC4-HP: king_wake is stale and the cut list names its own phase.
+        // AC4-HP: lead_wake is stale and the cut list names its own phase.
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         write_rows(
@@ -3918,7 +3918,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-11T09:52:20Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -3938,13 +3938,13 @@ mod tests {
         let trace = TickTrace {
             end_ts_unix: Some(parse_rfc3339_unix("2026-09-11T10:58:00Z").unwrap()),
             end_outcome: Some("timeout".to_string()),
-            end_cut: Some(vec!["king_wake".to_string(), "stranded".to_string()]),
+            end_cut: Some(vec!["lead_wake".to_string(), "stranded".to_string()]),
             ..TickTrace::default()
         };
 
         let mut rows = read_arms(&[journal], now);
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.stale, "line: {}", kw.line);
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         std::fs::remove_dir_all(&dir).ok();
@@ -4021,7 +4021,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-17T22:30:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -4073,7 +4073,7 @@ mod tests {
     fn pause_rows() {
         let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+        for arm in ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
             assert!(!row.stale, "{arm} is held on purpose, line: {}", row.line);
             assert_eq!(
@@ -4104,7 +4104,7 @@ mod tests {
             ..trace
         };
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.stale, "line: {}", kw.line);
         assert_eq!(
             kw.cause.as_deref(),
@@ -4120,7 +4120,7 @@ mod tests {
             ..trace
         };
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert_eq!(
             kw.cause.as_deref(),
             Some("launchd_foreign_plist"),
@@ -4140,7 +4140,7 @@ mod tests {
             ..trace
         };
         explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        let kw = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
         assert!(kw.stale, "line: {}", kw.line);
         assert_eq!(
             kw.cause.as_deref(),

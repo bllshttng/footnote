@@ -226,7 +226,7 @@ impl Core {
                                 pr_session_short: None,
                                 tail: None,
                                 // A bare shell pane has no registry entry, so
-                                // no crown and no reachability probe either.
+                                // no team and no reachability probe either.
                                 crown_level: None,
                                 crown_scope: None,
                                 crown_title: None,
@@ -566,7 +566,7 @@ impl Core {
                 pr_session_short: None,
                 tail: None,
                 // An external-daemon row is not an fno-registry worker: no
-                // crown, and its liveness lives in its own daemon, so no
+                // team, and its liveness lives in its own daemon, so no
                 // reachability reading either.
                 crown_level: None,
                 crown_scope: None,

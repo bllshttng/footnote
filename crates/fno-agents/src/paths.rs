@@ -285,10 +285,10 @@ impl AgentsHome {
         self.root.join("agent-hooks").join("spool.jsonl")
     }
 
-    /// The crown name store (`crown_names.json`), beside `registry.json`.
-    /// The mux reads this file as a contract - see [`crate::crown_names`].
-    pub fn crown_names_json(&self) -> PathBuf {
-        self.root.join("crown_names.json")
+    /// The team name store (`team_names.json`), beside `registry.json`.
+    /// The mux reads this file as a contract - see [`crate::team_names`].
+    pub fn team_names_json(&self) -> PathBuf {
+        self.root.join("team_names.json")
     }
 
     /// Per-provider injection gate record (`injection-gate.json`), stored next
@@ -326,7 +326,7 @@ impl AgentsHome {
 
     /// Per-scope refusal-rate trend baseline (`refusal-trend/`), beside
     /// `registry.json`. One file per scope, so concurrent beats of different
-    /// crowns share no document. The `reign_checkin` journal is the diff
+    /// teams share no document. The `lead_checkin` journal is the diff
     /// corpus, not the trend baseline: a beat that prints but does not
     /// journal must still advance the baseline, or a falling series reads
     /// RISING against the same stale pair on every beat. See
@@ -667,7 +667,7 @@ fn durable_spaces_root() -> PathBuf {
 
 /// The spaces ROOT (the directory holding one space dir per repository):
 /// the same resolution `space_dir`'s parent logic uses. Public for the
-/// `fno-agents` bin client, whose dead-crown sweep walks it.
+/// `fno-agents` bin client, whose dead-team sweep walks it.
 pub fn spaces_root() -> PathBuf {
     spaces_root_dir()
 }
@@ -722,7 +722,7 @@ pub fn space_slug(canonical_root: &Path) -> String {
 
 /// The space for the repository containing `cwd`, keyed on its CANONICAL root
 /// so every worktree of one repo answers the same path. Cross-worktree state
-/// (claims, events, kings) resolves here; mirrors Python `paths.space_dir`.
+/// (claims, events, leads) resolves here; mirrors Python `paths.space_dir`.
 pub fn space_dir(cwd: &Path) -> PathBuf {
     let root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
     spaces_root_dir().join(space_slug(&root))
@@ -918,8 +918,8 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 ///
 /// This is the Rust half of the three declarations. `cargo test` sandboxes no
 /// `HOME`, so a test that resolves a state root without one of these pins
-/// reaches the operator's live `~/.fno` - which is how loop_king unit tests
-/// landed king manifests in it.
+/// reaches the operator's live `~/.fno` - which is how loop_lead unit tests
+/// landed lead manifests in it.
 ///
 /// The directory name carries the pid AND a sequence: two tests sharing a
 /// pid-only name raced each other's cleanup. The process-wide env lock is held

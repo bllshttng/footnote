@@ -57,7 +57,7 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/backlog/note_history.rs",
     "crates/fno-agents/src/backlog/note_migrate.rs",
     "crates/fno-agents/src/backlog/settings.rs",  # the porcelain reads' store-path builder (FNO_CONFIG state_dir, then the .fno anchor), never a read
-    "crates/fno-agents/src/king_board/scope.rs",  # the scope's default store-path builder (graph_json_path), never a read
+    "crates/fno-agents/src/org_board/scope.rs",  # the scope's default store-path builder (graph_json_path), never a read
     # The claims store's db-path builder (the layout place of the graph
     # anchor, swapped to its db sibling), never a read.
     "crates/fno-agents/src/claim_store.rs",

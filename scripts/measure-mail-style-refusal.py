@@ -6,7 +6,7 @@ envelope (the <fno_mail> open/close lines and every appended "-- " trailer),
 drops the bodies that already bypass the gate (control: lane, style-exception
 marker), then runs the checker over the authored bodies that remain.
 
-The strip carries a positive control: "your crown" and "peer mail:" exist only
+The strip carries a positive control: "your team" and "peer mail:" exist only
 in the trailers, so near-zero occurrences after the strip prove the strip
 worked. Keeping the envelope reads ~31.3% because the trailers themselves
 break rules 1 and 2.
@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
 
 from fno import style  # noqa: E402
 
-CONTROL_POSITIVE_MARKERS = ("your crown", "peer mail:")
+CONTROL_POSITIVE_MARKERS = ("your team", "peer mail:")
 
 
 def corpus_paths() -> list[Path]:

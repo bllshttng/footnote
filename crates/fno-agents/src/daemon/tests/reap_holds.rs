@@ -649,7 +649,7 @@ fn ac3_the_conflict_release_reads_all_done_over_bare_witness_nodes() {
     );
 }
 
-/// King specimen (2026-09-11): a deferred witness is parked, not open work.
+/// Lead specimen (2026-09-11): a deferred witness is parked, not open work.
 /// The release gate accepts done and the inactive statuses; only ACTIVE
 /// work refuses.
 #[test]

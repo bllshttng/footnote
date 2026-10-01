@@ -64,8 +64,8 @@ pub(crate) fn install_sigint_handler() {
     }
 }
 
-fn cancel_path_for_driver(cwd: &Path, king_manifest: Option<&Path>) -> PathBuf {
-    king_manifest
+fn cancel_path_for_driver(cwd: &Path, lead_manifest: Option<&Path>) -> PathBuf {
+    lead_manifest
         .map(|path| absolute_path(&path.with_extension("cancelled")))
         .unwrap_or_else(|| absolute_path(&cwd.join(".fno").join(".target-cancelled")))
 }
@@ -319,13 +319,13 @@ pub fn run_loop_verb(args: &[String]) -> i32 {
     }
 }
 
-/// The wake clause for the respawned king's prompt.
+/// The wake clause for the respawned lead's prompt.
 ///
 /// A mail wake names the inbox the trigger matched, plus the ack that
 /// advances its cursor: the woken session is fresh and can derive neither
 /// the dead holder's name nor its reply-handle short id from any whoami of
 /// its own, and an unacked row re-wakes the scope on the next tick.
-fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
+fn lead_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
     match reason {
         Some("mail") => match address {
             Some(address) => format!(
@@ -344,13 +344,13 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
                 .to_string(),
         },
         Some("board") => {
-            " The board changed while this scope had no king: read it first.".to_string()
+            " The board changed while this scope had no lead: read it first.".to_string()
         }
         Some("backstop") => " No event fired; this is the periodic re-check, and an \
              unchanged board is a legitimate NoWork exit."
             .to_string(),
         Some("escalation_answered") => " You were woken by the answer to a question \
-             this crown asked the operator; it is quoted below - apply it before \
+             this team asked the operator; it is quoted below - apply it before \
              your next ruling."
             .to_string(),
         _ => String::new(),
@@ -360,9 +360,9 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
 /// The board diff the wake caller computed, as prompt text.
 ///
 /// The woken session is fresh: it cannot diff the board against anything it
-/// has seen. The diff travels on the command line so the king starts from
+/// has seen. The diff travels on the command line so the lead starts from
 /// WHAT changed - not a re-read of a board whose unchanged rows are noise.
-fn king_wake_detail_clause(detail: Option<&str>) -> String {
+fn lead_wake_detail_clause(detail: Option<&str>) -> String {
     match detail {
         Some(detail) if !detail.is_empty() => {
             format!(
@@ -374,17 +374,17 @@ fn king_wake_detail_clause(detail: Option<&str>) -> String {
     }
 }
 
-fn should_resume_codex_goal(king_wake: bool, successor: bool, harness: Option<&str>) -> bool {
-    king_wake && !successor && harness == Some("codex")
+fn should_resume_codex_goal(lead_wake: bool, successor: bool, harness: Option<&str>) -> bool {
+    lead_wake && !successor && harness == Some("codex")
 }
 
 fn try_resume_codex_goal_on_wake(
-    king_wake: bool,
+    lead_wake: bool,
     successor: bool,
     harness: Option<&str>,
     resume: impl FnOnce() -> Result<serde_json::Value, String>,
 ) -> Result<Option<serde_json::Value>, String> {
-    if !should_resume_codex_goal(king_wake, successor, harness) {
+    if !should_resume_codex_goal(lead_wake, successor, harness) {
         return Ok(None);
     }
     resume().map(Some)
@@ -397,7 +397,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         return Ok(crate::loop_readiness::run(&args[1..]));
     }
     if subcommand == "command" {
-        return Ok(crate::reign_goal::run_provider_command(&args[1..]));
+        return Ok(crate::lead_goal::run_provider_command(&args[1..]));
     }
     if subcommand != "run" {
         eprintln!("fno-agents loop: expected subcommand 'run', 'readiness', or 'command', got '{subcommand}'");
@@ -416,13 +416,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut prompt_file: Option<String> = None;
     let mut cli_alias: Option<String> = None;
     let mut driver_lib_dir: Option<PathBuf> = None;
-    let mut king_scope: Option<String> = None;
-    let mut king_wake = false;
-    let mut king_wake_reason: Option<String> = None;
-    let mut king_wake_address: Option<String> = None;
-    let mut king_wake_holder: Option<String> = None;
-    let mut king_wake_detail: Option<String> = None;
-    let mut king_wake_successor = false;
+    let mut lead_scope: Option<String> = None;
+    let mut lead_wake = false;
+    let mut lead_wake_reason: Option<String> = None;
+    let mut lead_wake_address: Option<String> = None;
+    let mut lead_wake_holder: Option<String> = None;
+    let mut lead_wake_detail: Option<String> = None;
+    let mut lead_wake_successor = false;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -494,25 +494,25 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 cwd = PathBuf::from(require_value!("--cwd", args, i));
             }
             "--scope" => {
-                king_scope = Some(require_value!("--scope", args, i).to_string());
+                lead_scope = Some(require_value!("--scope", args, i).to_string());
             }
             "--wake" => {
-                king_wake = true;
+                lead_wake = true;
             }
             "--wake-reason" => {
-                king_wake_reason = Some(require_value!("--wake-reason", args, i).to_string());
+                lead_wake_reason = Some(require_value!("--wake-reason", args, i).to_string());
             }
             "--wake-address" => {
-                king_wake_address = Some(require_value!("--wake-address", args, i).to_string());
+                lead_wake_address = Some(require_value!("--wake-address", args, i).to_string());
             }
             "--wake-holder" => {
-                king_wake_holder = Some(require_value!("--wake-holder", args, i).to_string());
+                lead_wake_holder = Some(require_value!("--wake-holder", args, i).to_string());
             }
             "--wake-detail" => {
-                king_wake_detail = Some(require_value!("--wake-detail", args, i).to_string());
+                lead_wake_detail = Some(require_value!("--wake-detail", args, i).to_string());
             }
             "--wake-successor" => {
-                king_wake_successor = true;
+                lead_wake_successor = true;
             }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
@@ -523,23 +523,23 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     // ── driver validation ─────────────────────────────────────────────────────
-    // The wake flags are king-only: they name which trigger sent the walk and
+    // The wake flags are lead-only: they name which trigger sent the walk and
     // switch the queue out of failure-retry accounting, and neither concept
     // exists on the target driver.
-    if (king_wake
-        || king_wake_reason.is_some()
-        || king_wake_address.is_some()
-        || king_wake_holder.is_some())
-        && driver.as_deref() != Some("king")
+    if (lead_wake
+        || lead_wake_reason.is_some()
+        || lead_wake_address.is_some()
+        || lead_wake_holder.is_some())
+        && driver.as_deref() != Some("lead")
     {
         eprintln!(
-            "fno-agents loop run: --wake/--wake-reason need --driver king (they name the \
-             trigger that woke a crowned scope)"
+            "fno-agents loop run: --wake/--wake-reason need --driver lead (they name the \
+             trigger that woke a teamed scope)"
         );
         return Ok(2);
     }
-    if let Some(reason) = king_wake_reason.as_deref() {
-        if !king_wake {
+    if let Some(reason) = lead_wake_reason.as_deref() {
+        if !lead_wake {
             // A reason without the mode is a prompt that lies: the clause
             // tells the session it was woken while the walk still runs
             // failure-retry accounting (ceiling guard and respawn bill).
@@ -561,7 +561,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         }
     }
-    if king_wake_address.is_some() && king_wake_reason.as_deref() != Some("mail") {
+    if lead_wake_address.is_some() && lead_wake_reason.as_deref() != Some("mail") {
         // The address is the inbox the mail trigger MATCHED. It is meaningful
         // only for a mail wake, and the woken session cannot rederive it: it
         // is a fresh session, and the row may sit under the dead holder's
@@ -572,17 +572,17 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         );
         return Ok(2);
     }
-    if king_wake_holder.is_some() && !king_wake {
+    if lead_wake_holder.is_some() && !lead_wake {
         // The holder is the wake caller's assertion that transcript truth
         // resolved this row gone; without --wake there is no wake to justify
-        // bypassing the live-crown-holder guard for it.
+        // bypassing the live-team-holder guard for it.
         eprintln!(
             "fno-agents loop run: --wake-holder needs --wake (it names the registry \
              row the wake caller resolved absent by transcript)"
         );
         return Ok(2);
     }
-    if king_wake_successor && (!king_wake || king_wake_holder.is_none()) {
+    if lead_wake_successor && (!lead_wake || lead_wake_holder.is_none()) {
         // A successor spawn is the respawn of a scope whose holder transcript
         // truth resolved gone. It needs the wake caller to have named that
         // holder (the guard skip is what lets the walk respawn over the dead
@@ -594,7 +594,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         );
         return Ok(2);
     }
-    if king_wake_detail.is_some() && !king_wake {
+    if lead_wake_detail.is_some() && !lead_wake {
         // The detail is the trigger's payload - what changed on the board.
         // Without --wake there is no trigger whose payload it could be.
         eprintln!(
@@ -603,9 +603,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         );
         return Ok(2);
     }
-    if king_wake_detail.is_some()
+    if lead_wake_detail.is_some()
         && !matches!(
-            king_wake_reason.as_deref(),
+            lead_wake_reason.as_deref(),
             Some("board") | Some("escalation_answered")
         )
     {
@@ -624,10 +624,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!("Usage: fno-agents loop run --driver target [options]");
             return Ok(2);
         }
-        Some("target") | Some("king") => {}
+        Some("target") | Some("lead") => {}
         Some(other) => {
             eprintln!(
-                "fno-agents loop run: unknown --driver '{other}'; supported: 'target', 'king'"
+                "fno-agents loop run: unknown --driver '{other}'; supported: 'target', 'lead'"
             );
             return Ok(2);
         }
@@ -658,35 +658,35 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
-    // driver: a king reads its per-scope file `<space>/kings/<scope>.md` (expired
-    // by `fno agents king done` on abdication) and never touches the target one.
+    // driver: a lead reads its per-scope file `<space>/leads/<scope>.md` (expired
+    // by `fno agents lead done` on abdication) and never touches the target one.
     let driver_name = driver.clone().unwrap_or_else(|| "target".to_string());
     let mut target_queue: Option<TargetQueue> = None;
-    let mut king_queue: Option<crate::loop_king::KingQueue> = None;
+    let mut lead_queue: Option<crate::loop_lead::LeadQueue> = None;
     // (unit display id, input/scope display) for the header, captured at
     // construction so the queue is never re-read for display (TOCTOU).
     let mut unit_display = ("(none)".to_string(), "(none)".to_string());
-    if driver_name == "king" {
-        let Some(scope) = king_scope.as_deref() else {
+    if driver_name == "lead" {
+        let Some(scope) = lead_scope.as_deref() else {
             eprintln!(
-                "fno-agents loop run: --driver king needs --scope <scope> (the crowned \
-                 territory to respawn a king over; the manifest is \
-                 <space>/kings/<scope>.md)"
+                "fno-agents loop run: --driver lead needs --scope <scope> (the teamed \
+                 territory to respawn a lead over; the manifest is \
+                 <space>/leads/<scope>.md)"
             );
             return Ok(2);
         };
         let fno_bin = crate::loopcheck::loopcheck_fno_bin();
-        match crate::loop_king::KingQueue::from_manifest_full(
+        match crate::loop_lead::LeadQueue::from_manifest_full(
             &cwd,
             scope,
             fno_bin,
-            king_wake,
-            king_wake_holder.as_deref(),
-            king_wake_successor,
+            lead_wake,
+            lead_wake_holder.as_deref(),
+            lead_wake_successor,
         ) {
             Ok(q) => {
                 unit_display = (q.walk_key().to_string(), q.scope().to_string());
-                king_queue = Some(q);
+                lead_queue = Some(q);
             }
             Err(e) => {
                 eprintln!("fno-agents loop run: {e}");
@@ -708,15 +708,15 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         }
     }
 
-    if king_wake && !king_wake_successor {
-        if let Some(queue) = king_queue.as_ref() {
+    if lead_wake && !lead_wake_successor {
+        if let Some(queue) = lead_queue.as_ref() {
             if let Ok(content) = std::fs::read_to_string(queue.manifest_path()) {
-                if let Some(manifest) = crate::king_termination::parse_king_manifest(&content) {
+                if let Some(manifest) = crate::lead_termination::parse_lead_manifest(&content) {
                     let resumed = match try_resume_codex_goal_on_wake(
-                        king_wake,
-                        king_wake_successor,
+                        lead_wake,
+                        lead_wake_successor,
                         manifest.harness.as_deref(),
-                        || crate::reign_goal::resume(&manifest, &cwd),
+                        || crate::lead_goal::resume(&manifest, &cwd),
                     ) {
                         Ok(resumed) => resumed,
                         Err(error) => {
@@ -734,10 +734,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                             "successor": false,
                             "provider_receipt": receipt,
                         });
-                        if let Some(reason) = king_wake_reason.as_deref() {
+                        if let Some(reason) = lead_wake_reason.as_deref() {
                             body["reason"] = serde_json::json!(reason);
                         }
-                        if let Some(address) = king_wake_address.as_deref() {
+                        if let Some(address) = lead_wake_address.as_deref() {
                             body["address"] = serde_json::json!(address);
                         }
                         let project_events = crate::paths::events_path(&cwd);
@@ -745,7 +745,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                         crate::loopcheck::emit_to_both(
                             &project_events,
                             &global_events,
-                            "king_goal_resumed",
+                            "lead_goal_resumed",
                             body,
                         );
                         return Ok(0);
@@ -794,28 +794,28 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // Per-driver continue prompt. The driver libs use it as the session prompt
     // for every (re)dispatch, so it IS the spawned session's instruction: a
-    // target resumes its own manifest, a king reads its board and reigns. One
-    // hardcoded "/target --resume" for every driver is how a respawned king
-    // once ran as a target resume that never knew it was crowned. The wake
-    // reason clause lives here for the same reason: a king that learns why it
+    // target resumes its own manifest, a lead reads its board and leads. One
+    // hardcoded "/target --resume" for every driver is how a respawned lead
+    // once ran as a target resume that never knew it was teamed. The wake
+    // reason clause lives here for the same reason: a lead that learns why it
     // was woken from a file it may never read has not learned it, and a
-    // mail-woken king that reads only its board never drains the mail that
+    // mail-woken lead that reads only its board never drains the mail that
     // woke it - the original failure with more processes.
-    let continue_prompt = if driver_name == "king" {
-        let scope = king_queue
+    let continue_prompt = if driver_name == "lead" {
+        let scope = lead_queue
             .as_ref()
             .map(|q| q.scope().to_string())
-            .or_else(|| king_scope.clone())
+            .or_else(|| lead_scope.clone())
             .unwrap_or_default();
         let wake_clause =
-            king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
-        let detail_clause = king_wake_detail_clause(king_wake_detail.as_deref());
+            lead_wake_clause(lead_wake_reason.as_deref(), lead_wake_address.as_deref());
+        let detail_clause = lead_wake_detail_clause(lead_wake_detail.as_deref());
         format!(
-            "You are the respawned king over {scope}. Read the board \
-             (fno inbox board --json --state <your kings manifest>), work \
-             every actionable row through the court duties in \
+            "You are the respawned lead over {scope}. Read the board \
+             (fno inbox board --json --state <your leads manifest>), work \
+             every actionable row through the org duties in \
              skills/lead, and encode each ruling in the graph before \
-             your next read. This is a reign pass, not a /target resume: do not \
+             your next read. This is a lead pass, not a /target resume: do not \
              implement nodes yourself, dispatch and rule.{wake_clause}{detail_clause}"
         )
     } else {
@@ -860,13 +860,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         cwd.to_str().unwrap_or(".").to_string(),
     ));
 
-    // The king walk's unit is keyed per invocation; hand that key to the
+    // The lead walk's unit is keyed per invocation; hand that key to the
     // dispatched session so its stop-hook terminal carries it and the walk
     // can close the unit on the pass's own verdict. Target units need no
     // counterpart: their manifest id is per-session already.
-    if let Some(kq) = king_queue.as_ref() {
+    if let Some(kq) = lead_queue.as_ref() {
         env.push((
-            crate::loop_king::WALK_SESSION_KEY_ENV.to_string(),
+            crate::loop_lead::WALK_SESSION_KEY_ENV.to_string(),
             kq.walk_key().to_string(),
         ));
     }
@@ -887,23 +887,23 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // re-reading any manifest, which avoids the TOCTOU double-read.
     let (session_id_display, input_display) = unit_display;
 
-    // ── king respawn ceiling (before any dispatch) ────────────────────────────
-    // The walk is one respawn of the crowned scope. Past the manifest ceiling
+    // ── lead respawn ceiling (before any dispatch) ────────────────────────────
+    // The walk is one respawn of the teamed scope. Past the manifest ceiling
     // it terminates on Budget without spawning: a scope that keeps needing a
-    // new king is a defect to look at, not a loop to fund. This is the
-    // ceiling's authority; KingQueue re-checks for mid-walk races. Wake mode
+    // new lead is a defect to look at, not a loop to fund. This is the
+    // ceiling's authority; LeadQueue re-checks for mid-walk races. Wake mode
     // skips BOTH guards (this one and the queue's): the caller's wake ledger
     // is the bound there, enforced before the walk was invoked. A successor
-    // wake is the exception - it IS a king generation, so the respawn budget
+    // wake is the exception - it IS a lead generation, so the respawn budget
     // binds it like any walk. An operator running --wake by hand is bypassing
     // a rate limit, not a safety limit.
-    if let Some(kq) = king_queue.as_ref() {
-        if (!king_wake || king_wake_successor) && kq.at_respawn_ceiling() {
+    if let Some(kq) = lead_queue.as_ref() {
+        if (!lead_wake || lead_wake_successor) && kq.at_respawn_ceiling() {
             journal.append(
                 "loop_terminated",
                 json!({
                     "reason": "Budget",
-                    "driver": "king",
+                    "driver": "lead",
                     "axis": "respawn",
                     "respawn_count": kq.respawn_count(),
                     "respawn_ceiling": kq.respawn_ceiling(),
@@ -911,9 +911,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 }),
             )?;
             eprintln!(
-                "fno-agents loop run: king scope {} is at its respawn ceiling \
+                "fno-agents loop run: lead scope {} is at its respawn ceiling \
                  ({}/{}); terminating on Budget without another spawn. A scope \
-                 that keeps needing a new king needs an operator, not a respawn.",
+                 that keeps needing a new lead needs an operator, not a respawn.",
                 kq.scope(),
                 kq.respawn_count(),
                 kq.respawn_ceiling()
@@ -945,11 +945,11 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     };
 
     // ── cancel closure ────────────────────────────────────────────────────────
-    // The target sentinel is scoped to target walks. A king has no target
-    // manifest, so its sidecar lives beside its own canonical crown manifest.
-    let sentinel = cancel_path_for_driver(&cwd, king_queue.as_ref().map(|q| q.manifest_path()));
-    let clear_hint = if let Some(kq) = king_queue.as_ref() {
-        format!("fno agents king cancel --scope {} --clear", kq.scope())
+    // The target sentinel is scoped to target walks. A lead has no target
+    // manifest, so its sidecar lives beside its own canonical team manifest.
+    let sentinel = cancel_path_for_driver(&cwd, lead_queue.as_ref().map(|q| q.manifest_path()));
+    let clear_hint = if let Some(kq) = lead_queue.as_ref() {
+        format!("fno agents lead cancel --scope {} --clear", kq.scope())
     } else {
         format!("rm {}", sentinel.display())
     };
@@ -972,10 +972,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // ── run the loop ──────────────────────────────────────────────────────────
     // Per-unit cap: None for a target (one deliverable re-dispatching until it
-    // terminates), Some(KING_MAX_DISPATCHES) for a king unit, which re-derives
+    // terminates), Some(LEAD_MAX_DISPATCHES) for a lead unit, which re-derives
     // from the board each pass - an unbounded re-dispatch against a board that
     // will not shrink is the shape that burns a night.
-    let outcome = match (&mut target_queue, &mut king_queue) {
+    let outcome = match (&mut target_queue, &mut lead_queue) {
         (Some(tq), _) => run_loop(tq, &dispatcher, &budget, &journal, &cancel, None),
         (_, Some(kq)) => run_loop(
             kq,
@@ -983,7 +983,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             &budget,
             &journal,
             &cancel,
-            Some(crate::loop_king::KING_MAX_DISPATCHES),
+            Some(crate::loop_lead::LEAD_MAX_DISPATCHES),
         ),
         (None, None) => unreachable!("exactly one queue is constructed above"),
     };
@@ -1027,7 +1027,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_path_for_driver, king_wake_clause, king_wake_detail_clause,
+        cancel_path_for_driver, lead_wake_clause, lead_wake_detail_clause,
         try_resume_codex_goal_on_wake,
     };
 
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn a_board_wakes_detail_names_the_diff_verbatim() {
-        let clause = king_wake_detail_clause(Some("added: x-1 (ready/p1)\nadded: x-2 (next/p0)"));
+        let clause = lead_wake_detail_clause(Some("added: x-1 (ready/p1)\nadded: x-2 (next/p0)"));
         assert!(
             clause.contains("added: x-1") && clause.contains("added: x-2"),
             "the diff is the payload, verbatim: {clause}"
@@ -1081,13 +1081,13 @@ mod tests {
             clause.starts_with('\n'),
             "it appends, not splices: {clause:?}"
         );
-        assert!(king_wake_detail_clause(None).is_empty());
-        assert!(king_wake_detail_clause(Some("")).is_empty());
+        assert!(lead_wake_detail_clause(None).is_empty());
+        assert!(lead_wake_detail_clause(Some("")).is_empty());
     }
 
     #[test]
     fn a_mail_wake_names_the_matched_inbox_and_its_ack() {
-        let clause = king_wake_clause(Some("mail"), Some("aa11bb22"));
+        let clause = lead_wake_clause(Some("mail"), Some("aa11bb22"));
         assert!(
             clause.contains("mail unread --name aa11bb22"),
             "the drain must read the matched inbox, not a derived one: {clause}"
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn a_mail_wake_without_an_address_falls_back_to_whoami() {
-        let clause = king_wake_clause(Some("mail"), None);
+        let clause = lead_wake_clause(Some("mail"), None);
         assert!(clause.contains("whoami"), "hand-run fallback: {clause}");
         assert!(!clause.contains("--name aa11bb22"));
     }
@@ -1108,19 +1108,19 @@ mod tests {
     #[test]
     fn non_mail_reasons_carry_no_mail_instruction() {
         for reason in ["board", "backstop"] {
-            let clause = king_wake_clause(Some(reason), None);
+            let clause = lead_wake_clause(Some(reason), None);
             assert!(!clause.contains("mail unread"), "{reason}: {clause}");
         }
-        assert!(king_wake_clause(None, None).is_empty());
+        assert!(lead_wake_clause(None, None).is_empty());
     }
 
     #[test]
     fn cancel_path_is_scoped_to_the_selected_driver() {
         let cwd = Path::new("/repo/worktree");
-        let king_manifest = Path::new("/repo/.fno/kings/k.md");
+        let lead_manifest = Path::new("/repo/.fno/leads/k.md");
         assert_eq!(
-            cancel_path_for_driver(cwd, Some(king_manifest)),
-            PathBuf::from("/repo/.fno/kings/k.cancelled")
+            cancel_path_for_driver(cwd, Some(lead_manifest)),
+            PathBuf::from("/repo/.fno/leads/k.cancelled")
         );
         assert_eq!(
             cancel_path_for_driver(cwd, None),

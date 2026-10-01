@@ -395,20 +395,17 @@ pub fn thread_goal_set_request_json(
     .to_string()
 }
 
-pub fn reign_objective(scope: &str) -> String {
-    format!("$fno:reign {}", scope.trim())
-}
-
-/// The lead objective a machine seed writes. `$fno:reign` was the pre-rename
-/// spelling and stays verifiable for one release: live codex goals carry it.
 pub fn lead_objective(scope: &str) -> String {
     format!("$fno:lead {}", scope.trim())
 }
 
-/// Whether `objective` is the lead objective for `scope` in either the
-/// current or the one-release-old spelling.
+
+/// Whether `objective` is the lead objective for `scope` in the current
+/// or the pre-rename spelling: a live codex goal keeps the objective
+/// string it was created with, and the reader cannot rewrite it.
 pub fn is_lead_objective(objective: &str, scope: &str) -> bool {
-    objective == lead_objective(scope) || objective == reign_objective(scope)
+    objective == lead_objective(scope)
+        || objective == format!("$fno:reign {}", scope.trim())
 }
 
 pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {
@@ -508,7 +505,7 @@ pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDrive
     }))
 }
 
-pub fn ensure_reign_goal(
+pub fn ensure_lead_goal(
     current: Option<&NativeGoal>,
     scope: &str,
     continuation_owner: &str,
@@ -1637,13 +1634,13 @@ impl CodexThread {
         Ok(goal)
     }
 
-    pub async fn ensure_reign_goal_typed(
+    pub async fn ensure_lead_goal_typed(
         &mut self,
         scope: &str,
         continuation_owner: &str,
     ) -> Result<NativeGoal, ThreadDriverError> {
         let current = self.goal_get_typed().await?;
-        ensure_reign_goal(current.as_ref(), scope, continuation_owner)?;
+        ensure_lead_goal(current.as_ref(), scope, continuation_owner)?;
         let objective = lead_objective(scope);
         match current {
             // An Active goal already carrying the lead spelling is done. One
@@ -2780,13 +2777,13 @@ mod tests {
         let goal: Value = serde_json::from_str(&thread_goal_set_request_json(
             8,
             "thread-full",
-            "$fno:reign x-0000",
+            "$fno:lead x-0000",
             "active",
         ))
         .unwrap();
         assert_eq!(goal["method"], "thread/goal/set");
         assert_eq!(goal["params"]["status"], "active");
-        assert_eq!(goal["params"]["objective"], "$fno:reign x-0000");
+        assert_eq!(goal["params"]["objective"], "$fno:lead x-0000");
         assert!(goal["params"].get("continuationOwner").is_none());
     }
 
@@ -2795,7 +2792,7 @@ mod tests {
         let goal = parse_goal_value(&json!({
             "result": { "goal": {
                 "threadId": "thread-full",
-                "objective": "$fno:reign x-0000",
+                "objective": "$fno:lead x-0000",
                 "status": "budgetLimited",
                 "tokenBudget": 50_000,
                 "tokensUsed": 12_345,
@@ -2813,7 +2810,7 @@ mod tests {
         assert!(parse_goal_value(&json!({
             "result": { "goal": {
                 "threadId": "thread-full",
-                "objective": "$fno:reign x-0000"
+                "objective": "$fno:lead x-0000"
             }}
         }))
         .is_err());
@@ -2844,7 +2841,7 @@ mod tests {
     fn ensure_goal_never_reopens_a_provider_limited_or_completed_goal() {
         let limited = NativeGoal {
             thread_id: "thread-full".into(),
-            objective: "$fno:reign x-0000".into(),
+            objective: "$fno:lead x-0000".into(),
             status: GoalStatus::BudgetLimited,
             usage: GoalUsage {
                 token_budget: Some(50_000),
@@ -2852,12 +2849,12 @@ mod tests {
                 time_used_seconds: 67,
             },
         };
-        assert!(ensure_reign_goal(Some(&limited), "x-0000", "king:x-0000").is_err());
+        assert!(ensure_lead_goal(Some(&limited), "x-0000", "lead:x-0000").is_err());
         let completed = NativeGoal {
             status: GoalStatus::Completed,
             ..limited
         };
-        assert!(ensure_reign_goal(Some(&completed), "x-0000", "king:x-0000").is_err());
+        assert!(ensure_lead_goal(Some(&completed), "x-0000", "lead:x-0000").is_err());
     }
 
     #[test]

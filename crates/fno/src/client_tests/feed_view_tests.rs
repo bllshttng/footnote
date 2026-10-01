@@ -691,7 +691,7 @@ fn detail_field_rows() {
     assert_eq!(by("lead"), "L1 e-0001");
 
     // A row whose session id does not match is NOT this event's session,
-    // however its name reads: parent and king stay unrecorded, and the pane
+    // however its name reads: parent and lead stay unrecorded, and the pane
     // says whose seat it actually is.
     let other = feed_item(Some("some-other-name"), Some("s-someone-else"));
     let other_dest = destination(&rows, &other);
@@ -726,9 +726,9 @@ fn detail_field_rows() {
         .collect();
     assert!(!labels.iter().any(|l| l == "model"), "{labels:?}");
     assert!(!labels.iter().any(|l| l == "parent"), "{labels:?}");
-    assert!(!labels.iter().any(|l| l == "crown"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "team"), "{labels:?}");
 
-    // The birth stamps ride the row: model, effort, parent and crown print
+    // The birth stamps ride the row: model, effort, parent and team print
     // when the creating session's registry row carried them.
     let mut stamped = feed_item(Some("x-a"), Some("s-1"));
     stamped.kind = "node_created".into();
@@ -802,10 +802,10 @@ fn detail_field_rows() {
         .collect();
     assert!(!labels.iter().any(|l| l == "parent"), "{labels:?}");
 
-    let mut crown = feed_item(None, None);
-    crown.kind = "crown_vacated".into();
-    crown.ts = "2026-09-28T16:45:58Z".into();
-    crown.title = "warden left L2 e: succession".into();
+    let mut team = feed_item(None, None);
+    team.kind = "team_vacated".into();
+    team.ts = "2026-09-28T16:45:58Z".into();
+    team.title = "warden left L2 e: succession".into();
     let mut owned_a = feed_item(Some("x-a"), None);
     owned_a.owner = Some("epic x-29a8 the epic".into());
     owned_a.ts = "2026-09-28T17:00:00Z".into();
@@ -814,9 +814,9 @@ fn detail_field_rows() {
     owned_b.ts = "2026-09-28T17:30:00Z".into();
     let mut loose = feed_item(Some("x-c"), None);
     loose.ts = "2026-09-28T18:00:00Z".into();
-    let items = vec![loose, owned_a, owned_b, crown];
+    let items = vec![loose, owned_a, owned_b, team];
     let slots = feed_view::display_slots(&items, feed_view::FeedOrder::Grouped);
-    // Slot shapes: crowns header + the crown row, the owner header with
+    // Slot shapes: teams header + the team row, the owner header with
     // its rows newest first, then the other header with the loose row.
     let shape: Vec<String> = slots
         .iter()
@@ -828,7 +828,7 @@ fn detail_field_rows() {
     assert_eq!(
         shape,
         [
-            "H:crowns",
+            "H:teams",
             "I:?",
             "H:epic x-29a8 the epic",
             "I:x-b",
@@ -840,12 +840,12 @@ fn detail_field_rows() {
     );
     // A header row never resolves to a detail.
     let g = feed_view::FeedOrder::Grouped;
-    assert_eq!(feed_row_item(&items, 1, ROWS, 0, g), None, "crowns header");
-    // The first item row IS the crown row.
+    assert_eq!(feed_row_item(&items, 1, ROWS, 0, g), None, "teams header");
+    // The first item row IS the team row.
     assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), Some(3));
 
     let mut vacated = feed_item(Some("x-a"), None);
-    vacated.kind = "crown_vacated".into();
+    vacated.kind = "team_vacated".into();
     vacated.ts = "2026-09-28T16:45:58Z".into();
     vacated.title = "warden left".into();
     let o = overlay(vec![vacated]);
@@ -860,7 +860,7 @@ fn detail_field_rows() {
     assert!(
         rows[2]
             .iter()
-            .any(|s| s.bold && s.brand && s.text.contains("crown_vacated")),
+            .any(|s| s.bold && s.brand && s.text.contains("team_vacated")),
         "the actionable kind is bold brand: {:?}",
         rows[2]
     );
@@ -871,22 +871,22 @@ fn detail_field_rows() {
     );
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(
-        lines[2].contains("crown_vacated") && lines[2].contains("warden left"),
+        lines[2].contains("team_vacated") && lines[2].contains("warden left"),
         "text is unchanged: {}",
         lines[2]
     );
 
     let mut item = feed_item(Some("x-a"), None);
-    item.owner = Some("king jolly-finch (king-4d9b)".into());
+    item.owner = Some("lead jolly-finch (lead-4d9b)".into());
     // Live holder: the line stands.
-    let (popup, _, _) = feed_detail::build(&[joined_row("king-4d9b", None, Some(1))], 0, &item);
+    let (popup, _, _) = feed_detail::build(&[joined_row("lead-4d9b", None, Some(1))], 0, &item);
     let owner = popup_rows(&popup)
         .into_iter()
         .find(|(l, _)| l.as_deref() == Some("owner"))
         .map(|(_, v)| v)
         .unwrap();
-    assert_eq!(owner, "king jolly-finch (king-4d9b)");
-    // Dead holder: the modal says so instead of naming a current king that
+    assert_eq!(owner, "lead jolly-finch (lead-4d9b)");
+    // Dead holder: the modal says so instead of naming a current lead that
     // is not there.
     let (popup, _, _) = feed_detail::build(&[], 0, &item);
     let owner = popup_rows(&popup)
@@ -894,7 +894,7 @@ fn detail_field_rows() {
         .find(|(l, _)| l.as_deref() == Some("owner"))
         .map(|(_, v)| v)
         .unwrap();
-    assert_eq!(owner, "king jolly-finch (king-4d9b) · gone");
+    assert_eq!(owner, "lead jolly-finch (lead-4d9b) · gone");
     // No holder to resolve: untouched.
     let mut plain = feed_item(Some("x-a"), None);
     plain.owner = Some("epic x-29a8 the epic".into());
@@ -1073,7 +1073,7 @@ async fn the_composed_frame_paints_every_field_and_opens_the_blueprint_composer(
 // session id when the edge names no row, and falls back to the birth's own
 // reason (or the honest silence) when the row has no edge at all.
 
-// (AC7-HP) The crowns band leads, then one header per owner ordered by
+// (AC7-HP) The teams band leads, then one header per owner ordered by
 // its newest row, then `other`; a header click resolves to no detail.
 
 // (AC8-HP) The kind span goes bold in the brand colour for kinds that
@@ -1118,5 +1118,5 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
 // question on the questions view's own path, never a provenance detour.
 
 // (x-182e) The owner line resolves its holder against the live roster: a
-// dead crown's handle says it is gone, a live one keeps the line, and a
+// dead team's handle says it is gone, a live one keeps the line, and a
 // line with no parenthesized holder passes through untouched.

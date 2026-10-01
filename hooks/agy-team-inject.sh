@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# fno hook: PreInvocation - agy team inject
+# hooks/agy-team-inject.sh -- agy (Antigravity CLI) PreInvocation team adapter.
+#
+# agy has NO session-start event (five events only: PreToolUse, PostToolUse,
+# PreInvocation, PostInvocation, Stop). PreInvocation is the surface instead,
+# and its stdin carries invocationNum, documented as 0-indexed with the first
+# invocation at 0 - so invocationNum == 0 IS session start. The gate is
+# load-bearing: PreInvocation fires before EVERY model call, and without it the
+# team line re-lands on every turn of the session.
+#
+# Contract (agy PreInvocation):
+#   stdin  (camelCase): conversationId, invocationNum, ...
+#   stdout: {"injectSteps":[{"ephemeralMessage":"<line>"}]}  -> inject the line
+#           anything else (incl. {})                        -> inject nothing
+#
+# ephemeralMessage over userMessage on purpose: userMessage is user-shaped, and
+# this repo's pitfalls corpus records that user-shaped injection is
+# indistinguishable from a superuser typing (the mail-probe entry).
+#
+# NEVER blocks. Always exits 0 and degrades to silence when anything it reads
+# is missing: no jq, no fno, no registry row, no team. An uncrowned session
+# injects nothing at all.
+set -uo pipefail
+
+HOOK_INPUT=$(cat)
+command -v jq >/dev/null 2>&1 || { echo '{}'; exit 0; }
+
+# invocationNum == 0 is session start; any other value means the model has
+# already been called this session and the line has landed.
+[[ "$(printf '%s' "$HOOK_INPUT" | jq -r '.invocationNum // empty' 2>/dev/null)" == "0" ]] || { echo '{}'; exit 0; }
+
+CONVERSATION_ID="$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2>/dev/null)"
+[[ -n "$CONVERSATION_ID" ]] || { echo '{}'; exit 0; }
+
+# Team read from the registry row, never from a name (the same choice as
+# lead-postcompact-reinject.sh): `fno agents registry-json` is a daemon-free
+# file read; this session's row matches session_id OR harness_session_id.
+command -v fno >/dev/null 2>&1 || { echo '{}'; exit 0; }
+# A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin here
+# has leaked off a spawned worker: strip it for this read and keep the exit
+# code, so a broken read never reads silently as "no row".
+AGENTS_JSON="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
+REG_RC=$?
+[[ "$REG_RC" -ne 0 ]] \
+  && echo "agy-team-inject.sh: fno agents registry-json exited $REG_RC; team treated as unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
+MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$CONVERSATION_ID" \
+    '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
+[[ -n "$MY_ROW" ]] || { echo '{}'; exit 0; }
+TEAM_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.team_level // empty' 2>/dev/null)"
+TEAM_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.team_scope // empty' 2>/dev/null)"
+[[ -n "$TEAM_LEVEL" || -n "$TEAM_SCOPE" ]] || { echo '{}'; exit 0; }
+
+jq -nc --arg m "You are the lead: team level ${TEAM_LEVEL:-?} over ${TEAM_SCOPE:-?}. Confirm with \`fno whoami\`. Before any CLI verb, load the lead reference at skills/lead/references/cli-commands.md." \
+    '{injectSteps: [{ephemeralMessage: $m}]}'
+exit 0

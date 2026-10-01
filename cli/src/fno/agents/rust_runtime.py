@@ -242,16 +242,16 @@ RUST_CLIENT_VERBS = frozenset(
         "session-start-bytes",
         "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
-        "court-orphans",
+        "org-vacancies",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
         # graph.json and claims in, per-scope fold out; Python passes the
         # crowns gather_court already adjudicated.
-        "court-fold",
+        "org-fold",
         # Crown-scope reign_checkin readback for `fno agents king history`:
         # daemon-free read; Python resolves the caller's crown scope and
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
-        "king-history",
+        "lead-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
         # daemon-free read; Python resolves the journal list and forwards the
         # flags, then invokes the binary directly (not via `fno agents`
@@ -261,12 +261,12 @@ RUST_CLIENT_VERBS = frozenset(
         # read; Python resolves the caller's crown scope and the paths Python
         # owns, then invokes the binary directly (not via `fno agents`
         # routing).
-        "king-checkin",
+        "lead-checkin",
         # Reign ledger page renderer for `fno agents king ledger`: court JSON
         # and the graph in, one HTML page out; Python resolves the court and
         # the paths, then invokes the binary directly (not via `fno agents`
         # routing).
-        "reign-ledger",
+        "lead-rundown",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",
@@ -524,12 +524,12 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
-    "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
-    "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json; invoked directly by `fno agents court`, not `fno agents` routing.",
-    "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the reign tenure verdict read (assembles its own inputs natively: crown, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents king history` and `fno agents king verdict`, which pass every journal paths.event_journals resolves.",
+    "org-vacancies": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
+    "org-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json; invoked directly by `fno agents court`, not `fno agents` routing.",
+    "lead-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the reign tenure verdict read (assembles its own inputs natively: crown, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents king history` and `fno agents king verdict`, which pass every journal paths.event_journals resolves.",
     "evals-macro": "The macro-eval failure-pattern leaderboard fold: --events <journal.jsonl> [--events ...] [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json]; invoked directly by `fno doctor evals macro`, which resolves the journal defaults.",
-    "king-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
-    "reign-ledger": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
+    "lead-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
+    "lead-rundown": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",

@@ -11,8 +11,8 @@ use crate::claims::{self, AcquireOutcome, ClaimState};
 use crate::client_verbs::py_repr_str;
 use crate::gc_sweep;
 use crate::graph_store::{entry_id, is_open_do_row, work_state_key};
-use crate::king_board::prs::{node_pr_refs, nodes_binding_pr};
-use crate::king_board::{is_terminal, s_str};
+use crate::org_board::prs::{node_pr_refs, nodes_binding_pr};
+use crate::org_board::{is_terminal, s_str};
 use crate::paths::AgentsHome;
 use crate::state;
 use crate::truth_probe::{family1_truth_probe_many, TruthProbe};
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn holder_handle_prints_the_whole_handle() {
-        assert_eq!(holder_handle("king-fno-g6"), "king-fno-g6");
+        assert_eq!(holder_handle("lead-fno-g6"), "lead-fno-g6");
         assert_eq!(
             holder_handle("target-session:01a0c61c-c000-70c0-8dd4-dcb7cd9e27d4"),
             "01a0c61c-c000-70c0-8dd4-dcb7cd9e27d4"
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn ended_blueprint_row_is_not_a_holder() {
         let (home, dir) = registry_home("ended-blueprint");
-        add_registry_row(&home, "king-fno-g6", "uuid-king", None);
+        add_registry_row(&home, "lead-fno-g6", "uuid-lead", None);
         let entries = vec![json!({
             "id": "x-aaaa",
             "status": "in_progress",
@@ -770,7 +770,7 @@ mod tests {
                 {
                     "phase": "blueprint",
                     "harness": "claude",
-                    "session_id": "uuid-king",
+                    "session_id": "uuid-lead",
                     "started_at": "2026-09-21T22:00:00Z",
                     "ended_at": "2026-09-21T22:31:41Z"
                 },
@@ -782,7 +782,7 @@ mod tests {
                 }
             ]
         })];
-        let probes = HashMap::from([("uuid-king".to_string(), reachable_probe())]);
+        let probes = HashMap::from([("uuid-lead".to_string(), reachable_probe())]);
         let hit = roster_holder_with(&home, &entries, "x-aaaa", "uuid-resuming", &|toks| {
             toks.iter()
                 .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))

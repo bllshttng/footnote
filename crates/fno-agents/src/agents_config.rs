@@ -167,7 +167,7 @@ fn resolve<T>(cwd: &Path, extract: impl Fn(&toml::Table) -> Option<T>) -> Option
 }
 
 /// Walk a dotted key path (`["paths", "graph_json"]`) through the candidate
-/// configs, first hit wins. `pub(crate)` so sibling modules (the king board)
+/// configs, first hit wins. `pub(crate)` so sibling modules (the lead board)
 /// read the same candidates Python's loader reads instead of re-deriving the
 /// precedence a third time.
 pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
@@ -845,7 +845,7 @@ pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
 /// registry and claude's daemon roster). Matches the Pydantic default.
 pub const DEFAULT_MAX_LIVE: u32 = 3;
 /// The per-territory team cap default: max live node-working workers
-/// under ONE crown scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
+/// under ONE team scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
 pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
@@ -870,7 +870,7 @@ pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
 /// `do pr wait --timeout 30m`, the longest detached child that is allowed to be
 /// running. Matches the Pydantic default.
 pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
-/// Default age at which a reaper hold escalates into a question a king or
+/// Default age at which a reaper hold escalates into a question a lead or
 /// the operator can rule on: the same derivation as the orphan
 /// clock, three times the longest detached wait.
 pub const DEFAULT_HOLD_ESCALATE_AFTER_S: u64 = 5400;
@@ -896,7 +896,7 @@ pub fn territory_max_live(cwd: &Path) -> u32 {
 }
 
 /// Blueprint thread cap defaults (operator law): no more than five
-/// blueprint threads at once, one per territory - one for each king. The
+/// blueprint threads at once, one per territory - one for each lead. The
 /// spawn gate refuses past either; the remedy is a native subagent.
 pub const DEFAULT_BLUEPRINT_MAX_LIVE: u32 = 5;
 pub const DEFAULT_BLUEPRINT_MAX_LIVE_PER_TERRITORY: u32 = 1;
@@ -995,7 +995,7 @@ pub fn orphan_reap_after(cwd: &Path) -> Duration {
 }
 
 /// Resolve `agents.hold_escalate_after_s`: the age at which a reaper hold
-/// escalates into a question a king or the operator can rule on.
+/// escalates into a question a lead or the operator can rule on.
 pub fn hold_escalate_after(cwd: &Path) -> Duration {
     positive_seconds(cwd, "hold_escalate_after_s", DEFAULT_HOLD_ESCALATE_AFTER_S)
 }

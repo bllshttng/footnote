@@ -4286,11 +4286,11 @@ where
                         }
                     })
                     .unwrap_or(Value::Null);
-                // Same formatter as Python's `AgentEntry.crown_label`, so the two
+                // Same formatter as Python's `AgentEntry.team_label`, so the two
                 // surfaces render an identical descriptor for the same row. Python
                 // tests the scope for falsiness (`self.crown_scope or '?'`), so the
                 // empty string has to fall back here too, not just None.
-                let crown: Value = match e.crown_level {
+                let team: Value = match e.crown_level {
                     Some(level) => Value::String(format!(
                         "L{level} {}",
                         e.crown_scope
@@ -4424,9 +4424,9 @@ where
                     // then read identically, which is the confusion a reader
                     // cannot recover from.
                     "substrate": e.substrate,
-                    // Crown (US9): the compact descriptor plus the raw fields, so a
+                    // Team (US9): the compact descriptor plus the raw fields, so a
                     // minion can resolve who to escalate to.
-                    "crown": crown,
+                    "crown": team,
                     "crown_level": e.crown_level,
                     "crown_scope": e.crown_scope,
                     "crown_grantor": e.crown_grantor,
@@ -4444,7 +4444,7 @@ where
                     // the row's mail delivery policy ("bus-only" holds
                     // mail on the durable bus, null is the injectable default).
                     // Stored since v14, read by every injector gate, and until
-                    // now never rendered anywhere a human or a king could see
+                    // now never rendered anywhere a human or a lead could see
                     // it. The remaining time on a timed hold is Python-only
                     // (`dnd` in schemas/agents-list-row.json): its clock lives
                     // under fno's config-resolved state dir, which the daemon
@@ -5255,7 +5255,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
     .await
 }
 
-fn cleanup_king_manifest(entry: &state::RegistryEntry) {
+fn cleanup_lead_manifest(entry: &state::RegistryEntry) {
     let Some(scope) = entry.crown_scope.as_deref() else {
         return;
     };
@@ -5267,14 +5267,14 @@ fn cleanup_king_manifest(entry: &state::RegistryEntry) {
     {
         return;
     }
-    let Some(kings) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
+    let Some(leads) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
         return;
     };
-    let path = kings.join("kings").join(format!("{scope}.md"));
-    // Owner guard, the Rust half of Python remove_king_manifest's
-    // expected_harness_session_id: a successor crowned over this scope after
+    let path = leads.join("leads").join(format!("{scope}.md"));
+    // Owner guard, the Rust half of Python remove_lead_manifest's
+    // expected_harness_session_id: a successor teamed over this scope after
     // the row went terminal can have re-armed the manifest with ITS session
-    // id, and deleting unconditionally would disarm that live king. Skip only
+    // id, and deleting unconditionally would disarm that live lead. Skip only
     // on a PROVEN foreign owner (the manifest names a different session id);
     // an id-less or matching manifest deletes on the registry's own authority,
     // which is what rm acts on.
@@ -5606,7 +5606,7 @@ async fn handle_rm_with(
             ),
         );
     }
-    cleanup_king_manifest(&entry);
+    cleanup_lead_manifest(&entry);
     // The row is gone from the registry: take its worktree, but only
     // as far as the reapable gate allows. The receipt rides the RESULT (the
     // operator's notice), deliberately NOT the event: agent_removed sits
@@ -6532,10 +6532,10 @@ pub(crate) fn run_reconcile_sweep(
     // the last status the batch applies. Full sweeps only: the serve-only
     // tick writes no probe inference, so planning revivals there is waste.
     let (mut revivals, revived) = if matches!(mode, SweepMode::Full) {
-        crate::liveness_sweep::plan_crown_revivals(
+        crate::liveness_sweep::plan_team_revivals(
             &entries,
             roster_readable,
-            |e| witness.crown_running(e),
+            |e| witness.team_running(e),
             &prober,
         )
     } else {

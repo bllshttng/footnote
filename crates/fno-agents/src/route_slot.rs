@@ -4254,7 +4254,7 @@ mod tests {
         // A typed model on a verb no slot row declares is the operator's own
         // pin: it lands instead of refusing, and the refusal text never fires.
         let out = resolve_slot_payload(&strict_payload(json!({
-            "work_verb": "reign",
+            "work_verb": "lead",
             "explicit_model_value": "gpt-6-astra",
         })));
         assert_eq!(out["status"], "none");

@@ -58,7 +58,7 @@ fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {
         mission: mission.to_string(),
         project: "fno".to_string(),
         scope: String::new(),
-        kingless: false,
+        leadless: false,
         members: Vec::new(),
         failure_limit: 3,
         interval_seconds: 300,

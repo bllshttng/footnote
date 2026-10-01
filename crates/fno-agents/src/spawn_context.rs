@@ -1134,7 +1134,7 @@ fn ambient_cwd() -> String {
 pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Result<(), String> {
     // Explicit dispatch context outranks ambient capture: a daemon
     // producer (the mission drain) exports FNO_SPAWN_ORIGIN +
-    // FNO_SPAWN_OWNER naming its arm and the responsible mission/crown, and
+    // FNO_SPAWN_OWNER naming its arm and the responsible mission/team, and
     // those ride the request verbatim. A malformed carrier is a producer bug
     // and refuses by name instead of falling back silently.
     let carried = match (

@@ -1,5 +1,5 @@
 //! The scoped merge freeze: one record with a subject and an allow-list of
-//! PRs, written by the crown through the `authorized-merge` verb's op
+//! PRs, written by the team through the `authorized-merge` verb's op
 //! transport (`{"op": "freeze-set"|"freeze-clear"|"freeze-check", ...}`).
 //!
 //! Two readers enforce it, both refusing an off-list PR with a receipt that
@@ -299,7 +299,7 @@ mod tests {
         let out = run_in(
             &home,
             "freeze-set",
-            &json!({"subject": "rc freeze", "set_by": "crown", "allow": [2739, 2740]}),
+            &json!({"subject": "rc freeze", "set_by": "team", "allow": [2739, 2740]}),
         );
         let r: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(r["outcome"], "frozen", "{out}");
@@ -327,7 +327,7 @@ mod tests {
     fn set_clear_lifecycle_contract() {
         let (_dir, home) = home("freeze-lift");
         let g = |extra: Value| {
-            let mut base = json!({"subject": "s", "set_by": "crown", "allow": [1]});
+            let mut base = json!({"subject": "s", "set_by": "team", "allow": [1]});
             for (k, v) in extra.as_object().unwrap() {
                 base[k] = v.clone();
             }

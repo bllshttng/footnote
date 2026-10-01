@@ -15,12 +15,12 @@
 //!   event bus stays the emitter.
 //! - kind `fallback`: the failover-chain validation (`validate_fallback` in
 //!   Python). Returns canonical links or the exact refusal the Python raised.
-//! - kind `crown-settle`: whether a crowned spawn is granted, transfers, or
-//!   refuses (`crown_settle::resolve`), a port of Python's
-//!   `settle_spawn_crown` with a new human-succession branch and ladder-aware
-//!   rivalry through `loop_king::crown_rivals`.
-//! - kind `crown-widen`: whether an agent can add an epic its own session
-//!   created to its own epic-set crown (`crown_widen::resolve`).
+//! - kind `team-settle`: whether a teamed spawn is granted, transfers, or
+//!   refuses (`team_settle::resolve`), a port of Python's
+//!   `settle_spawn_team` with a new human-succession branch and ladder-aware
+//!   rivalry through `loop_lead::team_rivals`.
+//! - kind `team-widen`: whether an agent can add an epic its own session
+//!   created to its own epic-set team (`team_widen::resolve`).
 
 use crate::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
@@ -157,12 +157,12 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("pane-group") => resolve_pane_group(&payload),
         Some("fallback") => resolve_fallback(&payload),
         Some("codex-route") => resolve_codex_route_kind(&payload),
-        Some("crown-settle") => crate::crown_settle::resolve(&payload),
-        Some("crown-identity") => crate::crown_identity::resolve(&payload),
-        Some("crown-widen") => crate::crown_widen::resolve(&payload),
-        Some("court-rivals") => crate::court_rivals::resolve(&payload),
+        Some("crown-settle") => crate::team_settle::resolve(&payload),
+        Some("crown-identity") => crate::team_identity::resolve(&payload),
+        Some("crown-widen") => crate::team_widen::resolve(&payload),
+        Some("org-rivals") => crate::org_rivals::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen|court-rivals"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|org-rivals"
         )),
     }
 }
@@ -1145,8 +1145,8 @@ mod tests {
     }
 
     #[test]
-    fn crown_widen_routes_to_the_widen_module() {
-        // Routing: kind crown-widen reaches crown_widen::resolve and the
+    fn team_widen_routes_to_the_widen_module() {
+        // Routing: kind team-widen reaches team_widen::resolve and the
         // unknown-kind refusal names it.
         let out = resolve(json!({
             "kind": "crown-widen",

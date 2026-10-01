@@ -30,8 +30,8 @@ pub struct ResumeArgs {
     /// Print the conversion plan and change nothing.
     pub dry_run: bool,
     /// Accept a converted session whose harness minted a NEW id, recording
-    /// the old one as the related id. Refused on a crowned row: moving a
-    /// crown to a new id is succession, a separate operation.
+    /// the old one as the related id. Refused on a teamed row: moving a
+    /// team to a new id is succession, a separate operation.
     pub allow_new_id: bool,
 }
 
@@ -376,21 +376,21 @@ mod tests {
     #[test]
     fn substrate_thread_parses_with_the_conversion_flags() {
         let parsed = parse_resume_args(&args(&[
-            "king-delivery",
+            "lead-delivery",
             "--substrate",
             "thread",
             "--dry-run",
             "--allow-new-id",
         ]))
         .expect("conversion flags parse");
-        assert_eq!(parsed.name, "king-delivery");
+        assert_eq!(parsed.name, "lead-delivery");
         assert_eq!(parsed.substrate.as_deref(), Some("thread"));
         assert!(parsed.dry_run);
         assert!(parsed.allow_new_id);
 
         // The equals form rides the same expansion, and the flags are
         // independent: a bare conversion sets neither boolean.
-        let parsed = parse_resume_args(&args(&["king-delivery", "--substrate=thread"]))
+        let parsed = parse_resume_args(&args(&["lead-delivery", "--substrate=thread"]))
             .expect("equals form parses");
         assert_eq!(parsed.substrate.as_deref(), Some("thread"));
         assert!(!parsed.dry_run);
@@ -398,7 +398,7 @@ mod tests {
 
         // A plain resume declares no substrate at all, so the conversion
         // path is never entered by default.
-        let parsed = parse_resume_args(&args(&["king-delivery"])).unwrap();
+        let parsed = parse_resume_args(&args(&["lead-delivery"])).unwrap();
         assert_eq!(parsed.substrate, None);
     }
 

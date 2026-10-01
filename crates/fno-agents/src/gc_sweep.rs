@@ -86,14 +86,14 @@ pub struct GcSummary {
     /// `(row id, descendant)`: a live CHILD registry row names this row's
     /// session in its own `spawned_by_session` - the parent is held,
     /// unretired, until that child is gone. A CHILD is a join worker
-    /// (`jn-t-`, legacy `j-`) or a row a crowned session spawned; a handoff
+    /// (`jn-t-`, legacy `j-`) or a row a teamed session spawned; a handoff
     /// (a blueprint's target, an advance dispatch) never holds its spawner.
     /// A parent whose own harness reports a terminal state is not held: the
     /// lineage guard exists to keep a running parent's surface alive for
     /// its children, and a terminal parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
-    pub kept_crowned: Vec<String>,
+    pub kept_teamed: Vec<String>,
     /// `(id, origin)`: origin is not `spawn` (adopted, unknown spelling), so
     /// a sweep never removes it - only a row fno itself spawned retires.
     pub kept_not_spawn: Vec<(String, String)>,
@@ -216,10 +216,10 @@ pub struct GcSummary {
     /// node (law d-71d03643): the nudge ladder's Resume rung is the
     /// owner. A projection the `kept_total` does not count.
     pub dead_work_rows: Vec<OpenPrRow>,
-    /// The dead-crown sweep's report when it ran beside this pass; `None`
-    /// when it did not run. The daemon arm reports crowns through its detail
+    /// The dead-team sweep's report when it ran beside this pass; `None`
+    /// when it did not run. The daemon arm reports teams through its detail
     /// line, the manual verb fills this field.
-    pub crowns: Option<crate::crown_reap::CrownReap>,
+    pub teams: Option<crate::team_reap::TeamReap>,
 }
 
 /// One open-PR row the nudge ladder reads (Locked Decision 7): the row, the
@@ -310,7 +310,7 @@ impl GcSummary {
         self.kept_shared_tree.len()
             + self.kept_live_descendants.len()
             + self.kept_operator.len()
-            + self.kept_crowned.len()
+            + self.kept_teamed.len()
             + self.kept_not_spawn.len()
             + self.kept_no_provenance.len()
             + self.kept_node_conflict.len()
@@ -1755,15 +1755,15 @@ pub(crate) fn run_with_release(
         }
     }
 
-    let mut manifest_crowns = crate::loop_reign::ManifestCrownCache::new();
+    let mut manifest_teams = crate::lead_state::ManifestCrownCache::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() || manifest_crowns.holds(e) {
-            summary.kept_crowned.push(id);
+        if e.crown_level.is_some() || manifest_teams.holds(e) {
+            summary.kept_teamed.push(id);
             continue;
         }
         // The origin gate runs BEFORE the graph read so a row fno never
@@ -2072,7 +2072,7 @@ pub(crate) fn run_with_release(
         }
         let mut row = GcRow {
             origin: e.origin.clone(),
-            crowned: e.crown_level.is_some(),
+            teamed: e.crown_level.is_some(),
             work,
             transcript_age_s: age,
             owns_worktree,
@@ -2149,7 +2149,7 @@ pub(crate) fn run_with_release(
             }
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
-                Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
+                Some(KeepReason::Teamed) => summary.kept_teamed.push(id),
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => {
                     summary.kept_no_provenance.push(id.clone());
@@ -2345,8 +2345,8 @@ pub(crate) fn run_with_release(
             continue;
         }
         // A parent whose live CHILD descendant exists is never retired: a
-        // CHILD edge means the spawner orchestrates and waits (a king over
-        // its court, a lead over its join workers), so the parent's surface
+        // CHILD edge means the spawner orchestrates and waits (a lead over
+        // its org, a lead over its join workers), so the parent's surface
         // must outlive the child's. A PEER edge is a handoff (a blueprint's
         // target, an advance dispatch); the spawner is done and waits on
         // nothing, so it never holds. A parent whose own harness reports a

@@ -25,7 +25,7 @@ const STATE_ERROR: &str =
 
 /// Authorities a review-list row may carry; anything else counts invalid.
 const READ_AUTHORITY_SOURCES: &[&str] =
-    &["operator", "crown", "agent", "beastmode", "chat_attested"];
+    &["operator", "team", "agent", "beastmode", "chat_attested"];
 
 /// The invalid-authority spelling cap: worst offenders first, the rest
 /// summarized, so a machine-wide index cannot turn one summary line into
@@ -160,7 +160,7 @@ fn is_retraction_row(row: &Value) -> bool {
 /// The stored-provenance-to-lane map, `_decision_lane` verbatim.
 fn decision_lane(row: &Value) -> &'static str {
     let authority = rows_str(row, "authority_source");
-    if authority == "agent" || authority == "crown" {
+    if authority == "agent" || authority == "team" {
         return "coord";
     }
     if authority == "beastmode" {
@@ -1019,7 +1019,7 @@ pub fn run(argv: &[String]) -> i32 {
 
     if let Some(output) = &opts.output {
         // The file always carries the whole answer: truncation is a stdout
-        // courtesy, never a property of the store.
+        // orgesy, never a property of the store.
         let mut full = payload.clone();
         full["decisions"] = json!(found.rows);
         full["truncated"] = json!(false);
@@ -1589,14 +1589,14 @@ fn render_human(
             );
         } else {
             // A subject that names a graph node carries authority this store
-            // structurally cannot hold: a king's ruling or an operator note
+            // structurally cannot hold: a lead's ruling or an operator note
             // on the node itself.
             let node_surface = match subject
                 .filter(|s| !s.is_empty())
                 .and_then(|s| entries.and_then(|e| subject_node_id(e, s)))
             {
                 Some(node_id) => format!(
-                    " That is not a finding that no rule exists: a king's ruling \
+                    " That is not a finding that no rule exists: a lead's ruling \
                      or an operator note on the node itself is authority no \
                      decision record carries. Read it with: fno backlog get {node_id}."
                 ),

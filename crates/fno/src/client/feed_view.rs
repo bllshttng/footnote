@@ -123,12 +123,12 @@ pub(crate) enum Slot {
     Item(usize),
 }
 
-/// True when a row renders in the crowns band: a crown kind, or a removal
-/// that names the crown it held.
-fn in_crowns_band(kind: &str, crown: &Option<String>) -> bool {
-    kind == "crown_granted"
-        || kind == "crown_vacated"
-        || (kind == "session_reaped" && crown.is_some())
+/// True when a row renders in the teams band: a team kind, or a removal
+/// that names the team it held.
+fn in_teams_band(kind: &str, team: &Option<String>) -> bool {
+    kind == "team_granted"
+        || kind == "team_vacated"
+        || (kind == "session_reaped" && team.is_some())
 }
 
 /// The display order for one panel order. `Grouped` is the shipped shape;
@@ -143,16 +143,16 @@ pub(crate) fn display_slots(items: &[FeedItem], order: FeedOrder) -> Vec<Slot> {
     }
 }
 
-/// The grouped order: the crowns band first (newest first), then one header
+/// The grouped order: the teams band first (newest first), then one header
 /// per owner, groups ordered by their newest row, then the unowned rows under
 /// `other`. Within a group, newest first; ties keep storage order.
 fn display_slots_grouped(items: &[FeedItem]) -> Vec<Slot> {
-    let mut crowns: Vec<usize> = Vec::new();
+    let mut teams: Vec<usize> = Vec::new();
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        if in_crowns_band(&item.kind, &item.crown) {
-            crowns.push(i);
+        if in_teams_band(&item.kind, &item.crown) {
+            teams.push(i);
             continue;
         }
         match &item.owner {
@@ -164,9 +164,9 @@ fn display_slots_grouped(items: &[FeedItem]) -> Vec<Slot> {
         }
     }
     let mut slots = Vec::new();
-    if !crowns.is_empty() {
-        slots.push(Slot::Header("crowns".into()));
-        for i in newest_first(items, &crowns) {
+    if !teams.is_empty() {
+        slots.push(Slot::Header("teams".into()));
+        for i in newest_first(items, &teams) {
             slots.push(Slot::Item(i));
         }
     }
@@ -217,11 +217,11 @@ pub(crate) fn display_kind(kind: &str) -> &str {
 }
 
 /// True for kinds whose event NEEDS ACTION, so the kind renders bold in the
-/// theme's accent: a question waiting, a crown leaving, a crowned session
+/// theme's accent: a question waiting, a team leaving, a teamed session
 /// removed.
 fn bold_kind(item: &FeedItem) -> bool {
     item.kind == "question_asked"
-        || item.kind == "crown_vacated"
+        || item.kind == "team_vacated"
         || (item.kind == "session_reaped" && item.crown.is_some())
 }
 

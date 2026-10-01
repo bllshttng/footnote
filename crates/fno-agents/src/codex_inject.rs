@@ -957,7 +957,7 @@ fn review_invocation_event_fields(
         .collect();
     let initiator = match audit_origin {
         Some("operator") => "operator",
-        Some("peer") => "king",
+        Some("peer") => "lead",
         Some("scheduler" | "recovery") => "daemon",
         _ => "unknown",
     };
@@ -2318,7 +2318,7 @@ mod tests {
         assert_eq!(fields["level"], "medium");
         assert_eq!(fields["level_source"], "explicit");
         assert_eq!(fields["flags"], serde_json::json!(["--comment"]));
-        assert_eq!(fields["initiator"], "king");
+        assert_eq!(fields["initiator"], "lead");
         assert_eq!(fields["submit_key"], "none");
         assert_eq!(
             fields["receipt"],

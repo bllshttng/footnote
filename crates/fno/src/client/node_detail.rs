@@ -189,18 +189,18 @@ pub(crate) fn pane_lines(
     title = title.trunc(w);
     lines.push(title);
     // Meta.
-    let king = match &view.card.king {
-        Some(king) => format!("{} (L{})", king.name, king.level),
+    let lead = match &view.card.lead {
+        Some(lead) => format!("{} (L{})", lead.name, lead.level),
         None => "none".into(),
     };
     lines.push(BLine::meta(t(&format!(
-        "{} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} king: {}",
+        "{} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} lead: {}",
         status,
         view.card.project.as_deref().unwrap_or("none"),
         prio,
         view.card.size.as_deref().unwrap_or("none"),
         view.difficulty.as_deref().unwrap_or("none"),
-        king
+        lead
     ))));
     lines.push(BLine::plain(String::new()));
     // Field lines: the label dim (the accent-dim slot is the id's, so a
@@ -449,7 +449,7 @@ fn short_id(id: &str) -> String {
 /// runs the selected row (a link drills in, a session launches through
 /// the hit cascade, a dim row answers with its reason), PgUp/PgDn scroll
 /// the document, `b` plans, `t` launches the node as a target through the
-/// prefilled launcher, and `A` asks the king (the board's own sends).
+/// prefilled launcher, and `A` asks the lead (the board's own sends).
 pub(crate) async fn detail_keys(
     view: &mut View,
     bytes: &[u8],
@@ -500,7 +500,7 @@ pub(crate) async fn detail_keys(
             ModalKey::PageDown => scroll_detail(view, true),
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
-            ModalKey::Byte(b'A') => backlog_board::ask_the_king(view, sock_w).await?,
+            ModalKey::Byte(b'A') => backlog_board::ask_the_lead(view, sock_w).await?,
             ModalKey::Byte(b'e') => backlog_board::edit_title(view)?,
             ModalKey::Byte(b'p') => backlog_board::edit_priority(view)?,
             ModalKey::Byte(b's') => backlog_board::edit_size(view)?,
