@@ -2,7 +2,7 @@
 """Compatibility shim. Real implementation lives in ``fno backlog triage``.
 
 Everything forwards through the ``fno`` front door; the retired in-repo
-``fno.graph.triage`` import leg is gone with the consumers repoint (x-9323).
+``fno.graph.triage`` import leg is gone with the consumers repoint.
 Kept in-repo so external callers (the ``/triage`` skill, hooks, users
 with muscle memory for ``scripts/triage.py``) keep working.
 """

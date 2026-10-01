@@ -39,6 +39,35 @@ def _stub_pr_worktree_lookup(monkeypatch):
         lambda pr: _TEST_PR_WORKTREES.get(str(pr)),
     )
 
+    # The live switch resolves through `fno config get auto_merge.enabled`;
+    # answer it from the row's own cwd config so the rows here test the
+    # hook's verdict logic, not whether a binary is installed on the runner.
+    # Every other command passes through to the real runner.
+    real_run = git_protection.subprocess.run
+
+    def _fake_config_get(cmd, **kwargs):
+        if cmd[:4] == ["fno", "config", "get", "auto_merge.enabled"]:
+            class _R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+
+            try:
+                text = (Path(kwargs["cwd"]) / ".fno" / "config.toml").read_text()
+            except (KeyError, OSError):
+                text = ""
+            for line in text.splitlines():
+                if line.strip() == "enabled = true":
+                    _R.returncode, _R.stdout = 0, "true\n"
+                    break
+                if line.strip() == "enabled = false":
+                    _R.returncode, _R.stdout = 0, "false\n"
+                    break
+            return _R()
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(git_protection.subprocess, "run", _fake_config_get)
+
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True,
