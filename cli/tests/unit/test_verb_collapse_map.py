@@ -277,7 +277,9 @@ def test_map_covers_current_surface_once():
     # freeing one more row: counted from the merged file, 600 -> 599.
     # The control drain ported to the fno-agents client binary, which the
     # click inventory does not see, freeing its row: 600 -> 599.
-    assert len(mapped) == 599, (
+    # The decide family ported native, freeing its four backlog rows and the
+    # two decide-shim rows with the registrations they kept: 599 -> 593.
+    assert len(mapped) == 593, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

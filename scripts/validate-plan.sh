@@ -1227,88 +1227,88 @@ if isinstance(loaded, dict):
         node_id = None
 if isinstance(node_id, str) and node_id.strip():
     try:
-        from fno.decide import _graph_entries, list_decisions
+        from fno.rust_binary import call_front_json
 
-        entries = _graph_entries(required=True)
+        answer = call_front_json(
+            {
+                "mode": "decisions",
+                "argv": [node_id.strip(), "--limit", "0", "--state", "all", "--json"],
+            }
+        )
+        rows = answer.get("decisions") or []
+        damaged = int(answer.get("damaged") or 0)
     except Exception as exc:  # noqa: BLE001 - an unread graph is not an empty graph
         sys.stdout.write(
             "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
             % " ".join(str(exc).split())[:160]
         )
         raise SystemExit(0)
-    try:
-        _subj, rows, damaged = list_decisions(
-            node_id.strip(), limit=None, state="all", entries=entries, scope="all"
+    if damaged:
+        # A damaged row could have held the closing verdict this whole
+        # gate exists to catch - reading the surviving rows as complete
+        # would be exactly the silent-pass failure the gate polices, one
+        # layer down. `fno backlog decide-reindex` is the recovery (same
+        # as _read_index's own operator-facing message).
+        sys.stdout.write(
+            "W\t%d damaged row(s) in the decision index - run "
+            "`fno backlog decide-reindex` and re-validate\n" % damaged
         )
-    except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
-        sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
-        if damaged:
-            # A damaged row could have held the closing verdict this whole
-            # gate exists to catch - reading the surviving rows as complete
-            # would be exactly the silent-pass failure the gate polices, one
-            # layer down. `fno backlog decide-reindex` is the recovery (same
-            # as _read_index's own operator-facing message).
-            sys.stdout.write(
-                "W\t%d damaged row(s) in the decision index - run "
-                "`fno backlog decide-reindex` and re-validate\n" % damaged
-            )
-        else:
-            def valid_expiry_ref_shape(ref):
-                if not isinstance(ref, dict):
-                    return False
-                kind = ref.get("kind")
-                if kind == "node":
-                    return isinstance(ref.get("node_id"), str) and bool(
-                        ref["node_id"].strip()
-                    )
-                if kind == "pr":
-                    number = ref.get("number")
-                    return (
-                        isinstance(ref.get("repository"), str)
-                        and bool(ref["repository"].strip())
-                        and isinstance(number, int)
-                        and not isinstance(number, bool)
-                        and number > 0
-                    )
+        def valid_expiry_ref_shape(ref):
+            if not isinstance(ref, dict):
                 return False
+            kind = ref.get("kind")
+            if kind == "node":
+                return isinstance(ref.get("node_id"), str) and bool(
+                    ref["node_id"].strip()
+                )
+            if kind == "pr":
+                number = ref.get("number")
+                return (
+                    isinstance(ref.get("repository"), str)
+                    and bool(ref["repository"].strip())
+                    and isinstance(number, int)
+                    and not isinstance(number, bool)
+                    and number > 0
+                )
+            return False
 
-            for row in rows:
-                if row.get("lane") != "coord" or "expiry_ref" not in row:
-                    continue
-                did = str(row.get("decision_id") or "<missing>")
-                if not valid_expiry_ref_shape(row.get("expiry_ref")):
-                    sys.stdout.write(
-                        "E\tcoord decision %s has invalid expiry_ref shape; "
-                        "use a node ref with node_id or a PR ref with repository "
-                        "and positive number\n" % did
-                    )
-                elif row.get("lifecycle") == "unscoped":
-                    sys.stdout.write(
-                        "E\tcoord decision %s has explicit expiry_ref but no "
-                        "positive closure evidence; repair the graph evidence "
-                        "and re-validate\n" % did
-                    )
-            # Drop rows the derived superseded_by map marks withdrawn - a
-            # withdrawn ruling must not demand acknowledgment. Never scan the
-            # ruling's own prose for this (see DecisionAcknowledgment's
-            # sibling note in ConsolidationBlock's docstring).
-            live = [r for r in rows if r.get("lifecycle") == "live"]
-            # casefold both sides: DecisionAcknowledgment accepts
-            # d-ABCD1234 (the id regex is case-insensitive, matching
-            # looks_like_decision_id), and a real minted id is always
-            # lowercase hex - but a hand-typed one in a plan need not be, and
-            # this is the only decision-id comparison in the codebase that is
-            # not already casefolded (list_decisions itself casefolds
-            # subject matches).
-            acked = {e.decision_id.casefold() for e in validated.decisions_acknowledged}
-            for row in live:
-                did = str(row.get("decision_id") or "")
-                if did and did.casefold() not in acked:
-                    text = " ".join(str(row.get("decision") or "").split())[:80]
-                    ts = str(row.get("ts") or "")
-                    sys.stdout.write("M\t%s\t%s\t%s\n" % (did, ts, text))
-            sys.stdout.write("D\t%d\n" % len(live))
+        for row in rows:
+            if row.get("lane") != "coord" or "expiry_ref" not in row:
+                continue
+            did = str(row.get("decision_id") or "<missing>")
+            if not valid_expiry_ref_shape(row.get("expiry_ref")):
+                sys.stdout.write(
+                    "E\tcoord decision %s has invalid expiry_ref shape; "
+                    "use a node ref with node_id or a PR ref with repository "
+                    "and positive number\n" % did
+                )
+            elif row.get("lifecycle") == "unscoped":
+                sys.stdout.write(
+                    "E\tcoord decision %s has explicit expiry_ref but no "
+                    "positive closure evidence; repair the graph evidence "
+                    "and re-validate\n" % did
+                )
+        # Drop rows the derived superseded_by map marks withdrawn - a
+        # withdrawn ruling must not demand acknowledgment. Never scan the
+        # ruling's own prose for this (see DecisionAcknowledgment's
+        # sibling note in ConsolidationBlock's docstring).
+        live = [r for r in rows if r.get("lifecycle") == "live"]
+        # casefold both sides: DecisionAcknowledgment accepts
+        # d-ABCD1234 (the id regex is case-insensitive, matching
+        # looks_like_decision_id), and a real minted id is always
+        # lowercase hex - but a hand-typed one in a plan need not be, and
+        # this is the only decision-id comparison in the codebase that is
+        # not already casefolded (list_decisions itself casefolds
+        # subject matches).
+        acked = {e.decision_id.casefold() for e in validated.decisions_acknowledged}
+        for row in live:
+            did = str(row.get("decision_id") or "")
+            if did and did.casefold() not in acked:
+                text = " ".join(str(row.get("decision") or "").split())[:80]
+                ts = str(row.get("ts") or "")
+                sys.stdout.write("M\t%s\t%s\t%s\n" % (did, ts, text))
+        sys.stdout.write("D\t%d\n" % len(live))
 PYEOF
     )
     # Same ladder _semantic_validate walks: the checkout's own interpreter
