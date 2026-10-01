@@ -746,40 +746,43 @@ fn codex_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
                 line_index + 1
             )
         })?;
-        let Some(payload) = row.get("payload") else {
-            continue;
-        };
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "function_call" | "custom_tool_call" | "local_shell_call" => {
-                let target =
-                    crate::transcript_activity::codex_call_text(line).ok_or_else(|| {
-                        format!(
-                            "{}:{}: transcript call has no command text",
-                            path.display(),
-                            line_index + 1
-                        )
-                    })?;
-                append_entry(
-                    &mut entries,
-                    "tool_use",
-                    Some("Bash".to_string()),
-                    target,
-                    String::new(),
-                );
-            }
-            "message" => {
-                let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
-                let text = message_text(payload.get("content").unwrap_or(&Value::Null));
-                if role == "assistant" {
-                    append_entry(&mut entries, "assistant_text", None, String::new(), text);
-                } else if role == "user" && !user_text_is_injected(&text) {
-                    append_entry(&mut entries, "user_text", None, String::new(), text);
-                }
-            }
-            _ => {}
-        }
+        codex_row_entries(&row, &mut entries)
+            .map_err(|e| format!("{}:{}: {e}", path.display(), line_index + 1))?;
     }
     Ok(entries)
+}
+
+/// The per-row form of [`codex_entries`]; the fold calls it directly so a
+/// rollout parses once per line. The error is a call row with no command
+/// text, fail-closed like the whole-text reader.
+pub(crate) fn codex_row_entries(row: &Value, entries: &mut Vec<Entry>) -> Result<(), &'static str> {
+    let Some(payload) = row.get("payload") else {
+        return Ok(());
+    };
+    match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+        "function_call" | "custom_tool_call" | "local_shell_call" => {
+            let target = crate::transcript_activity::codex_row_call_text(row)
+                .ok_or("transcript call has no command text")?;
+            append_entry(
+                entries,
+                "tool_use",
+                Some("Bash".to_string()),
+                target,
+                String::new(),
+            );
+        }
+        "message" => {
+            let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+            let text = message_text(payload.get("content").unwrap_or(&Value::Null));
+            if role == "assistant" {
+                append_entry(entries, "assistant_text", None, String::new(), text);
+            } else if role == "user" && !user_text_is_injected(&text) {
+                append_entry(entries, "user_text", None, String::new(), text);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub(crate) fn entries_from_transcript(harness: &str, path: &Path) -> Result<Vec<Entry>, String> {
