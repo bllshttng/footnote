@@ -23,7 +23,7 @@ Load references as needed during test planning:
 ## When to Use
 
 - After `/execute` completes and Playwright tests pass
-- Before `/pr create` for significant features
+- Before `/fno:ship pr create` for significant features
 - When feature involves complex UX flows
 - When feature has many edge cases
 

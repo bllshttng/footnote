@@ -45,7 +45,7 @@ This repo uses the footnote delivery pipeline. Two surfaces that compose:
 - **`fno` CLI** - atomic state ops: `fno backlog` (the feature graph), `fno do pr`,
   `fno agents mail`, `fno backlog carveout`. Run `fno help` for the catalog.
 - **`/fno:*` commands** - orchestration: `/fno:target` (idea -> shipped PR),
-  `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`.
+  `/fno:think`, `/fno:review`, `/fno:ship pr`, `/fno:fix`.
 
 Never hand-edit these state files (a hook rejects it): `~/.fno/graph.json` (use
 `fno backlog`) and `.fno/target-state.md` (immutable after `fno do target init`).

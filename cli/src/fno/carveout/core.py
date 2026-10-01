@@ -11,7 +11,7 @@ raw-signal/triaged-node line crisp is why this lives under `fno backlog carveout
 
 The ``backfill`` kind is special-cased downstream: the generic retro harvest
 SKIPS it (``retro.harvest.harvest_carveouts``) so it SURVIVES untouched for
-``/fno:pr merged``'s backfill slot, which reads it via
+``/fno:ship pr merged``'s backfill slot, which reads it via
 :func:`read_carveouts` and removes it via :func:`consume_carveouts` once run or
 filed as a node (Group 3).
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 # kind is a closed enum: a deferred decision, an out-of-scope bug, or a data
-# backfill the merged PR enables. ``backfill`` is consumed by /pr merged, not
+# backfill the merged PR enables. ``backfill`` is consumed by /fno:ship pr merged, not
 # the generic retro harvest.
 BACKFILL_KIND = "backfill"
 VALID_KINDS: Tuple[str, ...] = ("deferred", "oos-bug", BACKFILL_KIND)
@@ -399,7 +399,7 @@ class CarveoutNotFound(CarveoutError):
     """Raised when the id to update is not on the ledger.
 
     Its own type because the CLI must NOT fall back to creating the row. A
-    create-on-miss would resurrect a carve-out ``/pr merged`` already consumed,
+    create-on-miss would resurrect a carve-out ``/fno:ship pr merged`` already consumed,
     under a later PR's number - the exact re-filing hazard ``consume_carveouts``
     exists to prevent.
     """
@@ -525,7 +525,7 @@ def read_carveouts(
 ) -> "list[dict[str, Any]]":
     """Read the carve-out ledger under ``root``; return parsed records in order.
 
-    Filtered to ``kind`` when given (e.g. ``backfill`` for /pr merged's slot),
+    Filtered to ``kind`` when given (e.g. ``backfill`` for /fno:ship pr merged's slot),
     and to ``session_ids`` when given (the carve-out's ``session_id`` must be in
     the set). ``include_unscoped`` additionally keeps rows whose ``session_id``
     is null: they belong to no session, so an equality filter would hide them
@@ -539,7 +539,7 @@ def read_carveouts(
     cannot hide the rest - capture is never lost. A MISSING ledger returns
     ``[]`` (the common case, not an error). But a ledger that EXISTS yet cannot
     be read/decoded raises ``CarveoutError`` rather than masquerading as empty:
-    a failed read must not be a silent success (the /pr merged backfill slot
+    a failed read must not be a silent success (the /fno:ship pr merged backfill slot
     would otherwise drop a real backfill with no signal). Read-only: never
     mutates the ledger.
     """

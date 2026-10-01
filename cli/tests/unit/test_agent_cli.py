@@ -442,7 +442,7 @@ class TestStatus:
         assert result.exit_code == 0
         assert "inconsistencies:" in result.stdout
         assert "WARNING" in result.stdout
-        assert "/pr check" in result.stdout
+        assert "/fno:ship pr check" in result.stdout
 
     def test_ac4_edge_events_tail_bounded_constant_time(self, tmp_path, runner, monkeypatch):
         """Tail is constant-time wrt file size: time for 50MB <= 3x time for 5MB.

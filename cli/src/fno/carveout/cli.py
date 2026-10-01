@@ -29,7 +29,7 @@ carveout_app = typer.Typer(
         "its own commit - SIZE is the only justification for filing instead. "
         "Records to .fno/carveouts.jsonl; the retro-triage harvest at merge "
         "turns deferred/oos-bug into backlog nodes (deduped, classified), "
-        "while `backfill` is handled by /fno:pr merged. That harvest is "
+        "while `backfill` is handled by /fno:ship pr merged. That harvest is "
         "manual: `fno backlog retro sweep-carveouts --apply` is the only thing that "
         "clears the ledger, so every row you file is a chore for a human. "
         "See `fno inbox outstanding` for what has piled up."
@@ -163,7 +163,7 @@ def list_carveouts(
         None,
         "--session-id",
         help="Filter to carve-out(s) recorded under this session id. Repeatable; "
-        "/pr merged passes the merged PR's owning session(s) so it never touches "
+        "/fno:ship pr merged passes the merged PR's owning session(s) so it never touches "
         "another session's backfill.",
     ),
     pr_number: int = typer.Option(
@@ -193,7 +193,7 @@ def list_carveouts(
 
     Reads the CANONICAL ledger (the same one `add` writes to), so it works from
     a linked worktree. A missing ledger is not an error: prints nothing, exits 0.
-    Powers /fno:pr merged's backfill slot via
+    Powers /fno:ship pr merged's backfill slot via
     `--kind backfill --pr-number <n> --json`, whose `sessions_resolved` (and,
     when empty, `reason`) drives the consume-vs-read-only branch - so that
     branch keys on verb output, never on an empty shell variable of unknowable
@@ -269,7 +269,7 @@ def list_carveouts(
         )
     except CarveoutError as exc:
         # A present-but-unreadable ledger is a FAILED read, not "no carve-outs":
-        # surface it loud (exit 1) like `add`, so /pr merged never treats an
+        # surface it loud (exit 1) like `add`, so /fno:ship pr merged never treats an
         # unreadable ledger as "no backfills to run".
         typer.echo(f"carveout: failed to read carve-outs: {exc}", err=True)
         raise typer.Exit(1)
@@ -367,7 +367,7 @@ def update(
       - no field given (exit 2) - a no-op that prints a success line is exactly
         the lie this verb exists to stop
       - an id that is not on the ledger (exit 1) - never creates it, since that
-        would resurrect a row ``/pr merged`` already consumed, under a later
+        would resurrect a row ``/fno:ship pr merged`` already consumed, under a later
         PR's number
       - an empty ``--description`` (exit 2) - an empty carve-out is a lost one
       - an unreadable or unwritable ledger (exit 1) - a failed edit must not
@@ -444,7 +444,7 @@ def update(
         raise typer.Exit(1)
 
     # A warning, not a refusal. Crossing the backfill boundary hands the row to
-    # a different consumer (/pr merged's backfill slot vs the generic retro
+    # a different consumer (/fno:ship pr merged's backfill slot vs the generic retro
     # harvest), which is worth saying out loud - but refusing a legitimate
     # reclassification would be worse than permitting it.
     if old_kind is not None and kind is not None and old_kind != kind:
@@ -452,7 +452,7 @@ def update(
         if crossed:
             typer.echo(
                 f"carveout: {cv_id} moved {old_kind} -> {kind}; it now belongs to "
-                f"{'/fno:pr merged' if kind == BACKFILL_KIND else 'the retro-triage harvest'} "
+                f"{'/fno:ship pr merged' if kind == BACKFILL_KIND else 'the retro-triage harvest'} "
                 f"instead",
                 err=True,
             )
@@ -484,7 +484,7 @@ def resolve_carveouts(
 ) -> None:
     """Remove handled carve-out(s) from the ledger.
 
-    Used by /fno:pr merged's backfill slot once a backfill is run or filed
+    Used by /fno:ship pr merged's backfill slot once a backfill is run or filed
     as a backlog node, so a later run never re-offers the same entry. Idempotent:
     an id not present is a silent no-op. Prints the count actually removed.
 
@@ -534,7 +534,7 @@ def resolve_carveouts(
         # consume_carveouts returns the count actually removed and is best-effort
         # (a lock timeout or unwritable ledger also returns a low count). A
         # shortfall must be visible so a locked-ledger failure is not mistaken
-        # for "already resolved" - else /pr merged re-offers a handled backfill.
+        # for "already resolved" - else /fno:ship pr merged re-offers a handled backfill.
         # Exit stays 0 (an absent id is a legitimate idempotent no-op); the
         # signal is on stderr (mirrors retro/cli.py's removed<want warning).
         typer.echo(

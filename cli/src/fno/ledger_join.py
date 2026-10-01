@@ -1,6 +1,6 @@
 """Resolve the session(s) that own a merged PR, from ``ledger.json``.
 
-The join the ``/fno:pr merged`` ritual used to do in markdown bash (a jq
+The join the ``/fno:ship pr merged`` ritual used to do in markdown bash (a jq
 pipeline filtered through ``grep -vxE 'null|'``, an empty alternation that
 ugrep rejects). Every failure there collapsed to an empty variable, so a real
 ledger entry read as "no owning session" and the ritual silently declined to

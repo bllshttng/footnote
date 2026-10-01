@@ -4,7 +4,7 @@ All logic lives here so ``cli.py`` stays thin and this module is independently
 testable without invoking Typer machinery.
 
 The global LaunchAgent (``sh.fno.pr-watcher``) polls ``~/.fno/graph.json`` for
-open-PR backlog nodes and fires headless ``/fno:pr check`` or ``/fno:pr merged``
+open-PR backlog nodes and fires headless ``/fno:ship pr check`` or ``/fno:ship pr merged``
 via ``fno do pr watch tick``.  ONE agent globally -- no per-repo plists.
 
 Design constraints (locked):
@@ -75,7 +75,7 @@ _PLIST_TEMPLATE = """\
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Global PR-state watcher LaunchAgent.  ONE agent polls ~/.fno/graph.json
-  for open-PR backlog nodes and fires /fno:pr check or /fno:pr merged.
+  for open-PR backlog nodes and fires /fno:ship pr check or /fno:ship pr merged.
   RunAtLoad is false: review the rendered plist and run
     launchctl load {plist_path}
   yourself (human gate).

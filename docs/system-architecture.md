@@ -111,7 +111,7 @@ sequenceDiagram
     participant A as Agents (target/archer)
     participant CR as /review
     participant GV as goal-verifier
-    participant PR as /pr create
+    participant PR as /fno:ship pr create
     participant SH as Stop Hook
 
     U->>R: "build auth feature"
@@ -564,7 +564,7 @@ Some skills use `context: fork` in their frontmatter to run in an isolated subpr
 
 | Skill | Model | Rationale |
 |-------|-------|-----------|
-| `/pr create` | Haiku | Mechanical task - read commits, generate PR description |
+| `/fno:ship pr create` | Haiku | Mechanical task - read commits, generate PR description |
 
 Forked skills:
 - Run in a separate process

@@ -191,7 +191,7 @@ Codex's P1s land on the `GET /pulls/{N}/comments` review-comments endpoint, whic
 - **Fingerprint**: Read 4's newest comment timestamp folds into the fingerprint's 4th component, so a late inline finding (codex posts inline findings minutes after its review summary) advances the fingerprint - the session re-blocks rather than terminating `NoProgress`, and a fire that saw a clean PR before the finding arrived cannot have already terminated on stale data.
 - **Failure**: a Read 4 / commits-read failure fails closed exactly like Reads 1-3 - block with the read named (`pulls_comments` / `pr_commits`), retry next fire.
 
-The matching writer lives in `/pr check`: it replies in-thread (`in_reply_to`) per blocking finding - fix replies name the commit, declines carry `wontfix:`. Without that writer the gate is unsatisfiable (a PR addressed with zero in-thread replies could not have passed this gate).
+The matching writer lives in `/fno:ship pr check`: it replies in-thread (`in_reply_to`) per blocking finding - fix replies name the commit, declines carry `wontfix:`. Without that writer the gate is unsatisfiable. A PR addressed with zero in-thread replies cannot pass this gate.
 
 ### TerminationReason enum
 

@@ -1737,12 +1737,12 @@ def test_cmd_spawn_parses_pr_watch_headless_json_argv(
         [
             "spawn", "--name", "pr-check-7", "--substrate", "headless",
             "--harness", "claude", "--output-format", "json",
-            "/fno:pr check 7",
+            "/fno:ship pr check 7",
         ],
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["message"] == "/fno:pr check 7"
+    assert captured["message"] == "/fno:ship pr check 7"
     assert captured["headless"] is True
     assert captured["output_format"] == "json"
 
