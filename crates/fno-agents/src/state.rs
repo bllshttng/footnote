@@ -490,8 +490,9 @@ pub enum InsideLegState {
 /// The stored form of one inside-leg report (contract v2: X2). The wire payload
 /// the daemon receives is `{session_id, seq, state, reason?, ttl_ms?}`; the
 /// daemon adds `received_at` and stores the rest here on the [`RegistryEntry`].
-/// `seq` is per-`session_id` monotonic so a reordered/duplicate report can be
-/// dropped (`seq <= last_seq`); `ttl_ms` bounds how long the badge stays live
+/// `seq` is per-`session_id` monotonic within one host boot so a reordered or
+/// duplicate report can be dropped ([`InsideLegReport::yields_to`] has the
+/// rule and its reboot horizon); `ttl_ms` bounds how long the badge stays live
 /// before it ages to unknown. NOTE (E3.1 scope): this struct is the storage
 /// CONTRACT only -- the seq-drop, TTL-aging, and 3-tier authority BEHAVIOUR that
 /// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
@@ -610,7 +611,26 @@ impl InsideLegReport {
             None => false,
         }
     }
+
+    /// True when `new` replaces this stored report. A higher seq wins. A lower
+    /// or equal seq is a reordered or duplicate sibling and drops, unless it
+    /// arrives more than [`SEQ_REORDER_HORIZON_S`] after this one. The claude
+    /// hook's seq is the host monotonic clock, which restarts at zero on
+    /// reboot: without the horizon a row stored before a reboot drops every
+    /// report until the new uptime passes the old one, which takes days. An
+    /// unparseable stamp falls back to the plain seq rule.
+    pub fn yields_to(&self, new: &InsideLegReport) -> bool {
+        new.seq > self.seq
+            || rfc3339_like_to_secs(&self.received_at)
+                .zip(rfc3339_like_to_secs(&new.received_at))
+                .is_some_and(|(old, now)| now.saturating_sub(old) > SEQ_REORDER_HORIZON_S)
+    }
 }
+
+/// How far a reordered sibling report can trail the one stored before it.
+/// Each report's hook process is short and bounded (a 2s RPC cap), so two
+/// minutes covers a stalled hook with margin.
+pub const SEQ_REORDER_HORIZON_S: u64 = 120;
 
 /// True when a badge report ENTERS `target` from a different prior state.
 /// This is the whole episode gate for the OS-notification wire: firing only on

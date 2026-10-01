@@ -2,14 +2,14 @@
 //!
 //! A worker can burn hours and dollars while its node's `touched_at` and its
 //! branch sit flat; nothing else in the fleet reads cost against progress.
-//! This arm samples every live session carrying an open `do` phase: ledger
+//! This arm samples every live session carrying an open execute phase: ledger
 //! spend, branch head and commit count (`git` in the row's own cwd), and the
 //! node's `touched_at` (graph). Progress on any axis resets the ladder; a
 //! flat sample where spend grew or the node aged past the idle ceiling wakes
 //! the worker, and three unanswered wakes file ONE fleet task through the
 //! same store the pr-nudge ladder escalates through.
 //!
-//! Scope is open-do sessions on purpose: a blueprint or think worker's
+//! Scope is open execute sessions on purpose: a blueprint or think worker's
 //! deliverable is a plan document, so commits are not its progress signal.
 //! No transcript is read - a doom loop writes its transcript constantly,
 //! which is exactly the shape this arm exists to catch, so quietness gates
@@ -30,6 +30,11 @@ use crate::paths::AgentsHome;
 pub const BURN_WATCH_INTERVAL_S: u64 = 900;
 pub const DEFAULT_IDLE_S: i64 = 7200;
 pub const DEFAULT_SPEND_USD: f64 = 0.01;
+const ESCALATE_DEFAULT_RED_ROUNDS: u32 = 3;
+const ESCALATE_DEFAULT_CONFLICT_MERGES: u32 = 2;
+const ESCALATE_DEFAULT_DIFF_LINES: u64 = 2500;
+const ESCALATE_DEFAULT_HOURS: i64 = 24;
+const ESCALATE_DEFAULT_SLOT_WAIT_MIN: i64 = 60;
 const SENDER: &str = "burn-watch";
 const SENDER_LINE: &str = "Automatic notice from the fno daemon burn-watch arm, not a person. Your operator's hold outranks it.";
 
@@ -84,6 +89,44 @@ pub struct BurnState {
     pub task_key: Option<String>,
     #[serde(default)]
     pub task_cwd: Option<String>,
+    /// The capability escalation note went to the crown (or its board) for
+    /// this worker; every later pass skips the counter reads.
+    #[serde(default)]
+    pub escalation_noted: bool,
+}
+
+/// What the five capability counters read this pass. None is unread, and an
+/// unread counter never trips.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Counters {
+    red: Option<(String, u32)>,
+    conflict_merges: Option<u32>,
+    diff_lines: Option<u64>,
+    hours: Option<i64>,
+    slot_wait_min: Option<i64>,
+}
+
+/// The `burn_watch.escalate_*` thresholds. A 0 turns that counter off; a
+/// negative or wrong-typed value takes the default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Thresholds {
+    red_rounds: u32,
+    conflict_merges: u32,
+    diff_lines: u64,
+    hours: i64,
+    slot_wait_minutes: i64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            red_rounds: ESCALATE_DEFAULT_RED_ROUNDS,
+            conflict_merges: ESCALATE_DEFAULT_CONFLICT_MERGES,
+            diff_lines: ESCALATE_DEFAULT_DIFF_LINES,
+            hours: ESCALATE_DEFAULT_HOURS,
+            slot_wait_minutes: ESCALATE_DEFAULT_SLOT_WAIT_MIN,
+        }
+    }
 }
 
 /// What this pass does with one in-scope session.
@@ -144,6 +187,7 @@ pub fn decide(
             last_wake_at: prev.last_wake_at,
             task_key: prev.task_key.clone(),
             task_cwd: prev.task_cwd.clone(),
+            escalation_noted: prev.escalation_noted,
         };
         return (Decision::Hold, next);
     }
@@ -206,41 +250,121 @@ pub fn decide(
     }
 }
 
-/// Sessions with an open `do` phase, joined to their node: the arm's scope.
-fn scope_sessions(rows: &[Value]) -> BTreeMap<String, String> {
+/// One in-scope worker: its node and the model the graph observed.
+#[derive(Debug, Clone, PartialEq)]
+struct ScopedSession {
+    node: String,
+    observed_model: Option<String>,
+}
+
+/// What the pass knows about one node.
+#[derive(Debug, Clone, Default)]
+struct NodeFacts {
+    status: String,
+    touched_at: Option<i64>,
+    pr_number: Option<u64>,
+    first_execute_at: Option<i64>,
+}
+
+/// The model a session row observed, when the keeper wrote one: the
+/// `observed` kind carries the live model; other kinds carry nothing.
+fn session_model(row: &Value) -> Option<String> {
+    let observed = row.get("observed_model")?;
+    if observed.get("kind").and_then(Value::as_str) != Some("observed") {
+        return None;
+    }
+    observed
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Open execute sessions on open nodes, joined to their node: the arm's
+/// scope. The store returns node rows; the workers sit under each node's
+/// `sessions` array, so the walk goes inside.
+fn scope_sessions(rows: &[Value]) -> BTreeMap<String, ScopedSession> {
     let mut out = BTreeMap::new();
     for row in rows {
-        if !crate::graph_store::is_open_phase_row(row, "do") {
+        if row
+            .get("status")
+            .and_then(Value::as_str)
+            .map(is_open_status)
+            != Some(true)
+        {
             continue;
         }
-        if let (Some(sid), Some(node)) = (
-            row.get("session_id").and_then(Value::as_str),
-            row.get("node").and_then(Value::as_str),
-        ) {
-            out.insert(sid.to_string(), node.to_string());
+        let Some(node) = row.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(sessions) = row.get("sessions").and_then(Value::as_array) else {
+            continue;
+        };
+        for session in sessions {
+            if !crate::graph_store::is_open_do_row(session) {
+                continue;
+            }
+            if let Some(sid) = session.get("session_id").and_then(Value::as_str) {
+                out.insert(
+                    sid.to_string(),
+                    ScopedSession {
+                        node: node.to_string(),
+                        observed_model: session_model(session),
+                    },
+                );
+            }
         }
     }
     out
 }
 
-/// Open nodes by id: `(status, touched_at epoch)`; unparsable stamps read
-/// None and can never feed the age arm.
-fn node_facts(rows: &[Value]) -> HashMap<String, (String, Option<i64>)> {
-    rows.iter()
-        .filter_map(|row| {
-            let id = row.get("id").and_then(Value::as_str)?;
-            let status = row.get("status").and_then(Value::as_str)?.to_string();
-            let touched = row
-                .get("touched_at")
-                .and_then(Value::as_str)
-                .and_then(|raw| {
-                    chrono::DateTime::parse_from_rfc3339(raw)
-                        .ok()
-                        .map(|t| t.timestamp())
-                });
-            Some(id.to_string()).zip(Some((status, touched)))
-        })
-        .collect()
+fn parse_epoch(raw: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|t| t.timestamp())
+}
+
+/// Open nodes by id; unparsable stamps read None and can never feed the age
+/// arm.
+fn node_facts(rows: &[Value]) -> HashMap<String, NodeFacts> {
+    let mut out: HashMap<String, NodeFacts> = HashMap::new();
+    for row in rows {
+        let (Some(id), Some(status)) = (
+            row.get("id").and_then(Value::as_str),
+            row.get("status").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let touched_at = row
+            .get("touched_at")
+            .and_then(Value::as_str)
+            .and_then(parse_epoch);
+        let first_execute_at = row
+            .get("sessions")
+            .and_then(Value::as_array)
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .filter(|s| s.get("phase").and_then(Value::as_str) == Some("execute"))
+                    .filter_map(|s| {
+                        s.get("started_at")
+                            .and_then(Value::as_str)
+                            .and_then(parse_epoch)
+                    })
+                    .min()
+            })
+            .unwrap_or(None);
+        out.insert(
+            id.to_string(),
+            NodeFacts {
+                status: status.to_string(),
+                touched_at,
+                pr_number: row.get("pr_number").and_then(Value::as_u64),
+                first_execute_at,
+            },
+        );
+    }
+    out
 }
 
 /// The production runner every arm shares with the pr-nudge ladder.
@@ -311,6 +435,179 @@ fn git_progress(cwd: &str, runner: Runner) -> (Option<String>, Option<u64>) {
     (head, count)
 }
 
+/// The last non-empty stdout line, trimmed: a git word like a branch or a sha.
+fn first_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+}
+
+/// The workflow with the most distinct failed heads on a branch, from a
+/// GitHub Actions failure listing. A run whose latest attempt passed left
+/// the failure listing before this fold saw it, and the bucket check drops
+/// it again should a caller pass a mixed listing; nothing failed reads None.
+fn red_rounds(runs: &[Value]) -> Option<(String, u32)> {
+    let mut heads: BTreeMap<&str, std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for run in runs {
+        if crate::pr_push::rest_bucket(run) != "fail" {
+            continue;
+        }
+        if let (Some(name), Some(sha)) = (
+            run.get("name").and_then(Value::as_str),
+            run.get("head_sha").and_then(Value::as_str),
+        ) {
+            heads.entry(name).or_default().insert(sha);
+        }
+    }
+    heads
+        .into_iter()
+        .max_by_key(|(_, shas)| shas.len())
+        .map(|(name, shas)| (name.to_string(), shas.len() as u32))
+}
+
+/// Red rounds for the row's PR branch, when the branch has a PR and the gh
+/// budget allows the read. A failed read is None and trips nothing.
+fn red_rounds_for(cwd: &str, runner: Runner, now_ms: i64) -> Option<(String, u32)> {
+    if crate::gh_budget::snapshot(&crate::gh_budget::ledger_path(), now_ms).backoff_remaining_s != 0
+    {
+        return None;
+    }
+    let branch = first_line(
+        &runner(
+            &[
+                "git".into(),
+                "rev-parse".into(),
+                "--abbrev-ref".into(),
+                "HEAD".into(),
+            ],
+            cwd,
+        )
+        .1,
+    )?;
+    let (code, out, _) = runner(
+        &[
+            "gh".into(),
+            "api".into(),
+            format!(
+                "repos/{{owner}}/{{repo}}/actions/runs?branch={branch}&status=failure&per_page=100"
+            ),
+        ],
+        cwd,
+    );
+    if code != 0 {
+        return None;
+    }
+    let page: Value = serde_json::from_str(&out).ok()?;
+    let runs = page.get("workflow_runs")?.as_array()?;
+    red_rounds(runs)
+}
+
+/// Merges of `base` into the branch whose `git show --remerge-diff` answer is
+/// non-empty: each is one merge that needed a resolution. At most the newest
+/// 20 merges are opened; a failed read is None.
+fn conflict_merges(cwd: &str, base: &str, runner: Runner) -> Option<u32> {
+    let (code, out, _) = runner(
+        &[
+            "git".into(),
+            "rev-list".into(),
+            "--merges".into(),
+            "--max-count=20".into(),
+            format!("{base}..HEAD"),
+        ],
+        cwd,
+    );
+    if code != 0 {
+        return None;
+    }
+    let mut count = 0u32;
+    for sha in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (_, show, _) = runner(
+            &[
+                "git".into(),
+                "show".into(),
+                "--remerge-diff".into(),
+                "--format=".into(),
+                "--name-only".into(),
+                sha.to_string(),
+            ],
+            cwd,
+        );
+        if !show.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+/// Insertions plus deletions between `base` and HEAD. git omits a zero
+/// field, so an absent word reads 0; a failed read is None.
+fn diff_lines(cwd: &str, base: &str, runner: Runner) -> Option<u64> {
+    let (code, out, _) = runner(
+        &[
+            "git".into(),
+            "diff".into(),
+            "--shortstat".into(),
+            format!("{base}...HEAD"),
+        ],
+        cwd,
+    );
+    if code != 0 {
+        return None;
+    }
+    let field = |word: &str| -> u64 {
+        out.split(word)
+            .next()
+            .and_then(|head| {
+                let digits: String = head
+                    .trim_end()
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if digits.is_empty() {
+                    None
+                } else {
+                    digits.chars().rev().collect::<String>().parse().ok()
+                }
+            })
+            .unwrap_or(0)
+    };
+    Some(field("insertion") + field("deletion"))
+}
+
+/// The five counters for one in-scope worker's checkout. `base` unset, a
+/// probe that dies, an unreadable listing: each reads None and never trips.
+fn sample_counters(cwd: &str, facts: &NodeFacts, runner: Runner, now_epoch: i64) -> Counters {
+    let base = first_line(
+        &runner(
+            &[
+                "git".into(),
+                "rev-parse".into(),
+                "--abbrev-ref".into(),
+                "origin/HEAD".into(),
+            ],
+            cwd,
+        )
+        .1,
+    );
+    let now_ms = now_epoch.saturating_mul(1000);
+    Counters {
+        red: facts
+            .pr_number
+            .filter(|pr| *pr > 0)
+            .and_then(|_| red_rounds_for(cwd, runner, now_ms)),
+        conflict_merges: base
+            .as_deref()
+            .and_then(|b| conflict_merges(cwd, b, runner)),
+        diff_lines: base.as_deref().and_then(|b| diff_lines(cwd, b, runner)),
+        hours: facts.first_execute_at.map(|t| (now_epoch - t) / 3600),
+        slot_wait_min: crate::test_run::build_wait_since_ms(Path::new(cwd))
+            .map(|since| (now_ms - since) / 60_000),
+    }
+}
+
 fn state_path(home: &AgentsHome, sid: &str) -> Option<std::path::PathBuf> {
     if sid.is_empty() || sid.len() > 64 || !sid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
     {
@@ -352,6 +649,155 @@ fn escalation_text(node: &str, sid: &str, reason: &str, attempts: u32) -> String
          {attempts} wakes. Resume it with `fno agents resume {sid}`, stop it, or \
          requeue the node; the fleet task closes itself when progress lands."
     )
+}
+
+/// One evidence phrase per counter at or past its non-zero threshold.
+fn escalation_trips(counters: &Counters, t: &Thresholds) -> Vec<String> {
+    let mut trips = Vec::new();
+    if t.red_rounds > 0 {
+        if let Some((workflow, heads)) = &counters.red {
+            if *heads >= t.red_rounds {
+                trips.push(format!(
+                    "{workflow} red on {heads} heads (threshold {})",
+                    t.red_rounds
+                ));
+            }
+        }
+    }
+    if t.conflict_merges > 0 {
+        if let Some(n) = counters.conflict_merges {
+            if n >= t.conflict_merges {
+                trips.push(format!(
+                    "{n} merges of the base needed a resolution (threshold {})",
+                    t.conflict_merges
+                ));
+            }
+        }
+    }
+    if t.diff_lines > 0 {
+        if let Some(n) = counters.diff_lines {
+            if n >= t.diff_lines {
+                trips.push(format!(
+                    "{n} changed lines against the base (threshold {})",
+                    t.diff_lines
+                ));
+            }
+        }
+    }
+    if t.hours > 0 {
+        if let Some(h) = counters.hours {
+            if h >= t.hours {
+                trips.push(format!("{h}h on the node (threshold {}h)", t.hours));
+            }
+        }
+    }
+    if t.slot_wait_minutes > 0 {
+        if let Some(m) = counters.slot_wait_min {
+            if m >= t.slot_wait_minutes {
+                trips.push(format!(
+                    "{m}m waiting at the cargo build door (threshold {}m)",
+                    t.slot_wait_minutes
+                ));
+            }
+        }
+    }
+    trips
+}
+
+/// The once-per-worker note: what tripped, what did not, and the non-goal.
+fn escalation_note_text(
+    node: &str,
+    sid: &str,
+    harness: &str,
+    model: &str,
+    counters: &Counters,
+    tripped: &[String],
+) -> String {
+    let reading = |named: bool, text: String| {
+        if named {
+            None
+        } else {
+            Some(text)
+        }
+    };
+    let mut untripped: Vec<String> = Vec::new();
+    match &counters.red {
+        Some((workflow, heads)) => {
+            if let Some(text) = reading(
+                tripped.iter().any(|t| t.contains(workflow)),
+                format!("{workflow} red on {heads} heads"),
+            ) {
+                untripped.push(text);
+            }
+        }
+        None => untripped.push("red rounds unread".into()),
+    }
+    if let Some(n) = counters.conflict_merges {
+        if let Some(text) = reading(
+            tripped.iter().any(|t| t.contains("merges of the base")),
+            format!("{n} merges of the base"),
+        ) {
+            untripped.push(text);
+        }
+    }
+    if let Some(n) = counters.diff_lines {
+        if let Some(text) = reading(
+            tripped.iter().any(|t| t.contains("changed lines")),
+            format!("{n} changed lines"),
+        ) {
+            untripped.push(text);
+        }
+    }
+    if let Some(h) = counters.hours {
+        if let Some(text) = reading(
+            tripped.iter().any(|t| t.contains("h on the node")),
+            format!("{h}h on the node"),
+        ) {
+            untripped.push(text);
+        }
+    }
+    if let Some(m) = counters.slot_wait_min {
+        if let Some(text) = reading(
+            tripped.iter().any(|t| t.contains("cargo build door")),
+            format!("{m}m at the cargo build door"),
+        ) {
+            untripped.push(text);
+        }
+    }
+    let untripped_word = if untripped.is_empty() {
+        "no other reading".to_string()
+    } else {
+        untripped.join("; ")
+    };
+    format!(
+        "{SENDER_LINE} node {node}, session {sid} on {harness} / {model}: {}. \
+         Other readings: {untripped_word}. The crown chooses the destination: \
+         `skills/target/scripts/handoff.sh --harness <harness> --model <model>` \
+         (docs/architecture/target-self-handoff.md). Nothing was moved. \
+         This note is sent once per worker.",
+        tripped.join("; ")
+    )
+}
+
+/// The node's owning crown scope, resolved once per pass and cached.
+/// An unreadable registry reads as no owner.
+fn node_owner(
+    config_cwd: &Path,
+    registry_path: &Path,
+    rows: &[Value],
+    cache: &mut Option<HashMap<String, String>>,
+    node: &str,
+) -> Option<String> {
+    if cache.is_none() {
+        let crowns = crate::territory::live_crowns(registry_path).ok()?;
+        let (map, _) = crate::territory::node_owners(
+            &crowns,
+            rows,
+            &Ok(crate::king_board::project_map(config_cwd).unwrap_or_default()),
+        );
+        *cache = Some(map);
+    }
+    cache.as_ref()?.get(node).cloned()
 }
 
 /// One wake: mail the report; when the lane could not take it, fall back to
@@ -408,7 +854,7 @@ fn sample_session(
     sid: &str,
     node: &str,
     cwd: &str,
-    facts: &HashMap<String, (String, Option<i64>)>,
+    facts: &HashMap<String, NodeFacts>,
     runner: Runner,
 ) -> Sample {
     let (head, commits) = git_progress(cwd, runner);
@@ -419,7 +865,7 @@ fn sample_session(
         )),
         head,
         commits,
-        touched_at: facts.get(node).and_then(|(_, t)| *t),
+        touched_at: facts.get(node).and_then(|f| f.touched_at),
     }
 }
 
@@ -433,6 +879,8 @@ fn run_pass(
     now_epoch: i64,
     idle_s: i64,
     spend_min: f64,
+    config_cwd: &Path,
+    thresholds: &Thresholds,
 ) {
     let graph = crate::gc_sweep::graph_path(home);
     let store = crate::backlog::api::Store::new(&graph);
@@ -453,9 +901,12 @@ fn run_pass(
         }
     }
     let mut acted = 0u64;
+    let mut notes = 0u64;
     let mut skip: Option<String> = None;
     let mut sampled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (sid, node) in &scope {
+    let mut owners: Option<HashMap<String, String>> = None;
+    for (sid, scoped) in &scope {
+        let node = scoped.node.as_str();
         let Some(entry) = live.get(sid) else { continue };
         let Some(cwd) = (!entry.cwd.is_empty()).then_some(entry.cwd.as_str()) else {
             continue;
@@ -463,7 +914,7 @@ fn run_pass(
         // A node that left the open set is the reaper's question, not ours.
         if !facts
             .get(node)
-            .map(|(status, _)| is_open_status(status))
+            .map(|f| is_open_status(&f.status))
             .unwrap_or(false)
         {
             continue;
@@ -532,6 +983,64 @@ fn run_pass(
             }
             Decision::Hold => skip = Some("holding".into()),
         }
+        // The capability note rides its own flag, copied from prev because
+        // decide rebuilds the state and a stand-down must not clear it.
+        next.escalation_noted = prev.as_ref().map(|p| p.escalation_noted).unwrap_or(false);
+        if !next.escalation_noted {
+            let counters = sample_counters(
+                cwd,
+                facts.get(node).unwrap_or(&NodeFacts::default()),
+                runner,
+                now_epoch,
+            );
+            let tripped = escalation_trips(&counters, thresholds);
+            if !tripped.is_empty() {
+                let harness = entry.harness.as_deref().unwrap_or("unknown");
+                let model = scoped
+                    .observed_model
+                    .as_deref()
+                    .or(entry.model.as_deref())
+                    .or(entry.requested_model.as_deref())
+                    .unwrap_or("unknown");
+                let text = escalation_note_text(node, sid, harness, model, &counters, &tripped);
+                let owner = node_owner(config_cwd, &home.registry_json(), &rows, &mut owners, node);
+                let delivered = match &owner {
+                    Some(king_scope) => {
+                        let argv = vec![
+                            "fno".to_string(),
+                            "agents".to_string(),
+                            "mail".to_string(),
+                            "send".to_string(),
+                            "--from-name".to_string(),
+                            SENDER.to_string(),
+                            "--origin".to_string(),
+                            "scheduler".to_string(),
+                            "--to-king".to_string(),
+                            king_scope.clone(),
+                            text.clone(),
+                        ];
+                        let (code, stdout, _) = runner(&argv, "");
+                        crate::mail_inject::mail_send_accepted(code, &stdout)
+                    }
+                    None => false,
+                };
+                if !delivered {
+                    if let Err(e) = crate::fleet_task::file_once(
+                        &crate::provider_cap::questions_path(home),
+                        SENDER,
+                        &format!("capability escalation for {node}"),
+                        cwd,
+                        &text,
+                        Some("skills/target/scripts/handoff.sh"),
+                        Some(node),
+                    ) {
+                        eprintln!("burn-watch: escalation task refused: {e}");
+                    }
+                }
+                next.escalation_noted = true;
+                notes += 1;
+            }
+        }
         save_state(home, sid, &next);
     }
     // A session that left the scope loses its ladder and its filed task,
@@ -556,7 +1065,7 @@ fn run_pass(
                         SENDER,
                         &key,
                         &task_cwd,
-                        "row left the open-do scope",
+                        "row left the open execute scope",
                         SENDER,
                     ) {
                         eprintln!("burn-watch: task close refused: {e}");
@@ -576,7 +1085,11 @@ fn run_pass(
         crate::tick_ledger::SCHED_DAEMON,
         acted,
         skip.as_deref(),
-        Some(&format!("scope {} sessions", scope.len())),
+        Some(&format!(
+            "scope {} sessions, escalation notes {}",
+            scope.len(),
+            notes
+        )),
         BURN_WATCH_INTERVAL_S,
     );
 }
@@ -626,6 +1139,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 .and_then(|v| v.as_float())
                 .filter(|v| *v >= 0.0)
                 .unwrap_or(DEFAULT_SPEND_USD);
+        let thresholds = read_thresholds(&cwd);
         let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
         let mut runner: Runner = &mut run_command;
         run_pass(
@@ -636,8 +1150,41 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             crate::daemon::now_epoch_secs(),
             idle_s,
             spend_min,
+            &cwd,
+            &thresholds,
         );
     });
+}
+
+/// The `burn_watch.escalate_*` reads. A 0 turns the counter off; a negative
+/// or wrong-typed value takes the default.
+fn read_thresholds(cwd: &Path) -> Thresholds {
+    let unsigned = |name: &str, default: u64| -> u64 {
+        crate::agents_config::config_lookup(cwd, &["burn_watch", name])
+            .and_then(|v| v.as_integer())
+            .filter(|v| *v >= 0)
+            .map(|v| v as u64)
+            .unwrap_or(default)
+    };
+    let signed = |name: &str, default: i64| -> i64 {
+        crate::agents_config::config_lookup(cwd, &["burn_watch", name])
+            .and_then(|v| v.as_integer())
+            .filter(|v| *v >= 0)
+            .unwrap_or(default)
+    };
+    Thresholds {
+        red_rounds: unsigned(
+            "escalate_red_rounds",
+            u64::from(ESCALATE_DEFAULT_RED_ROUNDS),
+        ) as u32,
+        conflict_merges: unsigned(
+            "escalate_conflict_merges",
+            u64::from(ESCALATE_DEFAULT_CONFLICT_MERGES),
+        ) as u32,
+        diff_lines: unsigned("escalate_diff_lines", ESCALATE_DEFAULT_DIFF_LINES),
+        hours: signed("escalate_hours", ESCALATE_DEFAULT_HOURS),
+        slot_wait_minutes: signed("escalate_slot_wait_minutes", ESCALATE_DEFAULT_SLOT_WAIT_MIN),
+    }
 }
 
 #[cfg(test)]
@@ -727,6 +1274,16 @@ mod tests {
         // however old the sample looks.
         let (d, _) = decide(Some(&prev), &Sample::default(), 99_999, 7200, 0.01);
         assert_eq!(d, Decision::StandDown);
+        // First sighting records the sample and never fires.
+        let (d, next) = decide(
+            None,
+            &sample(Some(9.0), Some("a"), Some(1)),
+            99_999,
+            7200,
+            0.01,
+        );
+        assert_eq!(d, Decision::FirstSight);
+        assert_eq!(next.cost_usd, Some(9.0));
     }
 
     #[test]
@@ -751,19 +1308,6 @@ mod tests {
         assert!(escalated.escalated);
         let (d, _) = decide(Some(&escalated), &flat, 9000, 7200, 0.01);
         assert_eq!(d, Decision::Hold);
-    }
-
-    #[test]
-    fn a_first_sighting_only_records() {
-        let (d, next) = decide(
-            None,
-            &sample(Some(9.0), Some("a"), Some(1)),
-            99_999,
-            7200,
-            0.01,
-        );
-        assert_eq!(d, Decision::FirstSight);
-        assert_eq!(next.cost_usd, Some(9.0));
     }
 
     #[test]
@@ -818,69 +1362,91 @@ mod tests {
 
     #[test]
     fn scope_reads_open_do_rows_and_open_nodes_only() {
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
         let rows = vec![
-            json!({"id": "x-1", "status": "in_progress", "touched_at": "2026-09-16T17:04:00+00:00"}),
-            json!({"id": "x-2", "status": "done", "touched_at": "2026-09-16T17:04:00+00:00"}),
+            json!({
+                "id": "x-1", "status": "in_progress",
+                "touched_at": "2026-09-16T17:04:00+00:00", "pr_number": 2842,
+                "sessions": [
+                    {"phase": "execute", "session_id": "s-1", "harness": "claude",
+                     "started_at": "2026-09-16T09:00:00+00:00",
+                     "observed_model": {"kind": "observed", "model": "glm-5.3-flash"}},
+                    {"phase": "execute", "session_id": "s-4", "harness": "claude",
+                     "started_at": "2026-09-16T07:00:00+00:00",
+                     "ended_at": "2026-09-16T08:00:00+00:00"},
+                    {"phase": "blueprint", "session_id": "s-3", "harness": "claude",
+                     "started_at": "2026-09-16T06:00:00+00:00"}
+                ]
+            }),
+            json!({
+                "id": "x-2", "status": "done",
+                "touched_at": "2026-09-16T17:04:00+00:00",
+                "sessions": [
+                    {"phase": "execute", "session_id": "s-2", "harness": "claude",
+                     "started_at": "2026-09-16T09:00:00+00:00"}
+                ]
+            }),
             json!({"id": "x-3", "status": "in_progress", "touched_at": "garbage"}),
-            json!({"phase": "do", "session_id": "s-1", "node": "x-1", "harness": "claude", "started_at": "2026-09-16T09:00:00+00:00"}),
-            json!({"phase": "do", "session_id": "s-2", "node": "x-2", "harness": "claude", "started_at": "2026-09-16T09:00:00+00:00"}),
-            json!({"phase": "blueprint", "session_id": "s-3", "node": "x-1", "harness": "claude", "started_at": "2026-09-16T09:00:00+00:00"}),
         ];
         let scope = scope_sessions(&rows);
-        assert_eq!(scope.get("s-1").map(String::as_str), Some("x-1"));
+        assert_eq!(scope.get("s-1").map(|s| s.node.as_str()), Some("x-1"));
+        assert_eq!(
+            scope["s-1"].observed_model.as_deref(),
+            Some("glm-5.3-flash")
+        );
+        assert!(
+            !scope.contains_key("s-2"),
+            "rows on done nodes are out of scope"
+        );
         assert!(
             !scope.contains_key("s-3"),
             "blueprint rows are out of scope"
         );
+        assert!(!scope.contains_key("s-4"), "ended rows are out of scope");
         let facts = node_facts(&rows);
-        assert_eq!(facts["x-1"].1, Some(1_789_578_240));
+        assert_eq!(facts["x-1"].touched_at, Some(1_789_578_240));
         assert_eq!(
-            facts["x-3"].1, None,
+            facts["x-3"].touched_at, None,
             "a garbage stamp is None, never a guess"
         );
-        assert_eq!(facts["x-1"].0, "in_progress");
-    }
-
-    #[test]
-    fn a_durable_receipt_never_types_a_resume_over_a_busy_turn() {
-        let mut calls: Vec<Vec<String>> = Vec::new();
-        let mut runner: Runner = &mut |argv: &[String], _cwd: &str| {
-            calls.push(argv.to_vec());
-            if argv[2] == "mail" {
-                (
-                    0,
-                    "queued (durable): will deliver at the next turn".into(),
-                    String::new(),
-                )
-            } else {
-                (0, String::new(), String::new())
-            }
-        };
-        let (landed, via) = wake("s-1", "x-1", true, "spend grew", &mut runner);
-        assert!(!landed);
-        assert_eq!(via, "durable");
+        assert_eq!(facts["x-1"].status, "in_progress");
+        assert_eq!(facts["x-1"].pr_number, Some(2842));
         assert_eq!(
-            calls.len(),
-            1,
-            "no resume when the leg is durable and the row is busy"
+            facts["x-1"].first_execute_at,
+            Some(at("2026-09-16T07:00:00+00:00")),
+            "the ended row's earlier start"
         );
     }
 
     #[test]
     fn a_refused_mail_falls_back_to_the_resume() {
-        let mut calls: Vec<Vec<String>> = Vec::new();
-        let mut runner: Runner = &mut |argv: &[String], _cwd: &str| {
-            calls.push(argv.to_vec());
-            if argv[2] == "mail" {
-                (1, String::new(), String::new())
-            } else {
-                (0, String::new(), String::new())
-            }
-        };
-        let (landed, via) = wake("s-1", "x-1", false, "spend grew", &mut runner);
-        assert!(landed);
-        assert_eq!(via, "resume");
-        assert_eq!(calls[1][2], "resume");
+        // One table over the two mail answers: a durable receipt never types
+        // a resume over a busy turn; a refused send falls back to the resume.
+        for (code, stdout, busy, expect_calls, expect_landed, expect_via) in [
+            (
+                0,
+                "queued (durable): will deliver at the next turn",
+                true,
+                1,
+                false,
+                "durable",
+            ),
+            (1, "", false, 2, true, "resume"),
+        ] {
+            let mut calls: Vec<Vec<String>> = Vec::new();
+            let mut runner: Runner = &mut |argv: &[String], _cwd: &str| {
+                calls.push(argv.to_vec());
+                if argv[2] == "mail" {
+                    (code, stdout.into(), String::new())
+                } else {
+                    (0, String::new(), String::new())
+                }
+            };
+            let (landed, via) = wake("s-1", "x-1", busy, "spend grew", &mut runner);
+            assert_eq!(landed, expect_landed);
+            assert_eq!(via, expect_via);
+            assert_eq!(calls.len(), expect_calls);
+        }
 
         let watch = crate::watch_expiry::Watch {
             event_id: "watch-1".into(),
@@ -1039,5 +1605,375 @@ mod tests {
             "registry read failure must surface"
         );
         assert!(claims_error.is_err(), "claim read failure must surface");
+    }
+
+    #[test]
+    fn red_rounds_count_failed_heads_per_workflow_and_never_a_passed_rerun() {
+        let run = |name: &str, sha: &str, status: &str, conclusion: &str, attempt: u32| {
+            json!({
+                "name": name, "head_sha": sha, "status": status,
+                "conclusion": conclusion, "run_attempt": attempt
+            })
+        };
+        // PR 2428: cli-ci failed on 3 heads, attempt 1 each.
+        let pr2428 = vec![
+            run("cli-ci", "04d227cb0e", "completed", "failure", 1),
+            run("cli-ci", "79471b2e86", "completed", "failure", 1),
+            run("cli-ci", "af26bd1c9e", "completed", "failure", 1),
+        ];
+        assert_eq!(red_rounds(&pr2428), Some(("cli-ci".into(), 3)));
+        // A live listing: cli-ci on 4 heads, guards on 2, internal-refs on 1.
+        let x59e1 = vec![
+            run("cli-ci", "310291d161", "completed", "failure", 1),
+            run("cli-ci", "fcfe590eae", "completed", "failure", 1),
+            run("cli-ci", "5cb6b3d028", "completed", "failure", 2),
+            run("cli-ci", "7c3191a5dc", "completed", "failure", 1),
+            run("guards", "g1", "completed", "failure", 1),
+            run("guards", "g2", "completed", "failure", 1),
+            run("internal-refs", "i1", "completed", "failure", 7),
+        ];
+        assert_eq!(red_rounds(&x59e1), Some(("cli-ci".into(), 4)));
+        // Tonight's flake: the run left the failure listing once its second
+        // attempt passed; a listing carrying the passed rerun drops it too.
+        let flake = vec![run("guards", "f5c155fb6e", "completed", "success", 2)];
+        assert_eq!(red_rounds(&flake), None);
+        assert_eq!(red_rounds(&[]), None);
+        assert_eq!(
+            red_rounds(&[run("w", "s", "completed", "cancelled", 1)]),
+            None
+        );
+    }
+
+    /// One scenario: a fresh tree, a store row of the real shape, a crown
+    /// over `proj-a`, a staged world, one run_pass.
+    #[allow(clippy::type_complexity)]
+    fn escalation_scenario(
+        trip: &str,
+        thresholds: Thresholds,
+        mail_ok: bool,
+        passes: u32,
+    ) -> (
+        Vec<Vec<String>>,
+        crate::paths::AgentsHome,
+        tempfile::TempDir,
+        Vec<crate::fleet_task::Task>,
+    ) {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (key, value) in self.0.iter() {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(vec![
+            ("FNO_STATE_DIR", std::env::var_os("FNO_STATE_DIR")),
+            ("FNO_CLAIMS_ROOT", std::env::var_os("FNO_CLAIMS_ROOT")),
+            ("FNO_AGENTS_HOME", std::env::var_os("FNO_AGENTS_HOME")),
+        ]);
+        let td = tempfile::tempdir().unwrap();
+        let state_dir = td.path().join("state");
+        std::fs::create_dir_all(state_dir.join("locks")).unwrap();
+        std::env::set_var("FNO_STATE_DIR", &state_dir);
+        let claims_root = td.path().join("claims");
+        let waiters = claims_root.join(".fno/claims/build-waiters");
+        std::fs::create_dir_all(&waiters).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let workdir = td.path().join("workdir");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let workdir = std::fs::canonicalize(&workdir).unwrap();
+        let now_ms = crate::claims::now_ms();
+        let now_epoch = now_ms / 1000;
+        if trip == "slot" {
+            // The holder must predate the marker: anchor the marker at pid 1's
+            // real creation, because a fresh CI runner is younger than any
+            // fixed 70-minute offset. The wait then reads the host's uptime
+            // past the row's one-minute threshold on any machine.
+            let since_ms = match crate::claims::probe_pid(1) {
+                crate::claims::PidProbe::Created(created) => created,
+                _ => now_epoch * 1000 - 70 * 60_000,
+            };
+            std::fs::write(
+                waiters.join(format!(
+                    "{}.json",
+                    crate::claims::encode_key(&workdir.to_string_lossy())
+                )),
+                serde_json::to_string(&json!({
+                    "pid": 1,
+                    "since_ms": since_ms,
+                    "holder": "cargo:/other:42"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let home = crate::paths::AgentsHome::at(td.path().join("agents"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", home.root());
+        let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(&home));
+        crate::backlog::api::node_create(
+            &store,
+            crate::backlog::api::NodeCreateInput {
+                id: "x-esc".into(),
+                title: "burn me".into(),
+                status: Some("in_progress".into()),
+                project: Some("proj-a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let started = chrono::DateTime::from_timestamp(
+            now_ms / 1000 - if trip == "hours" { 25 * 3600 } else { 3600 },
+            0,
+        )
+        .unwrap()
+        .to_rfc3339();
+        assert!(crate::backlog::api::session_open_parked(
+            &store,
+            "x-esc",
+            "execute",
+            "claude",
+            "5e5c-aaaa-bbbb-cccc-000000000001",
+            None,
+            None,
+            &started
+        )
+        .unwrap());
+        crate::backlog::api::pull_request_attach(
+            &store,
+            "x-esc",
+            crate::backlog::api::PullRequestInput {
+                number: 2842,
+                url: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        let proj = td.path().join("proj");
+        std::fs::create_dir_all(proj.join(".fno")).unwrap();
+        std::fs::write(
+            proj.join(".fno/config.toml"),
+            "[work.workspaces.ws]\n[[work.workspaces.ws.projects]]\nname = \"proj-a\"\n",
+        )
+        .unwrap();
+        let mut crown = crate::state::RegistryEntry::default();
+        crown.name = "crown-1".into();
+        crown.status = crate::AgentStatus::Live;
+        crown.pid = Some(std::process::id());
+        crown.harness = Some("claude".into());
+        crown.crown_scope = Some("proj-a".into());
+        crown.crown_level = Some(1);
+        crown.harness_session_id = Some("5e5c-aaaa-bbbb-cccc-000000000001".into());
+        crown.cwd = workdir.to_string_lossy().into_owned();
+        crown.model = Some("glm-5.3-flash".into());
+        let mut registry = crate::state::Registry::default();
+        registry.entries.push(crown);
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let mut runner_inner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            calls.push(argv.to_vec());
+            let joined = argv.join(" ");
+            if argv[0] == "gh" {
+                let listing = if trip == "red" {
+                    format!(
+                        "{{\"workflow_runs\": [{}]}}",
+                        ["h1", "h2", "h3"]
+                            .iter()
+                            .map(|h| format!(
+                                "{{\"name\":\"cli-ci\",\"head_sha\":\"{h}\",\"status\":\"completed\",\"conclusion\":\"failure\"}}"
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                } else {
+                    "{\"workflow_runs\": []}".to_string()
+                };
+                return (0, listing, String::new());
+            }
+            if argv[0] == "fno" && argv[2] == "mail" && joined.contains("--to-king") {
+                return if mail_ok {
+                    (0, "delivered (hosted)\n".into(), String::new())
+                } else {
+                    (1, String::new(), String::new())
+                };
+            }
+            if joined.contains("rev-parse --abbrev-ref HEAD") {
+                return (0, "feature/x-esc\n".into(), String::new());
+            }
+            if joined.contains("rev-parse --abbrev-ref origin/HEAD") {
+                return (0, "origin/main\n".into(), String::new());
+            }
+            if joined.contains("rev-list --merges") {
+                return if trip == "conflict" {
+                    (0, "aaaa1111\nbbbb2222\n".into(), String::new())
+                } else {
+                    (0, String::new(), String::new())
+                };
+            }
+            if joined.contains("show --remerge-diff") {
+                return (0, "src/lib.rs\n".into(), String::new());
+            }
+            if joined.contains("diff --shortstat") {
+                return if trip == "diff" {
+                    (
+                        0,
+                        " 3 files changed, 1898 insertions(+), 612 deletions(-)\n".into(),
+                        String::new(),
+                    )
+                } else {
+                    (0, String::new(), String::new())
+                };
+            }
+            (0, String::new(), String::new())
+        };
+        let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "test");
+        for _ in 0..passes {
+            let mut runner: Runner = &mut runner_inner;
+            run_pass(
+                &home,
+                &emitter,
+                &mut runner,
+                &|_| false,
+                now_ms / 1000,
+                7200,
+                0.01,
+                &proj,
+                &thresholds,
+            );
+        }
+        // The questions store routes through the state-root layout, so the
+        // task read must run under the same pinned env the write ran under.
+        let tasks = crate::fleet_task::open_tasks(&crate::provider_cap::questions_path(&home))
+            .unwrap_or_default();
+        (calls, home, td, tasks)
+    }
+
+    #[test]
+    fn escalation_trips_once_and_reaches_the_crown_or_the_board() {
+        // The pure trip shape keeps the exact example: a 70-minute wait
+        // against the 60-minute default.
+        let trips = escalation_trips(
+            &Counters {
+                slot_wait_min: Some(70),
+                ..Counters::default()
+            },
+            &Thresholds::default(),
+        );
+        assert_eq!(
+            trips,
+            vec!["70m waiting at the cargo build door (threshold 60m)".to_string()]
+        );
+        // Each threshold trips alone; the note reaches the crown. The slot
+        // row trips at one minute because the marker anchors at the holder's
+        // real creation (a fresh CI runner is younger than a fixed offset).
+        for (trip, phrase, thresholds) in [
+            (
+                "red",
+                "cli-ci red on 3 heads (threshold 3)",
+                Thresholds::default(),
+            ),
+            (
+                "conflict",
+                "2 merges of the base needed a resolution (threshold 2)",
+                Thresholds::default(),
+            ),
+            (
+                "diff",
+                "2510 changed lines against the base (threshold 2500)",
+                Thresholds::default(),
+            ),
+            (
+                "hours",
+                "25h on the node (threshold 24h)",
+                Thresholds::default(),
+            ),
+            (
+                "slot",
+                "waiting at the cargo build door (threshold 1m)",
+                Thresholds {
+                    slot_wait_minutes: 1,
+                    ..Thresholds::default()
+                },
+            ),
+        ] {
+            let (calls, home, _td, tasks) = escalation_scenario(trip, thresholds, true, 1);
+            let notes: Vec<_> = calls
+                .iter()
+                .filter(|a| a.join(" ").contains("--to-king"))
+                .collect();
+            assert_eq!(notes.len(), 1, "{trip}: one note");
+            let text = notes[0].last().unwrap();
+            assert!(
+                text.contains(
+                    "node x-esc, session 5e5c-aaaa-bbbb-cccc-000000000001 on claude / glm-5.3-flash"
+                ),
+                "{trip}: {text}"
+            );
+            assert!(text.contains(phrase), "{trip}: {text}");
+            // An accepted --to-king send files no task.
+            assert!(tasks.is_empty(), "{trip}: {tasks:?}");
+            let state =
+                load_state(&home, "5e5c-aaaa-bbbb-cccc-000000000001").expect("state written");
+            assert!(state.escalation_noted, "{trip}");
+        }
+        // Nothing trips: no note, no task, no flag.
+        {
+            let (calls, home, _td, tasks) =
+                escalation_scenario("nothing", Thresholds::default(), true, 1);
+            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-king")));
+            assert!(tasks.is_empty());
+            assert!(
+                !load_state(&home, "5e5c-aaaa-bbbb-cccc-000000000001")
+                    .unwrap()
+                    .escalation_noted
+            );
+        }
+        // A zero threshold turns the counter off.
+        {
+            let (calls, _home, _td, tasks) = escalation_scenario(
+                "hours",
+                Thresholds {
+                    hours: 0,
+                    ..Thresholds::default()
+                },
+                true,
+                1,
+            );
+            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-king")));
+            assert!(tasks.is_empty());
+        }
+        // A refused send files exactly one fleet task.
+        {
+            let (calls, _home, _td, tasks) =
+                escalation_scenario("hours", Thresholds::default(), false, 1);
+            let notes: Vec<_> = calls
+                .iter()
+                .filter(|a| a.join(" ").contains("--to-king"))
+                .collect();
+            assert_eq!(notes.len(), 1);
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].key, "capability escalation for x-esc");
+            assert_eq!(
+                tasks[0].run, "skills/target/scripts/handoff.sh",
+                "the run line is the handoff script"
+            );
+            assert_eq!(tasks[0].node, "x-esc");
+        }
+        // A second pass sends nothing more: the flag is sticky across passes.
+        {
+            let (calls, _home, _td, _tasks) =
+                escalation_scenario("hours", Thresholds::default(), true, 2);
+            let notes: Vec<_> = calls
+                .iter()
+                .filter(|a| a.join(" ").contains("--to-king"))
+                .collect();
+            assert_eq!(notes.len(), 1, "the note is sent once across two passes");
+        }
     }
 }

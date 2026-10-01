@@ -133,9 +133,9 @@ pub(super) async fn serve(
             // Shared with the detached probe tasks: clear means no probe is
             // in flight. Held by [`TruthProbeLatch`], which clears it on drop.
             let truth_in_flight = Arc::new(AtomicBool::new(false));
-            // Logged ONCE on the first daemon miss, never per
-            // tick: the fallback is a fact about the environment, and a fleet
-            // with no daemon must not pay one line per second for it.
+            // Logged once per outage, never per tick: the fallback is a
+            // fact about the environment, and a fleet with no daemon must
+            // not pay one line per second for it. The recovery clears it.
             let mut fallback_logged = false;
             // Same once-only discipline for the wedged-probe skip below.
             let mut latch_wedge_logged = false;
@@ -241,12 +241,22 @@ pub(super) async fn serve(
                 )
                 .await
                 {
-                    Ok(answer) => answer,
-                    Err(_) => {
+                    // Every tick retries the daemon, so a miss at spawn (a
+                    // daemon restarting beside the mux, a 2s round under
+                    // load) heals by itself. Log both edges, or the log
+                    // reads degraded for the server's whole life.
+                    Ok(answer) => {
+                        if fallback_logged {
+                            fallback_logged = false;
+                            eprintln!("fno mux: agent daemon answering again; rows are served");
+                        }
+                        answer
+                    }
+                    Err(error) => {
                         if !fallback_logged {
                             fallback_logged = true;
                             eprintln!(
-                                "fno mux: no agent daemon answering at {}; reading the registry file directly (degraded fallback)",
+                                "fno mux: no agent daemon answering at {} ({error}); reading the registry file directly (degraded fallback, retried every tick)",
                                 agents_view::supervisor_sock_path().display()
                             );
                         }

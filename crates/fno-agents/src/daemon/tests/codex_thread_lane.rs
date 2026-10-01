@@ -1705,6 +1705,16 @@ fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
         state::InsideLegState::Done
     );
 
+    // After a reboot the hook's monotonic seq restarts below the stored one.
+    // Days later that low seq is a new turn, not a reordered sibling: it lands.
+    let after_reboot = state::InsideLegReport {
+        received_at: "2020-01-03T00:00:00Z".into(),
+        ..rep(1, state::InsideLegState::Working)
+    };
+    gate_inside_leg_onto_row(&mut registry, "sid-gate", after_reboot);
+    let leg = registry.entries[0].inside_leg.as_ref().unwrap();
+    assert_eq!((leg.state, leg.seq), (state::InsideLegState::Working, 1));
+
     // A row holding no such session: no-op.
     let n = gate_inside_leg_onto_row(
         &mut registry,
