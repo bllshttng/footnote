@@ -943,8 +943,8 @@ def known_harnesses() -> list[str]:
     """Sorted names of the harnesses that carry a capability row: the
     loud-error candidate list and the dispatch-capable roster. The COMPLETE
     supported-harness roster is ``fno.harness_names.KNOWN_HARNESSES`` (the
-    Rust list, served through that door), which is wider - hermes and
-    openclaw sit on it with no row here."""
+    Rust list, served through that door); hermes and openclaw sit on it
+    with no row here."""
     return sorted(_HARNESS_CAPS)
 
 

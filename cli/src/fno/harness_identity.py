@@ -570,10 +570,9 @@ def _legacy_handle_re() -> "re.Pattern[str]":
     return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
 
 
-# Built eagerly from the canonical harness-name list (fno.harness_names, the
-# Rust roster's door) rather than the capability table: this module is
-# platform-layer and must not reach into the runtime for the name set, and a
-# new harness is covered here the moment it lands on the roster.
+# Built eagerly from the roster door (fno.harness_names), not the capability
+# table: platform layer, no runtime import, and a new harness is covered the
+# moment it lands on the roster.
 LEGACY_HANDLE_RE = _legacy_handle_re()
 
 

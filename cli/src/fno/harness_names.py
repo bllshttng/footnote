@@ -52,8 +52,7 @@ def _read_roster() -> tuple[str, ...]:
 
 
 def known_harnesses() -> tuple[str, ...]:
-    """The roster, resolved at most once per process. Module-internal code
-    calls this; a global lookup never triggers ``__getattr__``."""
+    """The roster, resolved at most once per process; module-internal code calls this."""
     cached = globals().get("KNOWN_HARNESSES")
     if cached is None:
         globals()["KNOWN_HARNESSES"] = cached = _read_roster()
