@@ -344,7 +344,11 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
                 let long = long.clone();
                 move |v| {
                     v.confirm = Some(ConfirmAction {
-                        action: ConfirmKind::ReapAgents,
+                        action: ConfirmKind::StopAgent {
+                            sid: None,
+                            name: "w".into(),
+                            pane_id: None,
+                        },
                         label: long.clone(),
                     })
                 }
