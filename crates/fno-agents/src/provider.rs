@@ -1893,6 +1893,27 @@ impl Provider for GrokProvider {
     }
 }
 
+/// The COMPLETE harness roster: every harness footnote supports, dispatch or
+/// not. This is the one list (x-bd68) - Python's `fno.harness_names` proxies
+/// it through the [`crate::harness_roster`] verb instead of carrying a tuple
+/// copy, and `scripts/ci/check-harness-roster-parity.py` holds every evidence
+/// surface (setup docs, `for_name` arms, adapter rows) as a subset of it. A
+/// name may sit here without a [`for_name`] arm (hermes, openclaw: docs-only
+/// hosts); every [`KNOWN_PROVIDERS`] name MUST be here (test-enforced).
+pub const KNOWN_HARNESSES: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "opencode",
+    "pi",
+    "hermes",
+    "openclaw",
+    "cursor-agent",
+    "grok",
+    "zcode",
+];
+
 /// NAMING SKEW (Discretion 4 — commented, not lockstep-renamed, to keep
 /// the diff small): this 5-name list mirrors Python's `READABLE_PROVIDERS` (the
 /// spawn/pane read-tolerance roster), NOT Python's narrower 3-name
@@ -2691,6 +2712,35 @@ mod tests {
             );
         }
         assert!(for_name("nope").is_none(), "unknown provider must be None");
+    }
+
+    #[test]
+    fn roster_supersets_the_dispatch_providers_and_keeps_name_format() {
+        // KNOWN_HARNESSES is the one roster (x-bd68): every dispatchable
+        // provider is rostered, and every rostered name is lowercase kebab so
+        // the setup-doc glob, the parity gate's extractors, and the Python
+        // readers all agree on its shape.
+        for name in KNOWN_PROVIDERS {
+            assert!(
+                KNOWN_HARNESSES.contains(name),
+                "{name} is dispatchable but absent from KNOWN_HARNESSES"
+            );
+        }
+        assert!(!KNOWN_HARNESSES.is_empty());
+        for name in KNOWN_HARNESSES {
+            assert!(
+                !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        || c == '-'
+                        || c == '_'),
+                "roster name {name:?} is not lowercase kebab"
+            );
+        }
+        let mut sorted = KNOWN_HARNESSES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), KNOWN_HARNESSES.len(), "duplicate roster name");
     }
 
     // ---- claude short-id parse ----
