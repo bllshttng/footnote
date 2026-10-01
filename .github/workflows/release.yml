@@ -149,12 +149,20 @@ jobs:
             # The step runs under set -euo pipefail, so an unguarded listing
             # call would exit silently inside the command substitution, with
             # no ::error line. Guard every gh call.
-            if ! rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"; then
+            # The runs endpoint's server-side filters (branch, event, the
+            # success conclusion) answer from a stale index: on 2026-10-01
+            # they named a Sep 8 sha as the newest green run while 24 newer
+            # green runs existed, and the nightly shipped that stale sha -
+            # whose wheel smoke predates the accepted-refusal arm - so no
+            # nightly shipped. The same filtered listing flip-flopped fresh
+            # and stale within minutes when probed. List unfiltered and
+            # select branch, event, and conclusion client-side.
+            if ! rust_sha="$(BRANCH="$default_branch" gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/rust-ci.yml/runs?per_page=100" --jq '[.workflow_runs[] | select(.head_branch == $ENV.BRANCH and .event == "push" and .conclusion == "success")][0].head_sha // empty')"; then
               echo "::error::the rust-ci run list failed (see the gh error above); nothing to ship" >&2
               exit 1
             fi
             if [ -z "$rust_sha" ]; then
-              echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship" >&2
+              echo "::error::no successful rust-ci push run in the newest 100 on ${default_branch}; nothing to ship" >&2
               exit 1
             fi
             # Diagnostics go to stderr: this function's stdout is captured by
@@ -165,11 +173,11 @@ jobs:
 
             # The list is captured before the loop: breaking out of a read
             # against gh's pipe can SIGPIPE the producer, and pipefail would
-            # turn that into a silent step failure. --json matches the jq
-            # program exactly; a field the program reads but the flag never
-            # requests is the trap this replaces.
-            if ! runs="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
-              --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.headSha) \(.conclusion)"')"; then
+            # turn that into a silent step failure. The client-side shape is
+            # the rust pick's: the endpoint's server filters answer from the
+            # stale index.
+            if ! runs="$(BRANCH="$default_branch" gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/cli-ci.yml/runs?per_page=100" \
+              --jq '.workflow_runs[] | select(.head_branch == $ENV.BRANCH and .event == "push" and .conclusion != null and .conclusion != "") | "\(.head_sha) \(.conclusion)"')"; then
               echo "::error::the cli-ci run list failed (see the gh error above); cannot gate on cli-ci" >&2
               exit 1
             fi
@@ -186,7 +194,7 @@ jobs:
               exit 1
             fi
             if [ -z "$cli_run" ]; then
-              echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here" >&2
+              echo "::notice::no completed cli-ci push run found in the newest 100 on ${default_branch}; rust-ci green is the only gate here" >&2
             fi
 
             printf '%s' "$rust_sha"
