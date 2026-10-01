@@ -4847,5 +4847,4 @@ pub(crate) mod scope_tests {
         assert_eq!(answer["note"], "");
     }
 
-    use crate::decide_door::{decide_door_write, parse_decide_door, DecideDoor, DecideIdentity};
 }

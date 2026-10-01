@@ -2,13 +2,13 @@
 //! record verb, its provenance lanes, and the decide-reindex recovery
 //! verb, ported from the deleted Python decide family. Shared law-door
 //! helpers stay in `law_match`; this module reaches them through
-//! `super::`.
+//! `crate::law_match`.
 
 use serde_json::{json, Value};
 
 use crate::law_match::{
     all_decision_rows, attended_terminal, evidence_repo_root, is_retraction_row, mint_decision_id,
-    now_iso, project_events_journal, text_cap, ResolveProvenanceRequest, WAIVER_SUBJECT_PREFIX,
+    now_iso, project_events_journal, text_cap, WAIVER_SUBJECT_PREFIX,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,6 +46,7 @@ const AUTHORITY_SOURCES: &[&str] = &["operator", "crown", "agent", "beastmode"];
 #[derive(Clone, Copy)]
 pub(crate) enum DecideIdentity {
     Ambient,
+    #[cfg_attr(not(test), expect(dead_code))]
     Forced(Option<&'static str>),
 }
 

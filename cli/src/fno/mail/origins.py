@@ -10,6 +10,7 @@ always the mail lanes).
 
 from __future__ import annotations
 
+from typing import overload
 
 MAIL_ORIGINS: tuple[str, ...] = (
     "operator",
@@ -17,6 +18,14 @@ MAIL_ORIGINS: tuple[str, ...] = (
     "scheduler",
     "recovery",
 )
+
+
+@overload
+def enforce_origin_floor(origin: str) -> str: ...
+
+
+@overload
+def enforce_origin_floor(origin: None) -> None: ...
 
 
 def enforce_origin_floor(origin: str | None) -> str | None:
