@@ -427,6 +427,87 @@ mod tests {
     }
 
     #[test]
+    fn the_recommended_options_echo_becomes_the_merge_grant() {
+        let sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let subject = format!("merge-grant:subject@{sha}");
+        let ask_board = |req: &ClearRequest, qid: &str| {
+            seed_question(
+                req,
+                &json!({
+                    "ts": "2026-10-01T20:00:00Z",
+                    "type": "operator_question",
+                    "source": "agent",
+                    "data": {
+                        "question_id": qid,
+                        "question": "May PR 2911 merge?",
+                        "asker": "test-agent",
+                        "node": "x-0000",
+                        "subject": subject,
+                        "options": [
+                            {"n": 1, "text": "Yes, merge PR 2911."},
+                            {"n": 2, "text": "No, keep it held."},
+                        ],
+                        "context": {"recommendation": {"option": 1, "why": "every gate is met"}},
+                    },
+                }),
+            );
+        };
+        // The board words lane delivers the echoed option line with the
+        // operator's notes attached: the exact answer shape that once read
+        // as a conflict at the gate (q-7845e717).
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(
+            &tmp,
+            "q-echo",
+            Some("1. Yes, merge PR 2911. - notes: worried"),
+        );
+        ask_board(&req, "q-echo");
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert!(
+            result
+                .lines
+                .iter()
+                .any(|l| l.contains("operator merge grant recorded")),
+            "{:?}",
+            result.lines
+        );
+        let rows: Vec<Value> = graph_decisions(&req)
+            .into_iter()
+            .filter(|r| r["subject"] == subject.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["decision"],
+            crate::merge_grant::MERGE_GRANT_DECISION
+        );
+        let payload = serde_json::to_vec(&json!({ "decisions": rows })).unwrap();
+        assert_eq!(
+            crate::merge_grant::head_grant_status(Some(&payload)),
+            crate::merge_grant::HeadGrant::Granted
+        );
+
+        // The non-recommended option echoes too, and grants nothing: the raw
+        // words land at the subject and the gate reads a conflict.
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-hold2", Some("2. No, keep it held."));
+        ask_board(&req, "q-hold2");
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let rows: Vec<Value> = graph_decisions(&req)
+            .into_iter()
+            .filter(|r| r["subject"] == subject.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["decision"], "2. No, keep it held.");
+        let payload = serde_json::to_vec(&json!({ "decisions": rows })).unwrap();
+        assert_eq!(
+            crate::merge_grant::head_grant_status(Some(&payload)),
+            crate::merge_grant::HeadGrant::Conflict
+        );
+    }
+
+    #[test]
     fn only_the_user_or_the_asking_crown_closes_a_question_asked_of_the_user() {
         // (a) An agent answers the user's question: refused, nothing written.
         let tmp = tempfile::tempdir().unwrap();
@@ -939,7 +1020,7 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             ));
             if let Some(subject) = merge_grant_subject(question_event) {
                 if operator_can_grant(req) {
-                    answer.lines.push(if is_affirmative_merge_answer(&text) {
+                    answer.lines.push(if merge_answer_grants(question_event, &text) {
                         format!(
                             "outstanding: operator merge grant recorded at {subject} (binds this head only)"
                         )
@@ -1117,7 +1198,7 @@ fn make_decision(
     // resolves an agent authority can no more mint the grant through the
     // clear door than through decide.
     let grant_subject = merge_grant_subject(question_event).filter(|_| operator_can_grant(req));
-    let affirmative = grant_subject.is_some() && is_affirmative_merge_answer(answer);
+    let affirmative = grant_subject.is_some() && merge_answer_grants(question_event, answer);
     let decision_text = if affirmative {
         crate::merge_grant::MERGE_GRANT_DECISION.to_string()
     } else {
@@ -1264,6 +1345,96 @@ fn merge_grant_subject(question_event: &Value) -> Option<String> {
         .and_then(|data| data.get("subject"))
         .and_then(Value::as_str)?;
     crate::merge_grant::parse_head_grant_subject(subject).map(|_| subject.to_string())
+}
+
+/// Does this answer on a merge-grant question record the grant? Two shapes:
+/// the closed terminal set above, or picking the question's recommended
+/// option when that option reads affirmative.
+fn merge_answer_grants(question_event: &Value, answer: &str) -> bool {
+    is_affirmative_merge_answer(answer) || picks_recommended_option(question_event, answer)
+}
+
+/// The affirmative LEADS a board option's text may open with. Exact match is
+/// unavailable here (the option text is its own sentence), so the lead set is
+/// closed and conservative: an option that opens any other way never reads as
+/// the grant, whatever the recommendation says.
+fn is_affirmative_option_text(text: &str) -> bool {
+    let normalized = text.trim().to_lowercase();
+    [
+        "yes", "y", "merge", "approve", "approved", "lgtm", "ship it", "go ahead", "do it",
+    ]
+    .iter()
+    .any(|lead| {
+        normalized == *lead
+            || normalized.starts_with(&format!("{lead} "))
+            || normalized.starts_with(&format!("{lead},"))
+    })
+}
+
+/// True when the answer picks the question's recommended option and that
+/// option reads affirmative. The board words lane delivers the echoed option
+/// line ("1. Yes, merge PR 2911 at 5bf16e0bed. - notes: ..."), which the
+/// closed exact-match set can never admit; the recommendation intake
+/// validated is the asker's own affirmative, so picking it IS the grant.
+/// A recommendation whose text is not affirmative (a hold) never grants.
+fn picks_recommended_option(question_event: &Value, answer: &str) -> bool {
+    let data = question_event.get("data").unwrap_or(question_event);
+    let Some(recommended) = data
+        .get("context")
+        .and_then(|context| context.get("recommendation"))
+        .and_then(|rec| rec.get("option"))
+        .and_then(Value::as_u64)
+        .filter(|n| *n >= 1)
+    else {
+        return false;
+    };
+    let Some(options) = data.get("options").and_then(Value::as_array) else {
+        return false;
+    };
+    // File options carry an explicit `n` (1-based); flag options are bare
+    // strings whose order is the option number.
+    let text = options
+        .iter()
+        .enumerate()
+        .find(|(i, o)| {
+            o.get("n")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n == recommended)
+                || o.get("n").is_none() && (*i as u64) + 1 == recommended
+        })
+        .and_then(|(_, o)| {
+            o.get("text")
+                .and_then(Value::as_str)
+                .or_else(|| o.as_str())
+                .map(str::to_string)
+        })
+        .filter(|text| !text.is_empty());
+    let Some(text) = text else {
+        return false;
+    };
+    if !is_affirmative_option_text(&text) {
+        return false;
+    }
+    let norm = |s: &str| {
+        s.trim()
+            .trim_end_matches(['.', '!', '?', ';', ',', ':'])
+            .to_lowercase()
+    };
+    let answer_norm = norm(answer);
+    if answer_norm.is_empty() {
+        return false;
+    }
+    let text_norm = norm(&text);
+    if answer_norm == text_norm || answer_norm.starts_with(&text_norm) {
+        return true;
+    }
+    // The echoed number: "1", "1. Yes, ...", "1) Yes", "1: yes". The
+    // boundary check keeps "10." from reading as option 1.
+    let num = recommended.to_string();
+    match answer_norm.strip_prefix(&num) {
+        Some(rest) => rest.is_empty() || rest.starts_with(['.', ')', ':', ' ']),
+        None => false,
+    }
 }
 
 fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, String) {
