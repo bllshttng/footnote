@@ -190,7 +190,13 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_l
     assert!(text.contains("[26%|###     ]  x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     v.layout.agents[1].context_used_pct = Some(129);
-    let over_window = frame_text(&v.compose());
+    let over_frame = v.compose();
+    let red = over_frame.cells.iter();
+    let red = red
+        .filter(|c| c.c == '#' && c.fg == Color::Indexed(1))
+        .count();
+    assert_eq!(red, 8, "a near-compact bar paints its fill red");
+    let over_window = frame_text(&over_frame);
     assert!(
         over_window.contains("[129%|########] x-4310"),
         "{over_window:?}"
