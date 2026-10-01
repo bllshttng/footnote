@@ -1,5 +1,4 @@
 A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
-A	(?i)(?:pr(?:*#?*|-)+|#+)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	(`fno agents spawn --provider <vendor> --model <m>`).	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# CLASSIFY protocol|msg-twin|data
 A	(it landed via merged pr #{merged})	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	(not yet implemented; planned for a future story)	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
