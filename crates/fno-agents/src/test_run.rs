@@ -2723,6 +2723,8 @@ mod tests {
         });
         let (_, s0) = crate::claims::status("test:cargo-run:0", Some(&root));
         assert_eq!(s0.unwrap().holder, holder_of(100));
+        let (_, s1) = crate::claims::status("test:cargo-run:1", Some(&root));
+        assert_eq!(s1.unwrap().holder, holder_of(300));
         let _ = crate::claims::release(
             BUILD_CLAIM_KEY,
             &holder_of(100),
