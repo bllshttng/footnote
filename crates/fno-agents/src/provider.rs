@@ -2712,13 +2712,9 @@ mod tests {
             );
         }
         assert!(for_name("nope").is_none(), "unknown provider must be None");
-    }
-
-    #[test]
-    fn roster_supersets_the_dispatch_providers_and_keeps_name_format() {
-        // KNOWN_HARNESSES is the one roster: every dispatchable
-        // provider is rostered, and every rostered name is lowercase kebab so
-        // the setup-doc glob, the parity gate's extractors, and the Python
+        // KNOWN_HARNESSES is the one roster: every dispatchable provider is
+        // rostered, and every rostered name is lowercase kebab so the
+        // setup-doc glob, the parity gate's extractors, and the Python
         // readers all agree on its shape.
         for name in KNOWN_PROVIDERS {
             assert!(
