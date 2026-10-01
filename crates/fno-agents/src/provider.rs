@@ -1894,7 +1894,7 @@ impl Provider for GrokProvider {
 }
 
 /// The COMPLETE harness roster: every harness footnote supports, dispatch or
-/// not. This is the one list (x-bd68) - Python's `fno.harness_names` proxies
+/// not. This is the one list - Python's `fno.harness_names` proxies
 /// it through the [`crate::harness_roster`] verb instead of carrying a tuple
 /// copy, and `scripts/ci/check-harness-roster-parity.py` holds every evidence
 /// surface (setup docs, `for_name` arms, adapter rows) as a subset of it. A
@@ -2716,7 +2716,7 @@ mod tests {
 
     #[test]
     fn roster_supersets_the_dispatch_providers_and_keeps_name_format() {
-        // KNOWN_HARNESSES is the one roster (x-bd68): every dispatchable
+        // KNOWN_HARNESSES is the one roster: every dispatchable
         // provider is rostered, and every rostered name is lowercase kebab so
         // the setup-doc glob, the parity gate's extractors, and the Python
         // readers all agree on its shape.

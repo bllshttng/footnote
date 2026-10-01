@@ -1,5 +1,5 @@
 //! `fno-agents harness-roster`: the daemon-free JSON read of the one harness
-//! roster (x-bd68). Python's `fno.harness_names` proxies this instead of
+//! roster. Python's `fno.harness_names` proxies this instead of
 //! carrying a tuple copy of `provider::KNOWN_HARNESSES`; the parity gate
 //! parses the same const out of the Rust source, so a name added in Rust
 //! alone reaches every Python reader.

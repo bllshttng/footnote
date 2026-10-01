@@ -1,7 +1,7 @@
 """Canonical harness-name door (L0 platform data).
 
 The COMPLETE harness roster lives in Rust, ``KNOWN_HARNESSES`` in
-``crates/fno-agents/src/provider.rs``, the one list (x-bd68); this module is
+``crates/fno-agents/src/provider.rs``, the one list; this module is
 its Python door: ``KNOWN_HARNESSES`` runs one ``fno-agents harness-roster``
 subprocess per process, cached in the module globals (never a subprocess per
 call) and fail-closed, while ``scripts/ci/check-harness-roster-parity.py``

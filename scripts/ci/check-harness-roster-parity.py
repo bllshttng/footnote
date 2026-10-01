@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Harness-roster parity gate: the shipped evidence against the one roster.
 
-Since x-bd68 the COMPLETE roster of harnesses footnote supports lives in
+The COMPLETE roster of harnesses footnote supports lives in
 Rust, as ``KNOWN_HARNESSES`` in ``crates/fno-agents/src/provider.rs`` (the
 Python tuple copy is gone; ``fno.harness_names`` proxies the binary). This
 gate parses that same const out of the Rust SOURCE - stdlib only, no package
