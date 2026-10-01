@@ -1278,7 +1278,10 @@ impl LauncherEsc {
                     }
                     continue;
                 }
-                Some(b'[') | Some(b'O') => {
+                // Inside `ESC [` or `ESC O`: decided by the carry's length,
+                // not its last byte, so a multi-byte sequence (`[200~`,
+                // `[1;5B`) stays one sequence past its second byte.
+                Some(_) if self.esc.len() >= 2 => {
                     let mut reprocess = false;
                     match super::input_folds::esc_step(&mut self.esc, b) {
                         super::input_folds::EscStep::Carried => {}

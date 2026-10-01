@@ -125,7 +125,7 @@ mod tests {
         // A read ending in a lone ESC may be a split arrow: held, not Cancel.
         assert!(f.feed(b"\x1b").is_empty());
         assert_eq!(f.feed(b""), vec![FieldEvent::Cancel]);
-        assert_eq!(f.feed(b" \r"), vec![FieldEvent::Submit("zxaai".into())]);
+        assert_eq!(f.feed(b"\r"), vec![FieldEvent::Submit("zxaai".into())]);
 
         // An empty field paints the cursor cell, then the placeholder dimmed.
         let empty = InputField::new("new key name", 64);

@@ -155,10 +155,17 @@ impl View {
     /// state, preserving the current selection (a keyboard toggle must re-toggle
     /// the SAME row on the next Enter, not reset to row 0).
     pub(super) fn reopen_settings_keeping_sel(&mut self) {
-        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
+        let (sel, scroll) = self
+            .aux
+            .as_ref()
+            .map_or((0, 0), |m| (m.popup.sel, m.popup.scroll));
         let mut modal = self.build_settings_modal();
         let n = modal.popup.targets().len();
         modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
+        // Keep the scroll too, so a rebuild on a long page never jumps the
+        // list back to its top under the cursor.
+        modal.popup.scroll = scroll;
+        modal.popup.follow_sel(self.term.0 as usize);
         self.aux = Some(modal);
     }
 
@@ -231,12 +238,13 @@ pub(super) fn back(view: &mut View) -> bool {
             || l.pick.take().is_some()
             || l.axis.take().is_some()
     };
-    let stepped = view.key_capture.take().is_some()
-        || (!matches!(view.theme_import, theme_import_ui::ThemeImportUi::Idle) && {
-            theme_import_ui::reset(view);
-            true
-        })
-        || lane_step(&mut view.lane);
+    if keys_settings::close(view) {
+        return true;
+    }
+    let stepped = (!matches!(view.theme_import, theme_import_ui::ThemeImportUi::Idle) && {
+        theme_import_ui::reset(view);
+        true
+    }) || lane_step(&mut view.lane);
     if !stepped {
         return false;
     }
