@@ -196,7 +196,7 @@ def ship(
     else:
         # Stale-base guard: a branch cut from a stale local HEAD ships a PR full
         # of phantom deletions. Refuse before gh pr create (the same check the
-        # /pr create router runs; bypass FNO_PR_BASE_OK=stale-acknowledged).
+        # /fno:ship pr create router runs; bypass FNO_PR_BASE_OK=stale-acknowledged).
         from fno.pr._preflight import check_stale_base
 
         base_code, base_msg = check_stale_base(base=f"origin/{base_branch}")

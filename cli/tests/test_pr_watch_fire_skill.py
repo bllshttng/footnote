@@ -101,7 +101,7 @@ class TestFireSkill:
         assert result.ok is True
 
     def test_check_verb_fires_correct_skill(self, tmp_path):
-        """AC-HP: verb='check' -> /fno:pr check <n> in command."""
+        """AC-HP: verb='check' -> /fno:ship pr check <n> in command."""
         from fno.pr_watch._dispatch import fire_skill
 
         captured = {}

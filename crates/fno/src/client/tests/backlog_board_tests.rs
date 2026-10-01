@@ -721,8 +721,8 @@ fn chord_rows() {
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
 // content, region-framed, with the card rows visible.
-#[test]
-fn compose_rows() {
+#[tokio::test]
+async fn compose_rows() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
@@ -752,6 +752,17 @@ fn compose_rows() {
         text.contains("e/p/s/S edit"),
         "hint carries the edit keys: {text}"
     );
+    // One esc chip on the full board (the filter bar's, top right); a tap
+    // returns it to the docked column, and a tap on the column's chip,
+    // keyboard elsewhere, closes the column.
+    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    assert!(
+        !v.board_full && v.backlog_board.is_some(),
+        "full returns to docked"
+    );
+    v.region_owner = crate::client::region_focus::RegionOwner::Pane;
+    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    assert!(v.backlog_board.is_none(), "the docked column closes");
 }
 
 // Full screen paints the filter bar, the board pane and the two-row hint;

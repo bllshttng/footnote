@@ -145,7 +145,7 @@ def test_ship_gh_create_failure_abandons_and_requeues(tmp_path, graph):
 
 # ── x-9b87: stale-base guard parity with worker/ship.py ──────────────────────
 # The batch lane opens its PR via its own `gh pr create`, so it must run the
-# same `check_stale_base` guard the /pr create + worker paths run. On stale it
+# same `check_stale_base` guard the /fno:ship pr create + worker paths run. On stale it
 # routes through the EXISTING abandon path (never `refuse`, which would wedge
 # the batch open and re-hit the same stale worktree every daemon tick).
 

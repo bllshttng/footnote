@@ -241,7 +241,7 @@ def test_inbox_path_honors_post_merge_parking_lot_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """config.post_merge.parking_lot_path (the producer's per-project queue) drives
-    the capture-tier resolver, so add/list/tidy and /fno:pr merged all point
+    the capture-tier resolver, so add/list/tidy and /fno:ship pr merged all point
     at ONE file in every repo - not the fno-area default, which would make
     producer-written items invisible to the read commands (codex review, PR #434).
     """

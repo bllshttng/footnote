@@ -93,6 +93,17 @@ pub(super) async fn mouse_pre_pass(
         if consume_modal_close_gesture(view, rep.kind) {
             continue;
         }
+        // A tap on any painted esc chip is a pressed Esc; its release is
+        // swallowed so nothing under the closed overlay sees half a click.
+        if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
+            && super::esc_close::chip_at(view, rep.row, rep.col)
+        {
+            view.modal_release_swallow = true;
+            if let StdinFlow::Detach = super::esc_close::tap(view, scanner, sock_w).await? {
+                return Ok(StdinFlow::Detach);
+            }
+            continue;
+        }
         // A pointer action - click/press/wheel/drag, anything but passive hover
         // (Move) - is "other input": it disarms the resize repeat window exactly
         // as a non-resize keystroke does. Without this, a click that may have
@@ -120,6 +131,11 @@ pub(super) async fn mouse_pre_pass(
         // hover selects, a click runs the row's action, off-popup dismisses.
         if view.feed_detail.is_some() {
             feed_detail::mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        // The questions view paints next and owns every cell it covers: off
+        // the chip, a click reaches no pane and no sideline row under it.
+        if view.question_detail.is_some() {
             continue;
         }
         // US3: while the which-key modal is open, the mouse drives it

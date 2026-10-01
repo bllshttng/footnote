@@ -118,6 +118,10 @@ pub fn option_letter(n: u32) -> String {
     }
 }
 
+/// The words a delegate answer records. Plain prose with no command names:
+/// the clear checks answer text for authority claims.
+pub const DELEGATE_TEXT: &str = "Delegated by the user: the crown decides this if it is reversible (yes or costly) and asks the user again if it is not.";
+
 /// The user's answer read out of one page.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileAnswer {
@@ -128,6 +132,9 @@ pub enum FileAnswer {
     Words(String),
     /// The pin's `- [x] Done` ticked.
     Done,
+    /// The user handed the question to the agents (the mux door only; the
+    /// page parser never produces it).
+    Delegate,
     /// Two or more options ticked; nothing records, one notice.
     TwoTicked,
 }

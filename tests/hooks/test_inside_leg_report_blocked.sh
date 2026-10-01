@@ -48,17 +48,19 @@ exit 0
 STUBEOF
 chmod +x "$STUB"
 
-# run_hook <state> <session_id> <calls_file> <runtime_dir> [message] [hook_event_name]
+# run_hook <state> <session_id> <calls_file> <runtime_dir> [message] [hook_event_name] [extra_json]
 # Pipes a Notification/PreToolUse-shaped payload through the hook and prints
-# whatever landed on the (redirected) marker sink.
+# whatever landed on the (redirected) marker sink. extra_json merges raw keys
+# (tool_name, tool_input) into the payload.
 run_hook() {
-  local state="$1" sid="$2" calls="$3" rt="$4" msg="${5:-}" event="${6:-}"
+  local state="$1" sid="$2" calls="$3" rt="$4" msg="${5:-}" event="${6:-}" extra="${7:-}"
   local sink; sink="$(mktemp "$TMP/sink.XXXXXX")"
   local payload
   payload=$(python3 -c 'import json,sys; d={"session_id": sys.argv[1]}
 if sys.argv[2]: d["message"] = sys.argv[2]
 if sys.argv[3]: d["hook_event_name"] = sys.argv[3]
-print(json.dumps(d))' "$sid" "$msg" "$event")
+if sys.argv[4]: d.update(json.loads(sys.argv[4]))
+print(json.dumps(d))' "$sid" "$msg" "$event" "$extra")
   ( printf '%s' "$payload" | \
       CALLS_FILE="$calls" \
       FNO_TURN_MARKER_TTY="$sink" \
@@ -203,6 +205,47 @@ sink7="$TMP/sink7"
 n="$(call_count "$CALLS7")"
 [[ "$n" == "2" ]] && pass "T7 a failed report is not persisted, retry is not suppressed" \
   || fail "T7 expected 2 attempted calls after a failing send, got $n"
+
+# T8: a PreToolUse AskUserQuestion with a question in tool_input reports
+# blocked with the QUESTION TEXT as the reason, not the static string.
+CALLS8="$TMP/calls8"; : >"$CALLS8"
+RT8="$TMP/rt8"; mkdir -p "$RT8"
+run_hook working sess-8 "$CALLS8" "$RT8" "" "PreToolUse" \
+  '{"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick a budget door: hard cap or soft warn?","header":"Budget"}]}}' >/dev/null
+n="$(call_count "$CALLS8")"
+if [[ "$n" == "1" ]] \
+    && call_str "$CALLS8" 1 | grep -qF -- '--state blocked' \
+    && call_str "$CALLS8" 1 | grep -qF -- '--reason Pick a budget door: hard cap or soft warn?'; then
+  pass "T8 AskUserQuestion reason carries the question text"
+else
+  fail "T8 expected blocked + question text; got $n: $(tr '\n' '|' <"$CALLS8")"
+fi
+
+# T9: AskUserQuestion with NO tool_input degrades to the static reason.
+CALLS9="$TMP/calls9"; : >"$CALLS9"
+RT9="$TMP/rt9"; mkdir -p "$RT9"
+run_hook working sess-9 "$CALLS9" "$RT9" "" "PreToolUse" \
+  '{"tool_name":"AskUserQuestion"}' >/dev/null
+n="$(call_count "$CALLS9")"
+if [[ "$n" == "1" ]] \
+    && call_str "$CALLS9" 1 | grep -qF -- '--reason asking the user'; then
+  pass "T9 AskUserQuestion without tool_input falls back to the static reason"
+else
+  fail "T9 expected the static fallback reason; got $n: $(tr '\n' '|' <"$CALLS9")"
+fi
+
+# T10: ExitPlanMode names the plan approval, not the question fallback.
+CALLS10="$TMP/calls10"; : >"$CALLS10"
+RT10="$TMP/rt10"; mkdir -p "$RT10"
+run_hook working sess-10 "$CALLS10" "$RT10" "" "PreToolUse" \
+  '{"tool_name":"ExitPlanMode","tool_input":{"plan":"# big plan"}}' >/dev/null
+n="$(call_count "$CALLS10")"
+if [[ "$n" == "1" ]] \
+    && call_str "$CALLS10" 1 | grep -qF -- '--reason plan approval requested'; then
+  pass "T10 ExitPlanMode reason names the plan approval"
+else
+  fail "T10 expected the plan-approval reason; got $n: $(tr '\n' '|' <"$CALLS10")"
+fi
 
 printf '[inside-leg-blocked] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

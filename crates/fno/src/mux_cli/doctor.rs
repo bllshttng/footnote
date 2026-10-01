@@ -130,6 +130,121 @@ pub(super) fn legacy_mux_root_check() -> Check {
     }
 }
 
+/// `fno mux doctor`'s canonical-venv check: a worktree install once
+/// rewrote the CANONICAL checkout's `cli/.venv` console scripts with the
+/// worktree's interpreter, and every deployed script died with the pruned
+/// worktree. Every script shebang in the canonical venv's bin must name an
+/// interpreter inside the canonical checkout. Read-only; Na on a machine
+/// with no canonical cli venv.
+pub(super) fn canonical_venv_check() -> Check {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let repo_root = crate::digest_overlay::repo_root_from(&cwd);
+    let root = crate::digest_overlay::canonical_root_with(
+        &repo_root,
+        crate::digest_overlay::canonical_suppressed_by_env(),
+    )
+    .unwrap_or(repo_root);
+    let bin = root.join("cli/.venv/bin");
+    if !bin.is_dir() {
+        return Check {
+            name: "canonical cli venv".into(),
+            verdict: Verdict::Na,
+            detail: format!("no cli/.venv under {}", root.display()),
+            remedy: None,
+        };
+    }
+    let offenders = venv_shebang_offenders(&bin, &root);
+    if offenders.is_empty() {
+        Check {
+            name: "canonical cli venv".into(),
+            verdict: Verdict::Ok,
+            detail: format!(
+                "every script shebang in {} sits inside {}",
+                bin.display(),
+                root.display()
+            ),
+            remedy: None,
+        }
+    } else {
+        let mut listed = String::new();
+        for (i, (script, interp)) in offenders.iter().enumerate() {
+            if i == 4 {
+                listed.push_str(&format!(" and {} more", offenders.len() - 4));
+                break;
+            }
+            if i > 0 {
+                listed.push_str("; ");
+            }
+            listed.push_str(&format!("{script} -> {interp}"));
+        }
+        Check {
+            name: "canonical cli venv".into(),
+            verdict: Verdict::Fail,
+            detail: format!(
+                "venv script(s) name an interpreter outside {}: {}",
+                root.display(),
+                listed
+            ),
+            remedy: Some(format!("cd {}/cli && uv sync", root.display())),
+        }
+    }
+}
+
+/// Script name + interpreter for every regular file in `bin` whose `#!` names
+/// an interpreter outside `root`. Symlinks skip (the venv's own
+/// `python3 -> python` chain is venv-internal, whatever it resolves to);
+/// `env`-form and relative shebangs skip (they name no absolute tree, so they
+/// cannot name the pruned worktree). The comparison is lexical against
+/// `root` plus the canonicalized root when it resolves, so a `/tmp` vs
+/// `/private/tmp` alias never reads as an offender and a shebang spelled
+/// through a symlink into `root` never reads as clean.
+pub(super) fn venv_shebang_offenders(bin: &Path, root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(bin) else {
+        return out;
+    };
+    let alt_root = std::fs::canonicalize(root).ok();
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(meta) = entry.file_type() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mut file = match std::fs::File::open(entry.path()) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        use std::io::Read as _;
+        let mut head = [0u8; 512];
+        let n = file.read(&mut head).unwrap_or(0);
+        if !head[..n].starts_with(b"#!") {
+            continue;
+        }
+        let line_end = head[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+        let interp = std::str::from_utf8(&head[2..line_end])
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if !interp.starts_with('/') || interp.rsplit('/').next() == Some("env") {
+            continue;
+        }
+        let interp_path = std::path::Path::new(interp);
+        let inside = interp_path.starts_with(root)
+            || alt_root
+                .as_deref()
+                .is_some_and(|r| interp_path.starts_with(r));
+        if !inside {
+            out.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                interp.to_string(),
+            ));
+        }
+    }
+    out
+}
+
 /// What the backlog board would be scoped to.
 ///
 /// Resolves LIVE, the same way a client does at spawn, so this answers "what
@@ -154,5 +269,49 @@ pub(super) fn board_scope_check() -> Check {
         detail: why,
         remedy: refused
             .then(|| "set config.project.id in this repo, or config.mux.board_scope=all".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_text_lines_are_single_line_with_verdict() {
+        // AC6-UI: every finding is one line carrying its verdict word.
+        let c = Check {
+            name: "socket-dir".into(),
+            verdict: Verdict::Warn,
+            detail: "mode 755".into(),
+            remedy: Some("chmod 700".into()),
+        };
+        // Render captures stdout only in an integration harness; here assert the
+        // verdict vocabulary the line is built from stays stable.
+        assert_eq!(c.verdict.word(), "warn");
+        assert_eq!(Verdict::Ok.word(), "ok");
+        assert_eq!(Verdict::Fail.word(), "fail");
+        assert_eq!(Verdict::Na.word(), "n/a");
+
+        // The canonical-venv scan: a shebang inside the root passes,
+        // any absolute shebang outside is named (even a system shim, which
+        // factually points outside the checkout), env-form skips.
+        let td = tempfile::tempdir().unwrap();
+        let bin = td.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let root = td.path();
+        std::fs::write(
+            bin.join("good"),
+            format!("#!{}/venv/python3\n", root.display()),
+        )
+        .unwrap();
+        std::fs::write(bin.join("envform"), "#!/usr/bin/env python3\n").unwrap();
+        std::fs::write(bin.join("shim"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(bin.join("rogue"), "#!/wt/pruned/bin/python3\n").unwrap();
+        let offenders = venv_shebang_offenders(&bin, root);
+        assert_eq!(offenders.len(), 2);
+        assert!(offenders
+            .iter()
+            .any(|(s, i)| s == "rogue" && i == "/wt/pruned/bin/python3"));
+        assert!(offenders.iter().any(|(s, _)| s == "shim"));
     }
 }

@@ -1215,6 +1215,14 @@ pub(crate) struct LauncherEsc {
 
 impl LauncherEsc {
     pub(crate) fn fold(&mut self, bytes: &[u8]) -> Vec<LKey> {
+        self.fold_carry(bytes, true)
+    }
+
+    /// [`Self::fold`], but a raw-fed caller (no chord scanner in front)
+    /// passes `release_lone_esc = false` on a real read: a trailing ESC there
+    /// may be the first byte of a split arrow, so only the quiet-window flush
+    /// (an empty read) releases it.
+    pub(crate) fn fold_carry(&mut self, bytes: &[u8], release_lone_esc: bool) -> Vec<LKey> {
         let mut keys = Vec::new();
         let mut i = 0;
         while i < bytes.len() {
@@ -1270,7 +1278,10 @@ impl LauncherEsc {
                     }
                     continue;
                 }
-                Some(b'[') | Some(b'O') => {
+                // Inside `ESC [` or `ESC O`: decided by the carry's length,
+                // not its last byte, so a multi-byte sequence (`[200~`,
+                // `[1;5B`) stays one sequence past its second byte.
+                Some(_) if self.esc.len() >= 2 => {
                     let mut reprocess = false;
                     match super::input_folds::esc_step(&mut self.esc, b) {
                         super::input_folds::EscStep::Carried => {}
@@ -1340,7 +1351,7 @@ impl LauncherEsc {
         // chord scanner, which rejoins split CSI sequences and releases this
         // byte only after its 40ms quiet window. Without it one Esc press
         // waits forever for a second key.
-        if self.paste.is_none() && crate::keys::take_lone_esc(&mut self.esc) {
+        if release_lone_esc && self.paste.is_none() && crate::keys::take_lone_esc(&mut self.esc) {
             keys.push(LKey::Esc);
         }
         keys
@@ -4198,9 +4209,8 @@ pub(crate) async fn launcher_mouse(
             return Ok(over);
         }
         let portal = next_free_portal(view);
-        // Field-disjoint snapshots for the commit and step-down paths.
+        // A field-disjoint snapshot for the commit path.
         let catalog = view.launcher_catalog.clone();
-        let backlog = view.backlog.clone();
         if let Some(l) = view.launcher.as_mut() {
             let Some(mut picker) = l.picker.take() else {
                 unreachable!("checked Some above");
@@ -4210,14 +4220,6 @@ pub(crate) async fn launcher_mouse(
                 return Ok(true);
             }
             match hit {
-                Some(crate::chrome::ESC_CLOSE_HIT) => {
-                    // The esc chip click reads exactly as pressing Esc: a
-                    // drilled picker steps down its ladder, the main list
-                    // closes (the taken picker is never restored).
-                    if picker.mode != PickerMode::Main {
-                        picker_step_down(l, &catalog, &backlog, picker);
-                    }
-                }
                 Some(target) => {
                     let field = picker.field;
                     picker.popup.select(target);

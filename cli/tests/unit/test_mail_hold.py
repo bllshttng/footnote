@@ -256,7 +256,7 @@ def test_gate_fails_closed_when_the_binary_is_missing(monkeypatch):
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
-def test_two_same_window_codex_rows_never_share_one_clock():
+def test_two_same_window_codex_rows_never_share_one_clock(monkeypatch):
     """Writers key the full session identity key.
 
     Codex UUIDv7 ids opened in one 65.536-second window share their first
@@ -274,6 +274,7 @@ def test_two_same_window_codex_rows_never_share_one_clock():
         name="beta", short_id="", harness_session_id=sid_b, delivery_policy="bus-only"
     )
 
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
     hold_mod.arm(session_identity_key(sid_a), 5)
 
     assert hold_mod.read_any(row_a) is not None
@@ -285,10 +286,18 @@ def test_two_same_window_codex_rows_never_share_one_clock():
 
 
 def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypatch):
-    """The x-e21e guarantee, unchanged for every row busy mode never touched."""
-    monkeypatch.setattr(dispatch, "load_registry", lambda: [_entry()])
+    """The clockless-hold guarantee, unchanged for every row busy mode
+    never touched.
 
-    assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+    The row keeps the production shape: its registry name is its label, not
+    its handle, so the token branch must reach it through the address sweep
+    (the canonical handle here), not through the name.
+    """
+    row = _entry(name="quill")
+    monkeypatch.setattr(dispatch, "load_registry", lambda: [row])
+    _stub_gate(monkeypatch, "hold")
+
+    assert dispatch._delivery_policy_refusal(row) == dispatch.BUS_ONLY_POLICY
     assert dispatch._delivery_policy_refusal(HANDLE) == dispatch.BUS_ONLY_POLICY
 
 

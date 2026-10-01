@@ -8,6 +8,29 @@ pub(super) fn ctx_cell(pct: Option<u8>) -> String {
     format!("{pct}%{}{}", "▪".repeat(filled), "▫".repeat(3 - filled))
 }
 
+/// The card's context bar, `[28%|###     ]`, padded to [`CTX_BAR_W`] so the
+/// node after it lines up card to card. Unmeasured reads `-`, never `0%`.
+pub(super) const CTX_BAR_W: usize = 15;
+pub(super) const CTX_BAR_CELLS: usize = 8;
+/// At or past this share the bar paints red: claude compacts near the top
+/// of the window, so this is the warning before it happens.
+pub(super) const CTX_NEAR_COMPACT_PCT: u8 = 80;
+
+pub(super) fn ctx_bar(pct: Option<u8>) -> String {
+    let bar = match pct {
+        None => "-".to_string(),
+        Some(pct) => {
+            let filled = (usize::from(pct.min(100)) * CTX_BAR_CELLS).div_ceil(100);
+            format!(
+                "[{pct}%|{}{}]",
+                "#".repeat(filled),
+                " ".repeat(CTX_BAR_CELLS - filled)
+            )
+        }
+    };
+    format!("{bar:<CTX_BAR_W$}")
+}
+
 pub(super) fn up_cell(started_at: Option<u64>, now: u64) -> String {
     let Some(started_at) = started_at else {
         return "-".into();

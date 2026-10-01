@@ -909,7 +909,7 @@ event_types:
     consumers: [postmortem]
 
   - name: polling_external_review
-    description: "Emitted by /pr check at every external-review check tick. Counted as the fifth thrash-fingerprint signal so polling iterations register as progress and the thrash detector does not force-cancel the loop while waiting for a slow external reviewer."
+    description: "Emitted by /fno:ship pr check at every external-review check tick. Counted as the fifth thrash-fingerprint signal so polling iterations register as progress and the thrash detector does not force-cancel the loop while waiting for a slow external reviewer."
     sources: [target, subagent, hook]
     data:
       required: [pr_number, reviewer_bot, wait_kind, session_id]
@@ -5465,7 +5465,7 @@ event_types:
     consumers: [operator]
 
   - name: pr_watch_dispatched
-    description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno do pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
+    description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:ship pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno do pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
     sources: [daemon]
     data:
       required: [kind, pr]
@@ -5473,7 +5473,7 @@ event_types:
         kind:
           type: string
           enum: [review, merge]
-          description: "Which hand-off succeeded: 'review' for the /fno:pr check skill fire, 'merge' for the post-merge ritual dispatch."
+          description: "Which hand-off succeeded: 'review' for the /fno:ship pr check skill fire, 'merge' for the post-merge ritual dispatch."
         pr:
           type: integer
           description: "GitHub PR number."

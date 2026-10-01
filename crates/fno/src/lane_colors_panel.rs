@@ -5,6 +5,7 @@
 //! named by the question it answers. The build fns are the testable seam; the
 //! Client owns the drill lifecycle and the key handling.
 
+use crate::client::input_field::{back_row, InputField};
 use crate::client::AuxAction;
 use crate::popup::PopupRow;
 use crate::proto::Color;
@@ -44,13 +45,11 @@ pub(crate) struct LaneColorsUi {
     pub axis: Option<String>,
     /// `Some((axis, key))` = the color picker is open for that mapping.
     pub pick: Option<(String, String)>,
-    /// `Some((axis, buffer))` = naming a NEW key for that axis.
-    pub key_entry: Option<(String, String)>,
-    /// `Some(buffer)` = free-form color entry for the key being picked
+    /// `Some((axis, field))` = naming a NEW key for that axis.
+    pub key_entry: Option<(String, InputField)>,
+    /// `Some(field)` = free-form color entry for the key being picked
     /// (`pick` carries the (axis, key) context).
-    pub custom_entry: Option<String>,
-    /// Split-arrow safety for the text entries, same as `create_esc`.
-    pub entry_esc: Vec<u8>,
+    pub custom_entry: Option<InputField>,
 }
 
 impl LaneColorsUi {
@@ -61,7 +60,6 @@ impl LaneColorsUi {
     pub fn clear_entry(&mut self) {
         self.key_entry = None;
         self.custom_entry = None;
-        self.entry_esc.clear();
     }
     /// Drop the drill entirely (tab switch away from Colors).
     pub fn reset(&mut self) {
@@ -211,19 +209,15 @@ pub(crate) fn build_lane_color_rows(
 ) -> (Vec<PopupRow>, Vec<AuxAction>) {
     let mut rows = Vec::new();
     let mut actions = Vec::new();
+    if ui.pick.is_some() || ui.key_entry.is_some() || ui.axis.is_some() {
+        rows.push(back_row());
+        actions.push(AuxAction::SettingsBack);
+    }
     if let Some((axis, key)) = &ui.pick {
-        if ui.custom_entry.is_some() {
-            // Free-form entry replaces the picker view; Enter is handled by
-            // the key divert, so the rows are display-only context.
-            let buf = ui.custom_entry.as_deref().unwrap_or("");
-            rows.push(PopupRow::Header(format!("{axis}.{key}: {buf}")));
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Entry {
-                glyph: " ".into(),
-                label: "enter: name | indexed(n) | #rrggbb".into(),
-                hint: String::new(),
-                enabled: false,
-            });
+        if let Some(field) = &ui.custom_entry {
+            // Free-form entry replaces the picker view; the field owns the
+            // keyboard.
+            rows.push(field.row(&format!("{axis}.{key}")));
             return (rows, actions);
         }
         // Picker level: the named colors, each with a swatch in the theme's
@@ -256,10 +250,10 @@ pub(crate) fn build_lane_color_rows(
         actions.push(AuxAction::LaneColorCustom(axis.clone(), key.clone()));
         return (rows, actions);
     }
-    if let Some((axis, buf)) = &ui.key_entry {
-        // Key-naming entry: live echo + every key this axis resolves for
-        // (configured and default), so the operator names one that is new.
-        rows.push(PopupRow::Header(format!("{axis} key: {buf}")));
+    if let Some((axis, field)) = &ui.key_entry {
+        // Key-naming field + every key this axis resolves for (configured
+        // and default), so the operator names one that is new.
+        rows.push(field.row(&format!("{axis} key")));
         rows.push(PopupRow::Rule);
         push_lane_axis_rows(&mut rows, &mut actions, pal, axis, theme, None);
         return (rows, actions);
@@ -441,55 +435,6 @@ mod tests {
             pick(&dark, "red"),
             pick(&light, "red"),
             "the red square repaints under the other theme"
-        );
-    }
-
-    #[test]
-    fn lane_color_custom_entry_is_display_only_with_a_live_echo() {
-        let pal = lane_pal(&[]);
-        let ui = LaneColorsUi {
-            pick: Some(("route".into(), "zai".into())),
-            custom_entry: Some("#12abF0".into()),
-            ..Default::default()
-        };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui, &sup());
-        // The typed buffer echoes in the header.
-        assert!(matches!(
-            rows.first(),
-            Some(PopupRow::Header(h)) if h.contains("#12abF0")
-        ));
-        // No save action is reachable from a display-only entry; submit goes
-        // through the key divert, never a row.
-        assert!(actions.is_empty());
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { enabled: false, .. })));
-    }
-
-    #[test]
-    fn lane_color_key_entry_echoes_the_buffer_and_lists_existing_keys() {
-        let pal = lane_pal(&[("zai", "green"), ("openai", "blue")]);
-        let ui = LaneColorsUi {
-            key_entry: Some(("route".into(), "o".into())),
-            ..Default::default()
-        };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui, &sup());
-        assert!(matches!(
-            rows.first(),
-            Some(PopupRow::Header(h)) if h == "route key: o"
-        ));
-        // Existing keys are listed so an existing mapping is pickable.
-        assert!(rows.iter().any(
-            |r| matches!(r, PopupRow::SwatchEntry { label, .. } if label == "openai = blue #9fb8e5")
-        ));
-        // The configured pair (zai, openai) plus the two route defaults the
-        // config does not override (openrouter, anthropic) are all pickable.
-        assert_eq!(
-            actions
-                .iter()
-                .filter(|a| matches!(a, AuxAction::LaneColorEdit(_, _)))
-                .count(),
-            4
         );
     }
 

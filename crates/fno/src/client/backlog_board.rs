@@ -494,6 +494,20 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
     });
 }
 
+/// One gather, applied at once, for `fno mux serve --snapshot`, which has
+/// no run loop to kick the fold. Opens the board only where a client would:
+/// the sideline shows the backlog and the view is enabled.
+pub(crate) async fn fold_once(view: &mut View) {
+    if view.sideline_view != crate::view_store::SidelineView::Backlog || !view.experimental_backlog
+    {
+        return;
+    }
+    backlog_board_open_fresh(view);
+    let inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let gen = view.backlog_board.as_ref().map_or(0, |b| b.gen);
+    apply_fold(view, gen, BoardMsg::Gathered { inputs });
+}
+
 /// A fold landed: apply only to the still-open, same-generation board
 /// (the feed fold's contract, one consumer in the run loop).
 pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
@@ -2689,33 +2703,12 @@ pub(crate) async fn edit_description(view: &mut View) -> Result<(), String> {
 /// Suspend the mux, run $EDITOR on `text`, restore the mux, return the
 /// edited text. `None` when the editor failed or exited non-zero.
 fn run_editor(text: &str) -> Option<String> {
-    use crossterm::{cursor, execute, terminal};
-    use std::io::Write as _;
-    let mut out = std::io::stdout();
     let dir = std::env::temp_dir().join("fno-board-edit");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("details-{}.md", std::process::id()));
     std::fs::write(&path, text).ok()?;
-    let _ = execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
-    let _ = terminal::disable_raw_mode();
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    let status = match std::process::Command::new(&editor).arg(&path).status() {
-        Ok(status) => status,
-        // The terminal is already suspended: restore it on THIS path too,
-        // or the client keeps running cooked and unpainted.
-        Err(_) => {
-            let _ = terminal::enable_raw_mode();
-            let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
-            return None;
-        }
-    };
-    let _ = terminal::enable_raw_mode();
-    let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+    let ok = super::editor::edit_file_suspended(&path);
     let edited = std::fs::read_to_string(&path).ok();
     let _ = std::fs::remove_file(&path);
-    let _ = out.flush();
-    match status.success() {
-        true => edited,
-        false => None,
-    }
+    edited.filter(|_| ok)
 }
