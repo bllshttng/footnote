@@ -528,7 +528,17 @@ def _lane_fill_selection(
     env = dict(os.environ)
     if claims_root is not None:
         env["FNO_CLAIMS_ROOT"] = str(claims_root)
-    proc = _sp.run([str(binary), *args], capture_output=True, text=True, env=env)
+    proc = _sp.run(
+        [str(binary), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        # The door's own worst case is its select bound plus the enrich exec,
+        # so the caller waits a bounded 180s: an unbounded wait here wedges
+        # the xdist worker and its siblings stall behind it on a loaded
+        # runner.
+        timeout=180,
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"lane-fill failed: {(proc.stderr or '').strip()[:180]}")
     receipt = json.loads(proc.stdout)
@@ -555,6 +565,7 @@ def _release_lane_slot(lane_id: str, claims_root: Optional[Path]) -> None:
         capture_output=True,
         text=True,
         env=env,
+        timeout=60,
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "lane-release failed").strip()[:180])
