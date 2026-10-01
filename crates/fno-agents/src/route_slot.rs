@@ -4614,9 +4614,12 @@ mod tests {
     /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
     /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
     /// state file. Drop clears both.
+    type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
+
     pub(super) struct CapacityEnv {
         _guard: std::sync::MutexGuard<'static, ()>,
         pub(super) dir: tempfile::TempDir,
+        saved: Saved,
     }
 
     impl CapacityEnv {
@@ -4629,7 +4632,12 @@ mod tests {
             // The claude fallback lane names the AMBIENT harness, so a
             // session marker an earlier test in this process leaked would
             // read as codex or gemini and decline the lane. Scrub the same
-            // ambient identity set a spawned child scrubs.
+            // ambient identity set a spawned child scrubs; the snapshot
+            // restores it on drop so a concurrent reader keeps its world.
+            let mut saved: Saved = claims::AMBIENT_IDENTITY_NAMES
+                .iter()
+                .map(|n| (*n, std::env::var_os(n)))
+                .collect();
             for name in claims::AMBIENT_IDENTITY_NAMES {
                 std::env::remove_var(name);
             }
@@ -4643,11 +4651,18 @@ mod tests {
             // Pin the whole state world: a var an earlier test in this
             // process set without cleaning up (FNO_STATE_DIR, the global
             // settings pin, the agents home) would otherwise answer the
-            // walk's capacity and identity reads. The pins are SET, never
-            // removed: removing a root pin mid-run makes a lock-free reader
-            // resolve $HOME undeclared and trip the paths.rs guard.
+            // walk's capacity and identity reads. Snapshot-then-pin,
+            // restore on drop: a pin left set at a deleted dir sends a
+            // later test down its unreadable branch, and removal without a
+            // declared ambient is what trips the paths.rs guard.
+            saved.push(("FNO_STATE_DIR", std::env::var_os("FNO_STATE_DIR")));
             std::env::set_var("FNO_STATE_DIR", dir.path());
+            saved.push((
+                "FNO_GLOBAL_SETTINGS_PATH",
+                std::env::var_os("FNO_GLOBAL_SETTINGS_PATH"),
+            ));
             std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+            saved.push(("FNO_AGENTS_HOME", std::env::var_os("FNO_AGENTS_HOME")));
             std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents-home"));
             match fno_bin {
                 Some(path) => std::env::set_var("FNO_BIN", path),
@@ -4658,18 +4673,22 @@ mod tests {
             let providers = dir.path().join("providers");
             std::fs::create_dir_all(&providers).unwrap();
             std::fs::write(providers.join(".active-claude"), "makers").unwrap();
-            Self { _guard: guard, dir }
+            Self {
+                _guard: guard,
+                dir,
+                saved,
+            }
         }
     }
 
     impl Drop for CapacityEnv {
-        // The root pins stay set after the drop: a mid-run removal races
-        // lock-free state-resolving tests into the paths.rs guard. Their
-        // temp dirs are gone, so later reads degrade as unreadable, which
-        // every reader already treats as a branch.
         fn drop(&mut self) {
-            std::env::remove_var("FNO_CONFIG");
-            std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 

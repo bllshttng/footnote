@@ -1662,12 +1662,30 @@ fn overlay_stage(stage: &mut Stage, seam: &mut Seam) {
 mod tests {
     use super::*;
 
-    fn hermetic() -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+    type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
+
+    fn hermetic() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::path::PathBuf,
+        Saved,
+    ) {
         let guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("spawn-compose-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&root);
+        // Snapshot-then-pin, restore in clear_hermetic: a pin left set at a
+        // deleted dir sends a later test down its unreadable branch (the
+        // slot_cutover stamp lie), and removal without CI's declared ambient
+        // trips the paths.rs guard. FNO_TEST_HERMETIC is never touched: CI
+        // declares "0" for the process and the value must survive.
+        let keys = [
+            "FNO_CONFIG",
+            "FNO_CLAIMS_ROOT",
+            "FNO_STATE_DIR",
+            "FNO_AGENTS_HOME",
+        ];
+        let saved: Saved = keys.map(|k| (k, std::env::var_os(k))).into_iter().collect();
         // The consult arm reads the declared rows, the policy and the lanes
         // from DISK (the gather's own read); pin an empty config or the
         // test process's ambient config answers the walk.
@@ -1676,17 +1694,16 @@ mod tests {
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         std::env::set_var("FNO_STATE_DIR", root.join("state"));
         std::env::set_var("FNO_AGENTS_HOME", root.join("agents-home"));
-        std::env::set_var("FNO_TEST_HERMETIC", "1");
-        (guard, root)
+        (guard, root, saved)
     }
 
-    fn clear_hermetic(root: &std::path::Path) {
-        // Only FNO_CONFIG is unpinned: it is a config path, not a state
-        // root, so no guard reads its absence. The root pins stay set for
-        // the process; removing one mid-run races lock-free readers into
-        // the paths.rs undeclared-$HOME panic. Their dirs are gone, so
-        // later reads degrade as unreadable, a branch every reader has.
-        std::env::remove_var("FNO_CONFIG");
+    fn clear_hermetic(root: &std::path::Path, saved: Saved) {
+        for (key, value) in saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1697,7 +1714,7 @@ mod tests {
     /// resolve is the one the role-wiring contract pins.
     #[test]
     fn a_missing_role_answer_gates_the_composition() {
-        let (guard, root) = hermetic();
+        let (guard, root, saved) = hermetic();
         let inputs = Inputs {
             argv: vec![
                 "spawn".to_string(),
@@ -1728,7 +1745,7 @@ mod tests {
         };
         let answer = compose(&inputs);
         drop(guard);
-        clear_hermetic(&root);
+        clear_hermetic(&root, saved);
         assert!(answer.role_gate_needed, "the gate declares the need");
         assert_eq!(answer.exit, 0, "no refusal");
         assert!(answer.stderr.is_empty(), "no lines printed");
@@ -1741,7 +1758,7 @@ mod tests {
     /// the model injection. Either way no gate fires.
     #[test]
     fn a_carried_role_answer_composes_through() {
-        let (guard, root) = hermetic();
+        let (guard, root, saved) = hermetic();
         let inputs = Inputs {
             argv: vec![
                 "spawn".to_string(),
@@ -1772,7 +1789,7 @@ mod tests {
         };
         let answer = compose(&inputs);
         drop(guard);
-        clear_hermetic(&root);
+        clear_hermetic(&root, saved);
         assert!(!answer.role_gate_needed, "the carried answer composes");
         assert!(
             answer.argv.iter().any(|t| t == "--model"),
