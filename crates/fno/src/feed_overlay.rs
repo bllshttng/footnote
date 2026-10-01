@@ -1,5 +1,5 @@
 //! The activity-feed shell-out leg : a bounded, fail-open shell-out to
-//! `fno agents feed --json`, in the same shape as [`crate::court_overlay`]'s
+//! `fno agents feed --json`, in the same shape as [`crate::org_overlay`]'s
 //! fold (: the 800ms cap it first copied was half the projection's
 //! measured runtime, so the feed could never render).
 //!
@@ -13,7 +13,7 @@
 use serde::Deserialize;
 use std::time::Duration;
 
-/// Ten seconds, court_overlay's budget for a comparable multi-store read.
+/// Ten seconds, org_overlay's budget for a comparable multi-store read.
 /// The feed joins three stores and serialises 200 rows; its measured runtime
 /// is 1.6s against the 800ms this file inherited from needs_overlay's cheap
 /// reads, so under the old cap it could not succeed at all. A long budget
@@ -65,10 +65,10 @@ pub struct FeedItem {
     /// recorded cause, verbatim.
     #[serde(default)]
     pub reason: Option<String>,
-    /// `L{level} {scope}` for the crown kinds and a crowned removal.
+    /// `L{level} {scope}` for the team kinds and a teamed removal.
     #[serde(default)]
     pub crown: Option<String>,
-    /// The king or epic the row rolls up to; the panel groups on it.
+    /// The lead or epic the row rolls up to; the panel groups on it.
     #[serde(default)]
     pub owner: Option<String>,
     /// The session that spawned this row's session, from the birth event.
@@ -196,7 +196,7 @@ mod tests {
         let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead"},{"ts":"2026-09-29T08:00:00Z","kind":"node_created","node":"x-aaaa","cwd":"/workspace/node-project","title":"created node"}]"#;
         let items = parse_feed(body, b"").expect("a body carrying the new fields parses");
         assert_eq!(items[0].reason.as_deref(), Some("why"));
-        assert_eq!(items[0].crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(items[0].team.as_deref(), Some("L2 x-eeee"));
         assert_eq!(items[0].owner.as_deref(), Some("epic x-2222 the epic"));
         assert_eq!(items[0].parent.as_deref(), Some("s-lead"));
         assert_eq!(items[1].cwd.as_deref(), Some("/workspace/node-project"));

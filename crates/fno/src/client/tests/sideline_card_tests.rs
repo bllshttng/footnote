@@ -11,20 +11,20 @@ fn card_view(agents: Vec<AgentRow>) -> View {
     v
 }
 
-fn king_and_worker() -> Vec<AgentRow> {
-    let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
-    king.harness = Some("claude".into());
-    king.crown_level = Some(2);
-    king.crown_scope = Some("fno".into());
-    king.harness_session_id = Some("sess-king".into());
+fn lead_and_worker() -> Vec<AgentRow> {
+    let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
+    lead.harness = Some("claude".into());
+    lead.crown_level = Some(2);
+    lead.crown_scope = Some("fno".into());
+    lead.harness_session_id = Some("sess-lead".into());
     let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
     w1.harness = Some("codex".into());
     w1.pr = Some(42);
     w1.tail = Some("**one message**".into());
     w1.lineage_kind = Some("child".into());
-    w1.spawned_by_session = Some("sess-king".into());
+    w1.spawned_by_session = Some("sess-lead".into());
     w1.harness_session_id = Some("sess-w1".into());
-    vec![king, w1]
+    vec![lead, w1]
 }
 
 fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
@@ -82,7 +82,7 @@ fn row_text(frame: &Frame, row: usize, width: usize) -> String {
 fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
     // AC3: two agents expand to Blank, Agent, CardDetail per card, one
     // blank shared between adjacent cards, every agent depth 0.
-    let v = card_view(king_and_worker());
+    let v = card_view(lead_and_worker());
     let (rows, depths) = v.display_rows_with_depths();
     let names: Vec<String> = rows
         .iter()
@@ -111,23 +111,23 @@ fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
 }
 
 #[test]
-fn card_age_sort_orders_workers_inside_a_king_group() {
-    // The user report: sorted by age, a king's workers read
+fn card_age_sort_orders_workers_inside_a_lead_group() {
+    // The user report: sorted by age, a lead's workers read
     // 12m, 12m, 10m, 41m, 23s in the card view. The card path now runs the
     // same run sort the extended table uses, workers order inside their
-    // king's group, kings keep their group order.
+    // lead's group, leads keep their group order.
     let ages = [("w-old", 720u64), ("w-new", 60), ("w-mid", 600)];
     let mut agents = Vec::new();
-    let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
-    king.crown_level = Some(2);
-    king.crown_scope = Some("fno".into());
-    king.harness_session_id = Some("sess-king".into());
-    king.last_activity_age_s = Some(10);
-    agents.push(king);
+    let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
+    lead.crown_level = Some(2);
+    lead.crown_scope = Some("fno".into());
+    lead.harness_session_id = Some("sess-lead".into());
+    lead.last_activity_age_s = Some(10);
+    agents.push(lead);
     for (name, age) in ages {
         let mut w = agent_row(name, 5, Some(AgentBadge::Working), false);
         w.lineage_kind = Some("child".into());
-        w.spawned_by_session = Some("sess-king".into());
+        w.spawned_by_session = Some("sess-lead".into());
         w.harness_session_id = Some(format!("sess-{name}"));
         w.last_activity_age_s = Some(age);
         agents.push(w);
@@ -143,14 +143,14 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
         let got: Vec<&str> = rows
             .iter()
             .filter_map(|r| match r {
-                DisplayRow::Agent(a) if a.name != "king-a" => Some(a.name.as_str()),
+                DisplayRow::Agent(a) if a.name != "lead-a" => Some(a.name.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(
             got,
             vec!["w-new", "w-mid", "w-old"],
-            "workers order by the sort key inside the king group at {density:?}"
+            "workers order by the sort key inside the lead group at {density:?}"
         );
         // The painted age is the value sorted on: the card detail of the
         // oldest worker reads the humanized value of its measured age.
@@ -171,12 +171,12 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
 }
 
 #[test]
-fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_line2() {
+fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_lead_message_age_on_line2() {
     // Line 1 = glyph, slug, context bar, node, #42: no state word (the glyph
-    // carries it) and no uptime (peek has it). Line 2 = harness/model, king
-    // handle, message, age. A worker with no crowned ancestor has no king
+    // carries it) and no uptime (peek has it). Line 2 = harness/model, lead
+    // handle, message, age. A worker with no teamed ancestor has no lead
     // segment (and no empty `·  ·`).
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].context_used_pct = Some(26);
     agents[1].started_at = Some(crate::digest_overlay::now_secs() - 10800);
     agents[1].node = Some("x-4310".into());
@@ -213,12 +213,12 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_l
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("claude/opus"), "{text:?}");
-    assert!(text.contains("king-a"), "{text:?}");
+    assert!(text.contains("lead-a"), "{text:?}");
     assert!(text.contains("one message"), "{text:?}");
-    // The king's own card shows its crown scope, not a king name.
+    // The lead's own card shows its team scope, not a lead name.
     assert!(text.contains("fno"), "{text:?}");
-    // Line 2's segment join: harness/model, then the king handle.
-    assert!(text.contains("codex/gpt-6.1-sol \u{b7} king-a"), "{text:?}");
+    // Line 2's segment join: harness/model, then the lead handle.
+    assert!(text.contains("codex/gpt-6.1-sol \u{b7} lead-a"), "{text:?}");
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     assert_eq!(card_line::meter_node(&a, 21).text, "x-4fb5");
     assert_eq!(card_line::meter_node(&a, 5).text, "");
     // The node is a tap target where it is painted.
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].node = Some("x-4310".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
@@ -289,7 +289,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
 #[test]
 fn card_detail_click_routes_to_the_agent_above() {
     // AC5: row_action on a CardDetail equals row_action one row up.
-    let v = card_view(king_and_worker());
+    let v = card_view(lead_and_worker());
     let rows = v.painted_rows();
     let detail_i = rows
         .iter()
@@ -306,7 +306,7 @@ fn card_detail_click_routes_to_the_agent_above() {
 #[test]
 fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
     for select in [false, true] {
-        let mut v = card_view(king_and_worker());
+        let mut v = card_view(lead_and_worker());
         v.term = (30, 140);
         v.sideline_width = 80;
         let (agent_i, detail_i) = card_rows_for(&v, "w1");
@@ -328,7 +328,7 @@ fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
 
 #[test]
 fn hover_and_selection_share_the_same_card_cell_snapshot() {
-    let mut hover = card_view(king_and_worker());
+    let mut hover = card_view(lead_and_worker());
     hover.term = (30, 140);
     hover.sideline_width = 80;
     let (agent_i, detail_i) = card_rows_for(&hover, "w1");
@@ -336,7 +336,7 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
     let hover_frame = hover.compose();
     let hover_cells = card_pair_cells(&hover, &hover_frame, agent_i, detail_i);
 
-    let mut selected = card_view(king_and_worker());
+    let mut selected = card_view(lead_and_worker());
     selected.term = (30, 140);
     selected.sideline_width = 80;
     let (selected_agent_i, selected_detail_i) = card_rows_for(&selected, "w1");
@@ -361,7 +361,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     // same band, the column gaps included. The pair is the theme's explicit
     // hover pair - never INVERSE. The status and word columns of line 1
     // keep the row's lane accent on the band (the operator's color ruling).
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
@@ -393,7 +393,7 @@ fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
     // x-b5b8 scope add: a foreign-cwd agent's card stays two painted rows -
     // the subline's cwd folds into line 2 (`harness · … · cwd`), the Sub
     // row is gone.
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].cwd_base = Some("elsewhere".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
@@ -440,7 +440,7 @@ fn chosen_card_paints_accent_across_both_lines() {
     // x-b5b8: the focused card wears the same surface band as selection -
     // accent text on the sel surface, never a full brand fill. The lane
     // accent survives on the status and word columns of line 1.
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     v.layout.focus = 5;
@@ -470,7 +470,7 @@ fn chosen_card_paints_accent_across_both_lines() {
 
 #[test]
 fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     v.layout.focus = 5;
@@ -498,7 +498,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
     // the monochrome ruling made brand equal to text, so the old
     // fg != brand guard would fire on every text cell and retired with
     // the failure mode it guarded.)
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.theme = crate::theme::Theme::from_name("footnote-superscript").0;
     v.term = (30, 140);
     v.sideline_width = 80;
@@ -521,7 +521,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
 
 #[test]
 fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].last_activity_age_s = Some(42);
     let mut v = card_view(agents);
     v.term = (30, 140);
@@ -560,7 +560,7 @@ fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
 
 #[test]
 fn regular_card_snapshot_shows_a_pr_when_it_fits() {
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].last_activity_age_s = Some(42);
     let mut v = card_view(agents);
     set_density(&mut v, Density::Regular);
@@ -581,7 +581,7 @@ fn regular_card_snapshot_shows_a_pr_when_it_fits() {
 
 #[test]
 fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[1].pr = Some(1_234_567);
     let mut v = card_view(agents);
     set_density(&mut v, Density::Regular);
@@ -620,7 +620,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
 
 #[test]
 fn list_mode_keeps_identity_and_unknown_measurements_visible() {
-    let mut agents = king_and_worker();
+    let mut agents = lead_and_worker();
     agents[0].last_activity_age_s = Some(42);
     agents[1].last_activity_age_s = Some(42);
     let mut v = card_view(agents);
@@ -630,11 +630,11 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     let frame = v.compose();
 
     let text = frame_text(&frame);
-    assert!(text.contains("king-a"), "{text:?}");
+    assert!(text.contains("lead-a"), "{text:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("ctx"), "{text:?}");
     assert!(text.contains("up"), "{text:?}");
-    for name in ["king-a", "w1"] {
+    for name in ["lead-a", "w1"] {
         assert!(
             text.lines()
                 .any(|line| line.contains(name) && line.contains("●Work")),
@@ -654,7 +654,7 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
 }
 
 #[test]
-fn king_label_walk_stops_on_a_lineage_cycle() {
+fn lead_label_walk_stops_on_a_lineage_cycle() {
     // AC8: two rows naming each other as parent terminate with None.
     let mut x = agent_row("x", 4, Some(AgentBadge::Working), false);
     x.lineage_kind = Some("child".into());
@@ -671,7 +671,7 @@ fn king_label_walk_stops_on_a_lineage_cycle() {
         _ => None,
     });
     let xr = xrow.expect("row x exists");
-    assert_eq!(v.king_label(xr), None);
+    assert_eq!(v.lead_label(xr), None);
 }
 
 // The x-cd1c contrast family: every highlight band paints an explicit pair
@@ -756,16 +756,16 @@ fn the_dark_anchor_is_the_luminance_pick_on_every_accent() {
 #[test]
 fn composed_bands_hold_contrast_on_dark_and_light_frames() {
     // x-cd1c D1, end to end: the REAL painter's chosen band (the worker's
-    // card) and hover band (the king's card) clear their floors on a dark and
+    // card) and hover band (the lead's card) clear their floors on a dark and
     // a light lens theme. The bands are explicit pairs, so the lens needs no
     // inverse/dim modeling to judge them.
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     v.layout.focus = 5; // w1 is the chosen card
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
-    let (king_i, king_detail_i) = card_rows_for(&v, "king-a");
-    v.hover_row = Some(king_i);
+    let (lead_i, lead_detail_i) = card_rows_for(&v, "lead-a");
+    v.hover_row = Some(lead_i);
     let frame = v.compose();
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
@@ -777,7 +777,7 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
         chosen_cells.push(frame.cells[row * cols]);
         chosen_cells.push(frame.cells[row * cols + text_w - 1]);
     }
-    for display_i in [king_i, king_detail_i] {
+    for display_i in [lead_i, lead_detail_i] {
         let row = display_i - offset;
         hover_cells.push(frame.cells[row * cols]);
         hover_cells.push(frame.cells[row * cols + text_w - 1]);
@@ -846,7 +846,7 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
     }
     // Through the real painter: the detail row carries the palette gray
     // without the DIM flag.
-    let mut v = card_view(king_and_worker());
+    let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     let (_, detail_i) = card_rows_for(&v, "w1");

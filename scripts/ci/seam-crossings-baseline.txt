@@ -13,7 +13,7 @@ crossing	crates/fno-agents/src/bin/client.rs	let err = std::process::Command::ne
 crossing	crates/fno-agents/src/bin/client.rs	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	return match Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/blueprint_judge.rs	let out = Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/crown_alarm.rs	let fno = crate::scrape::fno_bin();
+crossing	crates/fno-agents/src/team_alarm.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/daemon.rs	let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
 crossing	crates/fno-agents/src/daemon.rs	let mut child = match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
@@ -33,10 +33,10 @@ crossing	crates/fno-agents/src/finalize_run_summary.rs	let mut cmd = Command::ne
 crossing	crates/fno-agents/src/gate_probes.rs	let _ = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/gc.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/king_checkin.rs	let mut argv = vec![fno_bin()];
+crossing	crates/fno-agents/src/lead_checkin.rs	let mut argv = vec![fno_bin()];
 # The Rundown arm owns draining this site: the daemon renders through the
 # front door; the drain would be the front calling the ledger natively.
-crossing	crates/fno-agents/src/king_ledger.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/rundown.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/lifecycle_child.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	return Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	let out = Command::new(crate::scrape::fno_bin())
@@ -89,9 +89,9 @@ crossing	crates/fno/src/client/update_menu.rs	let mut command = crate::process_a
 crossing	crates/fno/src/client/update_menu.rs	let err = std::process::Command::new(crate::server::fno_bin())
 crossing	crates/fno/src/connections_view.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/connections_view.rs	let mut cmd = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/court_overlay.rs	fn fno_bin() -> PathBuf {
-crossing	crates/fno/src/court_overlay.rs	crate::server::fno_bin()
-crossing	crates/fno/src/court_overlay.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/org_overlay.rs	fn fno_bin() -> PathBuf {
+crossing	crates/fno/src/org_overlay.rs	crate::server::fno_bin()
+crossing	crates/fno/src/org_overlay.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/feed_overlay.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());

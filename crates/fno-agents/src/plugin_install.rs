@@ -1105,7 +1105,7 @@ struct PluginInstallArgs {
     hooks: bool,
     hooks_status: bool,
     adapter: Option<String>,
-    crown: Option<String>,
+    team: Option<String>,
     hooks_file: Option<String>,
     extension_src: Option<String>,
     yes: bool,
@@ -1125,7 +1125,7 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
         hooks: false,
         hooks_status: false,
         adapter: None,
-        crown: None,
+        team: None,
         hooks_file: None,
         extension_src: None,
         yes: false,
@@ -1146,8 +1146,8 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
                 parsed.adapter = args.get(i + 1).cloned();
                 i += 2;
             }
-            "--crown" => {
-                parsed.crown = args.get(i + 1).cloned();
+            "--team" => {
+                parsed.team = args.get(i + 1).cloned();
                 i += 2;
             }
             "--hooks-file" => {
@@ -1224,7 +1224,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         hooks,
         hooks_status,
         adapter,
-        crown,
+        team,
         hooks_file,
         extension_src,
         yes,
@@ -1236,7 +1236,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             hooks,
             hooks_status,
             adapter.as_deref(),
-            crown.as_deref(),
+            team.as_deref(),
             hooks_file.as_deref(),
             json,
         );
@@ -1950,11 +1950,11 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
     };
     let hooks = home.join(".gemini").join("config").join("hooks.json");
     let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
-    let crown = stage.join("hooks").join("agy-crown-inject.sh");
+    let team = stage.join("hooks").join("agy-team-inject.sh");
     let s = crate::agy_hooks::status(
         &hooks,
         adapter.is_file().then_some(adapter.as_path()),
-        crown.is_file().then_some(crown.as_path()),
+        team.is_file().then_some(team.as_path()),
     );
     Ok(format!("agy plugin imported; {}", s.summary()))
 }
@@ -1969,7 +1969,7 @@ fn run_agy_hooks(
     _hooks: bool,
     status_flag: bool,
     adapter: Option<&str>,
-    crown: Option<&str>,
+    team: Option<&str>,
     hooks_file: Option<&str>,
     json: bool,
 ) -> i32 {
@@ -1990,8 +1990,8 @@ fn run_agy_hooks(
     };
     if status_flag {
         let adapter = adapter.map(PathBuf::from);
-        let crown = crown.map(PathBuf::from);
-        let s = crate::agy_hooks::status(&hooks_path, adapter.as_deref(), crown.as_deref());
+        let team = team.map(PathBuf::from);
+        let s = crate::agy_hooks::status(&hooks_path, adapter.as_deref(), team.as_deref());
         if json {
             match serde_json::to_string(&s) {
                 Ok(text) => println!("{text}"),
@@ -2010,8 +2010,8 @@ fn run_agy_hooks(
         eprintln!("plugin install agy --hooks: --adapter <path> is required");
         return 2;
     };
-    let crown = crown.map(PathBuf::from);
-    match crate::agy_hooks::install(&hooks_path, Path::new(adapter), crown.as_deref()) {
+    let team = team.map(PathBuf::from);
+    match crate::agy_hooks::install(&hooks_path, Path::new(adapter), team.as_deref()) {
         Ok(receipt) => {
             if json {
                 match serde_json::to_string(&receipt) {

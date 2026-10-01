@@ -9,7 +9,7 @@
 //!
 //! - `Owner`: the row's cwd (and, when both name one, its node) agree with
 //!   the target at `--state`; the normal engine decides as before.
-//! - `Crown`: the row is a crowned session with no node of its own; the king
+//! - `Team`: the row is a teamed session with no node of its own; the lead
 //!   path answers on its own evidence and never needs a target manifest.
 //! - `Refuse`: unreadable registry, absent row, cwd mismatch, or node
 //!   mismatch. Each carries its own reason, none is headroom, and the refusal
@@ -27,13 +27,13 @@ pub(super) struct Refusal {
 
 pub(super) enum Gate {
     Owner,
-    Crown,
+    Team,
     Refuse(Refusal),
 }
 
 /// The whole identity gate, as a decision-or-proceed. `None` when the caller
 /// passed no binding flags (the engine answers exactly as before) or when the
-/// asking session is the owner; `Some` carries the refusal or the crown
+/// asking session is the owner; `Some` carries the refusal or the team
 /// routing, each of which answers instead of the engine.
 pub(super) fn gate_output(parsed: &LoopCheckArgs) -> Option<(i32, String)> {
     if parsed.harness.is_none() || parsed.harness_session.is_none() {
@@ -41,7 +41,7 @@ pub(super) fn gate_output(parsed: &LoopCheckArgs) -> Option<(i32, String)> {
     }
     match gate(parsed) {
         Gate::Refuse(r) => Some(refusal_output(parsed, r)),
-        Gate::Crown => Some(super::king_decide::king_decide(parsed)),
+        Gate::Team => Some(super::lead_decide::lead_decide(parsed)),
         Gate::Owner => None,
     }
 }
@@ -130,10 +130,10 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
                 reason,
             });
         }
-        // The asking session IS the owner; the crown disposition still gives
-        // a crowned owner a path that does not depend on a target manifest.
+        // The asking session IS the owner; the team disposition still gives
+        // a teamed owner a path that does not depend on a target manifest.
         if owner.crown_level.is_some() && owner.node.is_none() {
-            return Gate::Crown;
+            return Gate::Team;
         }
         return Gate::Owner;
     }
@@ -171,11 +171,11 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
             );
         }
     }
-    // A crowned row with no node of its own is a crown, not a target owner:
-    // the king path evaluates its own evidence. When the row carries BOTH a
-    // crown and a node, the node binding is the tighter contract and wins.
+    // A teamed row with no node of its own is a team, not a target owner:
+    // the lead path evaluates its own evidence. When the row carries BOTH a
+    // team and a node, the node binding is the tighter contract and wins.
     if row.crown_level.is_some() && row.node.is_none() {
-        return Gate::Crown;
+        return Gate::Team;
     }
     Gate::Owner
 }

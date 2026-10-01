@@ -1383,7 +1383,7 @@ fn reconcile_does_not_reap_a_bg_thread_that_is_live_in_claudes_roster() {
     // finished ask -- but it is a RUNNING process owned by claude's daemon.
     // Reaping it unprobed made `fno-agents wait --state done` return
     // "done (via exit)" within seconds for a worker whose transcript was
-    // still growing, which reads to a waiting king as a dead teammate.
+    // still growing, which reads to a waiting lead as a dead teammate.
     let entries = vec![bg_claude_row("think-web-copy", "35570a01")];
     assert!(
         entries[0].is_one_shot_ask(),
@@ -2256,7 +2256,7 @@ fn the_ladder_answers_alive_for_a_known_live_socket() {
 }
 
 #[test]
-fn king_g4_shape_is_alive_from_the_socket_rung_and_never_dead() {
+fn lead_g4_shape_is_alive_from_the_socket_rung_and_never_dead() {
     // The measured specimen: status live, exited_at ten days old, a
     // heartbeat sixteen hours stale reading done, process up 4h41m. The
     // socket rung answers; the quiet heartbeat never downgrades the
@@ -2265,7 +2265,7 @@ fn king_g4_shape_is_alive_from_the_socket_rung_and_never_dead() {
     let sock = short_sock("g4");
     let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     write_bg_session(home.root(), "g4face", &sock);
-    let mut e = ladder_claude_row("king-footnote-g4", "g4face");
+    let mut e = ladder_claude_row("lead-footnote-g4", "g4face");
     e.exited_at = Some("2026-08-21T00:42:40Z".into());
     e.inside_leg = Some(heartbeat(
         state::InsideLegState::Done,
@@ -3067,7 +3067,7 @@ fn list_row_key_set_matches_shared_contract() {
         });
         e.crown_level = Some(1);
         e.crown_scope = Some("epic-x".into());
-        e.crown_grantor = Some("king".into());
+        e.crown_grantor = Some("lead".into());
         // A vendor stamp on a claude-hosted row: the exact shape the
         // provider axis exists to describe, and the one the pre-split
         // alias lied about by carrying "claude" here.
@@ -3177,14 +3177,14 @@ fn list_row_key_set_matches_shared_contract() {
     assert_eq!(row["mux"]["pane_id"], 10);
     assert_eq!(
         row["crown"], "L1 epic-x",
-        "same formatter as Python crown_label"
+        "same formatter as Python team_label"
     );
-    // The raw crown fields need value assertions too, not just presence:
+    // The raw team fields need value assertions too, not just presence:
     // hardcoding either to null passes a key-set check and the bare-row
     // null check, which is the "present but always null" lie again.
     assert_eq!(row["crown_level"], 1);
     assert_eq!(row["crown_scope"], "epic-x");
-    assert_eq!(row["crown_grantor"], "king");
+    assert_eq!(row["crown_grantor"], "lead");
 
     std::fs::remove_dir_all(home.root()).ok();
 }
@@ -3499,13 +3499,13 @@ fn list_row_resolves_opencode_session_id_from_harness_session_id() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// An empty crown scope renders `?`, not a trailing space. Python tests the
+/// An empty team scope renders `?`, not a trailing space. Python tests the
 /// scope for falsiness (`self.crown_scope or '?'`), so matching only on None
 /// would diverge on the empty string -- and nothing else covers that leg.
 #[test]
-fn list_row_crown_label_falls_back_on_an_empty_scope() {
+fn list_row_team_label_falls_back_on_an_empty_scope() {
     let home = short_home("listcrownempty");
-    seed_stream_row(&home, "worker-crown", "abc12345");
+    seed_stream_row(&home, "worker-team", "abc12345");
     state::update_registry(&home.registry_json(), |r| {
         let e = &mut r.entries[0];
         e.crown_level = Some(1);
@@ -3523,7 +3523,7 @@ fn list_row_crown_label_falls_back_on_an_empty_scope() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// A row with no pane, no crown and no captured session id emits those keys
+/// A row with no pane, no team and no captured session id emits those keys
 /// as null rather than omitting them -- consumers key off a stable shape.
 #[test]
 fn list_row_emits_absent_optional_fields_as_null() {
@@ -3540,7 +3540,7 @@ fn list_row_emits_absent_optional_fields_as_null() {
     // returns Null for a missing index), which is the very defect being
     // guarded. Assert presence first, then the value.
     let obj = row.as_object().unwrap();
-    for key in ["mux", "crown", "crown_level"] {
+    for key in ["mux", "team", "crown_level"] {
         assert!(obj.contains_key(key), "row omits key: {key}");
         assert!(obj[key].is_null(), "key {key} should be null on a bare row");
     }

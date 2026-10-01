@@ -83,7 +83,7 @@ struct Receipt {
 fn render_request(request: &Request) -> Result<Receipt, String> {
     let graph = backlog_view::graph_path();
     // No roster here: the snapshot records claims and columns, never live
-    // dots or crowns, which are roster facts the served board answers live.
+    // dots or teams, which are roster facts the served board answers live.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

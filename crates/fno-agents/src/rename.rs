@@ -159,8 +159,8 @@ pub fn request(params: &mut Map<String, Value>, positional: &[String]) -> Result
     Ok(())
 }
 
-/// Rename a registry label and, when the session holds a named live crown,
-/// its crown record in the same RPC.
+/// Rename a registry label and, when the session holds a named live team,
+/// its team record in the same RPC.
 pub(crate) fn respond(
     home: &crate::paths::AgentsHome,
     req: &crate::protocol::Request,
@@ -201,22 +201,22 @@ pub(crate) fn respond(
     };
     let old_label = source.name.clone();
     let session = source.harness_session_id.clone();
-    let crown = match session.as_deref() {
-        Some(session) => match crate::crown_names::rename_crown(
-            &home.crown_names_json(),
+    let team = match session.as_deref() {
+        Some(session) => match crate::team_names::rename_team(
+            &home.team_names_json(),
             &registry_path,
             session,
             new_name,
             false,
         ) {
-            Ok(crown) => crown,
+            Ok(team) => team,
             Err(error) => {
                 return Response::err(req.id, ErrorCode::InvalidParams, error);
             }
         },
         None => None,
     };
-    let label = if crown.is_some() {
+    let label = if team.is_some() {
         new_name.to_ascii_lowercase()
     } else {
         new_name.to_string()
@@ -225,21 +225,21 @@ pub(crate) fn respond(
         Ok(result) => result,
         Err(error) => return Response::err(req.id, ErrorCode::Internal, error),
     };
-    let crown = match (crown, session.as_deref()) {
+    let team = match (team, session.as_deref()) {
         (Some(_), Some(session)) => {
-            let result = crate::crown_names::rename_crown(
-                &home.crown_names_json(),
+            let result = crate::team_names::rename_team(
+                &home.team_names_json(),
                 &registry_path,
                 session,
                 new_name,
                 true,
             )
-            .and_then(|crown| {
-                crown.ok_or_else(|| "the named live crown changed before rename".to_string())
+            .and_then(|team| {
+                team.ok_or_else(|| "the named live team changed before rename".to_string())
             });
             match result {
-                Ok(crown) => Some(crown),
-                Err(crown_error) => {
+                Ok(team) => Some(team),
+                Err(team_error) => {
                     let rollback =
                         crate::state::rename_agent(&registry_path, session, &old_label, None);
                     let rollback_result = match rollback {
@@ -249,7 +249,7 @@ pub(crate) fn respond(
                     return Response::err(
                         req.id,
                         ErrorCode::Internal,
-                        format!("crown rename failed: {crown_error}; {rollback_result}"),
+                        format!("team rename failed: {team_error}; {rollback_result}"),
                     );
                 }
             }
@@ -279,12 +279,12 @@ pub fn receipt(name: &str, result: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("(unknown)");
     let mut receipt = format!("renamed {old} -> {new}");
-    if let Some(crown) = result.get("crown") {
+    if let Some(team) = result.get("crown") {
         if let (Some(from), Some(to)) = (
-            crown.get("from").and_then(Value::as_str),
-            crown.get("to").and_then(Value::as_str),
+            team.get("from").and_then(Value::as_str),
+            team.get("to").and_then(Value::as_str),
         ) {
-            receipt.push_str(&format!("; crown {from} -> {to}"));
+            receipt.push_str(&format!("; team {from} -> {to}"));
         }
     }
     Some(receipt)
@@ -491,32 +491,32 @@ mod tests {
     }
 
     #[test]
-    fn a_crowned_codex_rename_shows_one_name_everywhere() {
+    fn a_teamed_codex_rename_shows_one_name_everywhere() {
         use crate::protocol::{Request, ResponsePayload};
 
-        let dir = tmpdir("crowned-rename");
+        let dir = tmpdir("teamed-rename");
         let home = AgentsHome::at(&dir);
         let session = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
         let other_session = "01a0ee3f-235d-7671-8fbb-e09af1d5fb53";
         crate::state::update_registry(&home.registry_json(), |registry| {
-            let mut crowned = row("kestrel", session);
-            crowned.harness = Some("codex".into());
-            crowned.status = crate::AgentStatus::Ready;
-            crowned.crown_scope = Some("x-test".into());
-            crowned.crown_level = Some(2);
+            let mut teamed = row("kestrel", session);
+            teamed.harness = Some("codex".into());
+            teamed.status = crate::AgentStatus::Ready;
+            teamed.crown_scope = Some("x-test".into());
+            teamed.crown_level = Some(2);
             let mut other = row("raven", other_session);
             other.harness = Some("codex".into());
             other.status = crate::AgentStatus::Ready;
             other.crown_scope = Some("y-test".into());
             other.crown_level = Some(2);
-            registry.entries = vec![crowned, other];
+            registry.entries = vec![teamed, other];
         })
         .unwrap();
         std::fs::write(
-            home.crown_names_json(),
+            home.team_names_json(),
             serde_json::json!({
                 "version": 1,
-                "crowns": {
+                "teams": {
                     "x-test": {
                         "name": "Kestrel",
                         "regnal": 2,
@@ -538,7 +538,7 @@ mod tests {
         .unwrap();
 
         let before_registry = std::fs::read(home.registry_json()).unwrap();
-        let before_crowns = std::fs::read(home.crown_names_json()).unwrap();
+        let before_teams = std::fs::read(home.team_names_json()).unwrap();
         let duplicate = respond(
             &home,
             &Request::new(
@@ -548,7 +548,7 @@ mod tests {
             ),
         );
         let ResponsePayload::Err(error) = duplicate.payload else {
-            panic!("duplicate crown name was accepted");
+            panic!("duplicate team name was accepted");
         };
         assert!(error
             .message
@@ -558,18 +558,18 @@ mod tests {
             before_registry
         );
         assert_eq!(
-            std::fs::read(home.crown_names_json()).unwrap(),
-            before_crowns
+            std::fs::read(home.team_names_json()).unwrap(),
+            before_teams
         );
         crate::state::update_registry(&home.registry_json(), |registry| {
             registry.entries.retain(|entry| entry.name != "raven");
         })
         .unwrap();
         std::fs::write(
-            home.crown_names_json(),
+            home.team_names_json(),
             serde_json::json!({
                 "version": 1,
-                "crowns": {
+                "teams": {
                     "x-test": {
                         "name": "Kestrel",
                         "regnal": 2,
@@ -596,7 +596,7 @@ mod tests {
         };
         assert_eq!(
             receipt("kestrel", &result).as_deref(),
-            Some("renamed kestrel -> bob; crown Kestrel II -> Bob")
+            Some("renamed kestrel -> bob; team Kestrel II -> Bob")
         );
 
         let registry = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -607,12 +607,12 @@ mod tests {
             .unwrap();
         assert!(renamed.aliases.iter().any(|alias| alias == "kestrel"));
         let record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(home.crown_names_json()).unwrap()).unwrap();
-        assert_eq!(record["crowns"]["x-test"]["name"], "bob");
-        assert_eq!(record["crowns"]["x-test"]["regnal"], 1);
-        assert_eq!(record["crowns"]["x-test"]["holder_session"], session);
-        assert!(crate::crown_names::ensure_named_crown(
-            &home.crown_names_json(),
+            serde_json::from_slice(&std::fs::read(home.team_names_json()).unwrap()).unwrap();
+        assert_eq!(record["teams"]["x-test"]["name"], "bob");
+        assert_eq!(record["teams"]["x-test"]["regnal"], 1);
+        assert_eq!(record["teams"]["x-test"]["holder_session"], session);
+        assert!(crate::team_names::ensure_named_team(
+            &home.team_names_json(),
             &home.registry_json(),
             "x-test"
         )
@@ -628,16 +628,16 @@ mod tests {
         .unwrap();
         assert!(envelope.contains("from_name=\"bob\""));
         assert_eq!(
-            crate::king_checkin::title_rename_command("codex", "bob", None),
+            crate::lead_checkin::title_rename_command("codex", "bob", None),
             None
         );
         assert_eq!(
-            crate::king_checkin::title_rename_command("claude", "bob", None).as_deref(),
+            crate::lead_checkin::title_rename_command("claude", "bob", None).as_deref(),
             Some("/rename bob")
         );
 
         let before_registry = std::fs::read(home.registry_json()).unwrap();
-        let before_crowns = std::fs::read(home.crown_names_json()).unwrap();
+        let before_teams = std::fs::read(home.team_names_json()).unwrap();
         let refused = respond(
             &home,
             &Request::new(
@@ -652,8 +652,8 @@ mod tests {
             before_registry
         );
         assert_eq!(
-            std::fs::read(home.crown_names_json()).unwrap(),
-            before_crowns
+            std::fs::read(home.team_names_json()).unwrap(),
+            before_teams
         );
         std::fs::remove_dir_all(&dir).ok();
     }

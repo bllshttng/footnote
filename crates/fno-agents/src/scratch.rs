@@ -94,7 +94,7 @@ const RULES: &[Rule] = &[
     ]),
     // 6. Is this worker alive.
     rule!("liveness", [
-        "getmtime|stat -f|ps (aux|-o|-p|-ef|ax|-A|-eo)|pgrep|kill -0|os\\.kill|lsof|claude agents --json|registry\\.json|registry-json|/claims/|agents/registry|fno agents (top|list|court|status|reap|rm|stop)",
+        "getmtime|stat -f|ps (aux|-o|-p|-ef|ax|-A|-eo)|pgrep|kill -0|os\\.kill|lsof|claude agents --json|registry\\.json|registry-json|/claims/|agents/registry|fno agents (top|list|org|status|reap|rm|stop)",
     ]),
     // 7. Transcript search and tail.
     rule!("transcript", [
@@ -175,7 +175,7 @@ pub fn classify(content: &str) -> Option<&'static str> {
 }
 
 /// Cross-cutting attributes riding beside whatever shape the file is:
-/// (monitor, oneoff_probe). Monitors are the reign-mandated emit-on-change
+/// (monitor, oneoff_probe). Monitors are the lead-mandated emit-on-change
 /// loops; oneoff probes announce themselves in their first comment.
 pub fn attributes(content: &str) -> (bool, bool) {
     let monitor = {

@@ -68,7 +68,7 @@
 #      that eight rounds of hand-written cases missed. Read-only rglob over
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
-#      hooks/king-delegation-guard.sh compares write paths a crowned session
+#      hooks/lead-delegation-guard.sh compares write paths a teamed session
 #      hands it against the ~/.claude/projects prefix too: auto-memory is
 #      Claude Code's own file store, so the memory carveout must name that
 #      root to allow exactly it and nothing wider. Comparison only; no
@@ -340,7 +340,7 @@ crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/daemon_tests.rs
 crates/fno-agents/src/finalize.rs
-crates/fno-agents/src/hook/king_guard.rs
+crates/fno-agents/src/hook/lead_guard.rs
 crates/fno-agents/src/hook/stop.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
@@ -369,7 +369,7 @@ hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
 hooks/claude-config-write-guard.sh
 hooks/corrections-git-postcommit.sh
-hooks/king-delegation-guard.sh
+hooks/lead-delegation-guard.sh
 hooks/session-start.sh
 hooks/target-stop-hook.sh
 hooks/worktree-setup.sh

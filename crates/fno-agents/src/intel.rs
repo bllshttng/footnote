@@ -324,7 +324,7 @@ fn session_join(fno_dir: &Path) -> HashMap<String, (Vec<String>, Option<String>,
 
 /// The bus log path, mirroring the env order every bus reader shares
 /// (FNO_BUS_DIR, then FNO_INBOX_ROOT, else `<fno>/bus/messages.jsonl`). The
-/// config.paths.bus_dir template override is the gap king_board.rs already
+/// config.paths.bus_dir template override is the gap org_board.rs already
 /// documents.
 pub(crate) fn bus_log_path(fno_dir: &Path) -> PathBuf {
     if let Some(dir) = std::env::var("FNO_BUS_DIR").ok().filter(|v| !v.is_empty()) {
@@ -721,7 +721,7 @@ fn harness_total(s: &SessionRow) -> u64 {
 /// CLI entry: the flag parse, the env-resolved inputs, the one output.
 pub fn run_intel(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--windows") {
-        return crate::reign_eval::run(args);
+        return crate::lead_eval::run(args);
     }
     if args.iter().any(|a| a == "--fleet") {
         return crate::fleet_load::run_fleet_cli(args);
@@ -739,7 +739,7 @@ pub fn run_intel(args: &[String]) -> i32 {
              [--project NAME]... [--all-projects] [--sample N|all]\n\
              [--categories <run> --fold <saved fold JSON>] [--render <report.md>]\n\
              [--readers <secs>] [--every-ms N] (CPU-seconds per process class over a window)\n\
-             [--windows --session <id>|--crown <scope>] [--since DATE] [--until DATE] [--write [dir]]\n\n\
+             [--windows --session <id>|--team <scope>] [--since DATE] [--until DATE] [--write [dir]]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
              row addressed to the session. Tokens, lines, tool errors, languages,\n\
@@ -995,7 +995,7 @@ fn selected_harnesses(spec: &[String]) -> Vec<&'static str> {
 /// when the project config sets `paths.worktrees_base`. Deduplicated,
 /// order-preserving.
 fn project_roots(name: &str, cwd: &Path, fno_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let map = crate::king_board::scope::project_map(cwd).unwrap_or_default();
+    let map = crate::org_board::scope::project_map(cwd).unwrap_or_default();
     let unknown = |map: &std::collections::HashMap<String, String>| {
         let known: std::collections::BTreeSet<&str> = map.values().map(String::as_str).collect();
         format!(

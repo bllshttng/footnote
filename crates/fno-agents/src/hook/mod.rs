@@ -3,14 +3,14 @@
 //! The two shell hooks (Stop, PreToolUse) become 20-line exec wrappers of
 //! these entries: the policy they carried in shell + Python + jq moves here,
 //! so a fire costs one process instead of five CLI startups plus interpreter
-//! spins (measured 9.3s of a 9.9s court trace at `hooks/king-delegation-guard.sh`
+//! spins (measured 9.3s of a 9.9s org trace at `hooks/lead-delegation-guard.sh`
 //! before the port). Transport, not client verbs: dispatched in `main()`
 //! before the tokio runtime builds, never in `run`, so the verb-surface
 //! ratchet never sees them (shrink law d-fe66560a).
 
 pub mod bin_install_guard;
 pub mod edit_integrity;
-pub mod king_guard;
+pub mod lead_guard;
 pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;
@@ -29,7 +29,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
-        Some("king-guard") => king_guard::run(&args[1..]),
+        Some("lead-guard") => lead_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
@@ -38,7 +38,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, subagent-worktree-guard, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, pipe-guard, pretooluse-bash, prompt, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }
@@ -46,7 +46,7 @@ pub fn dispatch(args: &[String]) -> i32 {
 }
 
 /// The resolved events path's parent: the space the hooks key their counters,
-/// king manifests and journals off. `FNO_EVENTS_PATH` wins exactly as it does
+/// lead manifests and journals off. `FNO_EVENTS_PATH` wins exactly as it does
 /// for `fno-agents state path events`, so a pinned test sees a pinned space.
 pub(crate) fn events_space(cwd: &std::path::Path) -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
@@ -105,7 +105,7 @@ pub(crate) fn emit_block(reason: &str) -> i32 {
 /// One control-plane arm row for this fire. The row carries the fire's
 /// session id: `emit_tick` writes one row per SPACE with no session key of
 /// its own, so a reader of `fno agents status` sees only the space's newest
-/// fire and cannot tell a king's own row from a neighbor's - the misread
+/// fire and cannot tell a lead's own row from a neighbor's - the misread
 /// that once sent a drain-reserve fix chasing a driver=target
 /// misclassification for days.
 pub(crate) fn global_events_path(fallback: &Path) -> PathBuf {

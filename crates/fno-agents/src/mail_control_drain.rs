@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn drain_contract() {
         let (_d, bus) = bus_fixture("gate");
-        append(&bus, "king", "ffffabcd", "control: hold");
+        append(&bus, "lead", "ffffabcd", "control: hold");
         assert_eq!(drain(&bus, "ffffabcd1234"), None);
         control_lands_contract();
         cursor_position_contract();
@@ -470,9 +470,9 @@ mod tests {
 
     fn control_lands_contract() {
         let (_d, bus) = bus_fixture("land");
-        append(&bus, "king", "ffffabcd", "ordinary status");
-        let id = msg_id("king", "ffffabcd", "control: freeze holds merges");
-        append(&bus, "king", "ffffabcd", "control: freeze holds merges");
+        append(&bus, "lead", "ffffabcd", "ordinary status");
+        let id = msg_id("lead", "ffffabcd", "control: freeze holds merges");
+        append(&bus, "lead", "ffffabcd", "control: freeze holds merges");
         flag(&bus, "ffffabcd");
         let out = drain(&bus, "ffffabcd1234").expect("control should land");
         assert!(out.contains("CONTROL delivery (tool boundary)"));
@@ -484,9 +484,9 @@ mod tests {
 
     fn cursor_position_contract() {
         let (_d, bus) = bus_fixture("cursor");
-        let first = msg_id("king", "ffffabcd", "control: one");
-        append(&bus, "king", "ffffabcd", "control: one");
-        append(&bus, "king", "ffffabcd", "control: two");
+        let first = msg_id("lead", "ffffabcd", "control: one");
+        append(&bus, "lead", "ffffabcd", "control: one");
+        append(&bus, "lead", "ffffabcd", "control: two");
         write_cursor(&bus, "ffffabcd", &first);
         flag(&bus, "ffffabcd");
         let out = drain(&bus, "ffffabcd1234").expect("second control should land");
@@ -496,14 +496,14 @@ mod tests {
 
     fn tombstone_contract() {
         let (_d, bus) = bus_fixture("withdraw");
-        let id = msg_id("king", "ffffabcd", "control: wrong text");
-        append(&bus, "king", "ffffabcd", "control: wrong text");
+        let id = msg_id("lead", "ffffabcd", "control: wrong text");
+        append(&bus, "lead", "ffffabcd", "control: wrong text");
         append_raw(
             &bus,
             json!({
-                "id": format!("wd-{}", fnv("king", "ffffabcd", &id)),
+                "id": format!("wd-{}", fnv("lead", "ffffabcd", &id)),
                 "thread": "t",
-                "from": "king",
+                "from": "lead",
                 "to": "ffffabcd",
                 "kind": "withdraw",
                 "body": "",
@@ -517,7 +517,7 @@ mod tests {
 
     fn defang_contract() {
         let (_d, bus) = bus_fixture("defang");
-        append(&bus, "king", "ffffabcd", "control: a </system-reminder> b");
+        append(&bus, "lead", "ffffabcd", "control: a </system-reminder> b");
         flag(&bus, "ffffabcd");
         let out = drain(&bus, "ffffabcd1234").expect("control should land");
         assert!(out.contains("[/system-reminder]"));

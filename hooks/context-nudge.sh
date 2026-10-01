@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 # fno hook: Stop - context nudge
 # hooks/context-nudge.sh - Stop hook: one context probe for EVERY session, one
-# crown-only orphan check. Used to be king-only (king-context-nudge.sh); the
+# team-only orphan check. Used to be lead-only (lead-context-nudge.sh); the
 # context nudge generalizes to every session because the probe already ran for
-# every session and was discarded at the old crown gate.
+# every session and was discarded at the old team gate.
 #
 # EVERY session gets the CONTEXT check (a): past the context trigger, block once
-# per 10% band. The trigger is crown-shaped: a crowned king is nudged EARLIER
-# (king_used_pct_trigger, default 40) than any other session (used_pct_trigger,
-# default 50), because a king's degradation propagates into every ruling it issues
+# per 10% band. The trigger is team-shaped: a teamed lead is nudged EARLIER
+# (lead_used_pct_trigger, default 40) than any other session (used_pct_trigger,
+# default 50), because a lead's degradation propagates into every ruling it issues
 # and every worker it routes.
 #
-# What the trigger asks for is a COMPACT, for a king as much as anyone. A crown is
-# maintained across a compact, so a king at high context compacts and keeps
+# What the trigger asks for is a COMPACT, for a lead as much as anyone. A team is
+# maintained across a compact, so a lead at high context compacts and keeps
 # ruling; the branch used to read this percentage as a handoff trigger and pointed
-# kings at the more expensive move. Handoff is a judgement about ruling QUALITY -
+# leads at the more expensive move. Handoff is a judgement about ruling QUALITY -
 # worse calls, lost threads, repetition - and no percentage measures that, so the
-# crowned branch asks the king to assess its own rulings and attaches no number to
+# teamed branch asks the lead to assess its own rulings and attaches no number to
 # the answer. The concrete cost that makes compact the default: a successor gets a
 # NEW mail handle, orphaning every worker still holding the old one.
 #
-# A CROWNED king additionally gets the ORPHAN check (b): did it spawn workers
-# that are still live with no resolution recorded? A reign that spawns workers
+# A TEAMED lead additionally gets the ORPHAN check (b): did it spawn workers
+# that are still live with no resolution recorded? A lead that spawns workers
 # cannot be a pure pass: abdicating now leaves them nobody to mail at review.
-# Check (b) is crown-only; only check (a) generalizes.
+# Check (b) is team-only; only check (a) generalizes.
 #
 # Both BLOCK (the only Stop output documented to reach the model on Claude and
 # Codex; an allow's systemMessage is informational-only / lost on Codex) and
-# emit an event (session_context_nudge / king_context_nudge / king_orphan_block)
+# emit an event (session_context_nudge / lead_context_nudge / lead_orphan_block)
 # so `fno doctor event audit` can prove the hook actually fired in a real session. That
 # arming proof is the one question its predecessor (arm-handoff-precompact.sh,
 # gated on a pid dead ~1s after init) could never answer.
@@ -35,8 +35,8 @@
 # The context check does NOT depend on the registry. The probe (`fno-agents context-run --probe`)
 # is the only truthful pressure source: it counts tokens from the transcript and
 # owns its denominator. The registry is BEST-EFFORT here, used only to pick the
-# king trigger + king message and to run the orphan check. A missing row or an
-# unreadable registry is treated as non-crowned, which still nudges only on REAL
+# lead trigger + lead message and to run the orphan check. A missing row or an
+# unreadable registry is treated as non-teamed, which still nudges only on REAL
 # transcript pressure, so a registry problem can never produce a false handoff.
 # This is why context pressure has ONE measurement path; a second-hand percentage
 # whose denominator we cannot see was deleted from spend-drift-monitor.js for cause.
@@ -48,8 +48,8 @@
 #
 # What it must NOT gate on (the arm-handoff lesson, AC9): no pid-liveness probe
 # (a pid can only prove life, never death, and the init wrapper pid died ~1s
-# after init), no read of the target manifest (a king pass has none, so keying
-# on one would deliver this to zero kings), no reconstructed session identity.
+# after init), no read of the target manifest (a lead pass has none, so keying
+# on one would deliver this to zero leads), no reconstructed session identity.
 # Every GATING signal here is either handed to the hook in its payload
 # (transcript_path, session_id) or read from live external state (the registry,
 # the carveout ledger, config) at fire time. The one place that does touch ambient
@@ -116,14 +116,14 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | sed -n \
 # never consume each other's latch (same fix target-stop-hook applied).
 TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
 
-# ── 2. Both triggers from config (general 50, king 40). ───────────────────────
+# ── 2. Both triggers from config (general 50, lead 40). ───────────────────────
 GENERAL_TRIGGER="50"
-KING_TRIGGER="40"
+LEAD_TRIGGER="40"
 if command -v fno >/dev/null 2>&1; then
     # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
     # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
     # hook that wants two numbers from one block asks for the block.
-    # stdout is `{"enabled":...,"used_pct_trigger":50,"king_used_pct_trigger":40}`;
+    # stdout is `{"enabled":...,"used_pct_trigger":50,"lead_used_pct_trigger":40}`;
     # provenance goes to stderr. sed, not jq: jq is optional in this hook.
     _blk=$(with_timeout 3 fno config get target.handoff 2>/dev/null || true)
     _t=$(printf '%s' "$_blk" | sed -n 's/.*"used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
@@ -131,10 +131,10 @@ if command -v fno >/dev/null 2>&1; then
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
         *) GENERAL_TRIGGER="$_t" ;;
     esac
-    _t=$(printf '%s' "$_blk" | sed -n 's/.*"king_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"lead_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 40
-        *) KING_TRIGGER="$_t" ;;
+        *) LEAD_TRIGGER="$_t" ;;
     esac
 fi
 
@@ -185,18 +185,18 @@ if command -v jq >/dev/null 2>&1; then
     esac
 fi
 
-# ── 4. Registry read (BEST-EFFORT): crown + live children. ────────────────────
+# ── 4. Registry read (BEST-EFFORT): team + live children. ────────────────────
 # `fno agents registry-json` is a daemon-free file read (load_registry), NOT
 # `fno agents list` (which is Rust-routed and lazy-starts the daemon for
 # live-status enrichment - a Stop hook must never stall on a daemon start).
-# Emits structured crown_level/crown_scope/spawned_by_session per row.
+# Emits structured team_level/team_scope/spawned_by_session per row.
 #
 # BEST-EFFORT: a missing/unreadable registry or a session with no row is treated
-# as non-crowned. The context check still fires at the general trigger on REAL
-# pressure; the orphan check (crown-only) is skipped. The registry refines WHICH
+# as non-teamed. The context check still fires at the general trigger on REAL
+# pressure; the orphan check (team-only) is skipped. The registry refines WHICH
 # trigger and message apply; it is never the source of pressure truth.
-CROWN_LEVEL=""
-CROWN_SCOPE=""
+TEAM_LEVEL=""
+TEAM_SCOPE=""
 ORPHANS=""
 ORPHAN_COUNT=0
 ORPHAN_UNKNOWN=""
@@ -208,16 +208,16 @@ UNLINKED_UNKNOWN_COUNT=0
 if command -v fno >/dev/null 2>&1; then
     AGENTS_JSON=$(with_timeout 5 fno agents registry-json 2>/dev/null || true)
     if printf '%s' "$AGENTS_JSON" | jq -e '.agents' >/dev/null 2>&1; then
-        # This session's row (by session_id). No row -> non-crowned (not an exit).
+        # This session's row (by session_id). No row -> non-teamed (not an exit).
         MY_ROW=$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SESSION_ID" \
             '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)
         if [[ -n "$MY_ROW" ]]; then
-            CROWN_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)
-            CROWN_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
+            TEAM_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.team_level // empty' 2>/dev/null)
+            TEAM_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.team_scope // empty' 2>/dev/null)
         fi
-        # Active children this session spawned. Computed ONLY when crowned: the
-        # orphan check below is crown-only, so scanning the registry for children
-        # on every non-king Stop (the common case) is wasted work on a hot path.
+        # Active children this session spawned. Computed ONLY when teamed: the
+        # orphan check below is team-only, so scanning the registry for children
+        # on every non-lead Stop (the common case) is wasted work on a hot path.
         # The stored `status` word lies (a dead row can read `live`
         # indefinitely), so this reads the SERVED `liveness` field instead -
         # `fno agents registry-json` derives it from the freshness rule
@@ -226,7 +226,7 @@ if command -v fno >/dev/null 2>&1; then
         # unresolved, not alive: it is reported separately and never silently
         # folded into either the alive count or a dropped-dead bucket, so a
         # broken reader can never clear this guard by going quiet.
-        if [[ -n "$CROWN_LEVEL" ]]; then
+        if [[ -n "$TEAM_LEVEL" ]]; then
             # One jq call per bucket, emitting the name list then the count as
             # two output lines from the same filtered array - the count is
             # `length` of the identical `select(...)`, so a second jq pass
@@ -254,11 +254,11 @@ if command -v fno >/dev/null 2>&1; then
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
+                    and ((.team_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and .liveness == "alive"
                     # a door-stamped row names its owner (mission,
-                    # crown, operator or test run); it is owned autonomous
+                    # team, operator or test run); it is owned autonomous
                     # work, never an unlinked orphan. No provenance at all
                     # stays a visible defect here.
                     and ((.spawn_provenance // null) == null)
@@ -271,11 +271,11 @@ if command -v fno >/dev/null 2>&1; then
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
+                    and ((.team_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.liveness != "alive" and .liveness != "dead")
                     # a door-stamped row names its owner (mission,
-                    # crown, operator or test run); it is owned autonomous
+                    # team, operator or test run); it is owned autonomous
                     # work, never an unlinked orphan. No provenance at all
                     # stays a visible defect here.
                     and ((.spawn_provenance // null) == null)
@@ -288,14 +288,14 @@ if command -v fno >/dev/null 2>&1; then
     fi
 fi
 
-# Crowned -> king trigger (40) + king posture; every other session -> general
-# trigger (50). The crown determination is best-effort (above); a registry miss
+# Teamed -> lead trigger (40) + lead posture; every other session -> general
+# trigger (50). The team determination is best-effort (above); a registry miss
 # means the general trigger, never a skipped nudge on real pressure.
-IS_KING=0
+IS_LEAD=0
 EFFECTIVE_TRIGGER="$GENERAL_TRIGGER"
-if [[ -n "$CROWN_LEVEL" ]]; then
-    IS_KING=1
-    EFFECTIVE_TRIGGER="$KING_TRIGGER"
+if [[ -n "$TEAM_LEVEL" ]]; then
+    IS_LEAD=1
+    EFFECTIVE_TRIGGER="$LEAD_TRIGGER"
 fi
 
 # ── 5. Band index (shared by both latches). No reading -> band "0" so the ─────
@@ -442,7 +442,7 @@ fi
 if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     touch "$CTX_LATCH" 2>/dev/null || true
     # Measured ONCE per fire, inside the latch, and shared by both branches: both
-    # ask for a compact and the answer does not depend on the crown. Outside the
+    # ask for a compact and the answer does not depend on the team. Outside the
     # latch this would probe on every Stop.
     if [[ "${FNO_HARNESS:-}" == "codex" || -n "${CODEX_THREAD_ID:-}" ]]; then
         if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
@@ -453,24 +453,24 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     else
         _compact_ask="$(compact_instruction)"
     fi
-    if [[ "$IS_KING" -eq 1 ]]; then
-        emit_event "king_context_nudge" \
-            "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
-        # Roll up the king's neighbourhood from the same registry read (no second
+    if [[ "$IS_LEAD" -eq 1 ]]; then
+        emit_event "lead_context_nudge" \
+            "{\"used_pct\":${USED_PCT},\"trigger\":${LEAD_TRIGGER},\"team_level\":${TEAM_LEVEL},\"team_scope\":\"${TEAM_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
+        # Roll up the lead's neighbourhood from the same registry read (no second
         # source). Workers are counted by the orphan check below; peers and the
-        # king above derive the same way, so the nudge states the roll-up instead
-        # of asking the king to reconstruct it. Superset is approximate (my scope
+        # lead above derive the same way, so the nudge states the roll-up instead
+        # of asking the lead to reconstruct it. Superset is approximate (my scope
         # starts with theirs); it degrades to silence, never to a wrong claim.
-        PEER_KINGS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
-            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
-        KING_ABOVE=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
-            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s and ($s | startswith(.crown_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
+        PEER_LEADS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$TEAM_SCOPE" \
+            '[.agents[] | select((.team_level // 0) > 0 and (.team_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
+        LEAD_ABOVE=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$TEAM_SCOPE" \
+            '[.agents[] | select((.team_level // 0) > 0 and (.team_scope // "") != $s and ($s | startswith(.team_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
         _rollup=""
-        [[ "$PEER_KINGS" =~ ^[0-9]+$ && "$PEER_KINGS" -gt 0 ]] && _rollup=" ${PEER_KINGS} peer king(s) also in flight."
-        [[ "$KING_ABOVE" =~ ^[0-9]+$ && "$KING_ABOVE" -gt 0 ]] && _rollup="${_rollup} A king above holds your scope."
+        [[ "$PEER_LEADS" =~ ^[0-9]+$ && "$PEER_LEADS" -gt 0 ]] && _rollup=" ${PEER_LEADS} peer lead(s) also in flight."
+        [[ "$LEAD_ABOVE" =~ ^[0-9]+$ && "$LEAD_ABOVE" -gt 0 ]] && _rollup="${_rollup} A lead above holds your scope."
         # On a FIRST compaction the canon doc does not exist yet - PreCompact
-        # creates it, and PreCompact cannot run a model to ask the king
-        # anything - so telling the king to "fill" headings that are not on
+        # creates it, and PreCompact cannot run a model to ask the lead
+        # anything - so telling the lead to "fill" headings that are not on
         # disk yet is a no-op. Give the exact path and the literal heading
         # text instead: precompact-canon-doc.sh binds a session block to the
         # "## <heading>" line just above its marker, not to file position, so
@@ -478,43 +478,43 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # doc already exists or not.
         CANON_DOC=""
         if command -v fno >/dev/null 2>&1; then
-            # The same door precompact-canon-doc.sh uses: a scoped crown's
+            # The same door precompact-canon-doc.sh uses: a scoped team's
             # rolling doc is scope-keyed, so this ask must name THAT file or
-            # the king's judgment lands where the pipeline never reads.
-            if [[ -n "$CROWN_SCOPE" ]]; then
-                CANON_DOC=$(with_timeout 3 fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
+            # the lead's judgment lands where the pipeline never reads.
+            if [[ -n "$TEAM_SCOPE" ]]; then
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --scope "${TEAM_SCOPE}" 2>/dev/null | head -1 || true)
             else
                 CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
         fi
-        _king_doc_ask="fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
+        _lead_doc_ask="fill its two team-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
         if [[ -n "$CANON_DOC" ]]; then
-            _king_doc_ask="write (or append) this into ${CANON_DOC} yourself before you compact, even if that file does not exist yet - the hook binds each block by its heading text, not by file position, so this survives regardless: '## Gaps and open thinking (session)' then a line '<!-- fno:session -->', then your own text, then '<!-- /fno:session -->'; repeat the same shape with heading '## Workarounds in force (session)'. Nothing else knows what only you hold."
+            _lead_doc_ask="write (or append) this into ${CANON_DOC} yourself before you compact, even if that file does not exist yet - the hook binds each block by its heading text, not by file position, so this survives regardless: '## Gaps and open thinking (session)' then a line '<!-- fno:session -->', then your own text, then '<!-- /fno:session -->'; repeat the same shape with heading '## Workarounds in force (session)'. Nothing else knows what only you hold."
         fi
-        # A crown SURVIVES a compact, so this percentage is not a handoff trigger
-        # for a king; it is a compact trigger. The nudge says that plainly rather
-        # than pointing a king at the more expensive of the two moves. Handoff is a
+        # A team SURVIVES a compact, so this percentage is not a handoff trigger
+        # for a lead; it is a compact trigger. The nudge says that plainly rather
+        # than pointing a lead at the more expensive of the two moves. Handoff is a
         # judgement about ruling quality, so it is written as a self-assessment and
         # deliberately carries no number.
         #
         # The rung is NOT printed. Rung semantics changed when succession moved
         # into spawn and pre-existing rows were never migrated, so a stored level
-        # is stale for any king stamped before that. The scope is unambiguous and
-        # says everything the king needs. The event above still records the stored
+        # is stale for any lead stamped before that. The scope is unambiguous and
+        # says everything the lead needs. The event above still records the stored
         # level: that is a snapshot for whoever migrates the rows, and no session
         # acts on it.
         _compact_action="COMPACT AND KEEP RULING"
         if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
             _compact_action="PREPARE TO COMPACT AND KEEP RULING; do not compact until the action band"
         fi
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to ${_compact_action}. ${_compact_ask} The PreCompact hook writes your crown, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_king_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the team over ${TEAM_SCOPE}. A team is maintained across a compact - your team, session id, mail handle, and claims all come out the other side - so the move here is to ${_compact_action}. ${_compact_ask} The PreCompact hook writes your team, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_lead_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${TEAM_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the team in the same atomic write that vacates yours - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
         # Shape the ask by what already survives a compact. plan_path is read
         # lazily here - only on a real fire, not every Stop - and best-effort: a
         # missing read is the "neither" shape, never a skipped nudge. Reading it
-        # for wording (not gating) keeps the arm-handoff invariant intact: a king
+        # for wording (not gating) keeps the arm-handoff invariant intact: a lead
         # pass, which has no such manifest, still fires on real pressure above.
         PLAN_PATH=""
         if command -v fno >/dev/null 2>&1; then
@@ -533,63 +533,63 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
                 CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
             if [[ -n "$CANON_DOC" ]]; then
-                REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
+                REASON="${_compact_core} You have no plan and no team, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
             else
-                REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
+                REASON="${_compact_core} You have no plan and no team, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
             fi
         fi
     fi
 fi
 
-# ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
-if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 || "$UNLINKED_UNKNOWN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
-    # Resolution 1: the crown holder DECLARED this reign a court. Choosing
-    # court had no machine-visible act before `fno agents king shape` existed,
+# ── 7. Check (b): orphaned live children (TEAM-ONLY; latches INDEPENDENTLY). ─
+if [[ "$IS_LEAD" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 || "$UNLINKED_UNKNOWN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
+    # Resolution 1: the team holder DECLARED this lead a org. Choosing
+    # org had no machine-visible act before `fno agents lead shape` existed,
     # so this hook offered three options and could detect two - and the
     # cheapest way to silence it (the carveout, option 3) downgrades a live
     # teammate to advisory self-review. The shape field is the structured
-    # answer to option 1: a court with live workers is the ANSWERED case, and
-    # the nudge stays loud only for the unshaped reign walking away from them.
+    # answer to option 1: a org with live workers is the ANSWERED case, and
+    # the nudge stays loud only for the unshaped lead walking away from them.
     # Read failure leaves RESOLVED=0 (nag), matching the carveout posture
     # below: a broken reader never silently clears a guard.
     RESOLVED=0
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
-        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
+        LEAD_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents lead \
             manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
-        if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
-            KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
-            [[ "$KING_SHAPE" == "court" ]] && RESOLVED=1
+        if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
+            LEAD_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')
+            [[ "$LEAD_SHAPE" == "org" ]] && RESOLVED=1
         fi
     fi
     # Resolution 3: a carveout carrying THIS scope (structured field, not free
-    # text) means the king stated the orphaning and fell back to advisory
+    # text) means the lead stated the orphaning and fell back to advisory
     # self-review. Scope match is the discriminator, or any carveout silences it.
     if command -v fno >/dev/null 2>&1; then
         # --all is load-bearing: `carveout list` now scopes to the current
         # session by default, and this check must see a carveout filed by ANY
-        # session (the king that stated the orphaning is usually not this one).
+        # session (the lead that stated the orphaning is usually not this one).
         CARVEOUTS=$(with_timeout 3 fno backlog carveout list --all --json 2>/dev/null || true)
         # carveout list --json emits JSONL (one object per line), so stream-filter
         # rather than map (which needs an array). Structured .scope field match,
         # Only a RECENT carveout (last 24h) counts: a historical one from a
-        # previous reign must not permanently suppress orphan warnings for later
-        # reigns over the same scope. ISO-8601 UTC strings compare lexicographically.
+        # previous lead must not permanently suppress orphan warnings for later
+        # leads over the same scope. ISO-8601 UTC strings compare lexicographically.
         _cutoff=$(date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
             || date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '')
         if [[ -n "$_cutoff" ]]; then
-            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" --arg c "$_cutoff" \
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$TEAM_SCOPE" --arg c "$_cutoff" \
                 'select(.scope == $s and (.ts // "0") >= $c)' 2>/dev/null | grep -c . || true)
         else
-            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" \
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$TEAM_SCOPE" \
                 'select(.scope == $s)' 2>/dev/null | grep -c . || true)
         fi
         [[ "$_hit" =~ ^[0-9]+$ && "$_hit" -gt 0 ]] && RESOLVED=1
     fi
     if [[ "$RESOLVED" -eq 0 ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
-        emit_event "king_orphan_block" \
-            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this crown's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
+        emit_event "lead_orphan_block" \
+            "{\"team_level\":${TEAM_LEVEL},\"team_scope\":\"${TEAM_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
+        ORPHAN_REASON="You hold the team over ${TEAM_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this team's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A lead that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as org through the wave with 'fno agents lead shape org'; (2) hand the team to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${TEAM_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else
@@ -601,7 +601,7 @@ fi
 # ── 7b. Check (c): flush-cadence (work only in volatile state). ───────────────
 # Carveouts, filed nodes, PR bodies, commits and SUMMARY.md are written at the
 # END of a unit of work; a session that never reaches the end records nothing
-# (a reign can die mid-flight holding two PRs, unpushed, in a local worktree).
+# (a lead can die mid-flight holding two PRs, unpushed, in a local worktree).
 # git is only the code-vertical detector; the rule is vertical-agnostic - work
 # in volatile state moves to a durable store - so the check degrades to silence
 # when there is no repo (an active epic runs growth, marketing, finance and ops
@@ -642,7 +642,7 @@ fi
 if [[ "$FIRE_FLUSH" -eq 1 ]]; then
     # Whose dirt is this? A dirty count alone cannot tell this session's stale
     # work from a live foreign writer rooted in the same checkout (: a
-    # codex worker edited canonical before entering its worktree and two kings
+    # codex worker edited canonical before entering its worktree and two leads
     # were urged to commit its 351 mid-flight lines). The measurement runs only
     # inside FIRE_FLUSH, which the thresholds make rare, so the per-turn-end
     # cost is unchanged. Unmeasurable -> fail closed, never read as empty.

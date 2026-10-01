@@ -27,7 +27,7 @@ pub struct HookStatus {
     /// "matches" | "stale" | "unverifiable"
     pub stop: String,
     /// "matches" | "missing" | "not_shipped"
-    pub crown: String,
+    pub team: String,
     pub loaded: &'static str,
     pub runtime: &'static str,
     pub installed: bool,
@@ -96,12 +96,12 @@ impl HookStatus {
             ),
         };
         format!(
-            "file={} footnote={} {} stop={} crown={} -> {}",
+            "file={} footnote={} {} stop={} team={} -> {}",
             file,
             self.footnote,
             enabled,
             self.stop,
-            self.crown,
+            self.team,
             if self.installed {
                 "installed"
             } else {
@@ -112,10 +112,10 @@ impl HookStatus {
 }
 
 /// Read the hooks file's real state against the adapters this install
-/// ships. `adapter`/`crown` are the shipped adapter scripts; `None` means
+/// ships. `adapter`/`team` are the shipped adapter scripts; `None` means
 /// this install carries none, which reads `unverifiable`/`not_shipped`
 /// rather than a guess.
-pub fn status(hooks_file: &Path, adapter: Option<&Path>, crown: Option<&Path>) -> HookStatus {
+pub fn status(hooks_file: &Path, adapter: Option<&Path>, team: Option<&Path>) -> HookStatus {
     let mut s = HookStatus {
         file: "ok".to_string(),
         file_error: None,
@@ -124,7 +124,7 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, crown: Option<&Path>) -
         footnote: "absent".to_string(),
         enabled: true,
         stop: "unverifiable".to_string(),
-        crown: "not_shipped".to_string(),
+        team: "not_shipped".to_string(),
         loaded: "unverified",
         runtime: "unverified",
         installed: false,
@@ -168,7 +168,7 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, crown: Option<&Path>) -
         (Some(_), None) => "stale",
     }
     .to_string();
-    s.crown = match (crown, fn_map) {
+    s.team = match (team, fn_map) {
         (None, _) => "not_shipped",
         (Some(c), Some(map)) => {
             if has_handler(map.get("PreInvocation"), c) {
@@ -180,11 +180,11 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, crown: Option<&Path>) -
         (Some(_), None) => "missing",
     }
     .to_string();
-    s.installed = s.footnote == "configured" && s.stop == "matches" && s.crown != "missing";
+    s.installed = s.footnote == "configured" && s.stop == "matches" && s.team != "missing";
     s
 }
 
-/// Install footnote's Stop (and crown PreInvocation) handlers, preserving
+/// Install footnote's Stop (and team PreInvocation) handlers, preserving
 /// every other byte of structure: foreign top-level namespaces, foreign
 /// `footnote` keys, and `footnote.enabled` all survive. Refuses - writing
 /// nothing - on an unparseable file, a non-object root, or a non-object
@@ -192,7 +192,7 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, crown: Option<&Path>) -
 pub fn install(
     hooks_file: &Path,
     adapter: &Path,
-    crown: Option<&Path>,
+    team: Option<&Path>,
 ) -> Result<InstallReceipt, String> {
     let mut root = match read_root(hooks_file) {
         Root::Ok(map) => map,
@@ -232,7 +232,7 @@ pub fn install(
         "Stop".to_string(),
         json!([{"type": "command", "command": adapter.display().to_string(), "timeout": 60}]),
     );
-    if let Some(crown) = crown {
+    if let Some(team) = team {
         match fn_map.get("PreInvocation") {
             Some(Value::Array(_)) => {}
             None => {
@@ -246,7 +246,7 @@ pub fn install(
                 ))
             }
         }
-        let needs_append = !has_handler(fn_map.get("PreInvocation"), crown);
+        let needs_append = !has_handler(fn_map.get("PreInvocation"), team);
         if needs_append {
             let pre = fn_map
                 .get_mut("PreInvocation")
@@ -254,7 +254,7 @@ pub fn install(
                 .expect("array checked above");
             pre.push(json!({
                 "type": "command",
-                "command": crown.display().to_string(),
+                "command": team.display().to_string(),
                 "timeout": 30
             }));
         }
@@ -390,24 +390,24 @@ mod tests {
         );
     }
 
-    /// The crown PreInvocation handler is appended when absent and not
+    /// The team PreInvocation handler is appended when absent and not
     /// duplicated when present; other footnote keys survive.
     #[test]
-    fn crown_appended_once_and_other_keys_survive() {
+    fn team_appended_once_and_other_keys_survive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
-        let crown = Path::new("/plugin/hooks/agy-crown-inject.sh");
+        let team = Path::new("/plugin/hooks/agy-team-inject.sh");
         std::fs::write(&path, r#"{"footnote": {"Stop": [], "note": "keep me"}}"#).unwrap();
         let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        install(&path, adapter, Some(crown)).expect("install");
-        install(&path, adapter, Some(crown)).expect("second install");
+        install(&path, adapter, Some(team)).expect("install");
+        install(&path, adapter, Some(team)).expect("second install");
         let data: Value = serde::de::Deserialize::deserialize(
             &mut serde_json::Deserializer::from_str(&std::fs::read_to_string(&path).unwrap()),
         )
         .unwrap();
         let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
-        assert_eq!(pre.len(), 1, "crown appended once");
-        assert_eq!(pre[0]["command"], crown.display().to_string());
+        assert_eq!(pre.len(), 1, "team appended once");
+        assert_eq!(pre[0]["command"], team.display().to_string());
         assert_eq!(data["footnote"]["note"], "keep me");
     }
 

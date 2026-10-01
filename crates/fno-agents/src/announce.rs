@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 
 /// Terminal registry statuses (registry.py::TERMINAL_STATUSES). `pub(crate)`
-/// so other JSON-row readers in this crate (`crown_settle`) share the one
+/// so other JSON-row readers in this crate (`team_settle`) share the one
 /// string-matched copy instead of re-declaring it.
 pub(crate) const TERMINAL_STATUSES: &[&str] = &["exited", "orphaned", "failed", "permanent_dead"];
 
@@ -233,11 +233,11 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 // Scope matching: the exact port of mail/cli.py::_team_recipients
 // ---------------------------------------------------------------------------
 
-/// Which crown answers to `scope`: one rule shared with the walk, blank
+/// Which team answers to `scope`: one rule shared with the walk, blank
 /// answers false. `project:<p>` rides the same rule. An unreadable project
 /// map answers equality only: without it a portfolio reads as an epic set
 /// and would answer for each of its projects.
-pub(crate) fn crown_answers(
+pub(crate) fn team_answers(
     held: Option<&str>,
     requested: &str,
     projects: Option<&HashMap<String, String>>,
@@ -245,8 +245,8 @@ pub(crate) fn crown_answers(
     held.is_some_and(|h| {
         !h.is_empty()
             && match projects {
-                Some(map) => crate::loop_king::crown_answers_to(h, requested, map),
-                None => crate::loop_king::same_territory(h, requested, &HashMap::new()),
+                Some(map) => crate::loop_lead::team_answers_to(h, requested, map),
+                None => crate::loop_lead::same_territory(h, requested, &HashMap::new()),
             }
     })
 }
@@ -286,11 +286,11 @@ fn matches_scope_now(
                 .unwrap_or(false)
         })
         .any(|row| match scope {
-            "kings" => row
+            "leads" => row
                 .get("crown_level")
                 .map(|c| !c.is_null())
                 .unwrap_or(false),
-            _ => crown_answers(row_str(row, "crown_scope"), scope, projects),
+            _ => team_answers(row_str(row, "crown_scope"), scope, projects),
         })
 }
 
@@ -307,19 +307,19 @@ fn resolve_audience(
         let Some(sid) = row_session_id(row) else {
             continue;
         };
-        if scope == "kings" && row.get("crown_level").map(|c| c.is_null()).unwrap_or(true) {
+        if scope == "leads" && row.get("crown_level").map(|c| c.is_null()).unwrap_or(true) {
             continue;
         }
-        if scope != "all" && scope != "kings" {
+        if scope != "all" && scope != "leads" {
             let held = row_str(row, "crown_scope");
-            let crown_ok = crown_answers(held, scope, projects);
+            let team_ok = team_answers(held, scope, projects);
             // project:<p> also matches rows WORKING in that project (their cwd
             // names the repo), so an announcement reaches the team, not only a
-            // crown that may not exist.
+            // team that may not exist.
             let project_ok = scope.strip_prefix("project:").is_some_and(|p| {
                 !p.is_empty() && row_str(row, "cwd").is_some_and(|cwd| cwd_contains_project(cwd, p))
             });
-            if !crown_ok && !project_ok {
+            if !team_ok && !project_ok {
                 continue;
             }
         }
@@ -386,7 +386,7 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
         }
     }
     if out.scope.is_empty() {
-        return Err("--scope is required (all | kings | <crown> | project:<p>)".to_string());
+        return Err("--scope is required (all | leads | <team> | project:<p>)".to_string());
     }
     if out.from.is_empty() {
         return Err("--from is required".to_string());
@@ -399,12 +399,12 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
 
 /// Usage line printed on arg or authority refusal.
 fn send_usage() -> &'static str {
-    "usage: fno-agents announce send --scope <all|kings|<crown>|project:<p>> \
+    "usage: fno-agents announce send --scope <all|leads|<team>|project:<p>> \
      [--subject S] [--expires 24h] [--urgent] --from <sender> \
      --sender-kind <operator|agent> [--from-session <id>] [--json|-J]  (body on stdin)"
 }
 
-fn crown_row<'a>(rows: &'a [Value], sender: &str) -> Option<&'a Value> {
+fn team_row<'a>(rows: &'a [Value], sender: &str) -> Option<&'a Value> {
     rows.iter().filter(|row| !row_terminal(row)).find(|row| {
         row.get("crown_level")
             .map(|c| !c.is_null())
@@ -439,13 +439,13 @@ fn send_announcement(
     let sender_row = if parsed.sender_kind == "operator" {
         None
     } else {
-        crown_row(&registry, &parsed.from)
+        team_row(&registry, &parsed.from)
     };
     if parsed.sender_kind != "operator" && sender_row.is_none() {
         return Err((
             2,
             format!(
-                "announce: refused: sender {:?} holds no crown; fleet announcements are operator- or crowned-king-only",
+                "announce: refused: sender {:?} holds no team; fleet announcements are operator- or teamed-lead-only",
                 parsed.from
             ),
         ));
@@ -600,7 +600,7 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
         return 2;
     }
     let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
+        crate::org_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
     match send_announcement(&parsed, &body, paths, projects.as_ref()) {
         Ok(receipt) if parsed.json_out => {
             println!(
@@ -786,7 +786,7 @@ pub(crate) fn read_render(
     }
     let registry = crate::client_verbs::load_registry_entries(&paths.registry)?;
     let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
+        crate::org_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
     let mut seen = load_cursor(&paths.state_root, "announce-cursors", session_id);
 
     let mut fresh: Vec<&Value> = Vec::new();
@@ -1208,15 +1208,15 @@ mod tests {
     }
 
     #[test]
-    fn a_set_king_is_in_the_audience_of_one_member_epic() {
+    fn a_set_lead_is_in_the_audience_of_one_member_epic() {
         let registry = vec![
             agent_row(
-                "king-set",
+                "lead-set",
                 "sess-set",
                 json!({"crown_level": 2, "crown_scope": "x-bbbb,x-cccc"}),
             ),
             agent_row(
-                "king-folio",
+                "lead-folio",
                 "sess-folio",
                 json!({"crown_level": 0, "crown_scope": "alpha,beta"}),
             ),
@@ -1240,28 +1240,28 @@ mod tests {
     fn claude_audience_uses_the_full_session_id() {
         let session = "12345678-1234-1234-1234-123456789abc";
         let row = agent_row(
-            "king",
+            "lead",
             session,
             json!({"short_id": "12345678", "crown_level": 1}),
         );
 
         assert_eq!(
-            resolve_audience("kings", &[row], Some(&HashMap::new())),
+            resolve_audience("leads", &[row], Some(&HashMap::new())),
             vec![session.to_string()]
         );
     }
 
     #[test]
-    fn full_session_id_matches_a_kings_scope_row() {
+    fn full_session_id_matches_a_leads_scope_row() {
         let session = "abcdef12-1234-1234-1234-123456789abc";
         let row = agent_row(
-            "king",
+            "lead",
             session,
             json!({"short_id": "abcdef12", "crown_level": 1}),
         );
 
         assert!(matches_scope_now(
-            "kings",
+            "leads",
             session,
             &[row],
             Some(&HashMap::new())
@@ -1377,36 +1377,36 @@ mod tests {
     }
 
     #[test]
-    fn crowned_agent_sender_is_accepted() {
+    fn teamed_agent_sender_is_accepted() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let f = fixture("crown");
+        let f = fixture("team");
         let rows = vec![
             agent_row(
-                "king",
+                "lead",
                 "eeee5555-5555-5555-5555-555555555555",
                 json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
             ),
             agent_row("other", "ffff5555-5555-5555-5555-555555555555", json!({})),
         ];
         let mut flags = send_flags("all");
-        flags[3] = "king";
+        flags[3] = "lead";
         flags[5] = "agent";
-        let (code, _) = send_via(&f.paths, &flags, "from the crown", &rows);
+        let (code, _) = send_via(&f.paths, &flags, "from the team", &rows);
         assert_eq!(code, 0);
         assert_eq!(read_bus_segments(&f.paths.bus_live).len(), 1);
         std::fs::remove_dir_all(&f.root).ok();
     }
 
     #[test]
-    fn crowned_agent_sender_is_excluded_and_stamped_with_full_id() {
+    fn teamed_agent_sender_is_excluded_and_stamped_with_full_id() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("sender-full-id");
-        let king = "eeee5555-5555-5555-5555-555555555555";
+        let lead = "eeee5555-5555-5555-5555-555555555555";
         let other = "ffff5555-5555-5555-5555-555555555555";
         let rows = vec![
             agent_row(
-                "king",
-                king,
+                "lead",
+                lead,
                 json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
             ),
             agent_row(
@@ -1415,15 +1415,15 @@ mod tests {
                 json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
             ),
         ];
-        let mut flags = send_flags("kings");
-        flags[3] = "king";
+        let mut flags = send_flags("leads");
+        flags[3] = "lead";
         flags[5] = "agent";
-        let (code, id) = send_via(&f.paths, &flags, "from the crown", &rows);
+        let (code, id) = send_via(&f.paths, &flags, "from the team", &rows);
         assert_eq!(code, 0);
         let message = &read_bus_segments(&f.paths.bus_live)[0];
-        assert_eq!(row_str(message, "from_session"), Some(king));
+        assert_eq!(row_str(message, "from_session"), Some(lead));
         assert_eq!(message["meta"]["audience"], json!([other]));
-        assert!(read_render(&f.paths, king, Boundary::Prompt)
+        assert!(read_render(&f.paths, lead, Boundary::Prompt)
             .unwrap()
             .is_none());
         assert!(read_render(&f.paths, other, Boundary::Prompt)
@@ -1434,16 +1434,16 @@ mod tests {
     }
 
     #[test]
-    fn crowned_agent_sender_alone_is_refused_without_a_bus_line() {
+    fn teamed_agent_sender_alone_is_refused_without_a_bus_line() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("sender-alone");
         let rows = vec![agent_row(
-            "king",
+            "lead",
             "eeee5555-5555-5555-5555-555555555555",
             json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
         )];
-        let mut flags = send_flags("kings");
-        flags[3] = "king";
+        let mut flags = send_flags("leads");
+        flags[3] = "lead";
         flags[5] = "agent";
         let (code, message) = send_via(&f.paths, &flags, "no audience", &rows);
         assert_eq!(code, 1);
@@ -1704,20 +1704,20 @@ mod tests {
     fn the_sender_does_not_read_its_own_announcement() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("self");
-        let king_session = "bbbb4444-4444-4444-4444-444444444444";
+        let lead_session = "bbbb4444-4444-4444-4444-444444444444";
         let rows = vec![agent_row(
-            "king",
-            king_session,
+            "lead",
+            lead_session,
             json!({"crown_level": 1, "crown_scope": "epic/x"}),
         )];
         let mut flags = send_flags("all");
-        flags[3] = "king";
+        flags[3] = "lead";
         flags[5] = "agent";
         let mut args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
         args.push("--from-session".into());
-        args.push(king_session.to_string());
-        send_for_test(&f.paths, &args, "crown news", &rows);
-        let out = read_render(&f.paths, king_session, Boundary::Prompt).unwrap();
+        args.push(lead_session.to_string());
+        send_for_test(&f.paths, &args, "team news", &rows);
+        let out = read_render(&f.paths, lead_session, Boundary::Prompt).unwrap();
         assert!(out.is_none(), "sender skips its own line: {out:?}");
         std::fs::remove_dir_all(&f.root).ok();
     }

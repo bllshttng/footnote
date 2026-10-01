@@ -72,7 +72,7 @@ fn legacy_import_reconciles_source_counts_and_retries_clean() {
     let live = dir.path().join("events.jsonl");
     let mut body = String::new();
     let accepted = ["x-1", "x-2", "x-3"].iter().map(|scope| {
-        json!({"ts": "2026-09-10T08:00:00Z", "type": "reign_checkin",
+        json!({"ts": "2026-09-10T08:00:00Z", "type": "lead_checkin",
                "source": "loop", "data": {"scope": scope, "change": "c"}})
         .to_string()
     });
@@ -83,7 +83,7 @@ fn legacy_import_reconciles_source_counts_and_retries_clean() {
     // A torn write and a scope that fails the canonical check: both must be
     // STORED with their reject_reason, never dropped.
     body.push_str("{not json\n");
-    let bad_scope = json!({"ts": "2026-09-10T08:00:00Z", "type": "reign_checkin",
+    let bad_scope = json!({"ts": "2026-09-10T08:00:00Z", "type": "lead_checkin",
         "source": "loop", "data": {"scope": "two words", "change": "c"}})
     .to_string();
     body.push_str(&bad_scope);

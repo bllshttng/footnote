@@ -377,16 +377,16 @@ dual_owner_kinds = {
     # Rust known-kind table carries it so the daemon accepts the row, the way
     # the evals pair above does.
     "merge_cleanup_skipped",
-    # reign_checkin: the Rust emit_row is the one writer (the verb's beat plus
-    # the king stop hook's missed-beat row); the Python hand leg
+    # lead_checkin: the Rust emit_row is the one writer (the verb's beat plus
+    # the lead stop hook's missed-beat row); the Python hand leg
     # (`fno doctor event emit`) still writes rows until its port, and
     # schema.yaml validates both spellings.
-    "reign_checkin",
-    # king_term: the Rust reign-shape/loop-check verbs are the one writer
+    "lead_checkin",
+    # lead_term: the Rust lead-shape/loop-check verbs are the one writer
     # (declare/extend and the Stop-hook gate's reached/unreadable reading);
     # the Python hand leg (`fno doctor event emit`) can still write a row,
-    # the same generic-emit shape as reign_checkin above.
-    "king_term",
+    # the same generic-emit shape as lead_checkin above.
+    "lead_term",
     # pr_watch_unparked: the Rust pr-park action is the one emitter; the
     # Python side carries it in schema.yaml for the validator and
     # `doctor event find`, the way the scratch pair above does.
@@ -397,7 +397,7 @@ dual_owner_kinds = {
     # the way pr_watch_unparked above does.
     "pr_watch_draft_flip",
     # operator_question: the ask leg is the Rust question-intake transport;
-    # the king-wake, session-register, and stale-escalate Python arms still
+    # the lead-wake, session-register, and stale-escalate Python arms still
     # emit their own asks until they port.
     "operator_question",
 }

@@ -2,7 +2,7 @@
 //! PR's node with no worker alive.
 //!
 //! DonePRGreen means the PR merged; it does not mean the node closed (the
-//! specimen: a king stopped the worker four minutes after its merge, and
+//! specimen: a lead stopped the worker four minutes after its merge, and
 //! the node read in_review until a peer ran reconcile by hand). The
 //! merge verb closes its node in a child bound to the worker's lifetime, so
 //! a killed, crashed, or 429-dead worker takes the closer with it. This arm

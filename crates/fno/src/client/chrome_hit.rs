@@ -11,7 +11,7 @@ impl View {
         if let Some(hit) = self.chrome_hit_feed(row, col) {
             return Some(hit);
         }
-        // The questions block pins above the court block: a click on its
+        // The questions block pins above the org block: a click on its
         // rows opens the full questions view on that question; the `+N more`
         // row opens the list. The header toggles nothing here (the key does).
         if col < panel_w && self.sideline_view == crate::view_store::SidelineView::Agents {

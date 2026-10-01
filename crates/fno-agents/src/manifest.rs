@@ -1638,7 +1638,7 @@ mod tests {
         // Quarter-circle title spinner (the portal-view busy badge).
         let idle_screen = format!("{top}❯ \n{bottom}{status}");
         let v = m
-            .evaluate(&view_title(&idle_screen, "◑ king-fno-g5"))
+            .evaluate(&view_title(&idle_screen, "◑ lead-fno-g5"))
             .expect("title spinner matches");
         assert_eq!(v.state, "working");
         assert_eq!(v.rule_id, "osc_title_working");

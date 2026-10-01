@@ -89,15 +89,15 @@ pub enum SpawnOrigin {
 }
 
 /// WHO answers for the worker. Separate from origin by design: daemon work
-/// names its mission or crown without inventing a session parent, and a
-/// kingless scope is still a valid owner (the durable reference is required,
-/// never a live king).
+/// names its mission or team without inventing a session parent, and a
+/// leadless scope is still a valid owner (the durable reference is required,
+/// never a live lead).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnOwner {
     Session(SessionRef),
     Mission { project: String, mission: String },
-    Crown { project: String, scope: String },
+    Team { project: String, scope: String },
     Operator { tty: String },
     TestRun { script: String, run_id: String },
 }
@@ -198,7 +198,7 @@ pub struct SpawnProvenance {
 pub enum SpawnError {
     /// A required field is blank or the shape is wrong.
     Malformed(String),
-    /// Origin and owner disagree with the rules (daemon without mission/crown,
+    /// Origin and owner disagree with the rules (daemon without mission/team,
     /// a cause outside the vocabulary, a known-shape id attributed to the
     /// wrong harness).
     Contradiction(String),
@@ -330,9 +330,9 @@ fn validate_owner(owner: &SpawnOwner) -> Result<(), SpawnError> {
             require_nonblank("owner.mission.project", project)?;
             require_nonblank("owner.mission.mission", mission)
         }
-        SpawnOwner::Crown { project, scope } => {
-            require_nonblank("owner.crown.project", project)?;
-            require_nonblank("owner.crown.scope", scope)
+        SpawnOwner::Team { project, scope } => {
+            require_nonblank("owner.team.project", project)?;
+            require_nonblank("owner.team.scope", scope)
         }
         SpawnOwner::Operator { tty } => require_nonblank("owner.operator.tty", tty),
         SpawnOwner::TestRun { script, run_id } => {
@@ -410,7 +410,7 @@ pub fn validate(request: &SpawnRequest) -> Result<ValidatedSpawn, SpawnError> {
     };
     validate_owner(&request.owner)?;
 
-    // An autonomous daemon/LaunchAgent dispatch REQUIRES a mission or crown
+    // An autonomous daemon/LaunchAgent dispatch REQUIRES a mission or team
     // owner (AC2/AC3): the source names the arm, the owner names the durable
     // responsibility. Shell/test origins carry their own operator/test owner.
     if let SpawnOrigin::NonSession { source } = &request.origin {
@@ -421,11 +421,11 @@ pub fn validate(request: &SpawnRequest) -> Result<ValidatedSpawn, SpawnError> {
         if autonomous
             && !matches!(
                 request.owner,
-                SpawnOwner::Mission { .. } | SpawnOwner::Crown { .. }
+                SpawnOwner::Mission { .. } | SpawnOwner::Team { .. }
             )
         {
             return Err(SpawnError::MissingOwner(
-                "daemon/launch-agent origin requires a mission or crown owner; the daemon \
+                "daemon/launch-agent origin requires a mission or team owner; the daemon \
                  starter is never substituted"
                     .into(),
             ));
@@ -453,7 +453,7 @@ pub fn validate(request: &SpawnRequest) -> Result<ValidatedSpawn, SpawnError> {
 
 /// A request that passed validation. Backend code accepts only this form; it
 /// carries no authority of its own - origin is descriptive provenance, and
-/// existing crown/git/merge permission checks still authorize effects.
+/// existing team/git/merge permission checks still authorize effects.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedSpawn {
     request: SpawnRequest,
@@ -552,16 +552,16 @@ mod tests {
     }
 
     #[test]
-    fn kingless_crown_scope_remains_valid_ownership() {
-        validate(&daemon_request(SpawnOwner::Crown {
+    fn leadless_team_scope_remains_valid_ownership() {
+        validate(&daemon_request(SpawnOwner::Team {
             project: "fno".into(),
             scope: "epic-x".into(),
         }))
-        .expect("a durable scope reference is ownership; no live king required");
+        .expect("a durable scope reference is ownership; no live lead required");
     }
 
     #[test]
-    fn daemon_origin_without_mission_or_crown_refuses() {
+    fn daemon_origin_without_mission_or_team_refuses() {
         for owner in [
             SpawnOwner::Operator {
                 tty: "/dev/ttys001".into(),
@@ -573,7 +573,7 @@ mod tests {
         ] {
             let err = validate(&daemon_request(owner)).expect_err("must refuse");
             assert!(matches!(err, SpawnError::MissingOwner(_)), "{err}");
-            assert!(err.message().contains("mission or crown owner"));
+            assert!(err.message().contains("mission or team owner"));
         }
     }
 
@@ -608,7 +608,7 @@ mod tests {
                     cause: "sob".into(),
                 },
             },
-            SpawnOwner::Crown {
+            SpawnOwner::Team {
                 project: "fno".into(),
                 scope: "epic".into(),
             },
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_origin_takes_operator_owner_without_a_crown() {
+    fn shell_origin_takes_operator_owner_without_a_team() {
         let req = SpawnRequest::new(
             SpawnOrigin::NonSession {
                 source: NonSessionSource::Shell {

@@ -275,12 +275,12 @@ pub fn select_read(kind: Kind, args: &[String], door_exe: &OsStr, bound_s: u64) 
 
 /// The `held` kind answers from the question journals directly - no fno-py
 /// cold start, no bound to ride out. The fno dir is the one holding
-/// `graph_json_path(cwd)` (king_board/scope.rs), so the map the Python guard
+/// `graph_json_path(cwd)` (org_board/scope.rs), so the map the Python guard
 /// reads is the same fold `needs::held_map` gives the keeper.
 fn run_held(bound_s: u64) -> i32 {
     let started = Instant::now();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let fno_dir = crate::king_board::graph_json_path(&cwd)
+    let fno_dir = crate::org_board::graph_json_path(&cwd)
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));

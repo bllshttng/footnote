@@ -64,7 +64,7 @@ pub struct Query {
     status: Vec<String>,
     priority: Vec<String>,
     size: Vec<String>,
-    king: Vec<String>,
+    lead: Vec<String>,
     kind: Vec<String>,
     tag: Vec<String>,
     q: Option<String>,
@@ -116,7 +116,7 @@ impl Query {
                 "status" => push_unique(&mut q.status, val),
                 "priority" => push_unique(&mut q.priority, val),
                 "size" => push_unique(&mut q.size, val),
-                "king" => push_unique(&mut q.king, val),
+                "lead" => push_unique(&mut q.lead, val),
                 "type" => push_unique(&mut q.kind, val),
                 "tag" => push_unique(&mut q.tag, val),
                 "q" => q.q = val.map(str::to_string),
@@ -128,9 +128,9 @@ impl Query {
     }
 }
 
-/// The crowned row that rules a node's territory.
+/// The teamed row that rules a node's territory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct King {
+pub struct Lead {
     pub name: String,
     pub level: u32,
 }
@@ -158,7 +158,7 @@ pub struct Card {
     pub tags: Vec<String>,
     pub blocked: bool,
     pub claimed: bool,
-    pub king: Option<King>,
+    pub lead: Option<Lead>,
     /// True when any of the node's sessions joins a roster row.
     pub live: bool,
     /// The row's `created_at`, for the list view's date column.
@@ -262,7 +262,7 @@ pub struct Stats {
 pub struct Facets {
     pub projects: Vec<String>,
     pub epics: Vec<EpicRef>,
-    pub kings: Vec<String>,
+    pub leads: Vec<String>,
     pub priorities: Vec<String>,
     pub sizes: Vec<String>,
     pub statuses: Vec<String>,
@@ -445,14 +445,14 @@ fn build_order_map(inp: &Inputs) -> HashMap<String, usize> {
     map
 }
 
-/// The crowned row ruling this node's territory, from the roster.
-pub(crate) fn king_for(
+/// The teamed row ruling this node's territory, from the roster.
+pub(crate) fn lead_for(
     inp: &Inputs,
     node_id: &str,
     parent: Option<&str>,
     project: Option<&str>,
-) -> Option<King> {
-    king_of(&inp.agents, node_id, parent, project).map(|(name, level)| King { name, level })
+) -> Option<Lead> {
+    lead_of(&inp.agents, node_id, parent, project).map(|(name, level)| Lead { name, level })
 }
 
 /// The one per-row card function [`board`] and [`node`] both use.
@@ -513,7 +513,7 @@ pub(crate) fn card_of(
             .unwrap_or_default(),
         blocked,
         claimed,
-        king: king_for(
+        lead: lead_for(
             inp,
             &id,
             e.get("parent").and_then(Value::as_str),
@@ -578,7 +578,7 @@ fn stamped(e: &Value, field: &str) -> bool {
 }
 
 /// Whether the filtered card set keeps the row: any-of project, status,
-/// priority, size, king-name, type and tag filters, `epic` keeps the
+/// priority, size, lead-name, type and tag filters, `epic` keeps the
 /// epic's own card plus cards whose parent names any selected epic, and
 /// `q` is a case-insensitive substring of id, slug, title or details.
 fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
@@ -603,11 +603,11 @@ fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
     if !q.tag.is_empty() && !q.tag.iter().any(|t| card.tags.iter().any(|have| have == t)) {
         return false;
     }
-    if !q.king.is_empty()
+    if !q.lead.is_empty()
         && !card
-            .king
+            .lead
             .as_ref()
-            .is_some_and(|king| q.king.iter().any(|k| king.name == *k))
+            .is_some_and(|lead| q.lead.iter().any(|k| lead.name == *k))
     {
         return false;
     }
@@ -653,7 +653,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
             facets: Facets {
                 projects: vec![],
                 epics: vec![],
-                kings: vec![],
+                leads: vec![],
                 priorities: vec![],
                 sizes: vec![],
                 statuses: vec![],
@@ -758,7 +758,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
 fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
     let mut projects: BTreeMap<String, ()> = BTreeMap::new();
     let mut epics: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let mut kings: BTreeMap<String, ()> = BTreeMap::new();
+    let mut leads: BTreeMap<String, ()> = BTreeMap::new();
     let mut priorities: BTreeMap<String, ()> = BTreeMap::new();
     let mut sizes: BTreeMap<String, ()> = BTreeMap::new();
     let mut statuses: BTreeMap<String, ()> = BTreeMap::new();
@@ -768,8 +768,8 @@ fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
         if let Some(p) = &c.project {
             projects.insert(p.clone(), ());
         }
-        if let Some(k) = &c.king {
-            kings.insert(k.name.clone(), ());
+        if let Some(k) = &c.lead {
+            leads.insert(k.name.clone(), ());
         }
         if let Some(p) = &c.priority {
             priorities.insert(p.clone(), ());
@@ -809,7 +809,7 @@ fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
             .into_iter()
             .map(|(id, title)| EpicRef { id, title })
             .collect(),
-        kings: kings.into_keys().collect(),
+        leads: leads.into_keys().collect(),
         priorities: priorities.into_keys().collect(),
         sizes: sizes.into_keys().collect(),
         statuses: statuses.into_iter().map(|(s, _)| s).collect(),
@@ -1437,11 +1437,11 @@ pub(crate) fn session_action(a: Option<&AgentRow>) -> SessionAction {
     SessionAction::Dim("not resumable".into())
 }
 
-/// The node's king: the first crowned row whose territory names the node,
-/// its parent epic, or its project (crown scopes split on `,`, the level-0
+/// The node's lead: the first teamed row whose territory names the node,
+/// its parent epic, or its project (team scopes split on `,`, the level-0
 /// separator). Direct membership only - a grandchild epic resolves through
 /// no scope here, and the pane says `none` rather than guessing.
-pub(crate) fn king_of(
+pub(crate) fn lead_of(
     agents: &[AgentRow],
     node_id: &str,
     parent: Option<&str>,

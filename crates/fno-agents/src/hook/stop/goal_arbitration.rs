@@ -137,10 +137,10 @@ pub(super) fn arbitrate_codex_continuation(
     fire: &Fire,
     manifest: &str,
 ) -> GoalArbitration {
-    if driver != "king" {
+    if driver != "lead" {
         return GoalArbitration::None;
     }
-    let live = crate::reign_goal::read_codex_goal_for_stop(&fire.session_id);
+    let live = crate::lead_goal::read_codex_goal_for_stop(&fire.session_id);
     arbitrate_codex_continuation_from_reading(driver, fire, manifest, live)
 }
 
@@ -150,7 +150,7 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
     manifest: &str,
     live: Result<Option<crate::codex_thread::NativeGoal>, String>,
 ) -> GoalArbitration {
-    if driver != "king" {
+    if driver != "lead" {
         return GoalArbitration::None;
     }
     let Some(expected_session) = first_raw_field(manifest, &["harness_session_id"]) else {
@@ -183,16 +183,17 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
         );
     };
     let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
-        return GoalArbitration::Refusal("active Codex goal has no crown scope".into());
+        return GoalArbitration::Refusal("active Codex goal has no team scope".into());
     };
-    let expected_owner = format!("king:{}", scope.trim());
-    if owner != expected_owner {
+    let expected_owner = format!("lead:{}", scope.trim());
+    let legacy_owner = format!("king:{}", scope.trim());
+    if owner != expected_owner && owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
-            "active Codex goal owner must derive from crown scope: expected {expected_owner:?}, got {owner:?}"
+            "active Codex goal owner must derive from team scope: expected {expected_owner:?}, got {owner:?}"
         ));
     }
-    let expected_objective = crate::codex_thread::reign_objective(&scope);
-    if live.objective != expected_objective {
+    let expected_objective = crate::codex_thread::lead_objective(&scope);
+    if !crate::codex_thread::is_lead_objective(&live.objective, &scope) {
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected objective {expected_objective:?}, got {:?}",
             live.objective
@@ -233,20 +234,23 @@ fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -
             "active goal truth cannot be verified: manifest scope/node is missing".into(),
         );
     };
-    if goal.continuation_owner != expected_owner {
+    let legacy_owner = expected_owner.replacen("lead:", "king:", 1);
+    if goal.continuation_owner != expected_owner
+        && goal.continuation_owner != legacy_owner
+    {
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected continuation owner {expected_owner:?}, got {:?}",
             goal.continuation_owner
         ));
     }
-    if driver == "king" {
+    if driver == "lead" {
         let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
             return GoalArbitration::Refusal(
                 "active goal truth cannot be verified: manifest scope is missing".into(),
             );
         };
-        let expected = crate::codex_thread::reign_objective(&scope);
-        if goal.objective != expected {
+        let expected = crate::codex_thread::lead_objective(&scope);
+        if !crate::codex_thread::is_lead_objective(&goal.objective, &scope) {
             return GoalArbitration::Refusal(format!(
                 "conflicting goal truth: expected objective {expected:?}, got {:?}",
                 goal.objective
@@ -263,7 +267,7 @@ fn expected_continuation_owner(driver: &str, manifest: &str) -> Option<String> {
     let scope = first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default();
     let node_id = first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default();
     match driver {
-        "king" if !scope.is_empty() => Some(format!("king:{scope}")),
+        "lead" if !scope.is_empty() => Some(format!("lead:{scope}")),
         "target" if !node_id.is_empty() => Some(format!("target:{node_id}")),
         _ => None,
     }
@@ -335,5 +339,73 @@ fn harness_output_contract(fire: &Fire, decision: &str) -> &'static str {
         "json_block"
     } else {
         "exit_2_stderr"
+    }
+}
+
+
+#[cfg(test)]
+mod goal_spellings_tests {
+    use super::*;
+
+    fn manifest() -> &'static str {
+        "driver: lead\nscope: fno\nnode_id: x-aaaa\n"
+    }
+
+    fn truth(objective: &str, owner: &str) -> Option<GoalTruth> {
+        Some(GoalTruth {
+            objective: objective.to_string(),
+            status: "active".to_string(),
+            continuation_owner: owner.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_lead_goal_in_the_new_spelling_delegates() {
+        assert!(matches!(
+            arbitrate_goal_truth(
+                "lead",
+                manifest(),
+                truth("$fno:lead fno", "lead:fno"),
+            ),
+            GoalArbitration::Delegated
+        ));
+    }
+
+    #[test]
+    fn a_pre_rename_goal_keeps_delegating() {
+        // A live codex goal keeps the objective and owner strings it was
+        // created with; the reader cannot rewrite them.
+        assert!(matches!(
+            arbitrate_goal_truth(
+                "lead",
+                manifest(),
+                truth("$fno:reign fno", "king:fno"),
+            ),
+            GoalArbitration::Delegated
+        ));
+    }
+
+    #[test]
+    fn an_objective_for_another_scope_refuses() {
+        assert!(matches!(
+            arbitrate_goal_truth(
+                "lead",
+                manifest(),
+                truth("$fno:lead other", "lead:fno"),
+            ),
+            GoalArbitration::Refusal(_)
+        ));
+    }
+
+    #[test]
+    fn an_owner_that_derives_from_neither_spelling_refuses() {
+        assert!(matches!(
+            arbitrate_goal_truth(
+                "lead",
+                manifest(),
+                truth("$fno:lead fno", "target:x-aaaa"),
+            ),
+            GoalArbitration::Refusal(_)
+        ));
     }
 }

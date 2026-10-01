@@ -223,7 +223,7 @@ pub fn validate_route_settings(path: &str) -> Result<(), String> {
 /// first existing directory the transcript itself records, newest file and
 /// newest record first. Last fallback is the recorded cwd, naming the branch
 /// on stderr (a probe that does not name the store it read is the trap the
-/// king's own SKILL.md warns about).
+/// lead's own SKILL.md warns about).
 pub(crate) fn resolve_resume_cwd(
     claude_home: &crate::claude_ask::ClaudeHome,
     recorded: &str,
@@ -1318,13 +1318,13 @@ mod tests {
         // reaches it by transport id. The plan carries no namespace and keeps
         // the recorded id as billing provenance.
         let (_tmp, home) = staged_home(&[]);
-        let mut e = row("king-119e-reaper");
+        let mut e = row("lead-119e-reaper");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
         e.launch_account = Some("removed-acct".into());
         let plan = resolve_reentry_with(
             &reg(vec![e]),
-            "king-119e-reaper",
+            "lead-119e-reaper",
             ReentryTransition::Attach,
             None,
             &binding_ok,

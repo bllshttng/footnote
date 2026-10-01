@@ -111,7 +111,7 @@ struct Row {
 
 enum PopSpec {
     HarnessCapabilities,
-    KingManifests,
+    LeadManifests,
     RowsJson {
         path: String,
         key: Option<String>,
@@ -120,7 +120,7 @@ enum PopSpec {
 }
 
 const USAGE: &str = "usage: fno-agents honesty-sweep [--json|-J] \
-[--population harness-capabilities|king-manifests] \
+[--population harness-capabilities|lead-manifests] \
 [--rows-json <path|->] [--rows-key <key>] [--name <label>]
 populations repeat; each named population is swept in turn. \
 Exit 0 measured (a finding is a candidate, never a verdict), 2 unmeasured.";
@@ -187,7 +187,7 @@ fn table_to_rows(table: &toml::Value) -> Result<Vec<Row>, String> {
     Ok(out)
 }
 
-/// One scalar `key: value` line of a king manifest's frontmatter. Values that
+/// One scalar `key: value` line of a lead manifest's frontmatter. Values that
 /// parse as JSON keep that type (`respawn_count: 0` becomes `0`); anything
 /// else becomes a JSON string, and an empty value becomes `""`.
 fn manifest_field(line: &str) -> Option<(String, String)> {
@@ -208,11 +208,11 @@ fn manifest_field(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value))
 }
 
-fn read_king_rows() -> Result<Vec<Row>, String> {
+fn read_lead_rows() -> Result<Vec<Row>, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let kings = crate::paths::space_dir(&cwd).join("kings");
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&kings)
-        .map_err(|e| format!("cannot read kings dir {}: {e}", kings.display()))?
+    let leads = crate::paths::space_dir(&cwd).join("leads");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&leads)
+        .map_err(|e| format!("cannot read leads dir {}: {e}", leads.display()))?
         .flatten()
         .map(|entry| entry.path())
         .collect();
@@ -674,7 +674,7 @@ pub fn run_honesty_sweep(args: &[String]) -> i32 {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {
                     Some("harness-capabilities") => specs.push(PopSpec::HarnessCapabilities),
-                    Some("king-manifests") => specs.push(PopSpec::KingManifests),
+                    Some("lead-manifests") => specs.push(PopSpec::LeadManifests),
                     Some(other) => {
                         eprintln!("fno-agents honesty-sweep: unknown population {other:?}");
                         eprintln!("{USAGE}");
@@ -752,7 +752,7 @@ pub fn run_honesty_sweep(args: &[String]) -> i32 {
                     None => Err("no git root; passes 3 and 4 cannot scan sources".to_string()),
                 },
             ),
-            PopSpec::KingManifests => ("king-manifests", read_king_rows()),
+            PopSpec::LeadManifests => ("lead-manifests", read_lead_rows()),
             PopSpec::RowsJson { name, .. } => (name.as_str(), read_rows_json(spec)),
         };
         let population = match read {

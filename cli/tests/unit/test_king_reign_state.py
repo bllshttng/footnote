@@ -2,7 +2,7 @@
 
 The reader's semantics (agreeing, split, no manifest, unreadable registry,
 terminal rows, unsafe scopes, the shape rewrite) live in
-``crates/fno-agents/src/loop_reign.rs`` and are pinned by that module's own
+``crates/fno-agents/src/lead_state.rs`` and are pinned by that module's own
 tests. What these tests pin is the client half: the JSON maps onto the
 dataclass unchanged, a missing or failing binary answers unknown with a named
 reason (never a clean ``False``), and the argv carries the caller's intent.
@@ -100,7 +100,7 @@ def test_client_argv_carries_scope_session_and_registry(
     reign_state(scope="alpha", session_id="aaaa1111-0000-4000-8000-000000000001")
 
     argv = json.loads(log.read_text())
-    assert argv[0] == "reign-state"
+    assert argv[0] == "lead-state"
     assert "--scope" in argv and argv[argv.index("--scope") + 1] == "alpha"
     assert "--session" in argv
     assert (
@@ -155,8 +155,8 @@ def test_garbage_stdout_is_unknown_not_a_crash(tmp_path: Path, monkeypatch) -> N
 
 def test_rust_reader_semantics_live_in_the_crate() -> None:
     """The semantic cases (split, terminal, unsafe scope, legacy shape) are
-    pinned by loop_reign.rs's own tests; this file pins only the client."""
-    crate = Path(__file__).parents[3] / "crates" / "fno-agents" / "src" / "loop_reign.rs"
+    pinned by lead_state.rs's own tests; this file pins only the client."""
+    crate = Path(__file__).parents[3] / "crates" / "fno-agents" / "src" / "lead_state.rs"
     assert crate.is_file(), f"the Rust reader moved: {crate}"
     text = crate.read_text(encoding="utf-8")
     for needle in (

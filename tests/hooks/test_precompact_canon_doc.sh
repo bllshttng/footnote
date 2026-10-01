@@ -263,7 +263,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3d. An unowned session section (x-e6c3): a king's "## HANDOFF (session)"
+# 3d. An unowned session section (x-e6c3): a lead's "## HANDOFF (session)"
 # heading inside correct fno:session markers used to be deleted whole by the
 # refresh, because the writer re-emits only the four labels it knows. The
 # writer now re-emits every marked section it does not regenerate, verbatim,
@@ -275,7 +275,7 @@ python3 - "$HANDOFF_DOC" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
-block = "\n## HANDOFF (session)\n<!-- fno:session -->\nSENTINEL_HANDOFF_13 the next king must read: merge x before y.\n<!-- /fno:session -->\n"
+block = "\n## HANDOFF (session)\n<!-- fno:session -->\nSENTINEL_HANDOFF_13 the next lead must read: merge x before y.\n<!-- /fno:session -->\n"
 marker = "\n## User notes (you write here; the machine only ever reads this)\n"
 assert marker in s, "user notes heading not found"
 open(p, "w").write(s.replace(marker, block + marker, 1))
@@ -360,18 +360,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. AC2-EDGE: an uncrowned session's doc carries no King block at all.
-# Assert a positive marker too (crown: none), not absence alone - an absence
-# also fires if crown classification or auto-block generation never ran.
+# 7. AC2-EDGE: an uncrowned session's doc carries no Lead block at all.
+# Assert a positive marker too (team: none), not absence alone - an absence
+# also fires if team classification or auto-block generation never ran.
 # ---------------------------------------------------------------------------
-if grep -q "crown: none" "$DOC" && ! grep -q "## King:" "$DOC"; then
-  pass "uncrowned doc carries no King block (AC2-EDGE)"
+if grep -q "team: none" "$DOC" && ! grep -q "## Lead:" "$DOC"; then
+  pass "uncrowned doc carries no Lead block (AC2-EDGE)"
 else
-  fail "uncrowned doc unexpectedly carries a King block, or the auto block never ran"
+  fail "uncrowned doc unexpectedly carries a Lead block, or the auto block never ran"
 fi
 
 # ---------------------------------------------------------------------------
-# 8. AC1-HP: a crowned session's doc gains the King block and both new
+# 8. AC1-HP: a teamed session's doc gains the Lead block and both new
 # session headings. A fake `fno` on PATH stands in for the registry and the
 # epic-status read so the fixture never touches the real graph.
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ cat > "$FAKE_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"},{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
@@ -399,27 +399,27 @@ FAKE
 chmod +x "$FAKE_BIN/fno"
 trap 'rm -rf "$TMP" "$FAKE_BIN"' EXIT
 
-CROWNED_DOC="$TMP/crowned-canon.md"
-printf '{"trigger":"manual","custom_instructions":"%s"}' "$CROWNED_DOC" \
+TEAMED_DOC="$TMP/teamed-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$TEAMED_DOC" \
   | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
-if grep -q "## King: nodes under purview (auto)" "$CROWNED_DOC" \
-  && grep -q "level 2 over x-9e1e-fixture" "$CROWNED_DOC" \
-  && grep -q "x-aaaa \[ready\] a" "$CROWNED_DOC" \
-  && grep -q "x-bbbb \[in_progress\] b" "$CROWNED_DOC"; then
-  pass "crowned doc gains the King block naming level, scope, and children"
+if grep -q "## Lead: nodes under purview (auto)" "$TEAMED_DOC" \
+  && grep -q "level 2 over x-9e1e-fixture" "$TEAMED_DOC" \
+  && grep -q "x-aaaa \[ready\] a" "$TEAMED_DOC" \
+  && grep -q "x-bbbb \[in_progress\] b" "$TEAMED_DOC"; then
+  pass "teamed doc gains the Lead block naming level, scope, and children"
 else
-  fail "crowned doc missing King block content"
+  fail "teamed doc missing Lead block content"
 fi
-if grep -q "## Gaps and open thinking (session)" "$CROWNED_DOC" \
-  && grep -q "## Workarounds in force (session)" "$CROWNED_DOC"; then
-  pass "crowned doc gains the two new session headings"
+if grep -q "## Gaps and open thinking (session)" "$TEAMED_DOC" \
+  && grep -q "## Workarounds in force (session)" "$TEAMED_DOC"; then
+  pass "teamed doc gains the two new session headings"
 else
-  fail "crowned doc missing the new session headings"
+  fail "teamed doc missing the new session headings"
 fi
 
 # ---------------------------------------------------------------------------
-# 9. AC1-HP portfolio case: a level-2 crown over TWO epics (a comma-joined
-# scope, fno.agents.crown.canonical_scope's stored shape) sees BOTH epics'
+# 9. AC1-HP portfolio case: a level-2 team over TWO epics (a comma-joined
+# scope, fno.agents.team.canonical_scope's stored shape) sees BOTH epics'
 # children, not just the first.
 # ---------------------------------------------------------------------------
 PORTFOLIO_BIN="$(mktemp -d -t canon-fake-fno-portfolio-XXXXXX)"
@@ -427,7 +427,7 @@ cat > "$PORTFOLIO_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-epic-a,x-epic-b","name":"king-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-epic-a,x-epic-b","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-epic-a"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
@@ -450,13 +450,13 @@ PORTFOLIO_DOC="$TMP/portfolio-canon.md"
 printf '{"trigger":"manual","custom_instructions":"%s"}' "$PORTFOLIO_DOC" \
   | env PATH="$PORTFOLIO_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
 if grep -q "x-aaaa \[ready\] a" "$PORTFOLIO_DOC" && grep -q "x-bbbb \[in_progress\] b" "$PORTFOLIO_DOC"; then
-  pass "portfolio crown (comma-joined scope): both epics' children appear"
+  pass "portfolio team (comma-joined scope): both epics' children appear"
 else
-  fail "portfolio crown: missing children from one or both epics"
+  fail "portfolio team: missing children from one or both epics"
 fi
 
 # ---------------------------------------------------------------------------
-# 9b. A crown's spawned children partition into alive vs unresolved liveness,
+# 9b. A team's spawned children partition into alive vs unresolved liveness,
 # same rule as hooks/context-nudge.sh: a served "alive" word lists a child
 # under live workers, and anything else (missing, or the literal "unmeasured"
 # word liveness_sweep.rs can write) lists it separately as unresolved, never
@@ -468,7 +468,7 @@ cat > "$LIVENESS_BIN/fno" <<'FAKE'
 case "$*" in
   *"agents registry-json"*)
     echo '[
-      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"},
+      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"alive-child","status":"live","liveness":"alive"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"unmeasured-child","status":"live","liveness":"unmeasured"}
     ]'
@@ -507,8 +507,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. A king hand-writes ONLY the two crown headings (the shape context-nudge.sh
-# now tells a king to write on a FIRST compaction, when the doc - and its
+# 10. A lead hand-writes ONLY the two team headings (the shape context-nudge.sh
+# now tells a lead to write on a FIRST compaction, when the doc - and its
 # headings 1/2 - do not exist yet). The hook must bind each by heading text,
 # not by ordinal position, so both survive the fire that follows.
 # ---------------------------------------------------------------------------
@@ -529,35 +529,35 @@ printf '{"trigger":"manual","custom_instructions":"%s"}' "$HANDWRITTEN_DOC" \
 if grep -q "Unsure whether the blocked_child queue drains fairly" "$HANDWRITTEN_DOC" \
   && grep -q "Routing around the stale-epic-status cache" "$HANDWRITTEN_DOC" \
   && grep -q "_Merge order and the reason for it" "$HANDWRITTEN_DOC"; then
-  pass "hand-written crown-only headings bind by label, not ordinal position"
+  pass "hand-written team-only headings bind by label, not ordinal position"
 else
-  fail "hand-written crown headings lost or misplaced by the refire"
+  fail "hand-written team headings lost or misplaced by the refire"
 fi
 
 # ---------------------------------------------------------------------------
-# 11. A crowned session with NO custom_instructions keys its doc on the crown
-# scope, not the session id: a crown outlives its sessions, so a successor
+# 11. A teamed session with NO custom_instructions keys its doc on the team
+# scope, not the session id: a team outlives its sessions, so a successor
 # resolves the same rolling doc. The fake fno answers the --scope form with a
-# fixture path; the doc must land THERE, titled for the crown, still carrying
+# fixture path; the doc must land THERE, titled for the team, still carrying
 # the authoritative session id line.
 # ---------------------------------------------------------------------------
-CANON_PATH_OUT="$TMP/handoffs/crown-rolling.md"
+CANON_PATH_OUT="$TMP/handoffs/team-rolling.md"
 export CANON_PATH_OUT
 printf '{"trigger":"manual"}' \
   | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
 if [[ -f "$CANON_PATH_OUT" ]] \
-  && grep -q "# Canon doc: crown x-9e1e-fixture" "$CANON_PATH_OUT" \
+  && grep -q "# Canon doc: team x-9e1e-fixture" "$CANON_PATH_OUT" \
   && grep -q "Session id (authoritative): \`$SID\`" "$CANON_PATH_OUT"; then
-  pass "crowned default doc keys on the crown scope at the --scope answer"
+  pass "teamed default doc keys on the team scope at the --scope answer"
 else
-  fail "crowned default doc missing or not scope-keyed"
+  fail "teamed default doc missing or not scope-keyed"
 fi
 
 # ---------------------------------------------------------------------------
 # 12. AC-KILL (x-7ec3): a hook killed at the write boundary leaves the doc
 # byte-identical. The old write was a plain `> "$DOC_PATH"`, which truncates
 # the doc on open, so a kill mid-assembly destroyed the session blocks on
-# disk (the 2026-09-13 crown-doc loss). The write now assembles into a temp
+# disk (the 2026-09-13 team-doc loss). The write now assembles into a temp
 # file and renames, so the kill can no longer land between "doc emptied" and
 # "doc written"; the fake mv below kills the hook at the exact moment the
 # assembly has finished and the rename is next.
@@ -693,13 +693,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # 15. AC5-HP: a leaked FNO_AGENTS_RUNTIME=python pin must not blind
-# the crown read. The fake `fno` refuses `agents registry-json` ONLY when the
+# the team read. The fake `fno` refuses `agents registry-json` ONLY when the
 # pin is set (the real Rust client's refusal shape) and answers with the
-# crowned row otherwise; the hook strips the pin before the read, so the
-# crowned scope-keyed doc still lands. Run with the pin exported.
+# teamed row otherwise; the hook strips the pin before the read, so the
+# teamed scope-keyed doc still lands. Run with the pin exported.
 # ---------------------------------------------------------------------------
 PIN_BIN="$(mktemp -d -t canon-fake-fno-pin-XXXXXX)"
-PIN_DOC_OUT="$TMP/handoffs/pinned-crown-rolling.md"
+PIN_DOC_OUT="$TMP/handoffs/pinned-team-rolling.md"
 cat > "$PIN_BIN/fno" <<FAKE
 #!/usr/bin/env bash
 case "\$*" in
@@ -707,7 +707,7 @@ case "\$*" in
     if [ -n "\${FNO_AGENTS_RUNTIME:-}" ]; then
       exit 127
     fi
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
@@ -728,10 +728,10 @@ printf '{"trigger":"manual"}' \
   | env PATH="$PIN_BIN:$PATH" FNO_AGENTS_RUNTIME=python CLAUDE_CODE_SESSION_ID="$SID" \
     bash "$HOOK" >"$TMP/pin-out.txt" 2>"$PIN_ERR" || true
 if [[ -f "$PIN_DOC_OUT" ]] && grep -q "level 2 over x-9e1e-fixture" "$PIN_DOC_OUT" \
-  && grep -q "## King: nodes under purview (auto)" "$PIN_DOC_OUT"; then
-  pass "pinned env: the crown read survives the strip and the scope-keyed doc lands (AC5-HP)"
+  && grep -q "## Lead: nodes under purview (auto)" "$PIN_DOC_OUT"; then
+  pass "pinned env: the team read survives the strip and the scope-keyed doc lands (AC5-HP)"
 else
-  fail "pinned env: crown read stayed blind or doc is not the scope-keyed one"
+  fail "pinned env: team read stayed blind or doc is not the scope-keyed one"
 fi
 if grep -q "registry-json exited" "$PIN_ERR"; then
   fail "pinned env: a failing-read stderr line fired even though the strip healed the read"
@@ -742,7 +742,7 @@ fi
 # ---------------------------------------------------------------------------
 # 16. AC6-ERR: a genuinely failing registry read is reported, never
 # read as "uncrowned". The fake refuses unconditionally; the hook must print
-# one stderr line naming the exit code and the doc's crown line must read
+# one stderr line naming the exit code and the doc's team line must read
 # `unknown (registry-json exit 127)`, never `none`.
 # ---------------------------------------------------------------------------
 FAIL_BIN="$(mktemp -d -t canon-fake-fno-fail-XXXXXX)"
@@ -760,7 +760,7 @@ FAKE
 chmod +x "$FAIL_BIN/fno"
 trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN" "$KILL_BIN" "$GATE_BIN" "$PIN_BIN" "$FAIL_BIN"' EXIT
 
-FAIL_DOC="$TMP/unknown-crown-canon.md"
+FAIL_DOC="$TMP/unknown-team-canon.md"
 FAIL_ERR="$TMP/fail-err.txt"
 printf '{"trigger":"manual","custom_instructions":"%s"}' "$FAIL_DOC" \
   | env PATH="$FAIL_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" \
@@ -770,11 +770,11 @@ if grep -q "registry-json exited 127" "$FAIL_ERR"; then
 else
   fail "failed read: no stderr line naming the exit code"
 fi
-if grep -q "crown: unknown (registry-json exit 127)" "$FAIL_DOC" \
-  && ! grep -q "crown: none" "$FAIL_DOC"; then
-  pass "failed read: crown line reads unknown, never none"
+if grep -q "team: unknown (registry-json exit 127)" "$FAIL_DOC" \
+  && ! grep -q "team: none" "$FAIL_DOC"; then
+  pass "failed read: team line reads unknown, never none"
 else
-  fail "failed read: crown line wrong (expected unknown, got none or missing)"
+  fail "failed read: team line wrong (expected unknown, got none or missing)"
 fi
 
 echo

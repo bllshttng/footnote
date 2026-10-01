@@ -11,7 +11,7 @@
 //! tool call; a refusal does.
 //!
 //! A refusal is read in SHELL COMMAND POSITION, per pipeline stage, through
-//! the same `lex` the king guard uses: transparent wrappers (`env pytest`,
+//! the same `lex` the lead guard uses: transparent wrappers (`env pytest`,
 //! `timeout 30 cargo test`), env-assignment prefixes, full paths, every
 //! command-substitution body (each one is lexed as its own command), and
 //! one level of `bash -c` payloads. The other uv doors are covered because they
@@ -34,7 +34,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::king_guard::lex;
+use super::lead_guard::lex;
 use crate::test_run::cargo_test_selects_whole_suite;
 
 /// Wrappers that are transparent to command position: `sudo pytest ...`

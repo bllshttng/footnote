@@ -3,7 +3,7 @@
 
 The 2026-08-15 sweep (x-cccc's own `details`) counted every backlog node
 mentioned in a merged PR body AFTER the first as a "secondary" and reported
-61 as "not done" - a MENTION count, not a defect count. A king correction the
+61 as "not done" - a MENTION count, not a defect count. A lead correction the
 next day showed most of those were dependency notes, follow-up filings, or
 collision notes, never close claims. This script is the auditable rerun:
 classify each secondary mention by the sentence or table row that names it -
@@ -34,7 +34,7 @@ if _CLI_SRC.is_dir() and str(_CLI_SRC) not in sys.path:
     sys.path.insert(0, str(_CLI_SRC))
 
 # Dependency/follow-up/collision language ALWAYS wins over a close verb in the
-# same sentence (x-cccc king correction): "closes both nodes" (PR 836) is a
+# same sentence (x-cccc lead correction): "closes both nodes" (PR 836) is a
 # claim, but "x-aaaa is blocked_by this" or "branch x-aaaa ... untouched" is
 # not, even though a naive scanner sees a plausible-looking verb nearby.
 _DEPENDENCY_RE = re.compile(

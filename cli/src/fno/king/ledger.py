@@ -1,7 +1,7 @@
 """``fno agents king ledger`` - the reign ledger page.
 
 Identity, the court adjudication, and the paths stay in Python; the page
-assembly is the native ``reign-ledger`` verb (the king-history split), so
+assembly is the native ``lead-rundown`` verb (the lead-history split), so
 the Python-tree ratchet holds. Contract: docs/architecture/reign.md.
 """
 from __future__ import annotations
@@ -40,12 +40,12 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
     if binary is None:
         raise RuntimeError(
             "the fno-agents binary was not found: the reign ledger page is "
-            "rendered by the native reign-ledger verb"
+            "rendered by the native lead-rundown verb"
         )
     out = Path(path) if path is not None else default_ledger_path()
     argv = [
         str(binary),
-        "reign-ledger",
+        "lead-rundown",
         "--court-json",
         "-",
         "--graph",
@@ -59,5 +59,5 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
         argv, input=json.dumps(court), capture_output=True, text=True, check=False, timeout=60
     )
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"reign-ledger exited {proc.returncode}")
+        raise RuntimeError(proc.stderr.strip() or f"lead-rundown exited {proc.returncode}")
     return out

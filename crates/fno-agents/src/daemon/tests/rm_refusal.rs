@@ -634,7 +634,7 @@ async fn rm_refuses_a_row_the_roster_still_carries_and_names_no_force() {
     // AC2-NEG + AC2-COV: the short id IS present in a known snapshot, so
     // the row really is live. The refusal names the working incantation
     // (claude takes the short id, not the agent name) and never --force,
-    // which a king previously read as the remedy and applied to five
+    // which a lead previously read as the remedy and applied to five
     // genuinely-live rows.
     let home = short_home("rmstilllive");
     let mut row = claude_rm_row(
@@ -672,7 +672,7 @@ async fn rm_refuses_a_row_the_roster_still_carries_and_names_no_force() {
     assert!(message.contains("rm ran `claude stop`"), "{}", message);
     // Specimen guard (x-d19e): the refusal names what rm itself ran, the
     // hand-teardown cost, and offers no override flag. A rewrite that
-    // drops any of the three must fail here, not in a king's reign.
+    // drops any of the three must fail here, not in a lead's lead.
     assert!(
         message.contains("rm makes the same call itself"),
         "{}",

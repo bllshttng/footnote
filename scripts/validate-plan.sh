@@ -1768,7 +1768,7 @@ check_python_rows_file() {
                                 [[ -z "$scope_detail" ]] || scope_detail+="; "
                                 scope_detail+="$cited_id reads no LIVE line"
                             done
-                            scope_findings+=("$path is a Grant, but no ruling it cites approves this change: $scope_detail. A law that allows repairs in general approves none by itself. Cite the ruling that approves this repair: a live decision whose subject is $scope_node or whose text names $path. A king records one with: fno inbox decide $scope_node_arg \"approve the +$scope_size repair to $path\"")
+                            scope_findings+=("$path is a Grant, but no ruling it cites approves this change: $scope_detail. A law that allows repairs in general approves none by itself. Cite the ruling that approves this repair: a live decision whose subject is $scope_node or whose text names $path. A lead records one with: fno inbox decide $scope_node_arg \"approve the +$scope_size repair to $path\"")
                         elif [[ -n "$first_notlive_id" ]]; then
                             cited_id="$first_notlive_id"
                             findings+=("$path is a Grant, but $cited_id reads no LIVE line in fno backlog decisions $cited_id")

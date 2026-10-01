@@ -17,7 +17,7 @@ fn append(path: &Path, rows: &[serde_json::Value]) {
 }
 
 fn checkin(ts: &str, scope: &str, change: &str) -> serde_json::Value {
-    json!({"ts": ts, "type": "reign_checkin", "source": "loop",
+    json!({"ts": ts, "type": "lead_checkin", "source": "loop",
            "data": {"scope": scope, "change": change}})
 }
 
@@ -127,7 +127,7 @@ fn rotation_overwrite_keeps_ingested_history() {
     let receipt = sync(&live).unwrap();
     assert_eq!(receipt.ingested, 1, "only gen 3 is new");
     assert_eq!(count_events(&receipt.store), 3);
-    assert_eq!(count_type(&receipt.store, "reign_checkin"), 3);
+    assert_eq!(count_type(&receipt.store, "lead_checkin"), 3);
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn corrupt_and_bad_scope_rows_store_with_reject_reason() {
     append(
         &live,
         &[
-            json!({"ts": "2026-09-14T22:28:43Z", "type": "reign_checkin", "source": "loop",
+            json!({"ts": "2026-09-14T22:28:43Z", "type": "lead_checkin", "source": "loop",
              "data": {"scope": "x-bbbb ready no build, idea", "change": "corrupted"}}),
         ],
     );
@@ -192,7 +192,7 @@ fn corrupt_and_bad_scope_rows_store_with_reject_reason() {
         .unwrap();
     assert_eq!(
         bad_scope.as_deref(),
-        Some("scope is not a canonical crown scope")
+        Some("scope is not a canonical team scope")
     );
     let corrupt: i64 = conn
         .query_row(
@@ -210,7 +210,7 @@ fn canonical_scope_stamps_the_column() {
     let live = dir.path().join("events.jsonl");
     append(&live, &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "clean")]);
     let receipt = sync(&live).unwrap();
-    assert_eq!(count_type(&receipt.store, "reign_checkin"), 1);
+    assert_eq!(count_type(&receipt.store, "lead_checkin"), 1);
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
         1,
         "gate rows stay"
     );
-    assert_eq!(count_type(&store, "reign_checkin"), 2, "durable rows stay");
+    assert_eq!(count_type(&store, "lead_checkin"), 2, "durable rows stay");
     assert_eq!(
         count_type(&store, "mux_pane_counters"),
         1,
@@ -338,7 +338,7 @@ fn v1_store_migrates_in_place_oldest_first() {
         let ty = if line.contains("review_attestation") {
             "review_attestation"
         } else {
-            "reign_checkin"
+            "lead_checkin"
         };
         conn.execute(
             "INSERT INTO events (row_hash, ts_ms, type, source, scope, reject_reason, line)
@@ -462,7 +462,7 @@ fn retention_class_maps_schema_classes() {
     assert_eq!(retention_class("review_attestation"), "gate");
     assert_eq!(retention_class("review_coverage"), "gate");
     assert_eq!(retention_class("mux_pane_counters"), "ephemeral");
-    assert_eq!(retention_class("reign_checkin"), "durable");
+    assert_eq!(retention_class("lead_checkin"), "durable");
     assert_eq!(retention_class(""), "durable");
     assert!(is_gate_event("review_coverage"));
     assert!(is_ephemeral_event("single_flight_gate"));
@@ -524,12 +524,12 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
     assert!(append_envelope(&live, "{\"a\":1}\n{\"b\":2}", None).is_err());
-    let bad_scope = json!({"ts": "2026-09-17T12:00:00Z", "type": "reign_checkin",
+    let bad_scope = json!({"ts": "2026-09-17T12:00:00Z", "type": "lead_checkin",
         "source": "loop", "data": {"scope": "x-1 ready, two words"}})
     .to_string();
     let err = append_envelope(&live, &bad_scope, None).unwrap_err();
-    assert!(err.contains("canonical crown scope"), "err: {err}");
-    let bad_ts = json!({"ts": "not-a-time", "type": "reign_checkin",
+    assert!(err.contains("canonical team scope"), "err: {err}");
+    let bad_ts = json!({"ts": "not-a-time", "type": "lead_checkin",
         "source": "loop", "data": {}})
     .to_string();
     let err = append_envelope(&live, &bad_ts, None).unwrap_err();
@@ -573,7 +573,7 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
 
     // A session a manifest does not yet name - a fresh heir
     // whose only manifest is its predecessor's - journals the same way. The
-    // correlated row is what king admission reads; no manifest needed.
+    // correlated row is what lead admission reads; no manifest needed.
     let heir = json!({
         "ts": "2026-09-17T12:00:00Z",
         "type": "stop_decision",
@@ -582,10 +582,10 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
             "session_id": "thread-1",
             "raw_identity_candidates": [],
             "turn_id": "turn-2",
-            "manifest": "/private/kings/x-aaaa.md",
+            "manifest": "/private/leads/x-aaaa.md",
             "scope": "",
             "node_id": "",
-            "driver": "king",
+            "driver": "lead",
             "continuation_owner": "visitor",
             "decision": "allow",
             "class": "foreign-manifest",
@@ -609,7 +609,7 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
             "manifest": "",
             "scope": "ready no build, idea",
             "node_id": "",
-            "driver": "king",
+            "driver": "lead",
             "continuation_owner": "none",
             "decision": "allow",
             "class": "visitor",
@@ -619,7 +619,7 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
     })
     .to_string();
     let error = append_envelope(&live, &bad_scope, None).unwrap_err();
-    assert!(error.contains("canonical crown scope"), "error: {error}");
+    assert!(error.contains("canonical team scope"), "error: {error}");
 }
 
 #[test]
@@ -715,18 +715,18 @@ fn journal_text_reads_history_then_live_with_the_type_filter() {
     append(&dir.path().join("events.jsonl.1"), &[older.clone(), other]);
     append(&live, &[tail.clone()]);
     sync(&live).unwrap();
-    let text = journal_text(&live, &["reign_checkin"]);
+    let text = journal_text(&live, &["lead_checkin"]);
     assert_eq!(
         text,
         format!("{}\n{tail}\n", older.clone()),
         "rotated history first with the unasked type gone, live tail verbatim"
     );
     // The read never syncs: reading twice is stable.
-    assert_eq!(journal_text(&live, &["reign_checkin"]), text);
+    assert_eq!(journal_text(&live, &["lead_checkin"]), text);
     // The no-filter branch of the same surface: every committed row,
     // asked type or not.
     let unfiltered = journal_text(&live, &[]);
-    assert!(unfiltered.contains("reign_checkin"));
+    assert!(unfiltered.contains("lead_checkin"));
     assert!(unfiltered.contains("unwanted_kind"));
 }
 
@@ -765,7 +765,7 @@ fn journal_text_reads_committed_rows_in_commit_order() {
     sync(&live).unwrap();
     let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "store-only");
     append_envelope(&live, &b.to_string(), None).unwrap();
-    let text = journal_text(&live, &["reign_checkin"]);
+    let text = journal_text(&live, &["lead_checkin"]);
     assert!(
         text.find("\"imported\"").unwrap() < text.find("\"store-only\"").unwrap(),
         "committed rows first, in commit order: {text}"
@@ -785,10 +785,10 @@ fn journal_text_checked_errs_on_a_broken_store_and_journal_text_falls_back() {
     let live = dir.path().join("events.jsonl");
     append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
     std::fs::write(dir.path().join("events.db"), b"not a database").unwrap();
-    let err = journal_text_checked(&live, &EventQuery::of_types(&["reign_checkin"])).unwrap_err();
+    let err = journal_text_checked(&live, &EventQuery::of_types(&["lead_checkin"])).unwrap_err();
     assert!(err.contains("events.db"), "err names the store path: {err}");
     assert_eq!(
-        journal_text(&live, &["reign_checkin"]),
+        journal_text(&live, &["lead_checkin"]),
         std::fs::read_to_string(&live).unwrap()
     );
 }
@@ -940,3 +940,36 @@ fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
 
 mod coverage;
 mod observation;
+
+#[test]
+fn a_query_for_a_renamed_kind_matches_its_stored_old_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    append(
+        &journal,
+        &[json!({"ts": "2026-08-05T12:00:00Z", "type": "reign_checkin",
+                 "source": "loop", "data": {"scope": "fno", "change": "old spelling"}}),
+          json!({"ts": "2026-09-05T12:00:00Z", "type": "lead_checkin",
+                 "source": "loop", "data": {"scope": "fno", "change": "new spelling"}})],
+    );
+    let store = store_path(&journal);
+    import_all(&journal).unwrap();
+    let hits = query_events(
+        &store,
+        &EventQuery { types: vec!["lead_checkin".into()], ..Default::default() },
+    )
+    .unwrap();
+    let mut changes: Vec<String> = hits
+        .iter()
+        .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.line).ok())
+        .filter_map(|v| {
+            v["data"]["change"].as_str().map(|c| c.to_string())
+        })
+        .collect();
+    changes.sort();
+    assert_eq!(
+        changes,
+        vec!["new spelling".to_string(), "old spelling".to_string()],
+        "the alias table must surface pre-rename rows to a new-spelling query"
+    );
+}

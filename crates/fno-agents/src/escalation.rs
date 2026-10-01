@@ -1,5 +1,5 @@
 //! Escalation notes: one markdown file per superuser-tier call, written by a
-//! king into the project's escalations directory and read here by the king
+//! lead into the project's escalations directory and read here by the lead
 //! check-in (overdue action) and `state path` (shell hooks). The note stands
 //! alone: it names what is being decided, why now, every option with its
 //! consequence, the recommendation, and the default taken on silence. No ids,
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::finalize::{resolve_obsidian_vault, resolve_project_name, resolve_vault_root};
 
-/// The four classes that reach the superuser. Everything else, the king
+/// The four classes that reach the superuser. Everything else, the lead
 /// decides and logs.
 pub const CLASSES: [&str; 4] = [
     "public-surface",
@@ -241,7 +241,7 @@ fn parse_options(body: &str) -> Vec<EscalationOption> {
     out
 }
 
-/// Every defect, so a king fixes the note instead of debugging a silent push.
+/// Every defect, so a lead fixes the note instead of debugging a silent push.
 pub fn problems(e: &Escalation) -> Vec<String> {
     let mut out = Vec::new();
     if e.class.is_empty() {
@@ -321,7 +321,7 @@ pub fn phone_text(e: &Escalation) -> (String, String) {
     }
     let silence = match (e.on_silence.as_str(), e.recommend) {
         ("take-recommended", Some(n)) => format!("take option {n}"),
-        _ => "the king waits".to_string(),
+        _ => "the lead waits".to_string(),
     };
     body.push_str(&format!("No answer by {}: {}", e.deadline, silence));
     (title, body)
@@ -399,7 +399,7 @@ mod tests {
 class: irreversible
 status: open
 node: x-aaaa
-raised_by: king-a792
+raised_by: lead-a792
 raised_at: 2026-09-15T09:00:00Z
 deadline: 2026-09-16T09:00:00Z
 recommend: 2
@@ -421,7 +421,7 @@ The token is live. Anyone with read access to the repo can use it until it is ro
 Option 2. It closes the risk and cannot break anyone's checkout.
 
 ## If no answer by the deadline
-The king waits. A force push cannot be undone.
+The lead waits. A force push cannot be undone.
 "#;
 
     #[test]
@@ -448,7 +448,7 @@ The king waits. A force push cannot be undone.
         assert!(body.contains("2. Rotate the token"), "{body}");
         assert!(body.contains("Recommended: option 2"), "{body}");
         assert!(
-            body.contains("No answer by 2026-09-16T09:00:00Z: the king waits"),
+            body.contains("No answer by 2026-09-16T09:00:00Z: the lead waits"),
             "{body}"
         );
         assert!(!body.contains("x-aaaa"), "no id in the body: {body}");

@@ -10672,10 +10672,10 @@ fn wheel_rows() {
         "status bar occupies the bottom row"
     );
     // (x-cd67 US1) The sideline owns row 0: subtract only the chrome bottom
-    // row, then the always-visible court block's reservation (x-aeab).
+    // row, then the always-visible org block's reservation (x-aeab).
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - 1 - v.court_block_rows(),
+        v.term.0 as usize - 1 - v.org_block_rows(),
         "chrome bottom row is not a scroll slot"
     );
     v.status_on = false;
@@ -10685,7 +10685,7 @@ fn wheel_rows() {
     );
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - v.court_block_rows(),
+        v.term.0 as usize - v.org_block_rows(),
         "with no chrome the full height minus the block is usable"
     );
 }
@@ -11807,11 +11807,11 @@ pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
     v
 }
 
-// ---- US9: hierarchy-ordered sideline from mesh crown metadata ----
+// ---- US9: hierarchy-ordered sideline from mesh team metadata ----
 
-/// A live squad-1 row carrying a crown (or none). Not blocked - a plain live
+/// A live squad-1 row carrying a team (or none). Not blocked - a plain live
 /// coordinator/leaf, the shape the sideline orders.
-fn crowned_row(name: &str, pane: u64, level: Option<u32>, scope: Option<&str>) -> AgentRow {
+fn teamed_row(name: &str, pane: u64, level: Option<u32>, scope: Option<&str>) -> AgentRow {
     let mut r = blocked_row(name, pane, None);
     r.badge = None;
     r.crown_level = level;
@@ -11831,13 +11831,13 @@ fn agent_order(v: &View) -> Vec<String> {
 }
 
 #[test]
-fn crown_all_uncrowned_squad_keeps_order_and_paints_no_badge_or_indent() {
+fn team_all_uncrowned_squad_keeps_order_and_paints_no_badge_or_indent() {
     // The common case (Operator Intent): a stable sort of equal ranks is
-    // the identity, so the squad's order is unchanged and no crown ceremony
+    // the identity, so the squad's order is unchanged and no team ceremony
     // reaches the paint - the no-regression path.
     let v = view_with_agents(vec![
-        crowned_row("zeta", 2, None, None),
-        crowned_row("alpha", 3, None, None),
+        teamed_row("zeta", 2, None, None),
+        teamed_row("alpha", 3, None, None),
     ]);
     assert_eq!(agent_order(&v), vec!["zeta", "alpha"]);
     let text = frame_text(&v.compose());
@@ -11847,7 +11847,7 @@ fn crown_all_uncrowned_squad_keeps_order_and_paints_no_badge_or_indent() {
     {
         assert!(
             !line.contains('['),
-            "no crown badge on un-crowned row: {line:?}"
+            "no team badge on un-teamed row: {line:?}"
         );
     }
 }
@@ -11866,12 +11866,12 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 }
 
 #[test]
-fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
-    // A partial crown (level set, scope None) must never panic: it orders at
+fn team_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
+    // A partial team (level set, scope None) must never panic: it orders at
     // its altitude and paints no bracket tag - the registry label is the name.
     let mut v = view_with_agents(vec![
-        crowned_row("dir", 2, Some(1), None),
-        crowned_row("leaf", 3, None, None),
+        teamed_row("dir", 2, Some(1), None),
+        teamed_row("leaf", 3, None, None),
     ]);
     assert_eq!(agent_order(&v).first().map(String::as_str), Some("dir"));
     v.sideline_width = 60;
@@ -11879,7 +11879,7 @@ fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
         !dir_line.contains("[L1 ?]"),
-        "no bracket badge on a crowned row: {dir_line:?}"
+        "no bracket badge on a teamed row: {dir_line:?}"
     );
 }
 
@@ -12462,7 +12462,7 @@ fn yard_crowd_reads_rows_and_joins_needs() {
     assert_eq!(crowd[0].1, crate::sprites::Eye::Working);
     // A blocked row joins the needs queue -> attention eye.
     assert_eq!(crowd[1].1, crate::sprites::Eye::Attention);
-    assert_eq!(crowd[1].2, 0); // crown defaults to 0, no hat
+    assert_eq!(crowd[1].2, 0); // team defaults to 0, no hat
 }
 
 #[test]
@@ -12498,7 +12498,7 @@ fn yard_item(
     name: &str,
     species: usize,
     rarity: &str,
-    crown: u32,
+    team: u32,
     first: bool,
 ) -> crate::yard_overlay::YardItem {
     crate::yard_overlay::YardItem {
@@ -12507,7 +12507,7 @@ fn yard_item(
         harness: Some("claude".into()),
         species,
         rarity: rarity.into(),
-        crown_level: crown,
+        crown_level: team,
         first_sighting: first,
     }
 }
@@ -12531,7 +12531,7 @@ fn yard_overlay_renders_one_spotlight_sprite() {
     // The sprite: each of the cat's rendered rows WITH CONTENT appears
     // exactly once (padding trails, so match on the prefix; the sprite's
     // own blank top row is indistinguishable from padding by design),
-    // and NO hat row (crown 0) - one sprite, no second block.
+    // and NO hat row (team 0) - one sprite, no second block.
     for row in crate::sprites::render_frame(0, 0, crate::sprites::Eye::Attention) {
         if row.trim().is_empty() {
             continue;
@@ -12550,13 +12550,13 @@ fn yard_overlay_renders_one_spotlight_sprite() {
 }
 
 #[test]
-fn yard_overlay_crown_hat_only_when_grounded() {
-    let crowd = vec![("king", crate::sprites::Eye::Working, 2u32)];
-    let id = yard_item("king", 0, "rare", 0, true);
+fn yard_overlay_team_hat_only_when_grounded() {
+    let crowd = vec![("lead", crate::sprites::Eye::Working, 2u32)];
+    let id = yard_item("lead", 0, "rare", 0, true);
     let lines = yard_overlay_lines(&crowd, 0, Some(&id), 0, NeedsFooter::AsOf);
-    assert!(lines.iter().any(|l| l.contains("\\^^^/")), "crown hat row");
+    assert!(lines.iter().any(|l| l.contains("\\^^^/")), "team hat row");
     let caption = lines.iter().find(|l| l.contains('▸')).unwrap();
-    assert!(caption.contains("crown 2"));
+    assert!(caption.contains("team 2"));
     assert!(caption.contains("NEW"));
 }
 

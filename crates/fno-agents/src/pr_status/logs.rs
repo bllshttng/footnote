@@ -3,7 +3,7 @@
 //! cache, so logs, heal and status spend one read per job.
 
 use super::cache::CountingProbe;
-use crate::king_board::prs::classify_check;
+use crate::org_board::prs::classify_check;
 use crate::pr_status_facts::{GhProbe, RealGhProbe};
 use serde_json::Value;
 use std::path::{Path, PathBuf};

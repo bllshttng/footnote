@@ -163,11 +163,11 @@ set -euo pipefail
 # version this branch already had was 89 bytes longer, and the rebase kept
 # it (no conflict was flagged - the two hunks merged cleanly). Measured from
 # the actual committed AGENTS.md, zero spare.
-# +55 (39640 -> 39695), measured 2026-09-04: the `/fno:reign` row in
-# skills/using-fno/SKILL.md. Reign is a new first-class verb and that table is
+# +55 (39640 -> 39695), measured 2026-09-04: the `/fno:lead` row in
+# skills/using-fno/SKILL.md. Lead is a new first-class verb and that table is
 # its only session-start mention, the same shape as the workspace-restore and
 # demand-signal raises. The row was compressed to neighbor idiom first
-# ("Reign as the crowned king", -22 B). 55 is the measured residue, zero spare.
+# ("Lead as the teamed lead", -22 B). 55 is the measured residue, zero spare.
 # +16 (39695 -> 39711), measured 2026-09-06: the mesh-spawn row in
 # skills/using-fno/SKILL.md gained one clause naming the new unattended
 # `--permission-mode` built-in (agents.defaults.permission_mode collapsed the

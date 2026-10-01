@@ -1264,23 +1264,23 @@ fn driver_persist_history_called_per_iteration() {
     }
 }
 
-// ── king walk arm ─────────────────────────────────────────────────────────────
+// ── lead walk arm ─────────────────────────────────────────────────────────────
 
-/// Write a per-scope king manifest under the test's resolved project space.
-fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceiling: u64) {
-    let kings = dir
+/// Write a per-scope lead manifest under the test's resolved project space.
+fn write_lead_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceiling: u64) {
+    let leads = dir
         .join("spaces")
         .join(fno_agents::paths::space_slug(dir))
-        .join("kings");
-    fs::create_dir_all(&kings).unwrap();
+        .join("leads");
+    fs::create_dir_all(&leads).unwrap();
     let content = format!(
         "---\nfno_id: {fno_id}\nscope: {scope}\nharness: claude\nharness_session_id: k-sess\nbudget_max_iterations: 40\nrespawn_count: {count}\nrespawn_ceiling: {ceiling}\n---\n"
     );
-    fs::write(kings.join(format!("{scope}.md")), content).unwrap();
+    fs::write(leads.join(format!("{scope}.md")), content).unwrap();
 }
 
 /// Pin a CLEAN board at `dir`: the graph carries only the scope epic, closed
-/// done so the crown reads drained, and the config makes the in-process
+/// done so the team reads drained, and the config makes the in-process
 /// collector resolve it on a bare machine (no global config, no `~/.fno`).
 /// Every shelled source (gh, fno-py) is stubbed in `dir/bin` so no read
 /// degrades into an unreadable row the loop would treat as work. The board
@@ -1319,7 +1319,7 @@ fn pin_clean_board(dir: &Path, scope: &str) {
     fs::write(
         bin_dir.join("fno"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; \
              then echo '{{\"scope\":\"{scope}\",\"undelivered\":0}}'; exit 0; fi\n\
              if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"name\" ]; then echo 'k-9331-w0'; exit 0; fi\n\
              echo '{{}}'\n"
@@ -1336,14 +1336,14 @@ fn pin_clean_board(dir: &Path, scope: &str) {
 /// A stub `fno` binary whose `inbox board` prints the given actionable count.
 /// The board read went in process, so its board half is inert; the dispatch
 /// tests that call it pass on the scope queue's own unreadable row. The
-/// drain read the king walk shells answers with the same count, so a
+/// drain read the lead walk shells answers with the same count, so a
 /// workable stub board stays a workable stub scope.
 fn write_stub_fno_board(dir: &Path, actionable: u64) {
     write_stub_binary(
         dir,
         "fno",
         &format!(
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then \
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; then \
              echo '{{\"scope\":\"epic-x\",\"undelivered\": {actionable}}}'; exit 0; fi\n\
              if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"name\" ]; then echo 'k-9331-w0'; exit 0; fi\n\
              if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
@@ -1371,11 +1371,11 @@ fn run_verb(args: &[&str], envs: &[(&str, &str)]) -> (String, String, Option<i32
     )
 }
 
-/// Verify-4 shape, positive form: with a fixture king manifest the walk no
+/// Verify-4 shape, positive form: with a fixture lead manifest the walk no
 /// longer refuses by name - it proceeds past driver validation into the
 /// preflight header and runs to a terminal (NoWork on a clean board).
 #[test]
-fn king_walk_proceeds_past_driver_validation_into_preflight() {
+fn lead_walk_proceeds_past_driver_validation_into_preflight() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
@@ -1383,14 +1383,14 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
     write_stub_fno_board(&bin_dir, 0);
     pin_clean_board(dir.path(), "epic-x");
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--driver-lib-dir",
@@ -1415,8 +1415,8 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
         "a clean board is NoWork (exit 0)\nstdout={stdout}\nstderr={stderr}"
     );
     assert!(
-        stdout.contains("driver:     king"),
-        "the header must name the king driver: {stdout}"
+        stdout.contains("driver:     lead"),
+        "the header must name the lead driver: {stdout}"
     );
     assert!(
         stdout.contains("session:    k-9331-w"),
@@ -1427,21 +1427,21 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
 /// AC5-ERR: at the respawn ceiling the walk terminates on Budget before
 /// dispatching, and says so in both the journal and stderr.
 #[test]
-fn king_walk_terminates_budget_at_the_respawn_ceiling() {
+fn lead_walk_terminates_budget_at_the_respawn_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
     write_stub_fno_board(&bin_dir, 0);
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--driver-lib-dir",
@@ -1484,11 +1484,11 @@ fn king_walk_terminates_budget_at_the_respawn_ceiling() {
         .exists());
 }
 
-/// AC5-HP: a prior reign's terminal under the bare fno_id must not close the
-/// walk unit (the original defect), the continue prompt must name the king's
+/// AC5-HP: a prior lead's terminal under the bare fno_id must not close the
+/// walk unit (the original defect), the continue prompt must name the lead's
 /// next move, and one walk invocation bills exactly one respawn.
 #[test]
-fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
+fn lead_walk_dispatches_past_a_prior_lead_terminal_and_bills_one_respawn() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     let dump = dir.path().join("env-dump.txt");
@@ -1502,8 +1502,8 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
     write_stub_fno_board(&bin_dir, 2);
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
-    // A prior reign terminated under the bare manifest fno_id. Under the old
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+    // A prior lead terminated under the bare manifest fno_id. Under the old
     // unit keying the resume guard closed the unit on this event and the walk
     // dispatched nothing.
     let events = dir.path().join(".fno").join("events.jsonl");
@@ -1515,7 +1515,7 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--driver-lib-dir",
@@ -1539,20 +1539,20 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
 
     assert!(
         dump.exists(),
-        "the walk must dispatch despite the prior reign terminal\nstdout={stdout}\nstderr={stderr}"
+        "the walk must dispatch despite the prior lead terminal\nstdout={stdout}\nstderr={stderr}"
     );
     let env_dump = fs::read_to_string(&dump).unwrap();
     assert!(
-        env_dump.contains("respawned king over epic-x"),
-        "the continue prompt must name the reign: {env_dump}"
+        env_dump.contains("respawned lead over epic-x"),
+        "the continue prompt must name the lead: {env_dump}"
     );
     assert!(
-        env_dump.contains("FNO_KING_WALK_SESSION_KEY=k-9331-w"),
+        env_dump.contains("FNO_LEAD_WALK_SESSION_KEY=k-9331-w"),
         "the walk key must reach the child so its terminal correlates: {env_dump}"
     );
     assert!(
         !env_dump.contains("CONTINUE_PROMPT=/target --resume"),
-        "a king session must never be resumed as a target: {env_dump}"
+        "a lead session must never be resumed as a target: {env_dump}"
     );
     assert_eq!(
         code,
@@ -1563,7 +1563,7 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
         dir.path()
             .join("spaces")
             .join(fno_agents::paths::space_slug(dir.path()))
-            .join("kings")
+            .join("leads")
             .join("epic-x.md"),
     )
     .unwrap();
@@ -1577,10 +1577,10 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
 /// and `respawn_count` is untouched afterward. A wake is normal operation, so
 /// it must neither be refused by nor spend the failure-retry budget; the
 /// caller's wake ledger is the bound in this mode. The prompt must also carry
-/// the drain instruction, because a mail-woken king that reads only its board
+/// the drain instruction, because a mail-woken lead that reads only its board
 /// reproduces the original failure with more processes.
 #[test]
-fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
+fn lead_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     let dump = dir.path().join("wake-env-dump.txt");
@@ -1594,14 +1594,14 @@ fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
     write_stub_fno_board(&bin_dir, 2);
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--wake",
@@ -1640,7 +1640,7 @@ fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
         dir.path()
             .join("spaces")
             .join(fno_agents::paths::space_slug(dir.path()))
-            .join("kings")
+            .join("leads")
             .join("epic-x.md"),
     )
     .unwrap();
@@ -1657,7 +1657,7 @@ fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
 /// terminates Budget before dispatching - wake mode removed no refusal the
 /// plain walk ever had.
 #[test]
-fn king_walk_without_wake_still_refuses_at_the_spent_ceiling() {
+fn lead_walk_without_wake_still_refuses_at_the_spent_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     let dump = dir.path().join("plain-env-dump.txt");
@@ -1670,14 +1670,14 @@ fn king_walk_without_wake_still_refuses_at_the_spent_ceiling() {
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
     write_stub_fno_board(&bin_dir, 2);
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--driver-lib-dir",
@@ -1709,10 +1709,10 @@ fn king_walk_without_wake_still_refuses_at_the_spent_ceiling() {
 }
 
 /// A wake over an EMPTY board must still terminate NoWork: the board check
-/// stays in wake mode so a spurious trigger cannot spawn a king with nothing
+/// stays in wake mode so a spurious trigger cannot spawn a lead with nothing
 /// to do.
 #[test]
-fn king_wake_mode_over_an_empty_board_terminates_nowork() {
+fn lead_wake_mode_over_an_empty_board_terminates_nowork() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     let dump = dir.path().join("empty-env-dump.txt");
@@ -1725,14 +1725,14 @@ fn king_wake_mode_over_an_empty_board_terminates_nowork() {
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
     pin_clean_board(dir.path(), "epic-x");
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--wake",
@@ -1768,8 +1768,8 @@ fn king_wake_mode_over_an_empty_board_terminates_nowork() {
 /// Asserted by the new sentences being present, never by the old ones being
 /// gone (an absence proves nothing about what replaced them).
 #[test]
-fn loop_king_docstring_names_the_refill_edge_owner_and_what_the_counter_counts() {
-    let source = include_str!("../src/loop_king.rs");
+fn loop_lead_docstring_names_the_refill_edge_owner_and_what_the_counter_counts() {
+    let source = include_str!("../src/loop_lead.rs");
     // Single-line phrases: a doc comment wraps, so a sentence-spanning
     // contains() would test the wrapping, not the claim.
     assert!(
@@ -1790,20 +1790,20 @@ fn loop_king_docstring_names_the_refill_edge_owner_and_what_the_counter_counts()
 /// would tell the session it was woken while the walk still runs
 /// failure-retry accounting. Refused as a usage error.
 #[test]
-fn king_wake_reason_without_wake_is_refused() {
+fn lead_wake_reason_without_wake_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("lib");
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
-    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+    write_lead_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
     let (stdout, stderr, code) = run_verb(
         &[
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--scope",
             "epic-x",
             "--wake-reason",
@@ -1839,9 +1839,9 @@ fn king_wake_reason_without_wake_is_refused() {
 /// what tells a periodic re-check that an unchanged board is a legitimate
 /// NoWork exit rather than a failure to find work.
 #[test]
-fn king_wake_reason_board_and_backstop_clauses_reach_the_prompt() {
+fn lead_wake_reason_board_and_backstop_clauses_reach_the_prompt() {
     for (reason, needle) in [
-        ("board", "board changed while this scope had no king"),
+        ("board", "board changed while this scope had no lead"),
         ("backstop", "unchanged board is a legitimate NoWork exit"),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -1856,14 +1856,14 @@ fn king_wake_reason_board_and_backstop_clauses_reach_the_prompt() {
         let bin_dir = dir.path().join("bin");
         write_stub_binary(&bin_dir, "claude", "exit 0");
         write_stub_fno_board(&bin_dir, 2);
-        write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+        write_lead_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
         let (stdout, stderr, _code) = run_verb(
             &[
                 "loop",
                 "run",
                 "--driver",
-                "king",
+                "lead",
                 "--scope",
                 "epic-x",
                 "--wake",

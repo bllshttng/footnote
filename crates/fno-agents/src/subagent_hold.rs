@@ -1,5 +1,5 @@
 //! Finished background subagents this session still holds, read from its
-//! own claude transcript. Feeds the `subagents` reading in `king_checkin.rs`.
+//! own claude transcript. Feeds the `subagents` reading in `lead_checkin.rs`.
 //!
 //! A background subagent that finished stays held until its parent stops it
 //! with TaskStop. Every existing reader keys on transcript mtime, which

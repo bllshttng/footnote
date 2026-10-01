@@ -66,7 +66,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         tail: None,
         crown_level: None,
         crown_scope: None,
-        crown_title: None,
+        team_title: None,
         spawned_by_session: None,
         lineage_kind: None,
         harness_session_id: registry.harness_session_id.clone(),
@@ -86,7 +86,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     // graph, and both hold it.
     let live = GcRow {
         origin: Some("spawn".into()),
-        crowned: false,
+        teamed: false,
         work: fno_agents::graph_store::WorkState::AllDone {
             nodes: vec!["N1".into()],
         },

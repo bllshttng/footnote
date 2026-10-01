@@ -1,4 +1,4 @@
-//! Reads the king's last 20 end-of-turn replies and names asks repeated there.
+//! Reads the lead's last 20 end-of-turn replies and names asks repeated there.
 //! An ask belongs on a question page, never in chat.
 
 use std::{
@@ -50,7 +50,7 @@ const NOT_ASK: &[&str] = &[
 ];
 
 pub(crate) fn reading() -> Result<Value, String> {
-    let path = crate::king_checkin::own_claude_transcript()?;
+    let path = crate::lead_checkin::own_claude_transcript()?;
     Ok(fold(&last_replies(&path)?))
 }
 
@@ -228,7 +228,7 @@ fn fold(replies: &[String]) -> Value {
     })
 }
 
-pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+pub(crate) fn lines(readings: &[crate::lead_checkin::Reading]) -> Vec<String> {
     let Some(reading) = readings
         .iter()
         .find(|reading| reading.name == "repeated_asks")
@@ -268,7 +268,7 @@ pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::king_checkin::Reading;
+    use crate::lead_checkin::Reading;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
