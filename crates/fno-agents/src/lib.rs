@@ -358,6 +358,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_escalation;
 pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
@@ -1021,6 +1022,8 @@ mod tests {
             "x",
             "mux_pane_counters",
             "operator_decision",
+            // The hook emits this in Python; Rust only stages fixtures of it.
+            "loop_check_watch_idle",
         ];
         let test_only: BTreeSet<&str> = TEST_ONLY_EMIT_KINDS.iter().copied().collect();
 
