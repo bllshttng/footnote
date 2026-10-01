@@ -835,7 +835,7 @@ fn canonical_suppressed(value: Option<&std::ffi::OsStr>) -> bool {
 /// canonical-candidate test assert `Some(...)` against a function forced to
 /// return `None` - green everywhere except the one gate that runs before a
 /// push.
-fn canonical_suppressed_by_env() -> bool {
+pub(crate) fn canonical_suppressed_by_env() -> bool {
     canonical_suppressed(std::env::var_os("FNO_NO_CANONICAL_CONFIG").as_deref())
 }
 
@@ -869,7 +869,7 @@ fn canonical_suppressed_by_env() -> bool {
 /// `fno_agents::agents_config` verbatim. A third reader with its own idea of
 /// truthiness would resurrect the very split-brain this candidate fixes, just
 /// for operators who set it to "0" or "true".
-fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
+pub(crate) fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
     if suppressed {
         return None;
     }
@@ -884,7 +884,7 @@ fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
 /// without an env var the whole process shares.
 ///
 /// Falls back to `cwd` outside a repo, which is where a bare `.fno/` would be.
-fn repo_root_from(cwd: &Path) -> PathBuf {
+pub(crate) fn repo_root_from(cwd: &Path) -> PathBuf {
     let mut dir = cwd;
     loop {
         // A linked worktree's `.git` is a FILE, not a directory.
