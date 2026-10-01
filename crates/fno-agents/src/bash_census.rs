@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn the_three_command_fixture_matches_every_counted_share() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = write_fixture(&[
             "cd x && grep a b",
             "fno backlog get x-1",
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn allow_on_the_fixture_prints_exactly_one_pasteable_line() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = write_fixture(&["fno backlog get x-1"]);
         let args = vec![
             "--days".to_string(),
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn an_empty_window_exits_three() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
         let args = vec!["--cwd".to_string(), "/nothing/here".to_string()];
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn the_short_json_spelling_parses_like_the_long_one() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = write_fixture(&["fno backlog get x-1"]);
         let args = vec![
             "--days".to_string(),

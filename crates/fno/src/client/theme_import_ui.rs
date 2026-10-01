@@ -1,3 +1,4 @@
+use super::input_field::{back_row, InputField};
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,12 @@ const MAX_INPUT_BYTES: usize = 1_024;
 pub(super) enum ThemeImportUi {
     #[default]
     Idle,
-    Entry(String),
+    Entry(InputField),
+    /// The macOS file picker is open; its answer feeds the same preview.
+    Picking {
+        gen: u64,
+        started: bool,
+    },
     Loading {
         gen: u64,
         input: String,
@@ -37,14 +43,102 @@ pub(super) fn is_entry(state: &ThemeImportUi) -> bool {
 pub(super) fn reset(view: &mut View) {
     view.theme_import_gen = view.theme_import_gen.wrapping_add(1);
     view.theme_import = ThemeImportUi::Idle;
-    view.theme_import_esc.clear();
+}
+
+fn field() -> InputField {
+    InputField::new("path, folder or GitHub file URL", MAX_INPUT_BYTES)
 }
 
 pub(super) fn open(view: &mut View) {
     view.theme_import_gen = view.theme_import_gen.wrapping_add(1);
-    view.theme_import_esc.clear();
-    view.theme_import = ThemeImportUi::Entry(String::new());
+    view.theme_import = ThemeImportUi::Entry(field());
     view.reopen_settings_keeping_sel();
+}
+
+/// The argv that opens the system file picker and prints the chosen path:
+/// osascript "choose file" on a local macOS session, nothing on Linux or
+/// over SSH (the dialog would open on a screen the user cannot see).
+pub(super) fn picker_argv(os: &str, ssh: bool) -> Option<Vec<String>> {
+    (os == "macos" && !ssh).then(|| {
+        vec![
+            "osascript".into(),
+            "-e".into(),
+            "POSIX path of (choose file with prompt \"Choose a theme file\")".into(),
+        ]
+    })
+}
+
+fn local_picker() -> Option<Vec<String>> {
+    let ssh = ["SSH_CONNECTION", "SSH_TTY"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some());
+    picker_argv(std::env::consts::OS, ssh)
+}
+
+pub(super) fn pick(view: &mut View) {
+    if local_picker().is_none() {
+        view.set_notice("no file picker on this session; type the path".into());
+        return;
+    }
+    view.theme_import = ThemeImportUi::Picking {
+        gen: view.theme_import_gen,
+        started: false,
+    };
+    view.reopen_settings_keeping_sel();
+}
+
+/// A dropped path as a terminal types it: `file://`, one pair of quotes,
+/// and backslash escapes (Ghostty and iTerm2 escape spaces) come off.
+fn unshell(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix("file://").unwrap_or(s);
+    let s = ['\'', '"']
+        .iter()
+        .find_map(|q| s.strip_prefix(*q).and_then(|t| t.strip_suffix(*q)))
+        .unwrap_or(s);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        out.push(if c == '\\' {
+            chars.next().unwrap_or(c)
+        } else {
+            c
+        });
+    }
+    out
+}
+
+/// Enter on the theme file field; true ends the chunk. An empty field opens
+/// the picker where there is one. A path that fails as typed is retried
+/// with its drop escapes removed.
+pub(super) fn submit(view: &mut View, input: String) -> bool {
+    if input.is_empty() {
+        if local_picker().is_none() {
+            return false;
+        }
+        pick(view);
+        return true;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let parsed = crate::theme_import::parse_source(&input, &cwd).or_else(|reason| {
+        let plain = unshell(&input);
+        if plain == input {
+            return Err(reason);
+        }
+        crate::theme_import::parse_source(&plain, &cwd).map_err(|_| reason)
+    });
+    match parsed {
+        Ok(source) => {
+            view.theme_import = ThemeImportUi::Loading {
+                gen: view.theme_import_gen,
+                input,
+                source,
+                started: false,
+            };
+        }
+        Err(reason) => view.set_notice(reason),
+    }
+    true
 }
 
 pub(super) fn cancel(view: &mut View) {
@@ -53,7 +147,10 @@ pub(super) fn cancel(view: &mut View) {
 }
 
 pub(super) fn maybe_kick(view: &mut View, tx: &ImportTx) {
-    let Some((gen, input, source)) = (match &mut view.theme_import {
+    let tx = tx.clone();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let theme_dir = crate::digest_overlay::themes_dir();
+    match &mut view.theme_import {
         ThemeImportUi::Loading {
             gen,
             input,
@@ -61,25 +158,58 @@ pub(super) fn maybe_kick(view: &mut View, tx: &ImportTx) {
             started,
         } if !*started => {
             *started = true;
-            Some((*gen, input.clone(), source.clone()))
+            let (gen, input, source) = (*gen, input.clone(), source.clone());
+            tokio::spawn(async move {
+                let result =
+                    crate::theme_import::preview_with_theme_dir(&source, &cwd, theme_dir).await;
+                let source = source_label(&source);
+                let _ = tx.send(ImportMsg {
+                    gen,
+                    input,
+                    source,
+                    result,
+                });
+            });
         }
-        _ => None,
-    }) else {
-        return;
-    };
-    let tx = tx.clone();
-    let source_label = source_label(&source);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let theme_dir = crate::digest_overlay::themes_dir();
-    tokio::spawn(async move {
-        let result = crate::theme_import::preview_with_theme_dir(&source, &cwd, theme_dir).await;
-        let _ = tx.send(ImportMsg {
-            gen,
-            input,
-            source: source_label,
-            result,
-        });
-    });
+        ThemeImportUi::Picking { gen, started } if !*started => {
+            *started = true;
+            let gen = *gen;
+            let Some(argv) = local_picker() else {
+                return;
+            };
+            tokio::spawn(async move {
+                let run = tokio::process::Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .kill_on_drop(true)
+                    .output();
+                let path = match tokio::time::timeout(Duration::from_secs(600), run).await {
+                    Ok(Ok(out)) if out.status.success() => {
+                        String::from_utf8_lossy(&out.stdout).trim().to_string()
+                    }
+                    _ => String::new(),
+                };
+                let (source, result) = if path.is_empty() {
+                    (String::new(), Err("file picker: cancelled".to_string()))
+                } else {
+                    match crate::theme_import::parse_source(&path, &cwd) {
+                        Ok(source) => (
+                            source_label(&source),
+                            crate::theme_import::preview_with_theme_dir(&source, &cwd, theme_dir)
+                                .await,
+                        ),
+                        Err(reason) => (path.clone(), Err(reason)),
+                    }
+                };
+                let _ = tx.send(ImportMsg {
+                    gen,
+                    input: path,
+                    source,
+                    result,
+                });
+            });
+        }
+        _ => {}
+    }
 }
 
 pub(super) fn apply_result(view: &mut View, message: ImportMsg) {
@@ -88,7 +218,8 @@ pub(super) fn apply_result(view: &mut View, message: ImportMsg) {
     }
     let still_loading = matches!(
         &view.theme_import,
-        ThemeImportUi::Loading { gen, .. } if *gen == message.gen
+        ThemeImportUi::Loading { gen, .. } | ThemeImportUi::Picking { gen, .. }
+            if *gen == message.gen
     );
     if !still_loading || view.theme_import_gen != message.gen {
         return;
@@ -103,7 +234,7 @@ pub(super) fn apply_result(view: &mut View, message: ImportMsg) {
         }
         Err(reason) => {
             view.set_notice(reason);
-            view.theme_import = ThemeImportUi::Entry(message.input);
+            view.theme_import = ThemeImportUi::Entry(field().with_text(&message.input));
         }
     }
     view.reopen_settings_keeping_sel();
@@ -114,13 +245,26 @@ pub(super) fn rows(state: &ThemeImportUi, cwd: &Path) -> (Vec<PopupRow>, Vec<Aux
     let mut actions = Vec::new();
     match state {
         ThemeImportUi::Idle => return (rows, actions),
-        ThemeImportUi::Entry(input) => {
-            inert(&mut rows, PopupRow::Header(format!("theme file: {input}")));
-            inert_entry(
-                &mut rows,
-                "a theme file or folder path, or a GitHub file URL",
-            );
+        ThemeImportUi::Entry(field) => {
+            rows.push(back_row());
+            actions.push(AuxAction::SettingsBack);
+            rows.push(field.row("theme file"));
+            inert_entry(&mut rows, "type a path or drop a file here");
             inert_entry(&mut rows, "fno theme files and Ghostty theme files");
+            if local_picker().is_some() {
+                selectable(
+                    &mut rows,
+                    &mut actions,
+                    "choose file…",
+                    AuxAction::ThemePick,
+                    true,
+                );
+            }
+        }
+        ThemeImportUi::Picking { .. } => {
+            rows.push(back_row());
+            actions.push(AuxAction::SettingsBack);
+            inert_entry(&mut rows, "waiting for the file picker…");
         }
         ThemeImportUi::Loading { source, .. } => {
             inert(&mut rows, PopupRow::Header("import theme".into()));
@@ -260,60 +404,6 @@ fn selectable(
     if enabled {
         actions.push(action);
     }
-}
-
-pub(super) async fn entry_keys(view: &mut View, bytes: &[u8]) -> Result<StdinFlow, String> {
-    if !is_entry(&view.theme_import) {
-        return Ok(StdinFlow::Continue);
-    }
-    let mut esc = std::mem::take(&mut view.theme_import_esc);
-    let keys = fold_search_input(&mut esc, bytes);
-    view.theme_import_esc = esc;
-    for key in keys {
-        let ThemeImportUi::Entry(current) = &mut view.theme_import else {
-            break;
-        };
-        match key {
-            SearchKey::Esc => {
-                view.theme_import = ThemeImportUi::Idle;
-                view.theme_import_gen = view.theme_import_gen.wrapping_add(1);
-                view.reopen_settings_keeping_sel();
-                break;
-            }
-            SearchKey::Byte(b'\r' | b'\n') => {
-                let input = current.trim().to_string();
-                if input.is_empty() {
-                    continue;
-                }
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                match crate::theme_import::parse_source(&input, &cwd) {
-                    Ok(source) => {
-                        let gen = view.theme_import_gen;
-                        view.theme_import = ThemeImportUi::Loading {
-                            gen,
-                            input,
-                            source,
-                            started: false,
-                        };
-                        view.reopen_settings_keeping_sel();
-                    }
-                    Err(reason) => {
-                        view.set_notice(reason);
-                        view.reopen_settings_keeping_sel();
-                    }
-                }
-                break;
-            }
-            SearchKey::Byte(0x7f | 0x08) => {
-                current.pop();
-            }
-            SearchKey::Byte(b @ 0x20..=0x7e) if current.len() < MAX_INPUT_BYTES => {
-                current.push(b as char);
-            }
-            SearchKey::Byte(_) => {}
-        }
-    }
-    Ok(StdinFlow::Continue)
 }
 
 pub(super) async fn save(view: &mut View) -> Result<(), String> {

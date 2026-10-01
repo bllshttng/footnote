@@ -2208,7 +2208,7 @@ mod tests {
 
     #[test]
     fn guard_preset_ladder_env_config_and_malformed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         std::env::remove_var("FNO_GUARD_PRESET");
         // Absent everywhere: standard, and only the preset-gated guards answer.

@@ -464,14 +464,7 @@ pub(crate) fn copy_selected(view: &mut View) {
 /// clamp `select` onto the last entry on a hover sweep.
 pub(crate) fn hit_at(view: &View, row: u16, col: u16) -> Option<usize> {
     let m = view.feed_detail.as_ref()?;
-    let r = m.popup.render(view.term);
-    let (r0, c0) = r.origin;
-    let line = r.lines.get(row.checked_sub(r0 as u16)? as usize)?;
-    let cc = (col as usize).checked_sub(c0)?;
-    line.hits
-        .iter()
-        .find(|(t, off, len)| *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len)
-        .map(|(t, _, _)| *t)
+    m.popup.render(view.term).row_target_at(row, col)
 }
 
 /// Open the modal on one row, resolving the roster once; a later fold

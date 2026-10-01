@@ -43,7 +43,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     // board holds the keyboard. Org is the next view in the three-view cycle.
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE leg1 org-after-V");
-    h.wait_screen(15, |s| s.contains("Org Tree"));
+    h.wait_screen(15, |s| s.contains("Tree │ Table │ Graph"));
 
     h.type_bytes(&[PREFIX, b'?']);
     eprintln!("STAGE org global-keybinds");
@@ -53,7 +53,9 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
         "Org's own keys must not answer the prefix chord:\n{screen}"
     );
     h.type_bytes(&[27]);
-    h.wait_screen(15, |s| s.contains("Org Tree") && !s.contains("Keybindings"));
+    h.wait_screen(15, |s| {
+        s.contains("Tree │ Table │ Graph") && !s.contains("Keybindings")
+    });
 
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE leg1 agents-after-second-V");

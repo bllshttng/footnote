@@ -865,7 +865,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                     let target = std::path::PathBuf::from(worktree);
                     let canonical_target =
                         std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
-                    let cwds = crate::cargo_build_dirs::live_cwds(None)?;
+                    let cwds = crate::cargo_build_dirs::live_cwds_cached()?;
                     Ok(cwds.into_iter().any(|cwd| {
                         let canonical_cwd =
                             std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());

@@ -426,6 +426,22 @@ fn flat_role(r: Role) -> Role {
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
+/// Tab `i` of a tab strip hits as `TAB_HIT_BASE + i`; like the esc chip, far
+/// above any body row's real target.
+pub const TAB_HIT_BASE: usize = usize::MAX - 32;
+
+/// The tab index a hit target names, if it is a tab.
+pub fn tab_of_hit(t: usize) -> Option<usize> {
+    (TAB_HIT_BASE..TAB_HIT_BASE + 16)
+        .contains(&t)
+        .then(|| t - TAB_HIT_BASE)
+}
+
+/// Whether a hit target is a body row (not a tab and not an esc span).
+pub fn is_row_hit(t: usize) -> bool {
+    t < TAB_HIT_BASE
+}
+
 /// One painted esc-close span in screen cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseSpan {
@@ -644,10 +660,17 @@ fn content_row(content: &str, role: Role, inner_w: usize) -> FramedLine {
 /// The section tab strip: `●`/`○` (active gets the accent) + label per tab.
 fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
     let mut inner: Vec<Seg> = vec![(' ', Role::Tab(false))];
+    let mut hits = Vec::new();
     for (i, (label, active)) in tabs.iter().enumerate() {
         if i > 0 {
             inner.push((' ', Role::Tab(false)));
             inner.push((' ', Role::Tab(false)));
+        }
+        // The dot, the space and the label are one tap target; +1 for the
+        // left border.
+        let len = 2 + label.chars().count();
+        if inner.len() + len <= inner_w {
+            hits.push((TAB_HIT_BASE + i, inner.len() + 1, len));
         }
         inner.push((if *active { '●' } else { '○' }, Role::Tab(*active)));
         inner.push((' ', Role::Tab(*active)));
@@ -655,7 +678,9 @@ fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
             inner.push((ch, Role::Tab(*active)));
         }
     }
-    content_row_from_segs(inner, inner_w)
+    let mut row = content_row_from_segs(inner, inner_w);
+    row.hits = hits;
+    row
 }
 
 fn content_row_from_segs(mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
@@ -912,13 +937,30 @@ mod tests {
                 line.text
             );
         }
-        assert!(
-            framed
-                .lines
-                .iter()
-                .any(|l| l.text.contains("colors") && l.text.contains('│')),
-            "the strip row carries the tabs and closes its own border"
+        let strip = framed
+            .lines
+            .iter()
+            .find(|l| l.text.contains("colors") && l.text.contains('│'))
+            .expect("the strip row carries the tabs and closes its own border");
+        // Each tab's dot, space and label is one tap target, and no target
+        // reads as a body row.
+        let chars: Vec<char> = strip.text.chars().collect();
+        let spans: Vec<(Option<usize>, String)> = strip
+            .hits
+            .iter()
+            .map(|&(t, off, len)| (tab_of_hit(t), chars[off..off + len].iter().collect()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                (Some(0), "● general".to_string()),
+                (Some(1), "○ theme".to_string()),
+                (Some(2), "○ keys".to_string()),
+                (Some(3), "○ colors".to_string()),
+            ]
         );
+        assert!(strip.hits.iter().all(|(t, _, _)| !is_row_hit(*t)));
+        assert!(!is_row_hit(ESC_CLOSE_HIT) && is_row_hit(0));
     }
 
     #[test]

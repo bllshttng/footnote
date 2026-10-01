@@ -2290,6 +2290,76 @@ console.log("evictedRowCount: 18 cases ok");
             BACKLOG_PAGE.contains(r#"class="controls""#),
             "the filter bar keeps the controls class the nav offset targets"
         );
+        // The copied-id surface: the three render sites bind the one copy
+        // handler, and no fourth site appeared unbound.
+        assert!(
+            BACKLOG_PAGE.contains("function bindIdCopy(el, id)"),
+            "the one copy handler exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(cidEl, card.id)"),
+            "kanban card ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(lidEl, card.id)"),
+            "list row ids copy"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("bindIdCopy(idSpan, card.id)"),
+            "the panel id copies"
+        );
+        assert_eq!(
+            BACKLOG_PAGE.matches("bindIdCopy(").count(),
+            4,
+            "the handler binds at exactly the three render sites plus its definition"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("ev.stopPropagation()"),
+            "an id tap must not open the row behind it"
+        );
+        // The search bar is the first control on the page and holds the one
+        // find input, its clear button and the focus key.
+        let bar = BACKLOG_PAGE
+            .find(r#"id="searchbar""#)
+            .expect("the search bar exists");
+        let controls = BACKLOG_PAGE
+            .find(r#"id="controls""#)
+            .expect("controls exist");
+        assert!(bar < controls, "the search bar leads the page");
+        assert!(
+            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            "the placeholder names what search covers"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="f-q-clear""#),
+            "the clear button exists"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"id="searchkey""#),
+            "the focus key shows in the box"
+        );
+        assert!(
+            !BACKLOG_PAGE.contains(r#"size="14""#),
+            "the old hidden find input is gone"
+        );
+        assert!(
+            BACKLOG_PAGE.contains("b.dataset.id = card.id;"),
+            "board rows carry their id for the j/k selection"
+        );
+        // The filter state reads every key FILTER_KEYS iterates: one missing
+        // key made filterParams throw "state[k] is not iterable" on every
+        // fresh served board, and the route drew no cards at all (the
+        // snapshot copy tolerates the undefined, which is why only the
+        // bridge showed it). Found live on the deployed binary 2026-10-01.
+        for key in [
+            "project", "epic", "status", "priority", "size", "king", "kind",
+        ] {
+            let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
+            assert!(
+                BACKLOG_PAGE.contains(&line),
+                "the filter state must read {key} or filterParams throws at boot"
+            );
+        }
     }
 
     /// The three pure helpers must hold their contracts when run for real,
@@ -2363,9 +2433,11 @@ console.log("backlog page helpers: 12 cases ok");
         }
     }
 
-    /// The snapshot engine's pure half holds its contracts when run for
-    /// real: lift cardKeeps / laneKeyOf / voteText from the shipped page and
-    /// run the cases under node, the same rule as the board helpers.
+    /// The snapshot engine's pure half and the board's shortcut resolver
+    /// hold their contracts when run for real: lift cardKeeps / laneKeyOf /
+    /// voteText and shortcutAction / isTypingTarget / copiedToast from the
+    /// shipped page and run every case under node, the same rule as the
+    /// board helpers.
     #[test]
     fn snapshot_page_helpers_hold_under_node() {
         let asserts = r#"
@@ -2401,13 +2473,59 @@ eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent
 eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
 eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
 console.log("snapshot page helpers: 16 cases ok");
+// The board shortcuts: every key the ? sheet advertises, the typing guard,
+// the Escape unwind order, and the copied-id toast line.
+const M = { meta: false, ctrl: false };
+// focus search: the slash, and ctrl/cmd K (plain k is the selection move).
+eq(shortcutAction("/", M, {}), "focus-search", "/ focuses search");
+eq(shortcutAction("k", { meta: true, ctrl: false }, {}), "focus-search", "cmd-K focuses search");
+eq(shortcutAction("K", { meta: false, ctrl: true }, {}), "focus-search", "ctrl-K focuses search");
+eq(shortcutAction("k", { meta: true, ctrl: false }, { typing: true }), null, "cmd-K never fires while typing");
+// selection: j down, k up; j from nothing starts at the first card.
+eq(shortcutAction("j", M, {}), "sel-next", "j moves down");
+eq(shortcutAction("k", M, {}), "sel-prev", "k moves up");
+eq(shortcutAction("j", M, { hasSelection: false }), "sel-next", "j starts the selection");
+// enter and y answer only with a selection on the board.
+eq(shortcutAction("Enter", M, { hasSelection: true }), "open", "enter opens the selection");
+eq(shortcutAction("Enter", M, { hasSelection: false }), null, "enter without a selection is nothing");
+eq(shortcutAction("y", M, { hasSelection: true }), "copy", "y copies the selection");
+eq(shortcutAction("y", M, { hasSelection: false }), null, "y without a selection is nothing");
+// tab toggles the view, f jumps to the filters, ? opens the sheet.
+eq(shortcutAction("Tab", M, { view: "kanban" }), "toggle-view", "tab toggles the view");
+eq(shortcutAction("f", M, {}), "filters", "f opens the filters");
+eq(shortcutAction("?", M, {}), "sheet", "? opens the sheet");
+// the typing guard: no board key fires from inside a form field.
+for (const key of ["/", "j", "k", "y", "Tab", "f", "?", "Enter"]) {
+  eq(shortcutAction(key, M, { typing: true }), null, key + " never fires while typing");
+}
+// escape unwinds in order: sheet, then the search text, then the details;
+// it alone survives the typing guard.
+eq(shortcutAction("Escape", M, { sheetOpen: true }), "close-sheet", "escape closes the sheet first");
+eq(shortcutAction("Escape", M, { query: "abc" }), "clear-search", "escape clears the search before the details");
+eq(shortcutAction("Escape", M, { panelOpen: true }), "close-panel", "escape closes the details");
+eq(shortcutAction("Escape", M, {}), null, "escape with nothing open is nothing");
+eq(shortcutAction("Escape", M, { typing: true, query: "abc" }), "clear-search", "escape clears from inside a field");
+// the typing guard itself.
+eq(isTypingTarget({ tagName: "INPUT" }), true, "input swallows typing");
+eq(isTypingTarget({ tagName: "TEXTAREA" }), true, "textarea swallows typing");
+eq(isTypingTarget({ tagName: "SELECT" }), true, "select swallows typing");
+eq(isTypingTarget({ tagName: "DIV", isContentEditable: true }), true, "content editable swallows typing");
+eq(isTypingTarget({ tagName: "BUTTON" }), false, "a button is a board target");
+eq(isTypingTarget({}), false, "no tag is no target");
+eq(isTypingTarget(null), false, "no target is no target");
+// the toast names what landed on the clipboard.
+eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
+console.log("backlog shortcuts: 35 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
             lift_js_fn(BACKLOG_PAGE, "nestChildren"),
             lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
             lift_js_fn(BACKLOG_PAGE, "voteText"),
+            lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
+            lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
+            lift_js_fn(BACKLOG_PAGE, "copiedToast"),
             asserts
         );
         let path =
@@ -2432,6 +2550,10 @@ console.log("snapshot page helpers: 16 cases ok");
                 assert!(
                     stdout.contains("snapshot page helpers: 16 cases ok"),
                     "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
+                );
+                assert!(
+                    stdout.contains("backlog shortcuts: 35 cases ok"),
+                    "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
                 );
             }
         }
