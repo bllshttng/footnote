@@ -187,6 +187,21 @@ mod tests {
         crate::backlog::api::decision_record(&crate::backlog::api::Store::new(&req.graph), stored)
             .unwrap();
         crate::event_store::append_envelope(&req.journal_path, &raw_line, None).unwrap();
+        // The stores diverge: the decisions store's decision row sits at a
+        // different seq, so the journal's _store_seq cannot resolve there and
+        // the mirror must still append metadata-free bytes.
+        crate::event_store::append_envelope(
+            &req.decisions_path,
+            &json!({
+                "ts": "2026-09-23T00:00:30Z",
+                "type": "status_control",
+                "source": "test",
+                "data": {}
+            })
+            .to_string(),
+            None,
+        )
+        .unwrap();
         crate::event_store::append_envelope(&req.decisions_path, &raw_line, None).unwrap();
         let old_close = json!({
             "ts": "2026-09-23T00:02:00Z",
@@ -1132,7 +1147,7 @@ fn append_decision_mirror(path: &Path, line: &str, decision_id: &str) -> Result<
     // A recovery-annotated read re-mirrors only its raw stored envelope: the
     // mirror row must stay byte-identical to the first append, so identity
     // hashes the stored bytes, never the annotated render.
-    let line = crate::event_store::raw_stored_line(path, line)?.unwrap_or_else(|| line.to_string());
+    let line = crate::event_store::raw_stored_line(path, line)?;
     let event_id = stored_event_id(path, &line)?.unwrap_or_else(|| decision_id.to_string());
     crate::event_store::append_envelope(path, &line, Some(&event_id)).map(|_| ())
 }
@@ -1367,8 +1382,7 @@ fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, S
 fn append_close(journal: &Path, line: &str, qid: &str) -> Result<(), String> {
     // Same recovery rule as the decision mirror: a close read back through
     // journal_text re-appends only as its raw stored envelope.
-    let line =
-        crate::event_store::raw_stored_line(journal, line)?.unwrap_or_else(|| line.to_string());
+    let line = crate::event_store::raw_stored_line(journal, line)?;
     let event_id = stored_event_id(journal, &line)?.unwrap_or_else(|| format!("close:{qid}"));
     crate::event_store::append_envelope(journal, &line, Some(&event_id)).map(|_| ())
 }

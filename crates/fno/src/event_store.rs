@@ -1292,25 +1292,39 @@ pub fn recovery_envelope(row: &EventRow) -> serde_json::Value {
     value
 }
 
-/// The raw stored line behind a recovery-annotated read. [`journal_text`]
+/// The line identity work can append for a journal-text read: the raw stored
+/// line when `_store_seq` names this very envelope in THIS store, otherwise
+/// the input with its recovery annotations stripped. [`journal_text`]
 /// re-serializes committed rows with `_store_seq`/`_history_only` once the
 /// store holds recovery history, and identity work (row-hash lookup,
-/// idempotent re-append) must hash the original bytes. The seq must name this
-/// very envelope in THIS store - a mirror line read from a sibling store
-/// carries a foreign seq - so the row only comes back when the stored line
-/// equals the input without its recovery annotations. Returns `None`
-/// otherwise, so a caller keeps its live-line behavior.
-pub fn raw_stored_line(journal: &Path, line: &str) -> Result<Option<String>, String> {
+/// idempotent re-append) must never hash - or store - the annotated render.
+/// A line read from a sibling store carries a foreign seq, so its verified
+/// resolution fails and the stripped render stands in; for a line without
+/// annotations this is the verbatim input.
+pub fn raw_stored_line(journal: &Path, line: &str) -> Result<String, String> {
     let value = match serde_json::from_str::<serde_json::Value>(line) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(line.to_string()),
     };
+    let annotated = ["_store_seq", "_history_only", "_recovery_batch"]
+        .iter()
+        .any(|key| value.get(key).is_some());
+    if !annotated {
+        return Ok(line.to_string());
+    }
+    let mut stripped = value.clone();
+    if let Some(object) = stripped.as_object_mut() {
+        for key in ["_store_seq", "_history_only", "_recovery_batch"] {
+            object.remove(key);
+        }
+    }
+    let clean = serde_json::to_string(&stripped).unwrap_or_else(|_| line.to_string());
     let Some(seq) = value.get("_store_seq").and_then(serde_json::Value::as_i64) else {
-        return Ok(None);
+        return Ok(clean);
     };
     let store = store_path(journal);
     if !store.is_file() {
-        return Ok(None);
+        return Ok(clean);
     }
     let conn = open_read(&store)?;
     let stored: Option<String> = conn
@@ -1322,18 +1336,12 @@ pub fn raw_stored_line(journal: &Path, line: &str) -> Result<Option<String>, Str
         .optional()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let Some(stored) = stored else {
-        return Ok(None);
+        return Ok(clean);
     };
-    let mut stripped = value.clone();
-    if let Some(object) = stripped.as_object_mut() {
-        for key in ["_store_seq", "_history_only", "_recovery_batch"] {
-            object.remove(key);
-        }
-    }
     let same = serde_json::from_str::<serde_json::Value>(&stored)
         .map(|raw| raw == stripped)
         .unwrap_or(false);
-    Ok(same.then_some(stored))
+    Ok(if same { stored } else { clean })
 }
 
 /// Keep recovered history for folds, but never let it restart activity. A
