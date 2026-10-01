@@ -1281,6 +1281,11 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "scoreboard_by_provider" => {
             crate::scoreboard_provider::view(&params).map_err(StoreError::Invalid)
         }
+        // The escalation-vs-stayed fold (scoreboard_escalation.rs): client-
+        // shipped entries + rows + delegated events in, view + text out.
+        "scoreboard_escalation" => {
+            crate::scoreboard_escalation::view(&params).map_err(StoreError::Invalid)
+        }
         // The lifecycle verb decision (backlog_ready::serve_effective_verb):
         // one answer per shipped row; a refusal rides its own row.
         "effective_verb" => {

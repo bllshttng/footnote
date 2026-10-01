@@ -37,11 +37,14 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         _harness: str, session_id: str, own_pair: Optional[tuple[str, str]]
     ) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
+        from fno.claims.session_pid import resolve_session_harness
 
         # own_pair is the pair claims.self_identity completed (None when it
         # could not); the registry's agreement check keeps this detector
         # self-blind exactly where nothing proves self.
-        return row_owning_session_id(session_id, self_binding=own_pair)
+        return row_owning_session_id(
+            session_id, self_binding=own_pair, walk_harness=resolve_session_harness()
+        )
 
     return _resolve_self_identity(
         env, collide=collide, witness=runtime_identity_witness

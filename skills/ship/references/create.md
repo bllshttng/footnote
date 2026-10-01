@@ -96,10 +96,10 @@ EOF
 # expansion). The closure trailer and the reviewed-at line are appended later,
 # at the create step, since they matter only for a real PR.
 printf '%s\n' "$BODY" > .fno/pr-body.md
-if ! TEST_DELTA=$(fno-agents test-delta --base "$BASE" --max-net 0); then
-  echo "the suite is shrink-only (cap 0 over $BASE): the delta read failed or net test declarations rose; delete a test that guards no contract of its own (docs/test-audit/README.md, Keep rule), then rerun" >&2
+if ! TEST_DELTA=$(fno-agents test-delta --base "$BASE"); then
+  echo "test-delta refused: the delta read failed or net test declarations exceed the repo's configured cap ([test] max_net_new in .fno/config.toml; unset = no cap); see the verb's table above, then rerun" >&2
   cat .fno/pr-title.txt .fno/pr-body.md
-  echo "RESULT: BLOCKED step=test-delta reason=shrink-only test cap exceeded or delta read failed draft=.fno/pr-body.md"
+  echo "RESULT: BLOCKED step=test-delta reason=test cap exceeded or delta read failed draft=.fno/pr-body.md"
   exit 0
 fi
 {

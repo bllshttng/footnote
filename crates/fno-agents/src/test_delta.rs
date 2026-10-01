@@ -1,6 +1,6 @@
 //! Branch-local test-count changes for the PR description.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -106,19 +106,67 @@ pub enum ShrinkGate {
     Diff(String),
 }
 
-/// The shrink-only gate the push path shares with CI (`--max-net 0`). The
-/// OverCap message carries the table so a worker fixes the delta locally
-/// instead of learning the cap from a red main one full round later. The
-/// caller's git binary rides in: the push path passes its configured
+/// The `[test] max_net_new` cap, read through the same worktree ->
+/// canonical -> global candidate chain the other config readers use, so a
+/// linked feature worktree finds a cap that lives only in the canonical
+/// checkout's project config. Unset (or unparseable) means no cap: adding
+/// tests is the normal state of a repo that never opted into one.
+pub fn max_net_new(dir: &Path) -> Option<i64> {
+    let mut roots: Vec<PathBuf> = vec![crate::paths::worktree_repo_root(dir)];
+    if let Some(canonical) = crate::paths::canonical_repo_root(dir) {
+        roots.push(canonical);
+    }
+    let mut candidates: Vec<PathBuf> = roots
+        .into_iter()
+        .map(|root| root.join(".fno").join("config.toml"))
+        .collect();
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|h| Path::new(&h).join(".fno").join("config.toml"))
+    {
+        candidates.push(home);
+    }
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = toml::from_str::<toml::Value>(&text) else {
+            continue;
+        };
+        if let Some(cap) = parsed
+            .get("test")
+            .and_then(|t| t.get("max_net_new"))
+            .and_then(toml::Value::as_integer)
+        {
+            return Some(cap);
+        }
+    }
+    None
+}
+
+/// The test cap gate the push path shares with CI. The cap is the caller's
+/// resolved `[tests] max_net_new` (`None` = no cap: the diff is not even
+/// read). The OverCap message carries the table so a worker fixes the delta
+/// locally instead of learning the cap from a red main one full round later.
+/// The caller's git binary rides in: the push path passes its configured
 /// `--git-bin`, so a stubbed environment stays coherent.
-pub fn shrink_only_gate(git_bin: &str, dir: &Path, base: &str) -> Result<(), ShrinkGate> {
+pub fn shrink_only_gate(
+    git_bin: &str,
+    dir: &Path,
+    base: &str,
+    cap: Option<i64>,
+) -> Result<(), ShrinkGate> {
+    let Some(cap) = cap else {
+        return Ok(());
+    };
     let range = format!("{base}...HEAD");
     let diff = diff_range(git_bin, dir, &range).map_err(ShrinkGate::Diff)?;
     let delta = TestDelta::from_diff(&diff);
-    if let Some(net) = over_cap(&delta, 0) {
+    if let Some(net) = over_cap(&delta, cap) {
         return Err(ShrinkGate::OverCap(format!(
-            "the suite is shrink-only: net {net:+} test declarations against {base} (cap 0). \
-             Delete a test that guards no contract of its own (docs/test-audit/README.md, Keep rule):\n{}",
+            "net {net:+} test declarations against {base} exceeds the cap {cap} \
+             ([test] max_net_new in .fno/config.toml). Delete a test that guards \
+             no contract of its own:\n{}",
             delta.markdown()
         )));
     }
@@ -127,7 +175,9 @@ pub fn shrink_only_gate(git_bin: &str, dir: &Path, base: &str) -> Result<(), Shr
 
 /// `fno-agents test-delta --base <ref>` prints test declaration changes on
 /// the current branch. Python test functions, Rust test attributes, and shell
-/// test declarations are counted from the committed merge-base diff.
+/// test declarations are counted from the committed merge-base diff. The cap
+/// is `--max-net`, else the configured `[tests] max_net_new` (unset = no
+/// cap).
 pub fn run_test_delta(args: &[String]) -> i32 {
     let Some(base_pos) = args.iter().position(|arg| arg == "--base") else {
         eprintln!("usage: fno-agents test-delta --base <ref> [--max-net <n>]");
@@ -148,7 +198,7 @@ pub fn run_test_delta(args: &[String]) -> i32 {
                 return 2;
             }
         },
-        None => None,
+        None => max_net_new(Path::new(".")),
     };
     let range = format!("{base}...HEAD");
     let diff = match diff_range("git", Path::new("."), &range) {
@@ -163,7 +213,7 @@ pub fn run_test_delta(args: &[String]) -> i32 {
     if let Some(cap) = cap {
         if let Some(net) = over_cap(&delta, cap) {
             eprintln!(
-                "test-delta: net {net:+} test declarations against {base} (cap {cap}). The suite is shrink-only: delete a test that guards no contract of its own (docs/test-audit/README.md, Keep rule)."
+                "test-delta: net {net:+} test declarations against {base} exceeds the cap {cap}. Delete a test that guards no contract of its own."
             );
             return 1;
         }

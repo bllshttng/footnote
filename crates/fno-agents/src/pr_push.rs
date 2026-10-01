@@ -1133,10 +1133,17 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 3;
     }
 
-    // (5c) The shrink-only test cap, the same `--max-net 0` gate the guards
-    // workflow runs in CI. Refusing here moves the fix one round earlier: a
+    // (5c) The configured test cap, the same gate the guards workflow runs in
+    // CI with its own `--max-net 0`. The cap is `[test] max_net_new` in
+    // .fno/config.toml; unset means no cap, so a repo that never opted in
+    // adds tests freely. Refusing here moves the fix one round earlier: a
     // breach used to surface as a red main only after both runs had spent.
-    if let Err(gate) = crate::test_delta::shrink_only_gate(&git, &cwd, "origin/main") {
+    if let Err(gate) = crate::test_delta::shrink_only_gate(
+        &git,
+        &cwd,
+        "origin/main",
+        crate::test_delta::max_net_new(&cwd),
+    ) {
         match gate {
             crate::test_delta::ShrinkGate::OverCap(msg) => {
                 eprintln!("pr-push: refusing: {msg}");
@@ -1645,8 +1652,12 @@ exit 1
             .unwrap();
         assert!(o.status.success());
         std::fs::create_dir(&work).unwrap();
+        // Empty core.hooksPath keeps the fixture hermetic: a developer's
+        // global pre-push hook (protected branches) would otherwise refuse
+        // the fixture's push of main to the throwaway local origin.
         let git = |args: &[&str]| {
             let out = Command::new("git")
+                .args(["-c", "core.hooksPath="])
                 .args(args)
                 .current_dir(&work)
                 .output()
@@ -1662,7 +1673,10 @@ exit 1
         git(&["config", "user.name", "test"]);
         git(&["remote", "add", "origin", origin.to_str().unwrap()]);
         std::fs::write(work.join("lib.rs"), base_body).unwrap();
-        git(&["add", "lib.rs"]);
+        // Real repos ignore .fno/: the wiring rows drop a config.toml into
+        // the work repo after this commit and the tree must stay clean.
+        std::fs::write(work.join(".gitignore"), ".fno/\n").unwrap();
+        git(&["add", "lib.rs", ".gitignore"]);
         git(&["commit", "-q", "-m", "base"]);
         git(&["push", "-q", "origin", "main"]);
         git(&["checkout", "-q", "-b", "feature/cap"]);
@@ -1676,38 +1690,61 @@ exit 1
     }
 
     #[test]
-    fn the_shrink_gate_refuses_net_new_tests_and_passes_a_flat_delta() {
-        // Unit row: the OverCap message names the table, the flat delta is
-        // Ok, and a Diff failure is its own variant.
+    fn the_shrink_gate_enforces_the_configured_cap_and_an_unset_knob_allows_net_new_tests() {
+        // Unit rows: the OverCap message names the table and the knob, an
+        // unset cap reads as no gate at all, and a Diff failure is its own
+        // variant.
         let dir = tempfile::tempdir().unwrap();
         let (_origin, work) = push_repo(
             dir.path(),
             "#[test]\nfn kept_case() {}\n",
             "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
         );
-        let err = match crate::test_delta::shrink_only_gate(
-            "git",
-            std::path::Path::new(&work),
-            "origin/main",
-        ) {
-            Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
-            other => panic!("expected an over-cap refusal: {other:?}"),
-        };
+        let work_path = std::path::Path::new(&work);
+        let err =
+            match crate::test_delta::shrink_only_gate("git", work_path, "origin/main", Some(0)) {
+                Err(crate::test_delta::ShrinkGate::OverCap(msg)) => msg,
+                other => panic!("expected an over-cap refusal: {other:?}"),
+            };
         assert!(err.contains("net +1 test declarations"), "{err}");
         assert!(err.contains("| Rust | 1 | 0 | 1 |"), "{err}");
+        assert!(err.contains("max_net_new"), "{err}");
+        // The cap knob's contract: with it unset, the same net +1 head is no
+        // refusal, and the knob reads None from this config-less repo.
+        assert_eq!(
+            crate::test_delta::shrink_only_gate("git", work_path, "origin/main", None),
+            Ok(())
+        );
+        assert_eq!(crate::test_delta::max_net_new(work_path), None);
 
-        // Wiring rows: the verb refuses the +1 head with 3 and pushes the
-        // flat head with 0. The flat body keeps the base test and adds a
-        // non-test edit, so the delta is genuinely flat.
-        for (feat_body, expected) in [
+        // Wiring rows: the verb refuses the +1 head only when the work repo
+        // sets the knob, pushes that same head when the knob is absent, and
+        // pushes the flat head either way. The flat body keeps the base test
+        // and adds a non-test edit, so the delta is genuinely flat.
+        for (feat_body, config_body, expected) in [
             (
                 "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+                Some("[test]\nmax_net_new = 0\n"),
                 3,
             ),
-            ("#[test]\nfn kept_case() {}\n\nfn helper() {}\n", 0),
+            (
+                "#[test]\nfn kept_case() {}\n#[test]\nfn fresh_case() {}\n",
+                None,
+                0,
+            ),
+            (
+                "#[test]\nfn kept_case() {}\n\nfn helper() {}\n",
+                Some("[test]\nmax_net_new = 0\n"),
+                0,
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (_origin, work) = push_repo(dir.path(), "#[test]\nfn kept_case() {}\n", feat_body);
+            if let Some(config_body) = config_body {
+                let config_dir = std::path::Path::new(&work).join(".fno");
+                std::fs::create_dir_all(&config_dir).unwrap();
+                std::fs::write(config_dir.join("config.toml"), config_body).unwrap();
+            }
             let argv = [
                 "--cwd",
                 work.as_str(),
