@@ -396,6 +396,19 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         libc::setsid();
     }
 
+    // Block SIGTERM before any thread exists: every later thread inherits
+    // the block, and the sigwait thread below becomes the only place the
+    // signal is received. Done whether or not the spawner (the mux server)
+    // already blocked it, so the outcome never depends on who spawned us.
+    // The hosted child does NOT inherit this: portable-pty resets the mask
+    // in its pre_exec.
+    let mut term_set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut term_set);
+        libc::sigaddset(&mut term_set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &term_set, std::ptr::null_mut());
+    }
+
     // The socket must not already be served by a live keeper: connecting
     // succeeds only then. Connect-before-bind makes a double-keeper a loud
     // refusal instead of a silently stolen socket.
@@ -575,6 +588,83 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             .map_err(|e| format!("accept thread: {e}"))?;
     }
 
+    // The sigwait thread: SIGTERM is blocked on every thread, so delivery
+    // happens only here. end_child ends the child; the main thread's wait
+    // below then runs the normal Exited, unlink and exit path.
+    {
+        let set = term_set;
+        std::thread::Builder::new()
+            .name("fno-keeper-term".into())
+            .spawn(move || {
+                let mut sig: libc::c_int = 0;
+                loop {
+                    // SAFETY: sigwait over a set naming SIGTERM only.
+                    if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
+                        break;
+                    }
+                }
+                end_child(child_pid);
+            })
+            .map_err(|e| format!("term thread: {e}"))?;
+    }
+
+    // The socket-dir-gone thread. Why the DIRECTORY and not the socket
+    // path: a hand-off renames the socket file out of mux/panes and the
+    // keeper must keep running, while nothing in fno ever removes the
+    // panes/ dir - a gone dir means the whole state root went, so no
+    // server can ever reach us again. Two consecutive gone polls with no
+    // subscriber seated end the child.
+    {
+        let keeper = Arc::clone(&keeper);
+        let sock = cfg.sock.clone();
+        std::thread::Builder::new()
+            .name("fno-keeper-orphan".into())
+            .spawn(move || {
+                let poll = orphan_poll();
+                let dir = sock.parent().map(|p| p.to_path_buf());
+                let mut gone_streak = 0u32;
+                loop {
+                    std::thread::sleep(poll);
+                    let gone = match dir.as_deref().map(std::fs::symlink_metadata) {
+                        Some(Ok(_)) => false,
+                        // Only NotFound counts as gone; a permission or
+                        // other error is never a death reading.
+                        Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => true,
+                        _ => false,
+                    };
+                    let seated = keeper
+                        .client
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some();
+                    if gone && !seated {
+                        gone_streak += 1;
+                    } else {
+                        gone_streak = 0;
+                    }
+                    if gone_streak >= 2 {
+                        // eprintln! panics on a write error, which would end
+                        // this watcher and leave the keeper running: the
+                        // server that held our stderr pipe is dead. writeln!
+                        // to stderr and ignore the result.
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "fno-agents-worker: keeper_orphaned sock={} reason=socket_dir_gone child_pid={child_pid}",
+                            sock.display()
+                        );
+                        if child_pid == 0 {
+                            // No child exit will ever wake the main thread;
+                            // exit directly.
+                            std::process::exit(1);
+                        }
+                        end_child(child_pid);
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| format!("orphan thread: {e}"))?;
+    }
+
     // The main thread waits on the child (AC5-ERR): on exit, the exit frame,
     // unlink, exit. No client is required - a child that dies while nobody
     // watches still cleans its socket.
@@ -586,6 +676,47 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     keeper.send(&Frame::Exited(code));
     let _ = std::fs::remove_file(&cfg.sock);
     std::process::exit(code);
+}
+
+/// End the hosted child: SIGTERM, a 5 s grace, then SIGKILL. Shared by the
+/// Kill frame and the keeper's two self-exit paths (the sigwait thread and
+/// the socket-dir-gone thread). SIGTERM first because a killed-mid-write
+/// claude leaves an orphaned .claude.json.tmp in the config dir; the
+/// endpoint is unchanged for a worker that ignores SIGTERM. Every call
+/// site already runs off the main thread, so the grace never stalls the
+/// frame loop or the waiter.
+fn end_child(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    // SAFETY: kill with a valid pid and SIGTERM, then SIGKILL after the
+    // confirmed grace.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    for _ in 0..50 {
+        if !crate::claude_config_tmp::pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if crate::claude_config_tmp::pid_alive(pid) {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+/// The orphan thread's poll interval: `FNO_KEEPER_ORPHAN_POLL_MS`, a
+/// positive integer of milliseconds; default 30,000. An unset or bad value
+/// means the default.
+fn orphan_poll() -> std::time::Duration {
+    let ms = std::env::var("FNO_KEEPER_ORPHAN_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(30_000);
+    std::time::Duration::from_millis(ms)
 }
 
 /// Serve one accepted connection to completion, then drop it. Only the
@@ -651,32 +782,7 @@ fn serve_client(
                             // the child handle stays owned by the waiter.
                             let pid = keeper.child_pid.load(Ordering::SeqCst);
                             if pid > 0 {
-                                // SIGTERM first, then SIGKILL only past the
-                                // grace: a killed-mid-write claude leaves an
-                                // orphaned .claude.json.tmp in the config
-                                // dir. The endpoint is unchanged for a
-                                // worker that ignores SIGTERM. The grace
-                                // runs on its own thread so the frame loop
-                                // never stalls; the main thread's wait on
-                                // the child outlives it either way.
-                                // SAFETY: kill with a valid pid and SIGTERM,
-                                // then SIGKILL after the confirmed grace.
-                                std::thread::spawn(move || {
-                                    unsafe {
-                                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                                    }
-                                    for _ in 0..50 {
-                                        if !crate::claude_config_tmp::pid_alive(pid) {
-                                            return;
-                                        }
-                                        std::thread::sleep(std::time::Duration::from_millis(100));
-                                    }
-                                    if crate::claude_config_tmp::pid_alive(pid) {
-                                        unsafe {
-                                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                                        }
-                                    }
-                                });
+                                std::thread::spawn(move || end_child(pid));
                             }
                         }
                         Frame::Identify => {
