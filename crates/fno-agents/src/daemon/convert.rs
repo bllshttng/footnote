@@ -1082,15 +1082,9 @@ mod tests {
     fn park_session_claims_reads_and_repins_writer_lockfiles() {
         let temp = tempfile::TempDir::new().unwrap();
         with_claims_root(temp.path(), || {
-            let database = rusqlite::Connection::open(temp.path().join("graph.db")).unwrap();
-            database
-                .execute_batch(
-                    "CREATE TABLE claim_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                     INSERT INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1');",
-                )
-                .unwrap();
-            drop(database);
-
+            // No hand-seeded store: acquire builds its own db under the temp
+            // root. Seeding claim_meta here raced a foreign import under the
+            // env-pinned root and died on the shared 'lockfiles_imported' key.
             let child = ChildGuard(
                 Command::new("sleep")
                     .arg("60")

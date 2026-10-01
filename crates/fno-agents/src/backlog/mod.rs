@@ -2023,7 +2023,9 @@ mod tests {
 
     #[test]
     fn single_row_mutation_writes_only_target_rows_and_names_the_mutation() {
-        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
@@ -2063,7 +2065,9 @@ mod tests {
 
     #[test]
     fn single_row_write_passes_a_legacy_empty_field_on_another_row() {
-        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
@@ -2120,7 +2124,9 @@ mod tests {
 
     #[test]
     fn single_row_concurrent_writes_both_persist_with_positive_readback() {
-        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
@@ -2181,7 +2187,9 @@ mod tests {
         // pre-commit snapshot and the upgrade refused the instant the lock
         // freed (the measured 0.0000s SQLITE_BUSY): the failure this test
         // exists to keep dead.
-        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
@@ -2226,7 +2234,9 @@ mod tests {
 
     #[test]
     fn single_row_write_uses_current_store_state() {
-        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();

@@ -1049,7 +1049,7 @@ fn launch_account_from_env_is_three_valued() {
     // wide, so the test snapshots and restores both keys around its arms,
     // under the shared env-mutation lock (a sibling test mutating the same
     // keys on another thread would interleave mid-arm snapshots).
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fn restore(launch: Option<std::ffi::OsString>, dir: Option<std::ffi::OsString>) {
         match launch {
             Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
@@ -1092,7 +1092,7 @@ fn launch_account_source_rides_a_concrete_account() {
     // speak the vocabulary. Environment mutation is process-wide, so the
     // test snapshots and restores both keys around its arms, under the
     // same env-mutation lock the three-valued test holds.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fn restore(launch: Option<std::ffi::OsString>, src: Option<std::ffi::OsString>) {
         match launch {
             Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
