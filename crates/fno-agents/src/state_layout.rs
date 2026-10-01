@@ -403,15 +403,27 @@ fn migrate_entry(root: &Path, row: &Row, apply: bool, stamp: &str) -> Status {
 /// A legacy lock leaves only after its data file moved (so no waiter still
 /// needs it) and a non-blocking flock succeeds (so no holder still owns it).
 /// A socket never flocks; it parks once its store moved.
+///
+/// "Moved" is kind-aware. An `anchor` base (`graph.json.lock` waits on
+/// `graph.json`) is virtual, so its probe is the `.db` twin at the new
+/// location - the same probe `place` uses. Otherwise the data has moved when
+/// the new path exists OR the legacy base is gone: a lock whose data file no
+/// longer exists at either spelling protects nothing, and the flock below
+/// still refuses while a live holder owns it. A base the table does not
+/// carry (`graph-archive.json.store.sock`) reads the same way.
 fn migrate_lock(root: &Path, row: &Row, apply: bool, stamp: &str) -> Status {
     let legacy = root.join(&row.legacy);
     if !legacy.exists() {
         return Status::Absent;
     }
     let base = row.legacy.strip_suffix(".lock").unwrap_or(&row.legacy);
+    let legacy_base_exists = root.join(base).exists();
     let data_moved = match find(base) {
-        Some(base_row) => root.join(&base_row.new).exists(),
-        None => false,
+        Some(base_row) if base_row.kind == Kind::Anchor => {
+            db_twin(&root.join(&base_row.new)).exists()
+        }
+        Some(base_row) => root.join(&base_row.new).exists() || !legacy_base_exists,
+        None => !legacy_base_exists,
     };
     if !data_moved {
         return Status::Pending(format!("waiting for {base} to move"));
@@ -1076,6 +1088,34 @@ mod tests {
             .find(|e| e.legacy == "graph.json.lock")
             .unwrap();
         assert!(matches!(found.status, Status::Pending(ref d) if d.contains("graph.json")));
+        clean(&root);
+        // The anchor base is virtual, so the probe is the `.db` twin at the
+        // new location: with db/graph.db live the same lock deletes.
+        let root = tmp_root("anchor-lock");
+        std::fs::create_dir_all(root.join("db")).unwrap();
+        std::fs::write(root.join("db/graph.db"), b"SQLite format 3").unwrap();
+        std::fs::write(root.join("graph.json.lock"), b"").unwrap();
+        let receipt = migrate(&root, true);
+        let found = receipt
+            .entries
+            .iter()
+            .find(|e| e.legacy == "graph.json.lock")
+            .unwrap();
+        assert_eq!(found.status, Status::Deleted);
+        assert!(!root.join("graph.json.lock").exists(), "lock gone");
+        clean(&root);
+        // A base the table does not carry (graph-archive.json.store.sock)
+        // reads the same way: its .lock is residue once the base is gone.
+        let root = tmp_root("orphan-lock");
+        std::fs::write(root.join("graph-archive.json.store.sock.lock"), b"").unwrap();
+        let receipt = migrate(&root, true);
+        let found = receipt
+            .entries
+            .iter()
+            .find(|e| e.legacy == "graph-archive.json.store.sock.lock")
+            .unwrap();
+        assert_eq!(found.status, Status::Deleted);
+        assert!(!root.join("graph-archive.json.store.sock.lock").exists());
         clean(&root);
     }
 
