@@ -9,7 +9,7 @@ crates/fno/src/live_store_fence.rs	crates/fno-agents/src/live_store_fence.rs	car
 crates/fno/src/provider_key.rs	crates/fno-agents/src/provider_key.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/merge_posture.toml	crates/fno-agents/src/merge_posture.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/spawn_phase.toml	crates/fno-agents/src/spawn_phase.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
-cli/src/fno/agents/slot_lanes.toml	crates/fno-agents/src/slot_lanes.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/agents/model_tiers.toml	crates/fno-agents/src/model_tiers.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/registry_schema.toml	crates/fno-agents/src/registry_schema.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 crates/fno-agents/src/events_limits.toml	cli/src/fno/events/schema.yaml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/pr/_check_supersession_generated.py	crates/fno-agents/codegen/check_supersession.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml

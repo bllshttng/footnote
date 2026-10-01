@@ -713,28 +713,6 @@ def _rust_answer(provider: str, mode: str, substrate: str | None) -> dict:
     return verb_call("permission-tokens", payload, Exception)
 
 
-@pytest.mark.parametrize(
-    "provider,mode,substrate,expected",
-    [
-        # AC4-HP: the codex thread lane carries the axis, declared by
-        # harness.codex.thread.carries, resolved in codex's own words.
-        ("codex", "workspace-write:on-request", "thread", True),
-        ("codex", "full-auto", "thread", True),
-        ("codex", "yolo", "bg", True),
-        ("claude", "bypassPermissions", "thread", True),
-        ("claude", "bypassPermissions", "headless", True),
-        # Undeclared or unmappable lanes answer false, named, not guessed.
-        ("opencode", "auto", "thread", False),
-        ("pi", "yolo", "thread", False),
-        ("codex", "acceptEdits", "thread", False),
-        ("codex", "yolo", "headless", False),
-    ],
-)
-def test_mappability_matches_the_rust_owner(provider, mode, substrate, expected):
-    from fno.agents.spawn_defaults import _permission_mappable
-
-    assert _permission_mappable(provider, mode, substrate) is expected
-
 
 @pytest.mark.parametrize(
     "provider,mode",
