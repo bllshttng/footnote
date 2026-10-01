@@ -83,13 +83,15 @@ fn build(
             continue;
         }
         let ts = e.get("ts").and_then(Value::as_str).and_then(parse_local);
-        match escalations.get(nid) {
-            Some(Some(old)) if ts.is_some_and(|t| t <= *old) => {}
-            _ => {
-                escalations.insert(nid, ts);
-                let model = str_field(e, "model").unwrap_or(UNKNOWN).to_string();
-                esc_models.insert(nid, model);
-            }
+        let replace = match escalations.get(nid) {
+            None => true,
+            Some(None) => ts.is_some(),
+            Some(Some(old)) => ts.is_some_and(|t| t > *old),
+        };
+        if replace {
+            escalations.insert(nid, ts);
+            let model = str_field(e, "model").unwrap_or(UNKNOWN).to_string();
+            esc_models.insert(nid, model);
         }
     }
 
@@ -184,6 +186,7 @@ fn build(
             merge_instant(gn)
                 .zip(created_at_of(gn))
                 .map(|(end, start)| (end - start).num_minutes() as f64 / 60.0)
+                .filter(|h| *h >= 0.0)
         } else {
             None
         };
