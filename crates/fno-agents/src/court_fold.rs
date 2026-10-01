@@ -1762,7 +1762,7 @@ mod tests {
         // run and restore it after, under the process-wide env lock.
         static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
             std::sync::LazyLock::new(crate::claims::test_env_lock);
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var(crate::paths::HOME_ENV, dir.path());

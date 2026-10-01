@@ -1159,7 +1159,8 @@ struct View {
     /// The theme file importer, active only inside Settings > Theme.
     theme_import: theme_import_ui::ThemeImportUi,
     theme_import_gen: u64,
-    theme_import_esc: Vec<u8>,
+    /// The Keybindings tab's open "press the new key" capture.
+    key_capture: Option<keys_settings::KeyCapture>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1275,10 +1276,12 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
-    /// A queued update verb (restart or release upgrade) and its
-    /// one-in-flight bound, mirroring the sweep pair.
-    update_verb_want: Option<UpdateVerb>,
+    /// A queued release upgrade and its one-in-flight bound, mirroring the
+    /// sweep pair. (The restart is not queued: its tap unwinds the run loop.)
+    update_verb_want: Option<release_check::Channel>,
     update_verb_inflight: bool,
+    /// The update modal's restart tap detached the client; the detach exit reads this.
+    restart_pending: bool,
     /// The open new-agent popup, or the RETAINED draft after Esc
     /// (hidden but alive). Both live through `launcher_closed`.
     launcher: Option<agent_launcher::Launcher>,
@@ -1875,8 +1878,14 @@ pub(crate) enum AuxAction {
     ThemeImportOpen,
     ThemeImportSave,
     ThemeImportCancel,
-    /// Apply a validated mux prefix change now, then persist it through the CLI.
-    ApplyPrefix(String),
+    /// Step the settings modal back one drill level.
+    SettingsBack,
+    /// Open the macOS file picker for a theme file.
+    ThemePick,
+    /// Open the "press the new key" capture for an action id, or "prefix".
+    KeyCapture(String),
+    /// Open the key config in `$EDITOR`, then reload the keymap.
+    EditKeysFile,
     /// Open the color picker for one `[sideline.colors]` axis key
     /// (existing or just typed). The axis names its table
     /// (`harness` / `route` / `model` / `row`).
@@ -1897,6 +1906,8 @@ mod config_set;
 mod lane_entry;
 mod node_detail;
 pub(crate) use node_detail::wrap_line;
+mod editor;
+mod keys_settings;
 mod org_board;
 mod org_detail;
 mod org_graph;
@@ -1916,6 +1927,7 @@ use settings_modal::SettingsTab;
 // branches; the peek mail adapter moved to its own module for the
 // shrink-only ratchet.
 mod agent_launcher;
+pub(crate) mod input_field;
 mod input_folds;
 mod mail_input;
 mod overlay_keys;
@@ -1928,9 +1940,7 @@ use input_folds::{
 };
 
 use mail_input::peek_input_keys;
-use update_menu::{
-    build_sideline_menu, build_update_modal, probe_update, run_update_verb, UpdateProbe, UpdateVerb,
-};
+use update_menu::{build_sideline_menu, build_update_modal, probe_update, UpdateProbe};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -2116,7 +2126,7 @@ impl View {
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
-            theme_import_esc: Vec::new(),
+            key_capture: None,
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -2165,6 +2175,7 @@ impl View {
             sweep_action: None,
             update_verb_want: None,
             update_verb_inflight: false,
+            restart_pending: false,
             sweep_inflight: false,
             launcher: None,
             launcher_closed: None,
@@ -2688,19 +2699,7 @@ impl View {
     /// walks the visible line's hit spans; `None` off the popup.
     fn keys_modal_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.keys_modal.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     /// Keep the selected modal row inside the scrolled viewport after an arrow
@@ -3032,19 +3031,7 @@ impl View {
     /// mouse hover/click; `None` off the popup.
     fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.row_menu.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     /// Open the sideline MENU popup anchored at `anchor` (US4). Also
@@ -3090,19 +3077,7 @@ impl View {
     /// The flat popup target under a screen cell while an aux popup is open.
     fn aux_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.aux.as_ref()?;
-        let r = m.popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let li = (row as usize).checked_sub(r0)?;
-        let line = r.lines.get(li)?;
-        let cc = (col as usize).checked_sub(c0)?;
-        // The footer's close target is not a row index; returning it here would
-        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
-        line.hits
-            .iter()
-            .find(|(t, off, len)| {
-                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-            .map(|(t, _, _)| *t)
+        m.popup.render(self.term).row_target_at(row, col)
     }
 
     // In-block guards for the three popup click routers. A click that
@@ -8263,14 +8238,8 @@ async fn attach_and_run(
             });
         }
         // Kick a wanted update verb off the UI loop, at most one in flight.
-        if let (false, Some(verb)) = (view.update_verb_inflight, view.update_verb_want) {
-            view.update_verb_want = None;
-            view.update_verb_inflight = true;
-            let tx = restart_tx.clone();
-            tokio::spawn(async move {
-                let verdict = run_update_verb(verb).await;
-                let _ = tx.send(verdict);
-            });
+        if let (false, Some(channel)) = (view.update_verb_inflight, view.update_verb_want) {
+            update_menu::kick_upgrade(&mut view, restart_tx.clone(), channel);
         }
         // Kick a wanted harness-catalog probe, same one-in-flight
         // discipline as the update probe.
@@ -8643,7 +8612,7 @@ async fn attach_and_run(
                             // gate the catch-up digest on how long we were away.
                             crate::digest_overlay::record_detach(&view.session);
                             let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                            break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                            break Ok(update_menu::detach_exit(&view));
                         }
                         Err(e) => break Err(e),
                     }
@@ -9009,7 +8978,7 @@ async fn attach_and_run(
                         // gate the catch-up digest on how long we were away.
                         crate::digest_overlay::record_detach(&view.session);
                         let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                        break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                        break Ok(update_menu::detach_exit(&view));
                     }
                     Err(e) => break Err(e),
                 }
@@ -9229,6 +9198,10 @@ async fn attach_and_run(
         Ok(code) => {
             if let Some(n) = NOTICE.with(|n| n.borrow_mut().take()) {
                 eprintln!("fno: {n}");
+            }
+            // The update modal's restart unwinds here: run the verb in the foreground, exec the fresh client.
+            if let Some(err) = update_menu::maybe_reattach(code, &view.session).await {
+                return Err(err);
             }
             Ok(code)
         }
@@ -10145,6 +10118,7 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => {
             view.lane.reset();
             theme_import_ui::reset(view);
+            view.key_capture = None;
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
@@ -10164,15 +10138,15 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
-        AuxAction::RestartAgents | AuxAction::UpgradeRelease(_) => {
-            // The modal named every effect; the tap is the confirmation.
-            view.aux = None;
-            if view.update_verb_inflight || view.update_verb_want.is_some() {
-                view.set_notice("an update action is already running".into());
-            } else if let AuxAction::UpgradeRelease(c) = action {
-                view.update_verb_want = Some(UpdateVerb::Upgrade(c));
-            } else {
-                view.update_verb_want = Some(UpdateVerb::RestartAgents);
+        AuxAction::UpgradeRelease(c) => {
+            if update_menu::update_tap(view) {
+                view.update_verb_want = Some(c);
+            }
+        }
+        AuxAction::RestartAgents => {
+            // Never queues: the restart kills this server; the tap detaches.
+            if update_menu::restart_tap(view) {
+                return Ok(DispatchFlow::Detach);
             }
         }
         AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
@@ -10198,63 +10172,23 @@ async fn execute_aux_action(
             view.aux = None;
             View::open(view);
         }
-        AuxAction::ToggleHoverFocus => {
-            view.hover_focus = !view.hover_focus;
-            let enabled = if view.hover_focus { "true" } else { "false" };
-            let notice = match spawn_config_set("mux.hover_focus", enabled).await {
-                Ok(()) => format!("focus follows mouse: {enabled}"),
-                Err(_) => "focus follows mouse applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleStatus
+        AuxAction::ToggleHoverFocus
+        | AuxAction::ToggleStatus
         | AuxAction::ToggleConfirmLifecycle
         | AuxAction::ToggleResourceMeter
-        | AuxAction::ToggleSidelineLayout => {
-            settings_modal::run_toggle(view, action, sock_w).await?;
-        }
-        AuxAction::ApplyTheme(name) => {
-            theme_ground::apply(view, &name).await?;
-        }
-        AuxAction::ThemeImportOpen => theme_import_ui::open(view),
-        AuxAction::ThemeImportSave => theme_import_ui::save(view).await?,
-        AuxAction::ThemeImportCancel => theme_import_ui::cancel(view),
-        AuxAction::ApplyPrefix(spec) => {
-            let notice = match crate::keys::resolve_prefix_change(&spec) {
-                Err(refusal) => refusal,
-                Ok(map) => {
-                    crate::keys::reinstall(map);
-                    match spawn_config_set("mux.prefix", &spec).await {
-                        Ok(()) => format!("prefix: {spec}"),
-                        Err(_) => format!("prefix {spec} applied this session; save failed"),
-                    }
-                }
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorEdit(axis, key) => {
-            view.lane.axis = Some(axis.clone());
-            view.lane.pick = Some((axis, key));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorAdd(axis) => {
-            view.lane.axis = Some(axis.clone());
-            view.lane.entry_esc.clear();
-            view.lane.key_entry = Some((axis, String::new()));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorCustom(axis, key) => {
-            view.lane.pick = Some((axis.clone(), key.clone()));
-            view.lane.entry_esc.clear();
-            view.lane.custom_entry = Some(String::new());
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::LaneColorSet(axis, key, color) => {
-            view.lane.pick = None;
-            lane_entry::lane_color_save(view, &axis, &key, &color).await?;
-        }
+        | AuxAction::ToggleSidelineLayout
+        | AuxAction::ApplyTheme(_)
+        | AuxAction::ThemeImportOpen
+        | AuxAction::ThemeImportSave
+        | AuxAction::ThemeImportCancel
+        | AuxAction::ThemePick
+        | AuxAction::SettingsBack
+        | AuxAction::KeyCapture(_)
+        | AuxAction::EditKeysFile
+        | AuxAction::LaneColorEdit(..)
+        | AuxAction::LaneColorAdd(_)
+        | AuxAction::LaneColorCustom(..)
+        | AuxAction::LaneColorSet(..) => settings_modal::run_action(view, action, sock_w).await?,
     }
     Ok(DispatchFlow::Continue)
 }
@@ -10286,13 +10220,9 @@ async fn aux_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // A lane-colors text entry (naming a key / typing a free-form
-    // color) consumes the chunk, same precedence shape as create_keys.
-    if theme_import_ui::is_entry(&view.theme_import) {
-        return theme_import_ui::entry_keys(view, bytes).await;
-    }
-    if view.lane.is_entry() {
-        return lane_entry::lane_entry_keys(view, bytes, sock_w).await;
+    // An open settings text field or key capture consumes the chunk.
+    if let Some(flow) = settings_modal::field_keys(view, bytes, sock_w).await? {
+        return Ok(flow);
     }
     let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
@@ -10304,8 +10234,10 @@ async fn aux_keys(
         }
         match tok {
             ModalKey::Esc => {
-                theme_import_ui::reset(view);
-                view.aux = None;
+                if !settings_modal::back(view) {
+                    theme_import_ui::reset(view);
+                    view.aux = None;
+                }
             }
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
@@ -10358,12 +10290,7 @@ async fn aux_keys(
                     .map(|m| !m.popup.chrome.tabs.is_empty())
                     .unwrap_or(false);
                 if has_tabs {
-                    view.settings_tab = settings_modal::SettingsTab::next(view.settings_tab);
-                    // A section switch drops the colors drill so a
-                    // return to Colors always opens at the top level.
-                    view.lane.reset();
-                    theme_import_ui::reset(view);
-                    view.reopen_settings_keeping_sel();
+                    settings_modal::switch_tab(view, view.settings_tab.next());
                 } else {
                     theme_import_ui::reset(view);
                     view.aux = None;
@@ -10379,12 +10306,6 @@ async fn aux_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Keys while a lane-colors text entry is open: printable/Backspace
-/// edit the buffer, Enter submits, Esc cancels back to the underlying drill
-/// level. Modeled on [`create_keys`] (`fold_search_input` + per-key re-check),
-/// with the settings modal staying open underneath. Enter on an EMPTY buffer
-/// keeps the entry open; Enter on a custom entry validates through
-/// `parse_color` and saves or refuses with a notice.
 /// One mouse report while an aux popup is open (US4/US5): hover selects, a left
 /// click runs the entry (propagating detach), a click off the popup dismisses.
 async fn aux_mouse(
@@ -10401,12 +10322,12 @@ async fn aux_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
+            if settings_modal::tap_tab(view, rep.row, rep.col) {
+                return Ok(StdinFlow::Continue);
+            }
             match view.aux_hit(rep.row, rep.col) {
                 Some(t) => {
-                    // While a lane text entry owns the keyboard, row
-                    // clicks are inert: acting on a picker row mid-typing
-                    // would leave the buffer armed under a changed view.
-                    if view.lane.is_entry() || theme_import_ui::is_entry(&view.theme_import) {
+                    if !settings_modal::row_tap_allowed(view, t) {
                         return Ok(StdinFlow::Continue);
                     }
                     if let Some(m) = view.aux.as_mut() {
@@ -10424,6 +10345,7 @@ async fn aux_mouse(
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
                         theme_import_ui::reset(view);
+                        view.key_capture = None;
                         view.aux = None;
                     }
                 }

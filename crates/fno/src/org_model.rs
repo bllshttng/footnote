@@ -203,8 +203,14 @@ fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode
             view: session,
             agent: agent.cloned(),
         };
-        if agent.is_some_and(|a| !a.exited) {
-            current.push(row);
+        if let Some(live) = agent.filter(|a| !a.exited) {
+            // A node keeps one session row per phase, so one live session can join twice.
+            if !current
+                .iter()
+                .any(|s: &OrgSession| s.agent.as_ref().is_some_and(|a| same_agent(a, live)))
+            {
+                current.push(row);
+            }
         } else {
             former.push(row);
         }
@@ -243,6 +249,13 @@ fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode
             .as_ref()
             .or(b.view.started_at.as_ref())
             .cmp(&a.view.ended_at.as_ref().or(a.view.started_at.as_ref()))
+    });
+    let mut seen = std::collections::HashSet::new();
+    former.retain(|s| {
+        s.view
+            .session_id
+            .as_ref()
+            .is_none_or(|id| seen.insert(id.clone()))
     });
     let age_s = fold
         .get("age_hours")

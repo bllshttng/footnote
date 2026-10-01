@@ -79,6 +79,15 @@ pub enum PopupRow {
         enabled: bool,
         color: Color,
     },
+    /// A text field: ` label: text` with one cursor cell, or the dimmed
+    /// placeholder while empty. Never a target: the keyboard owns it.
+    Input {
+        label: String,
+        text: String,
+        /// A char index into `text`; its length is the cell past the end.
+        cursor: usize,
+        placeholder: String,
+    },
 }
 
 impl PopupRow {
@@ -94,7 +103,10 @@ impl PopupRow {
             PopupRow::Entry { enabled: false, .. }
             | PopupRow::SwatchEntry { enabled: false, .. } => 0,
             PopupRow::Entry { .. } | PopupRow::SwatchEntry { .. } | PopupRow::FullWidth(_) => 1,
-            PopupRow::Header(_) | PopupRow::Rule | PopupRow::Info { .. } => 0,
+            PopupRow::Header(_)
+            | PopupRow::Rule
+            | PopupRow::Info { .. }
+            | PopupRow::Input { .. } => 0,
         }
     }
 }
@@ -187,7 +199,8 @@ fn validate_menu_glyphs(rows: &[PopupRow]) {
             PopupRow::Header(_)
             | PopupRow::Rule
             | PopupRow::FullWidth(_)
-            | PopupRow::Info { .. } => {}
+            | PopupRow::Info { .. }
+            | PopupRow::Input { .. } => {}
         }
     }
 }
@@ -297,6 +310,31 @@ impl Rendered {
         let row = row as usize;
         let col = col as usize;
         row >= r0 && row < r0 + h && col >= c0 && col < c0 + self.width
+    }
+
+    fn hits_at(&self, row: u16, col: u16) -> impl Iterator<Item = usize> + '_ {
+        let (r0, c0) = self.origin;
+        let line = (row as usize)
+            .checked_sub(r0)
+            .and_then(|li| self.lines.get(li));
+        let cc = (col as usize).checked_sub(c0);
+        line.into_iter().flat_map(move |line| {
+            line.hits
+                .iter()
+                .filter(move |(_, off, len)| cc.is_some_and(|cc| cc >= *off && cc < off + len))
+                .map(|(t, _, _)| *t)
+        })
+    }
+
+    /// The body row target under a screen cell. Tabs and esc spans are not
+    /// rows: returning one would clamp `select` onto the last entry.
+    pub fn row_target_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.hits_at(row, col).find(|t| chrome::is_row_hit(*t))
+    }
+
+    /// The tab index under a screen cell.
+    pub fn tab_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.hits_at(row, col).find_map(chrome::tab_of_hit)
     }
 }
 
@@ -543,6 +581,15 @@ impl Popup {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
                 PopupRow::Rule => 0,
                 PopupRow::Info { label: _, value } => 1 + kw + 1 + chrome::str_cols(value) + 2,
+                PopupRow::Input {
+                    label,
+                    text,
+                    placeholder,
+                    ..
+                } => {
+                    let body = chrome::str_cols(text).max(1 + chrome::str_cols(placeholder));
+                    1 + chrome::str_cols(label) + 2 + body + 1 + 2
+                }
                 PopupRow::Entry {
                     glyph, label, hint, ..
                 } => {
@@ -655,6 +702,12 @@ impl Popup {
                         pad_role: Role::PanelBody,
                     }
                 }
+                PopupRow::Input {
+                    label,
+                    text,
+                    cursor,
+                    placeholder,
+                } => input_line(label, text, *cursor, placeholder, width),
                 PopupRow::FullWidth(s) => {
                     let ti = target_idx;
                     target_idx += 1;
@@ -926,6 +979,47 @@ impl Popup {
             width: framed.width,
             lines,
         }
+    }
+}
+
+/// Lay out one text field row. A text wider than the room shows the window
+/// that keeps the cursor cell in view.
+fn input_line(
+    label: &str,
+    text: &str,
+    cursor: usize,
+    placeholder: &str,
+    width: usize,
+) -> RenderedLine {
+    let head = format!(" {label}: ");
+    let head_n = head.chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let room = width.saturating_sub(head_n + 1).max(1);
+    let start = (cursor + 1).saturating_sub(room);
+    let end = chars.len().min(start + room);
+    let mut line: String = head.clone();
+    line.extend(&chars[start..end]);
+    let cursor_at = head_n + cursor - start;
+    if cursor == chars.len() {
+        line.push(' ');
+    }
+    let mut segs = vec![
+        (1usize, head_n.saturating_sub(2), Role::BodyAccent),
+        (cursor_at, 1, Role::BodyCursor),
+    ];
+    if chars.is_empty() && !placeholder.is_empty() {
+        line.push_str(placeholder);
+        segs.push((cursor_at + 1, placeholder.chars().count(), Role::PanelMeta));
+    }
+    RenderedLine {
+        text: pad(&line, width),
+        disabled: false,
+        sel_span: None,
+        hits: vec![],
+        roles: vec![],
+        segs,
+        pad_role: Role::PanelBody,
     }
 }
 

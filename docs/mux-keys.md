@@ -40,3 +40,5 @@ selector = ";"
 ```
 
 The action id is `selector`, not `toggle-sideline`. `;` is a free single-byte chord, right pinky against the default left-hand `Ctrl-b` prefix. A collision or unknown action id is refused and reported, never silently ignored.
+
+You can also rebind from the mux. Open settings > keybindings, pick the prefix or any listed action with `Enter` or a click, then press the new key. A collision, a digit, or the prefix byte is refused with the resolver's sentence, and the page waits for another key. A key that takes goes live at once and is saved to `[mux.keys]` or `mux.prefix` with `fno config set --local`. The last row, "edit keys in $EDITOR", opens that same file. After the editor exits, the mux reloads the keys.

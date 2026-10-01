@@ -50,7 +50,9 @@ fn store_path_strips_generation_suffix() {
     assert_eq!(store_path(&named), dir.path().join("global.db"));
     // A state-root journal routes through the layout ladder; a migrated root
     // answers the db/ store and a space journal keeps its sibling.
-    let _guard = crate::claims::test_env_lock().lock().unwrap();
+    let _guard = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var_os("FNO_AGENTS_HOME");
     std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
     let root = std::fs::canonicalize(dir.path()).unwrap();
