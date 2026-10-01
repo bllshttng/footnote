@@ -36,9 +36,10 @@ if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
     "${FNO_TEST_HARNESS:-}"
   exit 0
 fi
-# in_review adopt guard: one live node, in_review, open PR. The head_ref
-# the fake reports is what the proof has to match against the real git
-# branch of the fixture worktree, so cases flip the outcome with git only.
+# in_review adopt guard: one live node whose PR #4242 heads
+# feature/adopt-holds. The binding verdict is native; this fake applies its
+# adoption proof (OPEN state, head branch == this worktree's branch) so the
+# cases flip the outcome with git and FNO_TEST_PR_STATE only.
 if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
   case " $* " in
     *" --field _archived"*) printf 'null\n'; exit 0 ;;
@@ -48,15 +49,19 @@ if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
       printf '%s\n' "$node_id"
       exit 0
       ;;
-    *" --field status"*)    printf 'in_review\n'; exit 0 ;;
-    *" --field pr_number"*) printf '4242\n'; exit 0 ;;
   esac
   exit 1
 fi
-if [[ "${1:-} ${2:-}" == "do pr" && "${3:-}" == "info" ]]; then
-  printf '{"pr":%s,"state":"OPEN","head_ref":"%s","base_ref":"main"}\n' \
-    "${4:-}" "${FNO_TEST_PR_BRANCH:-feature/adopt-holds}"
-  exit 0
+if [[ "${1:-} ${2:-}" == "backlog target-binding" ]]; then
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [[ "${FNO_TEST_PR_STATE:-OPEN}" == "OPEN" && "$branch" == "feature/adopt-holds" ]]; then
+    echo "target binding: ADOPTED: re-binding this session to node x-b424242 on the open PR #4242 (branch $branch is that PR's head)." >&2
+    printf 'verdict=adopt\npr=4242\n'
+    exit 0
+  fi
+  echo "target binding: REFUSED: node x-b424242 is in_review (PR #4242)." >&2
+  printf 'verdict=refused\nnext=fno do target start "x-b424242 <follow-up scope, one sentence>"\n'
+  exit 1
 fi
 exit 1
 EOF
@@ -177,8 +182,26 @@ adopt_rc=0
 ) >"$TMP_DIR/adopt-fails.out" 2>"$TMP_DIR/adopt-fails.err" || adopt_rc=$?
 
 [[ "$adopt_rc" -eq 1 ]]
-grep -qF "REFUSED: node $ADOPT_NODE is in_review (open PR #4242)" "$TMP_DIR/adopt-fails.err"
-grep -qF 'TARGET_ALLOW_IN_REVIEW=1' "$TMP_DIR/adopt-fails.err"
+grep -qF "REFUSED: node $ADOPT_NODE is in_review (PR #4242)" "$TMP_DIR/adopt-fails.err"
 [[ ! -f "$ADOPT_FAILS_WT/.fno/target-state.md" && ! -f "$ADOPT_FAILS_WT/space/target-state.md" ]]
+
+# Proof fails: the PR's own worktree and branch, but the PR already merged.
+# Same branch is not enough; a merged PR is never adopted.
+ADOPT_MERGED_WT="$TMP_DIR/adopt-merged-wt"
+git -C "$ADOPT_MAIN" worktree add -q "$ADOPT_MERGED_WT" feature/adopt-holds 2>/dev/null \
+  || git -C "$ADOPT_MAIN" worktree add -q --force "$ADOPT_MERGED_WT" feature/adopt-holds
+mkdir -p "$ADOPT_MERGED_WT/space"
+merged_rc=0
+(
+  cd "$ADOPT_MERGED_WT"
+  PATH="$FAKE_BIN:$PATH" FNO_TEST_HARNESS=codex FNO_TARGET_INIT_GATED=1 \
+    FNO_TEST_SPACE="$ADOPT_MERGED_WT/space" FNO_TEST_PR_STATE=MERGED \
+    TARGET_START=1 TARGET_INPUT="$ADOPT_NODE" \
+    bash "$ROOT_DIR/hooks/helpers/init-target-state.sh"
+) >"$TMP_DIR/adopt-merged.out" 2>"$TMP_DIR/adopt-merged.err" || merged_rc=$?
+
+[[ "$merged_rc" -eq 1 ]]
+grep -qF "REFUSED: node $ADOPT_NODE is in_review (PR #4242)" "$TMP_DIR/adopt-merged.err"
+[[ ! -f "$ADOPT_MERGED_WT/space/target-state.md" ]]
 
 echo "Target state recovery validation passed"
