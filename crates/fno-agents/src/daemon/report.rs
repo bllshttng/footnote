@@ -72,16 +72,43 @@ pub(super) fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &st
     };
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
     let mut notify: Option<(String, String, bool)> = None;
+    // The flush is the served-axis path for a report that arrived before its
+    // row: the same posture diff the store path runs, so a buffered posture
+    // change emits like a direct one.
+    let mut posture_change: Option<(Option<String>, String)> = None;
     // Apply under the seq gate: a store-path report that landed on the row after
     // it became visible (but before this drain) set a >= seq; never regress it.
     let _ = state::update_registry(&ctx.home.registry_json(), |r| {
+        let prev_posture = r
+            .entries
+            .iter()
+            .find(|e| entry_holds_session(e, session_uuid))
+            .and_then(|e| e.inside_leg.as_ref())
+            .and_then(|p| p.posture.clone());
         if let Some((body, is_done)) = gate_inside_leg_onto_row(r, session_uuid, rep.clone()) {
             notify = Some((name.to_string(), body, is_done));
+        }
+        if let Some(p) = &rep.posture {
+            if prev_posture.as_ref() != Some(p) {
+                let render = |p: &state::ObservedPosture| format!("{}:{}", p.sandbox, p.approval);
+                posture_change = Some((prev_posture.as_ref().map(render), render(p)));
+            }
         }
     });
     if let Some((title, body, is_done)) = notify {
         let o = &ctx.opts;
         notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
+    }
+    if let Some((from, to)) = posture_change {
+        let _ = ctx.emitter.emit(
+            "agent_posture_changed",
+            &json!({
+                "name": name,
+                "harness_session_id": session_uuid,
+                "from": from,
+                "to": to,
+            }),
+        );
     }
     let _ = ctx.emitter.emit(
         "inside_leg_buffer_flushed",
